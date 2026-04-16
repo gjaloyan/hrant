@@ -102,3 +102,31 @@ def test_tick_decision_source_values():
     assert TickDecisionSource.L1_ROUTER.value == "L1_router"
     assert TickDecisionSource.L2_DIAGNOSER.value == "L2_diagnoser"
     assert TickDecisionSource.L3_ESCALATION.value == "L3_escalation"
+
+
+def test_tick_decision_idle_has_no_lever():
+    from backend.autonomic.types import TickDecision
+
+    d = TickDecision(source=TickDecisionSource.L0_REFLEX, lever=None, params={}, reason="idle")
+    assert d.lever is None
+    assert d.params == {}
+    assert d.reason == "idle"
+    assert d.rule_name is None
+
+
+def test_tick_decision_with_lever():
+    from backend.autonomic.types import TickDecision
+
+    d = TickDecision(
+        source=TickDecisionSource.L0_REFLEX,
+        lever="FIRE_SERVER_HEALTH",
+        params={"verbose": True},
+        reason="disk_space_low",
+        rule_name="disk_rule",
+    )
+    assert d.lever == "FIRE_SERVER_HEALTH"
+    assert d.rule_name == "disk_rule"
+
+
+def test_lever_status_not_executed_exists():
+    assert LeverStatus.NOT_EXECUTED.value == "not_executed"

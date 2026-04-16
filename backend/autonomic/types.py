@@ -28,6 +28,7 @@ class LeverStatus(str, Enum):
     SKIPPED = "skipped"
     ESCALATED = "escalated"
     BLOCKED_BY_SAFETY = "blocked_by_safety"
+    NOT_EXECUTED = "not_executed"
 
 
 class TickDecisionSource(str, Enum):
@@ -108,6 +109,15 @@ class LeverReport:
             reason=data.get("reason", ""),
             follow_ups=data.get("follow_ups", []),
         )
+
+
+@dataclass
+class TickDecision:
+    source: TickDecisionSource
+    lever: str | None
+    params: dict[str, Any]
+    reason: str
+    rule_name: str | None = None
 
 
 def utcnow() -> datetime:
