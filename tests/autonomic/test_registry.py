@@ -1,0 +1,77 @@
+import pytest
+
+from backend.autonomic.lever import Lever
+from backend.autonomic.levers import (
+    LeverRegistry,
+    clear_registry,
+    get_lever,
+    list_levers,
+    register_lever,
+)
+from backend.autonomic.types import Cost, LeverCategory, LeverReport, LeverSafety, LeverStatus, utcnow
+
+
+class LeverA(Lever):
+    name = "A"
+    category = LeverCategory.AUTONOMIC
+    safety = LeverSafety.GREEN
+    executor = "python"
+    estimated_cost = Cost()
+    required_context: list[str] = []
+    def preconditions(self, state): return True
+    def run(self, params, context):
+        return LeverReport(
+            lever=self.name, params=params,
+            started_at=utcnow(), finished_at=utcnow(),
+            status=LeverStatus.SUCCESS, outcome={}, reason="",
+        )
+
+
+class LeverB(LeverA):
+    name = "B"
+    category = LeverCategory.IMMUNE
+
+
+@pytest.fixture(autouse=True)
+def reset():
+    clear_registry()
+    yield
+    clear_registry()
+
+
+def test_register_and_get():
+    register_lever(LeverA)
+    lever = get_lever("A")
+    assert isinstance(lever, LeverA)
+
+
+def test_duplicate_registration_raises():
+    register_lever(LeverA)
+    with pytest.raises(ValueError, match="already registered"):
+        register_lever(LeverA)
+
+
+def test_get_missing_returns_none():
+    assert get_lever("MISSING") is None
+
+
+def test_list_levers_returns_all_names():
+    register_lever(LeverA)
+    register_lever(LeverB)
+    assert sorted(list_levers()) == ["A", "B"]
+
+
+def test_list_by_category():
+    register_lever(LeverA)
+    register_lever(LeverB)
+    reg = LeverRegistry.instance()
+    autonomic = reg.by_category(LeverCategory.AUTONOMIC)
+    immune = reg.by_category(LeverCategory.IMMUNE)
+    assert [l.name for l in autonomic] == ["A"]
+    assert [l.name for l in immune] == ["B"]
+
+
+def test_registry_is_singleton():
+    reg1 = LeverRegistry.instance()
+    reg2 = LeverRegistry.instance()
+    assert reg1 is reg2
