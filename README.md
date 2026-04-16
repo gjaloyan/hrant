@@ -423,3 +423,15 @@ learn this to model         — добавить последний Q&A в оч�
 
 ### Версионирование и Auto-Evolution
 `ModelVersionRegistry` ведёт реестр в `knowledge/model_versions.json`. `ModelEvaluator` сравнивает ответы старой и новой модели на тестовом наборе `knowledge/eval_set.json` (формат: `[{"question":"...","expected":"..."}]`) и даёт рекомендацию upgrade/rollback.
+
+## Autonomic subsystem (Model X)
+
+The agent includes an autonomic controller ("Model X") that runs in the
+background alongside the cortex. It is modelled after the human autonomic
+nervous system: reflexes (L0 rules), routing (L1 classifier, v1+),
+diagnosis (L2 small LLM, v1+), and escalation to cortex (L3).
+
+- **Kill switch:** `knowledge/autonomic/ENABLED` — set content to `false` to disable.
+- **Logs:** `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
+- **Design doc:** `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md`.
+- **Implementation plans:** `docs/superpowers/plans/`.
