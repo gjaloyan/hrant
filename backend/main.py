@@ -39,6 +39,11 @@ from .models import (
     LearnRequest,
 )
 from .analogy_engine import ANALOGIES
+from .autonomic.startup import (
+    build_scheduler,
+    start_autonomic_scheduler,
+    stop_autonomic_scheduler,
+)
 from .background import BACKGROUND
 from .channels import CHANNELS, get_channels, get_channel, save_channel, delete_channel
 from .providers import (
@@ -75,10 +80,16 @@ async def lifespan(application: FastAPI):
                 log.error("Failed to auto-start channel %s: %s", ch["id"], e)
     except Exception as e:
         log.warning("Channel auto-start error: %s", e)
+
+    scheduler = build_scheduler()
+    application.state.autonomic_scheduler = scheduler
+    await start_autonomic_scheduler(scheduler)
+
     yield
     # --- shutdown ---
     log.info("Server shutting down — stopping channels...")
     CHANNELS.stop_all()
+    await stop_autonomic_scheduler(application.state.autonomic_scheduler)
 
 app = FastAPI(title="Self-Learning Agent", lifespan=lifespan)
 app.add_middleware(
