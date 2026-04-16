@@ -1,0 +1,89 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# ---------- Virtual environments ----------
+.venv/
+venv/
+env/
+ENV/
+
+# ---------- Build / dist ----------
+build/
+dist/
+*.egg-info/
+*.egg
+
+# ---------- Node / Frontend ----------
+frontend/node_modules/
+frontend/dist/
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ---------- Secrets & local config ----------
+.env
+.env.local
+.env.*.local
+knowledge/oauth_tokens.json
+knowledge/access_log.json
+
+# ---------- Volatile runtime state ----------
+# These files change every conversation / every tick.
+# Keep their parent directories, but ignore the contents generated at runtime.
+knowledge/_history/
+knowledge/conversation.json
+knowledge/sessions.json
+knowledge/router_state.json
+knowledge/active_model.json
+knowledge/model_versions.json
+knowledge/providers.json
+knowledge/proposals.json
+knowledge/channels.json
+knowledge/gaps.json
+knowledge/patterns.json
+knowledge/index.json
+knowledge/graph.json
+knowledge/error_log.jsonl
+knowledge/eval_log.jsonl
+knowledge/finetune_queue.jsonl
+knowledge/memory_facts.jsonl
+
+# Autonomic runtime state (D project)
+knowledge/autonomic/events.jsonl
+knowledge/autonomic/telemetry.jsonl
+knowledge/autonomic/state/
+
+# ---------- IDE / OS ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Logs & temp ----------
+*.log
+logs/
+tmp/
+temp/
+text.txt
+
+# ---------- Claude / plugin caches ----------
+.claude/cache/
+.claude/settings.local.json

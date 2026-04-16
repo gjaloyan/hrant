@@ -1,0 +1,333 @@
+"""Memory extractor: picks up facts from conversations and stores them in the graph.
+
+After every conversation turn the extractor decides:
+  1. Does the message contain any memorable facts? (prices, dates, preferences,
+     technical specs, personal info, events, opinions...)
+  2. If yes — extract structured triples and store them as "memory facts" in the
+     knowledge graph with source="conversation".
+
+The graph becomes the agent's long-term memory: not just a note index,
+but a living store of everything the agent learned from talking to the user.
+
+On the retrieval side, _think() queries the graph for facts relevant to
+the current question BEFORE looking at notes — so the agent can recall
+"tomatoes cost 2 USD/kg in Armenia" when the topic is Armenian markets.
+"""
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+from .config import CONFIG
+from .knowledge_graph import GRAPH
+from .llm import LLMError, TaskType, router
+
+# ---- Prompts ----
+
+EXTRACT_FACTS_SYSTEM = """You are a memory extraction module for an AI assistant.
+Given a conversation turn (user message + agent answer), extract FACTS worth remembering.
+
+What counts as a memorable fact:
+- Prices, numbers, measurements ("tomatoes cost 2 USD/kg in Armenia")
+- Personal facts about the user ("user lives in Yerevan", "user is a developer")
+- Events and dates ("project deadline is March 15")
+- Technical specifications ("server has 32GB RAM")
+- Preferences and opinions ("user prefers Python over Java")
+- Locations and geography ("office is on 5th floor")
+- Relationships between things ("Redis is used as cache for the main app")
+- Rules and constraints ("API rate limit is 100 req/min")
+- Any concrete, specific information that could be useful later
+
+What is NOT a fact:
+- Greetings, thanks, small talk
+- Vague statements without specifics
+- The agent's own reasoning process
+- Questions without answers
+
+For each fact, extract it as entity-relation-entity triples that can be stored
+in a knowledge graph. Also provide tags/keywords for retrieval.
+
+Return strictly JSON:
+{
+  "has_facts": true/false,
+  "facts": [
+    {
+      "summary": "short human-readable summary of the fact",
+      "triples": [
+        ["entity1", "relation", "entity2"]
+      ],
+      "tags": ["tag1", "tag2"],
+      "category": "price" | "personal" | "technical" | "event" | "location" | "preference" | "relationship" | "rule" | "general",
+      "confidence": 0.0-1.0
+    }
+  ]
+}
+
+Rules:
+- Entity names should be lowercase, concise, noun phrases
+- Relations should be short verbs or prepositions: "costs", "lives_in", "has", "is", "prefers", "located_at", "deadline", "uses", etc.
+- Extract ALL facts, even small ones — memory should be comprehensive
+- If nothing is worth remembering, return {"has_facts": false, "facts": []}
+- Max 8 facts per turn"""
+
+
+class MemoryFact:
+    """A single fact extracted from conversation."""
+
+    def __init__(
+        self,
+        summary: str,
+        triples: list[tuple[str, str, str]],
+        tags: list[str],
+        category: str = "general",
+        confidence: float = 0.8,
+        ts: str | None = None,
+        source_turn: str = "",
+    ):
+        self.summary = summary
+        self.triples = triples
+        self.tags = tags
+        self.category = category
+        self.confidence = confidence
+        self.ts = ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.source_turn = source_turn[:200]
+
+    def to_dict(self) -> dict:
+        return {
+            "summary": self.summary,
+            "triples": self.triples,
+            "tags": self.tags,
+            "category": self.category,
+            "confidence": self.confidence,
+            "ts": self.ts,
+            "source_turn": self.source_turn,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> MemoryFact:
+        return cls(
+            summary=d.get("summary", ""),
+            triples=[tuple(t) for t in d.get("triples", [])],
+            tags=d.get("tags", []),
+            category=d.get("category", "general"),
+            confidence=d.get("confidence", 0.8),
+            ts=d.get("ts"),
+            source_turn=d.get("source_turn", ""),
+        )
+
+
+class MemoryExtractor:
+    """Extracts and stores conversation facts in the knowledge graph."""
+
+    GRAPH_SOURCE = "_memory"  # Special source marker for conversation-derived facts
+
+    def __init__(self, log_path: Optional[Path] = None):
+        kb_dir = Path(CONFIG.knowledge["base_dir"])
+        self.log_path = log_path or (kb_dir / "memory_facts.jsonl")
+        self._fact_count = 0
+        # Count existing facts
+        if self.log_path.exists():
+            try:
+                self._fact_count = sum(
+                    1 for line in self.log_path.read_text(encoding="utf-8").strip().split("\n")
+                    if line.strip()
+                )
+            except Exception:
+                pass
+
+    def extract_and_store(
+        self,
+        user_message: str,
+        agent_answer: str,
+        intent: str = "task",
+    ) -> list[MemoryFact]:
+        """Extract facts from a conversation turn and store in graph.
+
+        Called after every agent response. Skips pure chat/greetings
+        (handled by intent filter). Returns list of extracted facts.
+        """
+        # Skip trivial chat — no facts to extract
+        if intent == "chat" and len(user_message.strip()) < 30:
+            return []
+
+        try:
+            user_prompt = (
+                f"USER MESSAGE:\n{user_message[:1000]}\n\n"
+                f"AGENT ANSWER:\n{agent_answer[:1500]}"
+            )
+            data = router().call_json(
+                TaskType.CLASSIFICATION,
+                EXTRACT_FACTS_SYSTEM,
+                user_prompt,
+                max_tokens=800,
+                temperature=0.1,
+            )
+
+            if not data.get("has_facts"):
+                return []
+
+            facts: list[MemoryFact] = []
+            for raw in data.get("facts", []):
+                raw_triples = raw.get("triples", [])
+                triples = []
+                for t in raw_triples:
+                    if isinstance(t, (list, tuple)) and len(t) >= 3:
+                        triples.append((str(t[0]), str(t[1]), str(t[2])))
+
+                if not triples:
+                    continue
+
+                fact = MemoryFact(
+                    summary=raw.get("summary", ""),
+                    triples=triples,
+                    tags=raw.get("tags", []),
+                    category=raw.get("category", "general"),
+                    confidence=float(raw.get("confidence", 0.8)),
+                    source_turn=user_message[:200],
+                )
+                facts.append(fact)
+
+                # Store in knowledge graph
+                graph_triples = list(triples)
+                # Also add tag edges for better retrieval
+                for tag in fact.tags:
+                    for subj, _, _ in triples[:1]:  # Link first entity to tags
+                        graph_triples.append((subj.lower(), "tagged", tag.lower()))
+
+                GRAPH.add_relations(
+                    graph_triples,
+                    source_note=self.GRAPH_SOURCE,
+                    weight=fact.confidence,
+                )
+
+                # Append to log
+                self._append_log(fact)
+
+            return facts
+
+        except LLMError:
+            return []
+
+    def _append_log(self, fact: MemoryFact) -> None:
+        """Append a fact to the persistent log."""
+        try:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(fact.to_dict(), ensure_ascii=False) + "\n")
+            self._fact_count += 1
+        except Exception:
+            pass
+
+    def recall(self, query: str, limit: int = 10) -> list[dict]:
+        """Recall facts relevant to a query by searching the graph.
+
+        Returns fact summaries from memory edges that match the query.
+        This is the agent's "remember" function — it finds conversation
+        facts stored in the graph.
+        """
+        # Search graph for memory-sourced edges
+        query_terms = GRAPH._extract_query_entities(query)
+        if not query_terms:
+            return []
+
+        relevant_facts: list[dict] = []
+        seen_summaries: set[str] = set()
+
+        for term in query_terms:
+            term_n = GRAPH._normalize(term)
+            # Direct entity match
+            if term_n in GRAPH._edges:
+                for edge in GRAPH._edges[term_n]:
+                    if edge.get("note") == self.GRAPH_SOURCE:
+                        # Found a memory edge — look up the full fact
+                        fact_info = {
+                            "entity": term_n,
+                            "relation": edge["relation"],
+                            "target": edge["target"],
+                            "weight": edge.get("weight", 1.0),
+                        }
+                        key = f"{term_n}|{edge['relation']}|{edge['target']}"
+                        if key not in seen_summaries:
+                            seen_summaries.add(key)
+                            relevant_facts.append(fact_info)
+
+            # Also check if term appears as a target in memory edges
+            for entity, edges in GRAPH._edges.items():
+                for edge in edges:
+                    if (
+                        edge.get("note") == self.GRAPH_SOURCE
+                        and (term_n in edge["target"] or term_n in entity)
+                    ):
+                        key = f"{entity}|{edge['relation']}|{edge['target']}"
+                        if key not in seen_summaries:
+                            seen_summaries.add(key)
+                            relevant_facts.append({
+                                "entity": entity,
+                                "relation": edge["relation"],
+                                "target": edge["target"],
+                                "weight": edge.get("weight", 1.0),
+                            })
+
+        # Sort by weight and return top results
+        relevant_facts.sort(key=lambda f: -f["weight"])
+        return relevant_facts[:limit]
+
+    def recall_block(self, query: str, max_facts: int = 8) -> str:
+        """Build a memory context block for injection into prompts.
+
+        Returns a formatted string of recalled facts, or "" if nothing found.
+        """
+        facts = self.recall(query, limit=max_facts)
+        if not facts:
+            return ""
+
+        lines = [
+            "# REMEMBERED FACTS (from previous conversations)",
+            "These facts were learned from earlier conversations with the user.",
+            "",
+        ]
+        for f in facts:
+            rel = f["relation"].replace("_", " ")
+            lines.append(f"- {f['entity']} {rel} {f['target']}")
+
+        return "\n".join(lines)
+
+    def recent_facts(self, limit: int = 30) -> list[dict]:
+        """Return recent facts from the log."""
+        if not self.log_path.exists():
+            return []
+        try:
+            lines = self.log_path.read_text(encoding="utf-8").strip().split("\n")
+            facts = []
+            for line in lines[-limit:]:
+                if line.strip():
+                    facts.append(json.loads(line))
+            facts.reverse()
+            return facts
+        except Exception:
+            return []
+
+    def stats(self) -> dict:
+        """Memory statistics."""
+        # Count memory edges in graph
+        memory_edges = 0
+        memory_entities: set[str] = set()
+        for entity, edges in GRAPH._edges.items():
+            for edge in edges:
+                if edge.get("note") == self.GRAPH_SOURCE:
+                    memory_edges += 1
+                    memory_entities.add(entity)
+                    memory_entities.add(edge["target"])
+
+        return {
+            "total_facts_logged": self._fact_count,
+            "memory_edges_in_graph": memory_edges,
+            "memory_entities": len(memory_entities),
+            "graph_total_entities": GRAPH.entity_count(),
+            "graph_total_edges": GRAPH.edge_count(),
+        }
+
+
+MEMORY = MemoryExtractor()

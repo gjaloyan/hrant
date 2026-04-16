@@ -1,0 +1,31 @@
+{
+  "goals": [
+    {
+      "id": "09db5d437f",
+      "description": "Learn Python async patterns",
+      "priority": 8,
+      "goal_type": "learning",
+      "status": "completed",
+      "subtasks": [],
+      "created": "2026-04-14 01:16:21",
+      "completed": "2026-04-14 11:53:59",
+      "context": "Need for background task system",
+      "source": "user",
+      "progress_notes": []
+    },
+    {
+      "id": "af15be86f0",
+      "description": "Improve prompt: Add explicit instruction: 'NEVER fabricate conversation timestamps, dates, or qu",
+      "priority": 6,
+      "goal_type": "improvement",
+      "status": "active",
+      "subtasks": [],
+      "created": "2026-04-14 15:09:57",
+      "completed": null,
+      "context": "Meta-learner: prompt engineering needed — Add explicit instruction: 'NEVER fabricate conversation timestamps, dates, or quote user statements unless they are explicitly present in the context. If you don't have information, clearly state you don't know instead of inventing plausible-sounding references. When citing past conversations, only reference actual provided context.'",
+      "source": "meta_learner",
+      "progress_notes": []
+    }
+  ],
+  "interaction_count": 38
+}
