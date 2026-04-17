@@ -200,3 +200,73 @@ def test_service_repair_failure_escalates(monkeypatch):
     report = lever.run({"service": "ollama", "max_attempts": 1}, {})
     assert report.status == LeverStatus.ESCALATED
     assert report.outcome["final_status_active"] is False
+
+
+import json
+from pathlib import Path
+
+from backend.autonomic.levers.self_heal import FIRE_SELF_HEAL
+
+
+def _write_seed_sigs(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({
+            "id": "heal_test_v1",
+            "pattern": {"source": "error_log", "msg_regex": "boom"},
+            "severity": "warn",
+            "fix_lever": "FIRE_SERVER_HEALTH",
+            "fix_params": {"verbose": True},
+            "observed_count": 0,
+            "success_rate": None,
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_self_heal_metadata():
+    lever = FIRE_SELF_HEAL()
+    assert lever.name == "FIRE_SELF_HEAL"
+    assert lever.category == LeverCategory.IMMUNE
+    assert lever.safety == LeverSafety.GREEN
+
+
+def test_self_heal_without_signature_id_is_skipped(tmp_path: Path):
+    sig_path = tmp_path / "sig.jsonl"
+    _write_seed_sigs(sig_path)
+    lever = FIRE_SELF_HEAL()
+    report = lever.run({"signatures_path": str(sig_path)}, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert "signature_id" in report.reason
+
+
+def test_self_heal_unknown_signature_is_skipped(tmp_path: Path):
+    sig_path = tmp_path / "sig.jsonl"
+    _write_seed_sigs(sig_path)
+    lever = FIRE_SELF_HEAL()
+    report = lever.run(
+        {"signature_id": "nope", "signatures_path": str(sig_path)},
+        {},
+    )
+    assert report.status == LeverStatus.SKIPPED
+    assert "unknown_signature" in report.reason
+
+
+def test_self_heal_returns_fix_plan_without_executing(tmp_path: Path):
+    sig_path = tmp_path / "sig.jsonl"
+    _write_seed_sigs(sig_path)
+    lever = FIRE_SELF_HEAL()
+    report = lever.run(
+        {"signature_id": "heal_test_v1", "signatures_path": str(sig_path)},
+        {},
+    )
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["signature_id"] == "heal_test_v1"
+    assert report.outcome["fix_lever"] == "FIRE_SERVER_HEALTH"
+    assert report.outcome["fix_params"] == {"verbose": True}
+    assert report.follow_ups == ["FIRE_SERVER_HEALTH"]
+
+
+def test_self_heal_preconditions_always_true():
+    lever = FIRE_SELF_HEAL()
+    assert lever.preconditions(_snapshot()) is True
