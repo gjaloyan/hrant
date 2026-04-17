@@ -431,12 +431,18 @@ background alongside the cortex. It is modelled after the human autonomic
 nervous system: reflexes (L0 rules), routing (L1 classifier, v1+),
 diagnosis (L2 small LLM, v1+), and escalation to cortex (L3).
 
-**D-02 delivers Layer 0 + immune levers:**
+**Delivered (D-01 → D-03):**
 
+_Immune levers (D-02, react to ongoing errors/load):_
 - `FIRE_SERVER_HEALTH` — disk / memory / CPU threshold check (green).
 - `FIRE_ERROR_TRIAGE` — classifies `error_log.jsonl` entries by severity (green).
 - `FIRE_SELF_HEAL` — looks up an immune signature and returns its fix plan (green).
 - `FIRE_SERVICE_REPAIR` — whitelist-gated `systemctl restart` with `max_attempts`, POSIX only (green, skipped on non-POSIX).
+
+_Autonomic levers (D-03, scheduled self-maintenance):_
+- `FIRE_INTEGRITY_HEARTBEAT` — every 5 min, read-only check of `knowledge/index.json` vs files (green).
+- `FIRE_GOAL_PROPOSE` — hourly, wraps `GOALS.suggest_from_gaps(gaps.json)` (green).
+- `FIRE_MEMORY_CONSOLIDATION` — daily, reviews recent sessions and routes facts to `identity/user.md`, `memory_facts.jsonl`, and `sessions.json` summary field (green, delegates to cortex).
 
 **Paths:**
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
