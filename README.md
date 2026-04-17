@@ -431,7 +431,21 @@ background alongside the cortex. It is modelled after the human autonomic
 nervous system: reflexes (L0 rules), routing (L1 classifier, v1+),
 diagnosis (L2 small LLM, v1+), and escalation to cortex (L3).
 
-- **Kill switch:** `knowledge/autonomic/ENABLED` — set content to `false` to disable.
-- **Logs:** `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
-- **Design doc:** `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md`.
-- **Implementation plans:** `docs/superpowers/plans/`.
+**D-02 delivers Layer 0 + immune levers:**
+
+- `FIRE_SERVER_HEALTH` — disk / memory / CPU threshold check (green).
+- `FIRE_ERROR_TRIAGE` — classifies `error_log.jsonl` entries by severity (green).
+- `FIRE_SELF_HEAL` — looks up an immune signature and returns its fix plan (green).
+- `FIRE_SERVICE_REPAIR` — whitelist-gated `systemctl restart` with `max_attempts`, POSIX only (green, skipped on non-POSIX).
+
+**Paths:**
+- Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
+- Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
+- Immune DB: `knowledge/immune/signatures.jsonl` (seed) + `knowledge/immune/fixes/` (markdown recipes).
+- Design doc: `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md`.
+- Implementation plans: `docs/superpowers/plans/`.
+
+**Env vars** (set before starting uvicorn to override defaults):
+`AUTONOMIC_ENABLED_PATH`, `AUTONOMIC_TICK_SECONDS`, `AUTONOMIC_KNOWLEDGE_ROOT`,
+`AUTONOMIC_ERROR_LOG_PATH`, `AUTONOMIC_LEVER_LOG_PATH`, `AUTONOMIC_PENDING_PATH`,
+`AUTONOMIC_TICK_LOG_PATH`.
