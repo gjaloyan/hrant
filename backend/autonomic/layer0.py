@@ -90,4 +90,25 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=120.0,
         ),
+        LayerZeroRule(
+            name="integrity_tick",
+            predicate=lambda s: True,
+            lever="FIRE_INTEGRITY_HEARTBEAT",
+            params={},
+            cooldown_seconds=300.0,
+        ),
+        LayerZeroRule(
+            name="goal_propose_tick",
+            predicate=lambda s: True,
+            lever="FIRE_GOAL_PROPOSE",
+            params={},
+            cooldown_seconds=3600.0,
+        ),
+        LayerZeroRule(
+            name="consolidation_tick",
+            predicate=lambda s: True,
+            lever="FIRE_MEMORY_CONSOLIDATION",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
     ]
