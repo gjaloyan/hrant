@@ -85,3 +85,43 @@ def test_capability_scan_tools_handles_missing_docstring(tmp_path: Path):
     note = self_root / "tools" / "bare.md"
     assert note.exists()
     assert "(no docstring)" in note.read_text(encoding="utf-8")
+
+
+def test_capability_scan_writes_skills_notes(tmp_path: Path):
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir()
+    calc_dir = skills_dir / "calc"
+    calc_dir.mkdir()
+    (calc_dir / "SKILL.md").write_text("# calc\nSafe arithmetic evaluator.\n", encoding="utf-8")
+    (calc_dir / "handler.py").write_text("# handler", encoding="utf-8")
+    bare_dir = skills_dir / "no_skill_md"
+    bare_dir.mkdir()
+    (bare_dir / "handler.py").write_text("# handler", encoding="utf-8")
+    self_root = tmp_path / "knowledge_self"
+
+    lever = FIRE_CAPABILITY_SCAN()
+    report = lever.run({
+        "tools_dir": str(tmp_path / "tools"),
+        "skills_dir": str(skills_dir),
+        "channels_path": str(tmp_path / "channels.json"),
+        "self_root": str(self_root),
+    }, {})
+
+    assert report.outcome["skills_written"] == 2
+    calc_note = (self_root / "skills" / "calc.md").read_text(encoding="utf-8")
+    assert "Safe arithmetic evaluator" in calc_note
+    assert "kind: skill" in calc_note
+    bare_note = (self_root / "skills" / "no_skill_md.md").read_text(encoding="utf-8")
+    assert "(no SKILL.md)" in bare_note
+
+
+def test_capability_scan_skills_missing_dir_is_zero(tmp_path: Path):
+    self_root = tmp_path / "knowledge_self"
+    lever = FIRE_CAPABILITY_SCAN()
+    report = lever.run({
+        "tools_dir": str(tmp_path / "tools"),
+        "skills_dir": str(tmp_path / "skills_does_not_exist"),
+        "channels_path": str(tmp_path / "channels.json"),
+        "self_root": str(self_root),
+    }, {})
+    assert report.outcome["skills_written"] == 0
