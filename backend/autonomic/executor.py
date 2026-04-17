@@ -57,7 +57,7 @@ class LeverExecutor:
 
         started = utcnow()
         try:
-            report = lever.run(dict(params), {})
+            report = lever.run(dict(params), {"state": state})
         except Exception as exc:
             report = LeverReport(
                 lever=lever.name,
