@@ -59,3 +59,14 @@ def list_levers() -> list[str]:
 def clear_registry() -> None:
     """Testing helper — wipe all registrations."""
     LeverRegistry.instance().clear()
+
+
+def register_default_immune_levers() -> None:
+    from .error_triage import FIRE_ERROR_TRIAGE
+    from .self_heal import FIRE_SELF_HEAL
+    from .server_health import FIRE_SERVER_HEALTH
+    from .service_repair import FIRE_SERVICE_REPAIR
+    register_lever(FIRE_SERVER_HEALTH)
+    register_lever(FIRE_ERROR_TRIAGE)
+    register_lever(FIRE_SELF_HEAL)
+    register_lever(FIRE_SERVICE_REPAIR)

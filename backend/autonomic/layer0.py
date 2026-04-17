@@ -58,3 +58,36 @@ class Layer0Engine:
             params={},
             reason="idle_no_rules_matched",
         )
+
+
+def default_rules() -> list[LayerZeroRule]:
+    return [
+        LayerZeroRule(
+            name="disk_low",
+            predicate=lambda s: s.disk_free_gb < 2.0,
+            lever="FIRE_SERVER_HEALTH",
+            params={"reason": "disk_low"},
+            cooldown_seconds=300.0,
+        ),
+        LayerZeroRule(
+            name="memory_low",
+            predicate=lambda s: s.memory_free_gb < 0.5,
+            lever="FIRE_SERVER_HEALTH",
+            params={"reason": "memory_low"},
+            cooldown_seconds=300.0,
+        ),
+        LayerZeroRule(
+            name="cpu_high",
+            predicate=lambda s: s.cpu_load_1m > 4.0,
+            lever="FIRE_SERVER_HEALTH",
+            params={"reason": "cpu_high"},
+            cooldown_seconds=300.0,
+        ),
+        LayerZeroRule(
+            name="errors_present",
+            predicate=lambda s: len(s.recent_errors) > 0,
+            lever="FIRE_ERROR_TRIAGE",
+            params={},
+            cooldown_seconds=120.0,
+        ),
+    ]

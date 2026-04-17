@@ -75,3 +75,16 @@ def test_registry_is_singleton():
     reg1 = LeverRegistry.instance()
     reg2 = LeverRegistry.instance()
     assert reg1 is reg2
+
+
+def test_immune_levers_are_auto_registered():
+    from backend.autonomic.levers import register_default_immune_levers
+    clear_registry()
+    register_default_immune_levers()
+    reg = LeverRegistry.instance()
+    names = reg.names()
+    assert "FIRE_SERVER_HEALTH" in names
+    assert "FIRE_ERROR_TRIAGE" in names
+    assert "FIRE_SELF_HEAL" in names
+    assert "FIRE_SERVICE_REPAIR" in names
+    clear_registry()

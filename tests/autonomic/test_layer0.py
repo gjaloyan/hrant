@@ -116,3 +116,31 @@ def test_predicate_exception_is_swallowed_and_rule_skipped():
     engine = Layer0Engine(rules=[boom, ok])
     decision = engine.evaluate(_snapshot())
     assert decision.lever == "FIRE_OK"
+
+
+def test_default_rules_includes_server_and_error_rules():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    names = {r.name for r in rules}
+    assert "disk_low" in names
+    assert "memory_low" in names
+    assert "cpu_high" in names
+    assert "errors_present" in names
+
+
+def test_default_rules_disk_fires_when_low():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    disk_rule = next(r for r in rules if r.name == "disk_low")
+    assert disk_rule.lever == "FIRE_SERVER_HEALTH"
+    assert disk_rule.predicate(_snapshot(disk_free_gb=0.5)) is True
+    assert disk_rule.predicate(_snapshot(disk_free_gb=50.0)) is False
+
+
+def test_default_rules_errors_fires_only_when_nonempty():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    rule = next(r for r in rules if r.name == "errors_present")
+    assert rule.lever == "FIRE_ERROR_TRIAGE"
+    assert rule.predicate(_snapshot(recent_errors=[])) is False
+    assert rule.predicate(_snapshot(recent_errors=[{"message": "x"}])) is True
