@@ -27,6 +27,7 @@ class Layer0Engine:
 
     def evaluate(self, state: StateSnapshot) -> TickDecision:
         now = time.monotonic()
+        last_cooldown_hit: TickDecision | None = None
         for rule in self._rules:
             try:
                 matched = bool(rule.predicate(state))
@@ -37,13 +38,15 @@ class Layer0Engine:
                 continue
             last = self._last_fired.get(rule.name)
             if last is not None and (now - last) < rule.cooldown_seconds:
-                return TickDecision(
-                    source=TickDecisionSource.L0_REFLEX,
-                    lever=None,
-                    params={},
-                    reason=f"cooldown:{rule.name}",
-                    rule_name=rule.name,
-                )
+                if last_cooldown_hit is None:
+                    last_cooldown_hit = TickDecision(
+                        source=TickDecisionSource.L0_REFLEX,
+                        lever=None,
+                        params={},
+                        reason=f"cooldown:{rule.name}",
+                        rule_name=rule.name,
+                    )
+                continue
             self._last_fired[rule.name] = now
             return TickDecision(
                 source=TickDecisionSource.L0_REFLEX,
@@ -52,6 +55,8 @@ class Layer0Engine:
                 reason=f"rule_matched:{rule.name}",
                 rule_name=rule.name,
             )
+        if last_cooldown_hit is not None:
+            return last_cooldown_hit
         return TickDecision(
             source=TickDecisionSource.L0_REFLEX,
             lever=None,
