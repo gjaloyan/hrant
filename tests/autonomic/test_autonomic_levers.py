@@ -154,3 +154,215 @@ def test_goal_propose_delegates_to_goals_manager(tmp_path: Path):
 def test_goal_propose_preconditions_true():
     lever = FIRE_GOAL_PROPOSE()
     assert lever.preconditions(_snapshot()) is True
+
+
+from backend.autonomic.levers.memory_consolidation import FIRE_MEMORY_CONSOLIDATION
+
+
+def _fake_claude_response() -> dict:
+    return {
+        "session_summary": "User discussed Python async patterns.",
+        "user_profile_facts": [
+            {"summary": "User prefers Python over Java", "confidence": 0.9, "category": "preference"},
+            {"summary": "User lives in Yerevan", "confidence": 0.95, "category": "location"},
+        ],
+        "durable_facts": [
+            {
+                "summary": "tomatoes cost 2 USD/kg in Armenia",
+                "triples": [["tomato", "costs_in", "armenia"]],
+                "tags": ["price", "armenia"],
+                "category": "price",
+                "confidence": 0.95,
+            }
+        ],
+        "topic_threads": ["python async", "armenian prices"],
+    }
+
+
+def _write_sessions(path: Path, sessions: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"current_id": "x", "sessions": sessions}, ensure_ascii=False), encoding="utf-8")
+
+
+def _minimal_session(sid: str, turns: int = 1, consolidated: bool = False) -> dict:
+    s = {
+        "id": sid,
+        "started": "2026-04-14 00:00:00",
+        "ended": "2026-04-14 01:00:00",
+        "title": f"session-{sid}",
+        "archived": False,
+        "turns": [
+            {"ts": "2026-04-14 00:00:00", "user": "hello", "answer": "hi", "intent": "chat"}
+            for _ in range(turns)
+        ],
+    }
+    if consolidated:
+        s["consolidated"] = True
+    return s
+
+
+def test_memory_consolidation_metadata():
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    assert lever.name == "FIRE_MEMORY_CONSOLIDATION"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "claude"
+
+
+def test_memory_consolidation_skips_when_all_consolidated(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    _write_sessions(sessions_path, [_minimal_session("a", consolidated=True)])
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    assert lever.preconditions(_snapshot()) is True
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "user_md_path": str(tmp_path / "user.md"),
+        "memory_facts_path": str(tmp_path / "memory_facts.jsonl"),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_unconsolidated_sessions"
+
+
+def test_memory_consolidation_writes_to_three_tiers(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    user_md_path = tmp_path / "user.md"
+    facts_path = tmp_path / "memory_facts.jsonl"
+    _write_sessions(sessions_path, [_minimal_session("a", turns=2)])
+    user_md_path.write_text("# User Profile\n\n## О пользователе\n- existing fact\n", encoding="utf-8")
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    with patch("backend.autonomic.levers.memory_consolidation.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_claude_response()
+        report = lever.run({
+            "sessions_path": str(sessions_path),
+            "user_md_path": str(user_md_path),
+            "memory_facts_path": str(facts_path),
+            "max_sessions": 5,
+        }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["sessions_processed"] == 1
+    assert report.outcome["profile_added"] == 2
+    assert report.outcome["facts_added"] == 1
+
+    user_md_content = user_md_path.read_text(encoding="utf-8")
+    assert "User prefers Python over Java" in user_md_content
+    assert "User lives in Yerevan" in user_md_content
+
+    facts_lines = facts_path.read_text(encoding="utf-8").splitlines()
+    assert len(facts_lines) == 1
+    fact = json.loads(facts_lines[0])
+    assert fact["summary"] == "tomatoes cost 2 USD/kg in Armenia"
+
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    assert saved["sessions"][0]["consolidated"] is True
+    assert saved["sessions"][0]["summary"] == "User discussed Python async patterns."
+
+
+def test_memory_consolidation_dedups_profile_facts(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    user_md_path = tmp_path / "user.md"
+    facts_path = tmp_path / "memory_facts.jsonl"
+    _write_sessions(sessions_path, [_minimal_session("a")])
+    user_md_path.write_text(
+        "# User Profile\n\n## О пользователе\n- user prefers python over java (existing)\n",
+        encoding="utf-8",
+    )
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    with patch("backend.autonomic.levers.memory_consolidation.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_claude_response()
+        report = lever.run({
+            "sessions_path": str(sessions_path),
+            "user_md_path": str(user_md_path),
+            "memory_facts_path": str(facts_path),
+        }, {})
+
+    assert report.outcome["profile_added"] == 1
+
+
+def test_memory_consolidation_dedups_durable_facts(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    user_md_path = tmp_path / "user.md"
+    facts_path = tmp_path / "memory_facts.jsonl"
+    _write_sessions(sessions_path, [_minimal_session("a")])
+    existing = {
+        "summary": "tomatoes cost 2 USD/kg in Armenia",
+        "triples": [["tomato", "costs_in", "armenia"]],
+        "tags": ["price"],
+        "category": "price",
+        "confidence": 1.0,
+        "ts": "2026-04-10 00:00:00",
+        "source_turn": "",
+    }
+    facts_path.write_text(json.dumps(existing) + "\n", encoding="utf-8")
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    with patch("backend.autonomic.levers.memory_consolidation.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_claude_response()
+        report = lever.run({
+            "sessions_path": str(sessions_path),
+            "user_md_path": str(user_md_path),
+            "memory_facts_path": str(facts_path),
+        }, {})
+
+    assert report.outcome["facts_added"] == 0
+    facts_lines = facts_path.read_text(encoding="utf-8").splitlines()
+    assert len(facts_lines) == 1
+
+
+def test_memory_consolidation_caps_at_max_sessions(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    user_md_path = tmp_path / "user.md"
+    facts_path = tmp_path / "memory_facts.jsonl"
+    _write_sessions(sessions_path, [_minimal_session(f"s{i}") for i in range(10)])
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    with patch("backend.autonomic.levers.memory_consolidation.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_claude_response()
+        report = lever.run({
+            "sessions_path": str(sessions_path),
+            "user_md_path": str(user_md_path),
+            "memory_facts_path": str(facts_path),
+            "max_sessions": 3,
+        }, {})
+
+    assert report.outcome["sessions_processed"] == 3
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    consolidated_count = sum(1 for s in saved["sessions"] if s.get("consolidated"))
+    assert consolidated_count == 3
+
+
+def test_memory_consolidation_skips_empty_sessions(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    user_md_path = tmp_path / "user.md"
+    facts_path = tmp_path / "memory_facts.jsonl"
+    _write_sessions(sessions_path, [_minimal_session("a", turns=0)])
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "user_md_path": str(user_md_path),
+        "memory_facts_path": str(facts_path),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_unconsolidated_sessions"
+
+
+def test_memory_consolidation_follow_ups_includes_topic_threads(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    user_md_path = tmp_path / "user.md"
+    facts_path = tmp_path / "memory_facts.jsonl"
+    _write_sessions(sessions_path, [_minimal_session("a")])
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    with patch("backend.autonomic.levers.memory_consolidation.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_claude_response()
+        report = lever.run({
+            "sessions_path": str(sessions_path),
+            "user_md_path": str(user_md_path),
+            "memory_facts_path": str(facts_path),
+        }, {})
+
+    assert "python async" in report.follow_ups
+    assert "armenian prices" in report.follow_ups
