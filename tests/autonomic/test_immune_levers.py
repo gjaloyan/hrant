@@ -128,3 +128,75 @@ def test_error_triage_preconditions_requires_errors():
     lever = FIRE_ERROR_TRIAGE()
     assert lever.preconditions(_snapshot(recent_errors=[])) is False
     assert lever.preconditions(_snapshot(recent_errors=[{"message": "x"}])) is True
+
+
+from backend.autonomic.levers.service_repair import FIRE_SERVICE_REPAIR
+
+
+def test_service_repair_metadata():
+    lever = FIRE_SERVICE_REPAIR()
+    assert lever.name == "FIRE_SERVICE_REPAIR"
+    assert lever.category == LeverCategory.IMMUNE
+    assert lever.safety == LeverSafety.GREEN
+
+
+def test_service_repair_rejects_service_not_in_whitelist():
+    lever = FIRE_SERVICE_REPAIR()
+    report = lever.run({"service": "rm_rf_please"}, {})
+    assert report.status == LeverStatus.BLOCKED_BY_SAFETY
+    assert "whitelist" in report.reason
+
+
+def test_service_repair_on_unsupported_platform_returns_skipped(monkeypatch):
+    import backend.autonomic.levers.service_repair as mod
+    monkeypatch.setattr(mod, "_PLATFORM_SUPPORTED", False)
+    lever = FIRE_SERVICE_REPAIR()
+    report = lever.run({"service": "ollama"}, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert "platform" in report.reason.lower()
+
+
+def test_service_repair_runs_subprocess_on_supported_platform(monkeypatch):
+    import backend.autonomic.levers.service_repair as mod
+    calls: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, rc: int = 0, out: str = "active (running)"):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        if cmd[1] == "status":
+            return _Result(rc=0, out="active (running)")
+        return _Result(rc=0, out="")
+
+    monkeypatch.setattr(mod, "_PLATFORM_SUPPORTED", True)
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    lever = FIRE_SERVICE_REPAIR()
+    report = lever.run({"service": "ollama", "max_attempts": 1}, {})
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["service"] == "ollama"
+    assert report.outcome["final_status_active"] is True
+    assert any(c[:2] == ["systemctl", "restart"] for c in calls)
+
+
+def test_service_repair_failure_escalates(monkeypatch):
+    import backend.autonomic.levers.service_repair as mod
+
+    class _Result:
+        def __init__(self, rc: int, out: str = ""):
+            self.returncode = rc
+            self.stdout = out
+            self.stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        return _Result(rc=3, out="inactive (failed)")
+
+    monkeypatch.setattr(mod, "_PLATFORM_SUPPORTED", True)
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    lever = FIRE_SERVICE_REPAIR()
+    report = lever.run({"service": "ollama", "max_attempts": 1}, {})
+    assert report.status == LeverStatus.ESCALATED
+    assert report.outcome["final_status_active"] is False
