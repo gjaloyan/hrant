@@ -20,7 +20,12 @@ from .executor import LeverExecutor
 from .kill_switch import DEFAULT_PATH as DEFAULT_ENABLED_PATH
 from .kill_switch import KillSwitch
 from .layer0 import Layer0Engine, default_rules
-from .levers import LeverRegistry, clear_registry, register_default_immune_levers
+from .levers import (
+    LeverRegistry,
+    clear_registry,
+    register_default_autonomic_levers,
+    register_default_immune_levers,
+)
 from .safety import SafetyGate
 from .scheduler import AutonomicScheduler
 from .state import StateSnapshotBuilder
@@ -44,6 +49,7 @@ def build_scheduler() -> AutonomicScheduler:
 
     clear_registry()
     register_default_immune_levers()
+    register_default_autonomic_levers()
     registry = LeverRegistry.instance()
 
     gate = SafetyGate(pending_approvals_path=pending)
