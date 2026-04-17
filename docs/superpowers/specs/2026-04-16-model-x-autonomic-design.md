@@ -640,15 +640,18 @@ UI-панель `AutonomicPanel.tsx`:
 | Pid | Scope | Status |
 |---|---|---|
 | **D-01** | Foundation: scheduler, state snapshot, kill switch, safety gate, lever base, event bus, registry, 2 toy levers, FastAPI lifespan wire | ✅ merged (13 commits) |
-| **D-02** | Layer 0 reflex engine + immune DB + 4 immune levers (`SERVER_HEALTH`, `ERROR_TRIAGE`, `SELF_HEAL`, `SERVICE_REPAIR`) + real tick + integration tests | ✅ d-02-layer0-immune (15 commits, 110 tests) |
-| **D-03** | Claude-delegation executor + **3** autonomic levers: `FIRE_INTEGRITY_HEARTBEAT` (python), `FIRE_MEMORY_CONSOLIDATION` (claude), `FIRE_GOAL_PROPOSE` (wraps `goals.py`) | ⏳ next |
-| **D-04** | `FIRE_SELF_STUDY` + `FIRE_CAPABILITY_SCAN` + `FIRE_NOTE_CURATION` + `FIRE_GRAPH_MAINTENANCE`; absorb `backend/background.py` into `FIRE_SELF_STUDY` and retire it | planned |
-| **D-05** | Telemetry cohort: `FIRE_MODEL_EVAL`, `FIRE_SESSION_ARCHIVE`, `FIRE_COST_AUDIT` + remaining autonomic (`FIRE_SELF_REFLECTION`, `FIRE_FINETUNE_QC`, `FIRE_GAP_DETECTION`) | planned |
-| **D-06** | Body cohort (`FIRE_TOOL_INSTALL` yellow, capability scan extras) + Frontend `AutonomicPanel.tsx` + StatusBar indicator + `backend/autonomic/api.py` expansion | planned |
+| **D-02** | Layer 0 reflex engine + immune DB + 4 immune levers (`SERVER_HEALTH`, `ERROR_TRIAGE`, `SELF_HEAL`, `SERVICE_REPAIR`) + real tick + integration tests | ✅ merged (15 commits, 110 tests) |
+| **D-03** | Claude-delegation executor + **3** autonomic levers: `FIRE_INTEGRITY_HEARTBEAT` (python), `FIRE_MEMORY_CONSOLIDATION` (claude), `FIRE_GOAL_PROPOSE` (wraps `goals.py`) + Layer0Engine cooldown fall-through fix | ✅ merged (PR #1, 8 commits, 139 tests) |
+| **D-04** | Self-knowledge cohort: `FIRE_CAPABILITY_SCAN` + `FIRE_SELF_STUDY` + new `knowledge/self/` infrastructure (modules, tools, skills, mcp_servers, server_inventory) | ⏳ next |
+| **D-05** | Knowledge curation cohort: `FIRE_NOTE_CURATION` + `FIRE_GRAPH_MAINTENANCE` + retirement of `backend/background.py` (its `learn_topic_bg` becomes a lever) | planned |
+| **D-06** | Telemetry cohort: `FIRE_MODEL_EVAL`, `FIRE_SESSION_ARCHIVE`, `FIRE_COST_AUDIT` + remaining autonomic (`FIRE_SELF_REFLECTION`, `FIRE_FINETUNE_QC`, `FIRE_GAP_DETECTION`) | planned |
+| **D-07** | Body cohort (`FIRE_TOOL_INSTALL` yellow, Linux-only OS inventory extras) + Frontend `AutonomicPanel.tsx` + StatusBar indicator + `backend/autonomic/api.py` expansion | planned |
 
-**Why only 3 levers in D-03 (vs 7 "autonomic cycles" in Section 3):** to keep each sub-project reviewable inside a single plan-and-execute cycle. The remaining 4 autonomic-category levers are split across D-04 and D-05 by dependency — e.g. `SELF_STUDY` needs `knowledge/self/` infrastructure built first, `SELF_REFLECTION` benefits from telemetry signals from `MODEL_EVAL`, etc. The full catalog in Section 3 remains the target; only the order of arrival is staged.
+**Why the scope reshuffle at D-04:** the original D-04 bundled four levers (`SELF_STUDY`, `CAPABILITY_SCAN`, `NOTE_CURATION`, `GRAPH_MAINTENANCE`) plus a `backend/background.py` retirement. During brainstorming on 2026-04-18 we noticed these naturally split into two cohorts that write to different parts of `knowledge/` and share no infrastructure: "self-knowledge" (writes `knowledge/self/`) and "knowledge curation" (writes `knowledge/graph.json` and notes under `knowledge/{category}/`). Splitting keeps each sub-project the same size as D-02/D-03 (~3 levers, ~140 tests, single PR review).
 
-**backend/background.py:** Kept as-is through D-03. Its sole job is user-proactive `learn_topic` triggered from chat flow or the gap tracker. This overlaps conceptually with `FIRE_SELF_STUDY` but not operationally until that lever lands. D-04 absorbs the `learn_topic` path into `FIRE_SELF_STUDY` and deletes `backend/background.py`. Header comment in `backend/background.py` records this intent.
+**Why still only 3 levers in D-03 (vs 7 "autonomic cycles" in Section 3):** to keep each sub-project reviewable inside a single plan-and-execute cycle. The remaining 4 autonomic-category levers are split across D-04, D-05, and D-06 by dependency — e.g. `SELF_STUDY` needs `knowledge/self/` infrastructure built first, `SELF_REFLECTION` benefits from telemetry signals from `MODEL_EVAL`, etc. The full catalog in Section 3 remains the target; only the order of arrival is staged.
+
+**backend/background.py:** Kept as-is through D-04. Its sole job is user-proactive `learn_topic` triggered from chat flow or the gap tracker. Originally slated to be absorbed by `FIRE_SELF_STUDY`, but that lever (D-04) is strictly about reading the agent's own source code — a different concern. D-05's curation cohort takes over `learn_topic`: either as a dedicated `FIRE_PROACTIVE_LEARN` lever or by folding the call directly into `FIRE_NOTE_CURATION`. Header comment in `backend/background.py` will be updated when D-05 lands.
 
 **HTTP surface evolution:**
 - D-02 (done): `/api/autonomic/status` — read-only kill-switch + scheduler liveness + registered lever names. Lives in `backend/autonomic/api.py`.
