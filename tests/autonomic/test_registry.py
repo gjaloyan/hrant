@@ -88,3 +88,15 @@ def test_immune_levers_are_auto_registered():
     assert "FIRE_SELF_HEAL" in names
     assert "FIRE_SERVICE_REPAIR" in names
     clear_registry()
+
+
+def test_autonomic_levers_are_auto_registered():
+    from backend.autonomic.levers import register_default_autonomic_levers
+    clear_registry()
+    register_default_autonomic_levers()
+    reg = LeverRegistry.instance()
+    names = reg.names()
+    assert "FIRE_INTEGRITY_HEARTBEAT" in names
+    assert "FIRE_GOAL_PROPOSE" in names
+    assert "FIRE_MEMORY_CONSOLIDATION" in names
+    clear_registry()
