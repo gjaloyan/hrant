@@ -631,4 +631,30 @@ UI-панель `AutonomicPanel.tsx`:
 8. Frontend AutonomicPanel + StatusBar индикатор
 9. v0 запуск на dev-машине, сбор метрик за 2 недели
 
+---
+
+## 11. Phased delivery (D-01 → D-06)
+
+Секция 10 — полное видение v0. Чтобы не скатиться в "всё сразу и плохо", D декомпозирован на шесть под-проектов. Каждый самодостаточен, tests-first, сливается в master линейно. Видение (19 рычагов, L0→L3, UI-панель) остаётся полным; порядок поставки — ниже.
+
+| Pid | Scope | Status |
+|---|---|---|
+| **D-01** | Foundation: scheduler, state snapshot, kill switch, safety gate, lever base, event bus, registry, 2 toy levers, FastAPI lifespan wire | ✅ merged (13 commits) |
+| **D-02** | Layer 0 reflex engine + immune DB + 4 immune levers (`SERVER_HEALTH`, `ERROR_TRIAGE`, `SELF_HEAL`, `SERVICE_REPAIR`) + real tick + integration tests | ✅ d-02-layer0-immune (15 commits, 110 tests) |
+| **D-03** | Claude-delegation executor + **3** autonomic levers: `FIRE_INTEGRITY_HEARTBEAT` (python), `FIRE_MEMORY_CONSOLIDATION` (claude), `FIRE_GOAL_PROPOSE` (wraps `goals.py`) | ⏳ next |
+| **D-04** | `FIRE_SELF_STUDY` + `FIRE_CAPABILITY_SCAN` + `FIRE_NOTE_CURATION` + `FIRE_GRAPH_MAINTENANCE`; absorb `backend/background.py` into `FIRE_SELF_STUDY` and retire it | planned |
+| **D-05** | Telemetry cohort: `FIRE_MODEL_EVAL`, `FIRE_SESSION_ARCHIVE`, `FIRE_COST_AUDIT` + remaining autonomic (`FIRE_SELF_REFLECTION`, `FIRE_FINETUNE_QC`, `FIRE_GAP_DETECTION`) | planned |
+| **D-06** | Body cohort (`FIRE_TOOL_INSTALL` yellow, capability scan extras) + Frontend `AutonomicPanel.tsx` + StatusBar indicator + `backend/autonomic/api.py` expansion | planned |
+
+**Why only 3 levers in D-03 (vs 7 "autonomic cycles" in Section 3):** to keep each sub-project reviewable inside a single plan-and-execute cycle. The remaining 4 autonomic-category levers are split across D-04 and D-05 by dependency — e.g. `SELF_STUDY` needs `knowledge/self/` infrastructure built first, `SELF_REFLECTION` benefits from telemetry signals from `MODEL_EVAL`, etc. The full catalog in Section 3 remains the target; only the order of arrival is staged.
+
+**backend/background.py:** Kept as-is through D-03. Its sole job is user-proactive `learn_topic` triggered from chat flow or the gap tracker. This overlaps conceptually with `FIRE_SELF_STUDY` but not operationally until that lever lands. D-04 absorbs the `learn_topic` path into `FIRE_SELF_STUDY` and deletes `backend/background.py`. Header comment in `backend/background.py` records this intent.
+
+**HTTP surface evolution:**
+- D-02 (done): `/api/autonomic/status` — read-only kill-switch + scheduler liveness + registered lever names. Lives in `backend/autonomic/api.py`.
+- D-03: add `/api/autonomic/ticks` (recent tick log tail), `/api/autonomic/levers/{name}` (last report).
+- D-06: full panel API — pending approvals list, approve/reject, immune signatures, kill-switch toggle.
+
+**main.py refactor policy (lightweight):** routers live next to their domain module (FastAPI-idiomatic). E.g. `backend/background.py` owns `router = APIRouter(prefix="/api/background")`; `backend/autonomic/api.py` owns its own. `backend/main.py` includes them. Big-bang rewrite of main.py is NOT a D-goal; extractions happen opportunistically when a D-NN touches a surface.
+
 А/B/C получают свои spec'ы отдельно, в порядке: A → B → C.

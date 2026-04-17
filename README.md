@@ -442,10 +442,14 @@ diagnosis (L2 small LLM, v1+), and escalation to cortex (L3).
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
 - Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
 - Immune DB: `knowledge/immune/signatures.jsonl` (seed) + `knowledge/immune/fixes/` (markdown recipes).
-- Design doc: `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md`.
+- Design doc: `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md` (section 11 — phased delivery D-01..D-06).
 - Implementation plans: `docs/superpowers/plans/`.
+
+**HTTP:** `GET /api/autonomic/status` reports kill-switch, scheduler liveness, and registered levers. Router lives in `backend/autonomic/api.py`; extended in D-03 and D-06.
 
 **Env vars** (set before starting uvicorn to override defaults):
 `AUTONOMIC_ENABLED_PATH`, `AUTONOMIC_TICK_SECONDS`, `AUTONOMIC_KNOWLEDGE_ROOT`,
 `AUTONOMIC_ERROR_LOG_PATH`, `AUTONOMIC_LEVER_LOG_PATH`, `AUTONOMIC_PENDING_PATH`,
 `AUTONOMIC_TICK_LOG_PATH`.
+
+**Relationship to `backend/background.py`:** the autonomic subsystem is reflex/immune-driven (L0 rules + signatures). `background.py` is goal-driven (user-proactive `learn_topic` from chat or gap tracker). They coexist through D-03; D-04's `FIRE_SELF_STUDY` absorbs `learn_topic` and retires `background.py`.

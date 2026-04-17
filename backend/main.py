@@ -878,34 +878,13 @@ def update_goal_priority(goal_id: str, body: PriorityUpdate):
     return {"ok": True}
 
 
-# ---------------- background tasks ----------------
-@app.get("/api/background")
-def background_status():
-    return BACKGROUND.status()
+# ---------------- background tasks & autonomic ----------------
+# Router-based: endpoints live next to their module of origin.
+from .background import router as background_router  # noqa: E402
+from .autonomic.api import router as autonomic_router  # noqa: E402
 
-
-class BgLearnRequest(BaseModel):
-    topic: str
-
-
-@app.post("/api/background/learn")
-async def background_learn(body: BgLearnRequest):
-    started = await BACKGROUND.learn_topic_bg(body.topic)
-    if not started:
-        raise HTTPException(409, "background task already running")
-    return {"ok": True, "message": f"Learning '{body.topic}' in background"}
-
-
-@app.post("/api/background/cancel")
-async def background_cancel():
-    cancelled = BACKGROUND.cancel()
-    return {"ok": cancelled}
-
-
-@app.post("/api/background/process-goals")
-async def background_process():
-    count = await BACKGROUND.process_proactive_goals()
-    return {"started": count}
+app.include_router(background_router)
+app.include_router(autonomic_router)
 
 
 # ---------------- sessions ----------------

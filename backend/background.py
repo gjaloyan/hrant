@@ -1,14 +1,22 @@
-"""Background task runner: parallel execution for proactive learning.
+"""Background task runner: user-proactive learning (goal-driven).
 
-Allows the agent to learn topics, fill knowledge gaps, and complete goals
-in the background while still responding to user queries. Uses asyncio
-tasks managed by FastAPI's event loop.
+Runs at most one foreground learning task at a time (triggered by user
+chat flow or the gap-tracker). This is NOT the autonomic scheduler —
+see backend/autonomic/ for the reflex/immune tick loop.
+
+Relationship to Model X (spec section 5, "what changes"):
+  - Model X is reflex-driven (L0 rules + immune signatures).
+  - This runner is goal-driven (proactive learning from gap_tracker).
+  - They coexist at v0. When `FIRE_SELF_STUDY` ships in D-04, it will
+    absorb the learn_topic path and this module will be retired.
 
 Key design decisions:
-  - Max 1 concurrent background task (avoid API rate limits)
-  - Tasks are cancellable and report progress
-  - Results are stored for the agent to reference later
-  - Failures are logged but don't crash the main loop
+  - Max 1 concurrent background task (avoid API rate limits).
+  - Tasks are cancellable and report progress.
+  - Results are stored for the agent to reference later.
+  - Failures are logged but don't crash the main loop.
+
+HTTP surface: see `router` at the bottom of this file.
 """
 from __future__ import annotations
 
@@ -17,6 +25,9 @@ import json
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 from .config import CONFIG
 from .goals import GOALS, Goal
@@ -146,3 +157,35 @@ class BackgroundRunner:
 
 
 BACKGROUND = BackgroundRunner()
+
+
+router = APIRouter(prefix="/api/background", tags=["background"])
+
+
+class BgLearnRequest(BaseModel):
+    topic: str
+
+
+@router.get("")
+def background_status():
+    return BACKGROUND.status()
+
+
+@router.post("/learn")
+async def background_learn(body: BgLearnRequest):
+    started = await BACKGROUND.learn_topic_bg(body.topic)
+    if not started:
+        raise HTTPException(409, "background task already running")
+    return {"ok": True, "message": f"Learning '{body.topic}' in background"}
+
+
+@router.post("/cancel")
+async def background_cancel():
+    cancelled = BACKGROUND.cancel()
+    return {"ok": cancelled}
+
+
+@router.post("/process-goals")
+async def background_process():
+    count = await BACKGROUND.process_proactive_goals()
+    return {"started": count}
