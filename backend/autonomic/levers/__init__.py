@@ -70,3 +70,12 @@ def register_default_immune_levers() -> None:
     register_lever(FIRE_ERROR_TRIAGE)
     register_lever(FIRE_SELF_HEAL)
     register_lever(FIRE_SERVICE_REPAIR)
+
+
+def register_default_autonomic_levers() -> None:
+    from .goal_propose import FIRE_GOAL_PROPOSE
+    from .integrity_heartbeat import FIRE_INTEGRITY_HEARTBEAT
+    from .memory_consolidation import FIRE_MEMORY_CONSOLIDATION
+    register_lever(FIRE_INTEGRITY_HEARTBEAT)
+    register_lever(FIRE_GOAL_PROPOSE)
+    register_lever(FIRE_MEMORY_CONSOLIDATION)
