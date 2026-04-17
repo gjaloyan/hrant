@@ -49,7 +49,7 @@ class FIRE_CAPABILITY_SCAN(Lever):
         self_root = Path(params.get("self_root") or DEFAULT_SELF_ROOT)
 
         tools_written = self._scan_tools(tools_dir, self_root / "tools")
-        skills_written = 0
+        skills_written = self._scan_skills(skills_dir, self_root / "skills")
         mcp_written = False
         server_written = False
 
@@ -87,6 +87,25 @@ class FIRE_CAPABILITY_SCAN(Lever):
             note_path = out_dir / f"{py.stem}.md"
             note_path.write_text(
                 _render_tool_note(py.name, doc, funcs, py.stat().st_mtime),
+                encoding="utf-8",
+            )
+            written += 1
+        return written
+
+    def _scan_skills(self, skills_dir: Path, out_dir: Path) -> int:
+        if not skills_dir.exists():
+            return 0
+        out_dir.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for entry in sorted(skills_dir.iterdir()):
+            if not entry.is_dir() or entry.name.startswith((".", "_")):
+                continue
+            skill_md = entry / "SKILL.md"
+            description = skill_md.read_text(encoding="utf-8") if skill_md.exists() else "(no SKILL.md)"
+            files = sorted(p.name for p in entry.iterdir() if p.is_file())
+            note_path = out_dir / f"{entry.name}.md"
+            note_path.write_text(
+                _render_skill_note(entry.name, description, files),
                 encoding="utf-8",
             )
             written += 1
@@ -139,5 +158,31 @@ def _render_tool_note(file_name: str, doc: str, funcs: list[str], mtime: float) 
         lines.extend(f"- `{f}`" for f in funcs)
     else:
         lines.append("(none)")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_skill_note(name: str, description: str, files: list[str]) -> str:
+    updated_iso = utcnow().isoformat()
+    lines = [
+        "---",
+        f"skill: {name}",
+        "category: self",
+        "kind: skill",
+        f"updated: {updated_iso}",
+        f"file_count: {len(files)}",
+        "---",
+        "",
+        f"# skill: {name}",
+        "",
+        "## Description",
+        description.strip(),
+        "",
+        "## Files",
+    ]
+    if files:
+        lines.extend(f"- `{f}`" for f in files)
+    else:
+        lines.append("(empty)")
     lines.append("")
     return "\n".join(lines)
