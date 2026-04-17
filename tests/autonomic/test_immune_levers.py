@@ -76,3 +76,55 @@ def test_server_health_no_state_falls_back_to_live_reading():
 def test_server_health_preconditions_always_true():
     lever = FIRE_SERVER_HEALTH()
     assert lever.preconditions(_snapshot()) is True
+
+
+from backend.autonomic.levers.error_triage import FIRE_ERROR_TRIAGE
+
+
+def test_error_triage_metadata():
+    lever = FIRE_ERROR_TRIAGE()
+    assert lever.name == "FIRE_ERROR_TRIAGE"
+    assert lever.category == LeverCategory.IMMUNE
+    assert lever.safety == LeverSafety.GREEN
+
+
+def test_error_triage_empty_snapshot_returns_zero_counts():
+    lever = FIRE_ERROR_TRIAGE()
+    state = _snapshot(recent_errors=[])
+    report = lever.run({}, {"state": state})
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["total"] == 0
+    assert report.outcome["by_severity"] == {}
+
+
+def test_error_triage_classifies_by_confidence():
+    lever = FIRE_ERROR_TRIAGE()
+    state = _snapshot(recent_errors=[
+        {"confidence": 20, "question": "q1"},
+        {"confidence": 45, "question": "q2"},
+        {"confidence": 75, "question": "q3"},
+        {"confidence": 10, "question": "q4"},
+    ])
+    report = lever.run({}, {"state": state})
+    assert report.outcome["total"] == 4
+    by_sev = report.outcome["by_severity"]
+    assert by_sev.get("critical", 0) == 2
+    assert by_sev.get("warn", 0) == 1
+    assert by_sev.get("info", 0) == 1
+
+
+def test_error_triage_uses_explicit_severity_when_provided():
+    lever = FIRE_ERROR_TRIAGE()
+    state = _snapshot(recent_errors=[
+        {"severity": "critical", "message": "boom"},
+        {"severity": "warn", "message": "meh"},
+        {"severity": "info", "message": "fine"},
+    ])
+    report = lever.run({}, {"state": state})
+    assert report.outcome["by_severity"] == {"critical": 1, "warn": 1, "info": 1}
+
+
+def test_error_triage_preconditions_requires_errors():
+    lever = FIRE_ERROR_TRIAGE()
+    assert lever.preconditions(_snapshot(recent_errors=[])) is False
+    assert lever.preconditions(_snapshot(recent_errors=[{"message": "x"}])) is True
