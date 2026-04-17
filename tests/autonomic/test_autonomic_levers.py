@@ -89,3 +89,68 @@ def test_integrity_heartbeat_reports_ok_when_matched(tmp_path: Path):
 def test_integrity_heartbeat_preconditions_always_true():
     lever = FIRE_INTEGRITY_HEARTBEAT()
     assert lever.preconditions(_snapshot()) is True
+
+
+from unittest.mock import patch
+
+from backend.autonomic.levers.goal_propose import FIRE_GOAL_PROPOSE
+
+
+def test_goal_propose_metadata():
+    lever = FIRE_GOAL_PROPOSE()
+    assert lever.name == "FIRE_GOAL_PROPOSE"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "python"
+
+
+def test_goal_propose_skips_when_gaps_file_missing(tmp_path: Path):
+    lever = FIRE_GOAL_PROPOSE()
+    report = lever.run({"gaps_path": str(tmp_path / "missing.json")}, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_gaps"
+
+
+def test_goal_propose_skips_when_gaps_file_empty(tmp_path: Path):
+    gaps_path = tmp_path / "gaps.json"
+    gaps_path.write_text("{}", encoding="utf-8")
+    lever = FIRE_GOAL_PROPOSE()
+    report = lever.run({"gaps_path": str(gaps_path)}, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_gaps"
+
+
+def test_goal_propose_delegates_to_goals_manager(tmp_path: Path):
+    gaps_path = tmp_path / "gaps.json"
+    gaps_path.write_text(json.dumps({
+        "python_async": {"topic": "python_async", "count": 3, "last": "2026-04-15"},
+        "rust_ownership": {"topic": "rust_ownership", "count": 2, "last": "2026-04-16"},
+    }), encoding="utf-8")
+
+    captured: dict = {}
+
+    class _FakeGoal:
+        def __init__(self, description: str):
+            self.description = description
+            self.id = "id_" + description[:5]
+
+    def _fake_suggest(gaps, max_goals=3):
+        captured["gaps"] = gaps
+        captured["max_goals"] = max_goals
+        return [_FakeGoal(f"Learn about: {g['topic']}") for g in gaps[:max_goals]]
+
+    lever = FIRE_GOAL_PROPOSE()
+    with patch("backend.autonomic.levers.goal_propose.GOALS") as mock_goals:
+        mock_goals.suggest_from_gaps.side_effect = _fake_suggest
+        report = lever.run({"gaps_path": str(gaps_path), "max_goals": 2}, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["proposed"] == 2
+    assert report.outcome["gap_count"] == 2
+    assert captured["max_goals"] == 2
+    assert {g["topic"] for g in captured["gaps"]} == {"python_async", "rust_ownership"}
+
+
+def test_goal_propose_preconditions_true():
+    lever = FIRE_GOAL_PROPOSE()
+    assert lever.preconditions(_snapshot()) is True
