@@ -50,8 +50,8 @@ class FIRE_CAPABILITY_SCAN(Lever):
 
         tools_written = self._scan_tools(tools_dir, self_root / "tools")
         skills_written = self._scan_skills(skills_dir, self_root / "skills")
-        mcp_written = False
-        server_written = False
+        mcp_written = self._scan_channels(channels_path, self_root / "mcp_servers")
+        server_written = self._scan_server(self_root / "server_inventory.md")
 
         total = tools_written + skills_written + (1 if mcp_written else 0) + (1 if server_written else 0)
         return LeverReport(
@@ -110,6 +110,75 @@ class FIRE_CAPABILITY_SCAN(Lever):
             )
             written += 1
         return written
+
+    def _scan_channels(self, channels_path: Path, out_dir: Path) -> bool:
+        if not channels_path.exists():
+            return False
+        try:
+            data = json.loads(channels_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return False
+        channels = data.get("channels", []) if isinstance(data, dict) else []
+        out_dir.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "---",
+            "category: self",
+            "kind: mcp_channels",
+            f"updated: {utcnow().isoformat()}",
+            f"channel_count: {len(channels)}",
+            "---",
+            "",
+            "# MCP / channels inventory",
+            "",
+            "| id | type | enabled | auto_start | status |",
+            "| --- | --- | --- | --- | --- |",
+        ]
+        for ch in channels:
+            lines.append(
+                f"| {ch.get('id','?')} | {ch.get('type','?')} | {ch.get('enabled','?')} | {ch.get('auto_start','?')} | {ch.get('status','?')} |"
+            )
+        lines.append("")
+        (out_dir / "channels.md").write_text("\n".join(lines), encoding="utf-8")
+        return True
+
+    def _scan_server(self, out_path: Path) -> bool:
+        try:
+            vm = psutil.virtual_memory()
+            disk = psutil.disk_usage(".")
+            boot_iso = datetime.fromtimestamp(psutil.boot_time(), timezone.utc).isoformat()
+            info = {
+                "platform": platform.platform(),
+                "python_version": platform.python_version(),
+                "machine": platform.machine(),
+                "cpu_count_physical": psutil.cpu_count(logical=False) or 0,
+                "cpu_count_logical": psutil.cpu_count(logical=True) or 0,
+                "memory_total_gb": round(vm.total / (1024 ** 3), 2),
+                "memory_available_gb": round(vm.available / (1024 ** 3), 2),
+                "disk_total_gb": round(disk.total / (1024 ** 3), 2),
+                "disk_free_gb": round(disk.free / (1024 ** 3), 2),
+                "boot_time": boot_iso,
+            }
+        except Exception as exc:
+            log.warning("capability_scan: server inventory failed: %s", exc)
+            return False
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            "---",
+            "category: self",
+            "kind: server_inventory",
+            f"updated: {utcnow().isoformat()}",
+            f"host: {platform.node()}",
+            "---",
+            "",
+            "# Server inventory",
+            "",
+        ]
+        for k, v in info.items():
+            lines.append(f"- {k}: {v}")
+        lines.append("")
+        out_path.write_text("\n".join(lines), encoding="utf-8")
+        return True
 
 
 def _module_docstring(src: str) -> str:
