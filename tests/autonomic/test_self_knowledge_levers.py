@@ -1,9 +1,11 @@
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from backend.autonomic.levers.capability_scan import FIRE_CAPABILITY_SCAN
-from backend.autonomic.types import LeverCategory, LeverSafety, LeverStatus, StateSnapshot
+from backend.autonomic.levers.self_study import FIRE_SELF_STUDY
+from backend.autonomic.types import LeverCategory, LeverSafety, LeverStatus, StateSnapshot, utcnow
 
 
 def _snapshot(**overrides) -> StateSnapshot:
@@ -193,3 +195,163 @@ def test_capability_scan_reason_reports_total_artifacts(tmp_path: Path):
         "self_root": str(self_root),
     }, {})
     assert "scanned:2_artifacts" == report.reason
+
+
+def _fake_study_response() -> dict:
+    return {
+        "purpose": "Routes tick decisions through Layer 0 rules.",
+        "public_interface": [
+            {"name": "Layer0Engine", "kind": "class", "one_line": "Evaluates rules in order."},
+            {"name": "default_rules", "kind": "function", "one_line": "Returns the seeded rule list."},
+        ],
+        "dependencies": ["backend.autonomic.types"],
+        "notes": "Cooldown fall-through preserves single-rule semantics.",
+    }
+
+
+def _seed_backend(root: Path, module_names: list[str]) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "__init__.py").write_text("", encoding="utf-8")
+    for name in module_names:
+        (root / f"{name}.py").write_text(f'"""Module {name}."""\n\nX = 1\n', encoding="utf-8")
+
+
+def test_self_study_metadata():
+    lever = FIRE_SELF_STUDY()
+    assert lever.name == "FIRE_SELF_STUDY"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "claude"
+
+
+def test_self_study_preconditions_true():
+    lever = FIRE_SELF_STUDY()
+    assert lever.preconditions(_snapshot()) is True
+
+
+def test_self_study_picks_new_modules_first_and_caps_at_max(tmp_path: Path):
+    backend_root = tmp_path / "backend"
+    _seed_backend(backend_root, ["a", "b", "c", "d", "e"])
+    self_root = tmp_path / "knowledge_self"
+
+    lever = FIRE_SELF_STUDY()
+    with patch("backend.autonomic.levers.self_study.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_study_response()
+        report = lever.run({
+            "backend_root": str(backend_root),
+            "self_root": str(self_root),
+            "max_modules": 3,
+        }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["modules_processed"] == 3
+    assert report.outcome["modules_total"] == 5
+    notes = sorted((self_root / "modules").glob("*.md"))
+    assert len(notes) == 3
+
+
+def test_self_study_prefers_stale_over_fresh(tmp_path: Path):
+    backend_root = tmp_path / "backend"
+    _seed_backend(backend_root, ["fresh", "stale"])
+    self_root = tmp_path / "knowledge_self"
+    modules_dir = self_root / "modules"
+    modules_dir.mkdir(parents=True)
+
+    fresh_mtime_iso = datetime.fromtimestamp((backend_root / "fresh.py").stat().st_mtime, timezone.utc).isoformat()
+    (modules_dir / "fresh.md").write_text(
+        f"---\nmodule: backend/fresh.py\ncategory: self\nkind: module\nupdated: {utcnow().isoformat()}\nsource_mtime: {fresh_mtime_iso}\nloc: 1\n---\n\n# fresh\n",
+        encoding="utf-8",
+    )
+    (modules_dir / "stale.md").write_text(
+        "---\nmodule: backend/stale.py\ncategory: self\nkind: module\nupdated: 2020-01-01T00:00:00+00:00\nsource_mtime: 2020-01-01T00:00:00+00:00\nloc: 1\n---\n\n# stale\n",
+        encoding="utf-8",
+    )
+
+    lever = FIRE_SELF_STUDY()
+    with patch("backend.autonomic.levers.self_study.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_study_response()
+        report = lever.run({
+            "backend_root": str(backend_root),
+            "self_root": str(self_root),
+            "max_modules": 1,
+        }, {})
+
+    assert report.outcome["modules_processed"] == 1
+    stale_after = (modules_dir / "stale.md").read_text(encoding="utf-8")
+    assert "Routes tick decisions" in stale_after
+
+
+def test_self_study_skips_pycache_tests_venv(tmp_path: Path):
+    backend_root = tmp_path / "backend"
+    backend_root.mkdir()
+    (backend_root / "__init__.py").write_text("", encoding="utf-8")
+    (backend_root / "real.py").write_text('"""real."""\n', encoding="utf-8")
+    for skip_dir in ("__pycache__", "tests", ".venv"):
+        d = backend_root / skip_dir
+        d.mkdir()
+        (d / "junk.py").write_text('"""junk."""\n', encoding="utf-8")
+    self_root = tmp_path / "knowledge_self"
+
+    lever = FIRE_SELF_STUDY()
+    with patch("backend.autonomic.levers.self_study.router") as mock_router:
+        mock_router.return_value.call_json.return_value = _fake_study_response()
+        report = lever.run({
+            "backend_root": str(backend_root),
+            "self_root": str(self_root),
+            "max_modules": 5,
+        }, {})
+
+    assert report.outcome["modules_total"] == 1
+    assert report.outcome["modules_processed"] == 1
+
+
+def test_self_study_cortex_failure_skips_that_module(tmp_path: Path):
+    backend_root = tmp_path / "backend"
+    _seed_backend(backend_root, ["a", "b"])
+    self_root = tmp_path / "knowledge_self"
+
+    call_count = {"n": 0}
+
+    def flaky_call(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("cortex timeout")
+        return _fake_study_response()
+
+    lever = FIRE_SELF_STUDY()
+    with patch("backend.autonomic.levers.self_study.router") as mock_router:
+        mock_router.return_value.call_json.side_effect = flaky_call
+        report = lever.run({
+            "backend_root": str(backend_root),
+            "self_root": str(self_root),
+            "max_modules": 2,
+        }, {})
+
+    assert report.outcome["modules_processed"] == 1
+    assert report.outcome["modules_skipped"] == 1
+
+
+def test_self_study_truncates_large_files(tmp_path: Path):
+    backend_root = tmp_path / "backend"
+    backend_root.mkdir()
+    (backend_root / "__init__.py").write_text("", encoding="utf-8")
+    big = "\n".join(f"x = {i}" for i in range(3500))
+    (backend_root / "big.py").write_text(f'"""big module."""\n{big}\n', encoding="utf-8")
+    self_root = tmp_path / "knowledge_self"
+
+    captured: dict = {}
+
+    def capture_call(task_type, system, user, **kw):
+        captured["user"] = user
+        return _fake_study_response()
+
+    lever = FIRE_SELF_STUDY()
+    with patch("backend.autonomic.levers.self_study.router") as mock_router:
+        mock_router.return_value.call_json.side_effect = capture_call
+        lever.run({
+            "backend_root": str(backend_root),
+            "self_root": str(self_root),
+            "max_modules": 1,
+        }, {})
+
+    assert "[truncated]" in captured["user"]
