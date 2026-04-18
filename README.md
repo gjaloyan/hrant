@@ -448,6 +448,11 @@ _Self-knowledge levers (D-04):_
 - `FIRE_CAPABILITY_SCAN` — every 6h, inventories `backend/tools/`, `backend/skills/`, `knowledge/channels.json`, and the host via psutil into `knowledge/self/` (green, python).
 - `FIRE_SELF_STUDY` — daily, reads up to 3 priority-ordered `backend/**/*.py` modules per tick and writes one markdown note per module to `knowledge/self/modules/` via cortex (green, claude).
 
+_Knowledge curation levers (D-05):_
+- `FIRE_GRAPH_MAINTENANCE` — daily, prunes orphan edges and unreferenced entities from `knowledge/graph.json` (green, python).
+- `FIRE_PROACTIVE_LEARN` — hourly, picks one `goal_type="proactive"` goal (`"Learn about: X"` description) and runs `learn_topic` to create the note (green, claude). Replaces the retired `backend/background.py`.
+- `FIRE_NOTE_CURATION` — weekly, refreshes notes with `confidence="partial"/"unverified"` or 30+ days old with `access_count >= 5`, up to 2 per tick; excludes `personal/` and `projects/` categories (green, claude).
+
 **Paths:**
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
 - Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
@@ -463,4 +468,4 @@ _Self-knowledge levers (D-04):_
 `AUTONOMIC_ERROR_LOG_PATH`, `AUTONOMIC_LEVER_LOG_PATH`, `AUTONOMIC_PENDING_PATH`,
 `AUTONOMIC_TICK_LOG_PATH`.
 
-**Relationship to `backend/background.py`:** the autonomic subsystem is reflex/immune-driven (L0 rules + signatures). `background.py` is goal-driven (user-proactive `learn_topic` from chat or gap tracker). They coexist through D-03; D-04's `FIRE_SELF_STUDY` absorbs `learn_topic` and retires `background.py`.
+**Note:** `backend/background.py` was retired in D-05. Proactive topic learning is now driven by `FIRE_PROACTIVE_LEARN` reading `goal_type="proactive"` goals from `knowledge/goals.json`. The `/api/background/*` HTTP endpoints were removed.
