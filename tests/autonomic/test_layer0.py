@@ -174,19 +174,6 @@ def test_default_rules_schedule_ticks_predicate_always_true():
     assert rules["consolidation_tick"].predicate(snap) is True
 
 
-def test_default_rules_has_nine_rules_after_d04():
-    from backend.autonomic.layer0 import default_rules
-    rules = default_rules()
-    assert len(rules) == 9
-
-
-def test_default_rules_d04_scheduled_rules_at_end():
-    from backend.autonomic.layer0 import default_rules
-    rules = default_rules()
-    names_tail = [r.name for r in rules[-2:]]
-    assert names_tail == ["capability_scan_tick", "self_study_tick"]
-
-
 def test_default_rules_d04_cooldowns():
     from backend.autonomic.layer0 import default_rules
     rules = {r.name: r for r in default_rules()}
@@ -194,3 +181,27 @@ def test_default_rules_d04_cooldowns():
     assert rules["capability_scan_tick"].cooldown_seconds == 21600.0
     assert rules["self_study_tick"].lever == "FIRE_SELF_STUDY"
     assert rules["self_study_tick"].cooldown_seconds == 86400.0
+
+
+def test_default_rules_has_twelve_rules_after_d05():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    assert len(rules) == 12
+
+
+def test_default_rules_d05_scheduled_rules_at_end():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    names_tail = [r.name for r in rules[-3:]]
+    assert names_tail == ["graph_maintenance_tick", "proactive_learn_tick", "note_curation_tick"]
+
+
+def test_default_rules_d05_cooldowns():
+    from backend.autonomic.layer0 import default_rules
+    rules = {r.name: r for r in default_rules()}
+    assert rules["graph_maintenance_tick"].lever == "FIRE_GRAPH_MAINTENANCE"
+    assert rules["graph_maintenance_tick"].cooldown_seconds == 86400.0
+    assert rules["proactive_learn_tick"].lever == "FIRE_PROACTIVE_LEARN"
+    assert rules["proactive_learn_tick"].cooldown_seconds == 3600.0
+    assert rules["note_curation_tick"].lever == "FIRE_NOTE_CURATION"
+    assert rules["note_curation_tick"].cooldown_seconds == 604800.0
