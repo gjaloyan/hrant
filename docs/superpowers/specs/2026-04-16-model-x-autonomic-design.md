@@ -642,8 +642,8 @@ UI-панель `AutonomicPanel.tsx`:
 | **D-01** | Foundation: scheduler, state snapshot, kill switch, safety gate, lever base, event bus, registry, 2 toy levers, FastAPI lifespan wire | ✅ merged (13 commits) |
 | **D-02** | Layer 0 reflex engine + immune DB + 4 immune levers (`SERVER_HEALTH`, `ERROR_TRIAGE`, `SELF_HEAL`, `SERVICE_REPAIR`) + real tick + integration tests | ✅ merged (15 commits, 110 tests) |
 | **D-03** | Claude-delegation executor + **3** autonomic levers: `FIRE_INTEGRITY_HEARTBEAT` (python), `FIRE_MEMORY_CONSOLIDATION` (claude), `FIRE_GOAL_PROPOSE` (wraps `goals.py`) + Layer0Engine cooldown fall-through fix | ✅ merged (PR #1, 8 commits, 139 tests) |
-| **D-04** | Self-knowledge cohort: `FIRE_CAPABILITY_SCAN` + `FIRE_SELF_STUDY` + new `knowledge/self/` infrastructure (modules, tools, skills, mcp_servers, server_inventory) | ⏳ next |
-| **D-05** | Knowledge curation cohort: `FIRE_NOTE_CURATION` + `FIRE_GRAPH_MAINTENANCE` + retirement of `backend/background.py` (its `learn_topic_bg` becomes a lever) | planned |
+| **D-04** | Self-knowledge cohort: `FIRE_CAPABILITY_SCAN` + `FIRE_SELF_STUDY` + new `knowledge/self/` infrastructure (modules, tools, skills, mcp_servers, server_inventory) | ✅ merged (PR #2, 9 commits, 162 tests) |
+| **D-05** | Knowledge curation cohort: `FIRE_NOTE_CURATION` (weekly claude refresh) + `FIRE_GRAPH_MAINTENANCE` (daily orphan prune) + `FIRE_PROACTIVE_LEARN` (hourly claude) — last one absorbs `backend/background.py::learn_topic_bg` and retires the module | ⏳ next |
 | **D-06** | Telemetry cohort: `FIRE_MODEL_EVAL`, `FIRE_SESSION_ARCHIVE`, `FIRE_COST_AUDIT` + remaining autonomic (`FIRE_SELF_REFLECTION`, `FIRE_FINETUNE_QC`, `FIRE_GAP_DETECTION`) | planned |
 | **D-07** | Body cohort (`FIRE_TOOL_INSTALL` yellow, Linux-only OS inventory extras) + Frontend `AutonomicPanel.tsx` + StatusBar indicator + `backend/autonomic/api.py` expansion | planned |
 
@@ -651,7 +651,7 @@ UI-панель `AutonomicPanel.tsx`:
 
 **Why still only 3 levers in D-03 (vs 7 "autonomic cycles" in Section 3):** to keep each sub-project reviewable inside a single plan-and-execute cycle. The remaining 4 autonomic-category levers are split across D-04, D-05, and D-06 by dependency — e.g. `SELF_STUDY` needs `knowledge/self/` infrastructure built first, `SELF_REFLECTION` benefits from telemetry signals from `MODEL_EVAL`, etc. The full catalog in Section 3 remains the target; only the order of arrival is staged.
 
-**backend/background.py:** Kept as-is through D-04. Its sole job is user-proactive `learn_topic` triggered from chat flow or the gap tracker. Originally slated to be absorbed by `FIRE_SELF_STUDY`, but that lever (D-04) is strictly about reading the agent's own source code — a different concern. D-05's curation cohort takes over `learn_topic`: either as a dedicated `FIRE_PROACTIVE_LEARN` lever or by folding the call directly into `FIRE_NOTE_CURATION`. Header comment in `backend/background.py` will be updated when D-05 lands.
+**backend/background.py:** Retired in D-05 via a dedicated `FIRE_PROACTIVE_LEARN` lever that absorbs `learn_topic_bg` and the chat-flow trigger `process_proactive_goals()`. The four `/api/background/*` endpoints are removed in the same plan. Originally slated to be absorbed by `FIRE_SELF_STUDY`, but that lever (D-04) is strictly about reading the agent's own source code — a different concern. See [D-05 design](./2026-04-18-d-05-knowledge-curation-design.md) Section 4.1 for the retirement steps.
 
 **HTTP surface evolution:**
 - D-02 (done): `/api/autonomic/status` — read-only kill-switch + scheduler liveness + registered lever names. Lives in `backend/autonomic/api.py`.
