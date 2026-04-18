@@ -125,3 +125,71 @@ def test_capability_scan_skills_missing_dir_is_zero(tmp_path: Path):
         "self_root": str(self_root),
     }, {})
     assert report.outcome["skills_written"] == 0
+
+
+def test_capability_scan_writes_channels_summary(tmp_path: Path):
+    channels_path = tmp_path / "channels.json"
+    channels_path.write_text(json.dumps({
+        "channels": [
+            {"id": "telegram", "type": "telegram", "enabled": True, "auto_start": True, "status": "running"},
+            {"id": "slack", "type": "slack", "enabled": False, "auto_start": False, "status": "stopped"},
+        ],
+    }), encoding="utf-8")
+    self_root = tmp_path / "knowledge_self"
+
+    lever = FIRE_CAPABILITY_SCAN()
+    report = lever.run({
+        "tools_dir": str(tmp_path / "tools"),
+        "skills_dir": str(tmp_path / "skills"),
+        "channels_path": str(channels_path),
+        "self_root": str(self_root),
+    }, {})
+
+    assert report.outcome["mcp_written"] is True
+    content = (self_root / "mcp_servers" / "channels.md").read_text(encoding="utf-8")
+    assert "| telegram | telegram | True | True | running |" in content
+    assert "| slack | slack | False | False | stopped |" in content
+
+
+def test_capability_scan_channels_missing_file_is_false(tmp_path: Path):
+    self_root = tmp_path / "knowledge_self"
+    lever = FIRE_CAPABILITY_SCAN()
+    report = lever.run({
+        "tools_dir": str(tmp_path / "tools"),
+        "skills_dir": str(tmp_path / "skills"),
+        "channels_path": str(tmp_path / "nope.json"),
+        "self_root": str(self_root),
+    }, {})
+    assert report.outcome["mcp_written"] is False
+
+
+def test_capability_scan_writes_server_inventory(tmp_path: Path):
+    self_root = tmp_path / "knowledge_self"
+    lever = FIRE_CAPABILITY_SCAN()
+    report = lever.run({
+        "tools_dir": str(tmp_path / "tools"),
+        "skills_dir": str(tmp_path / "skills"),
+        "channels_path": str(tmp_path / "channels.json"),
+        "self_root": str(self_root),
+    }, {})
+    assert report.outcome["server_written"] is True
+    content = (self_root / "server_inventory.md").read_text(encoding="utf-8")
+    assert "platform:" in content
+    assert "cpu_count_physical:" in content
+    assert "memory_total_gb:" in content
+
+
+def test_capability_scan_reason_reports_total_artifacts(tmp_path: Path):
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "t.py").write_text('"""tool t."""\n', encoding="utf-8")
+    self_root = tmp_path / "knowledge_self"
+
+    lever = FIRE_CAPABILITY_SCAN()
+    report = lever.run({
+        "tools_dir": str(tools_dir),
+        "skills_dir": str(tmp_path / "skills"),
+        "channels_path": str(tmp_path / "channels.json"),
+        "self_root": str(self_root),
+    }, {})
+    assert "scanned:2_artifacts" == report.reason
