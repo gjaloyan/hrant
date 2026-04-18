@@ -8,13 +8,8 @@ import {
   failGoal,
   deleteGoal,
   updateGoalPriority,
-  fetchBgStatus,
-  bgLearn,
-  bgCancel,
-  bgProcessGoals,
   GoalData,
   GoalStats,
-  BgStatus,
 } from "../api";
 
 const TYPE_COLORS: Record<string, string> = {
@@ -57,7 +52,6 @@ function PriorityBar({ priority }: { priority: number }) {
 export default function GoalsPanel() {
   const [goals, setGoals] = useState<GoalData[]>([]);
   const [stats, setStats] = useState<GoalStats | null>(null);
-  const [bgStatus, setBgStatus] = useState<BgStatus | null>(null);
   const [selected, setSelected] = useState<GoalData | null>(null);
   const [msg, setMsg] = useState("");
   const [showForm, setShowForm] = useState(false);
@@ -65,7 +59,6 @@ export default function GoalsPanel() {
   const [formPriority, setFormPriority] = useState(5);
   const [formType, setFormType] = useState("user");
   const [formContext, setFormContext] = useState("");
-  const [learnTopic, setLearnTopic] = useState("");
   const [filter, setFilter] = useState<"all" | "active" | "completed">("all");
 
   const flash = (text: string) => {
@@ -75,10 +68,9 @@ export default function GoalsPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [goalsData, bg] = await Promise.all([fetchGoals(), fetchBgStatus()]);
+      const goalsData = await fetchGoals();
       setGoals(goalsData.goals);
       setStats(goalsData.stats);
-      setBgStatus(bg);
     } catch (e: any) {
       flash("Error: " + e.message);
     }
@@ -129,28 +121,6 @@ export default function GoalsPanel() {
   const handlePriority = async (id: string, p: number) => {
     try {
       await updateGoalPriority(id, p);
-      load();
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    }
-  };
-
-  const handleBgLearn = async () => {
-    if (!learnTopic.trim()) return;
-    try {
-      await bgLearn(learnTopic.trim());
-      setLearnTopic("");
-      flash("Background learning started");
-      load();
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    }
-  };
-
-  const handleProcessGoals = async () => {
-    try {
-      const res = await bgProcessGoals();
-      flash(res.started > 0 ? "Processing proactive goal..." : "No goals to process");
       load();
     } catch (e: any) {
       flash("Error: " + e.message);
@@ -316,54 +286,6 @@ export default function GoalsPanel() {
               </div>
             </button>
           ))}
-        </div>
-
-        {/* Background task status */}
-        <div className="border-t border-slate-800 p-3 space-y-2">
-          <div className="text-[10px] font-semibold opacity-50 uppercase tracking-wider">
-            Background Tasks
-          </div>
-          {bgStatus?.busy && bgStatus.current ? (
-            <div className="bg-emerald-900/30 rounded p-2 text-xs space-y-1">
-              <div className="flex justify-between">
-                <span className="text-emerald-400">{bgStatus.current.description}</span>
-                <button
-                  onClick={async () => { await bgCancel(); load(); }}
-                  className="text-rose-400 hover:text-rose-300 text-[10px]"
-                >
-                  cancel
-                </button>
-              </div>
-              <div className="opacity-50 text-[10px]">
-                started: {bgStatus.current.started}
-              </div>
-            </div>
-          ) : (
-            <div className="text-xs opacity-40">Idle</div>
-          )}
-          <div className="flex gap-1">
-            <input
-              className="flex-1 bg-slate-900 rounded px-2 py-0.5 text-xs outline-none"
-              placeholder="Learn topic..."
-              value={learnTopic}
-              onChange={(e) => setLearnTopic(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleBgLearn()}
-            />
-            <button
-              onClick={handleBgLearn}
-              disabled={bgStatus?.busy}
-              className="bg-violet-800 hover:bg-violet-700 rounded px-2 py-0.5 text-xs disabled:opacity-50"
-            >
-              Learn
-            </button>
-          </div>
-          <button
-            onClick={handleProcessGoals}
-            disabled={bgStatus?.busy}
-            className="w-full bg-slate-800 hover:bg-slate-700 rounded px-2 py-0.5 text-xs disabled:opacity-50"
-          >
-            Process proactive goals
-          </button>
         </div>
 
         {msg && (

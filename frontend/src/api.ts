@@ -363,36 +363,6 @@ export const deleteGoal = (id: string) =>
 export const updateGoalPriority = (id: string, priority: number) =>
   json_put<{ ok: boolean }>(`/api/goals/${id}/priority`, { priority });
 
-// ---- Background Tasks ----
-
-export type BgStatus = {
-  busy: boolean;
-  current: {
-    task_type: string;
-    description: string;
-    goal_id: string | null;
-    status: string;
-    started: string | null;
-    finished: string | null;
-    result: string;
-    error: string;
-  } | null;
-  history_count: number;
-  recent: any[];
-};
-
-export const fetchBgStatus = () =>
-  json_get<BgStatus>("/api/background");
-
-export const bgLearn = (topic: string) =>
-  json_post<{ ok: boolean; message: string }>("/api/background/learn", { topic });
-
-export const bgCancel = () =>
-  json_post<{ ok: boolean }>("/api/background/cancel");
-
-export const bgProcessGoals = () =>
-  json_post<{ started: number }>("/api/background/process-goals");
-
 // ---- Sessions ----
 
 export type SessionSummary = {
