@@ -444,10 +444,15 @@ _Autonomic levers (D-03, scheduled self-maintenance):_
 - `FIRE_GOAL_PROPOSE` — hourly, wraps `GOALS.suggest_from_gaps(gaps.json)` (green).
 - `FIRE_MEMORY_CONSOLIDATION` — daily, reviews recent sessions and routes facts to `identity/user.md`, `memory_facts.jsonl`, and `sessions.json` summary field (green, delegates to cortex).
 
+_Self-knowledge levers (D-04):_
+- `FIRE_CAPABILITY_SCAN` — every 6h, inventories `backend/tools/`, `backend/skills/`, `knowledge/channels.json`, and the host via psutil into `knowledge/self/` (green, python).
+- `FIRE_SELF_STUDY` — daily, reads up to 3 priority-ordered `backend/**/*.py` modules per tick and writes one markdown note per module to `knowledge/self/modules/` via cortex (green, claude).
+
 **Paths:**
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
 - Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
 - Immune DB: `knowledge/immune/signatures.jsonl` (seed) + `knowledge/immune/fixes/` (markdown recipes).
+- Self-knowledge: `knowledge/self/modules/`, `knowledge/self/tools/`, `knowledge/self/skills/`, `knowledge/self/mcp_servers/`, `knowledge/self/server_inventory.md` (written by D-04 levers).
 - Design doc: `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md` (section 11 — phased delivery D-01..D-06).
 - Implementation plans: `docs/superpowers/plans/`.
 
