@@ -146,21 +146,12 @@ def test_default_rules_errors_fires_only_when_nonempty():
     assert rule.predicate(_snapshot(recent_errors=[{"message": "x"}])) is True
 
 
-def test_default_rules_has_seven_rules_after_d03():
-    from backend.autonomic.layer0 import default_rules
-    rules = default_rules()
-    assert len(rules) == 7
-
-
 def test_default_rules_reactive_rules_come_first():
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
     reactive_names = {"disk_low", "memory_low", "cpu_high", "errors_present"}
-    scheduled_names = {"integrity_tick", "goal_propose_tick", "consolidation_tick"}
     first_four = {r.name for r in rules[:4]}
-    last_three = {r.name for r in rules[4:]}
     assert first_four == reactive_names
-    assert last_three == scheduled_names
 
 
 def test_default_rules_schedule_tick_cooldowns():
@@ -181,3 +172,25 @@ def test_default_rules_schedule_ticks_predicate_always_true():
     assert rules["integrity_tick"].predicate(snap) is True
     assert rules["goal_propose_tick"].predicate(snap) is True
     assert rules["consolidation_tick"].predicate(snap) is True
+
+
+def test_default_rules_has_nine_rules_after_d04():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    assert len(rules) == 9
+
+
+def test_default_rules_d04_scheduled_rules_at_end():
+    from backend.autonomic.layer0 import default_rules
+    rules = default_rules()
+    names_tail = [r.name for r in rules[-2:]]
+    assert names_tail == ["capability_scan_tick", "self_study_tick"]
+
+
+def test_default_rules_d04_cooldowns():
+    from backend.autonomic.layer0 import default_rules
+    rules = {r.name: r for r in default_rules()}
+    assert rules["capability_scan_tick"].lever == "FIRE_CAPABILITY_SCAN"
+    assert rules["capability_scan_tick"].cooldown_seconds == 21600.0
+    assert rules["self_study_tick"].lever == "FIRE_SELF_STUDY"
+    assert rules["self_study_tick"].cooldown_seconds == 86400.0

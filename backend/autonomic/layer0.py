@@ -116,4 +116,18 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=86400.0,
         ),
+        LayerZeroRule(
+            name="capability_scan_tick",
+            predicate=lambda s: True,
+            lever="FIRE_CAPABILITY_SCAN",
+            params={},
+            cooldown_seconds=21600.0,
+        ),
+        LayerZeroRule(
+            name="self_study_tick",
+            predicate=lambda s: True,
+            lever="FIRE_SELF_STUDY",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
     ]
