@@ -44,7 +44,6 @@ from .autonomic.startup import (
     start_autonomic_scheduler,
     stop_autonomic_scheduler,
 )
-from .background import BACKGROUND
 from .channels import CHANNELS, get_channels, get_channel, save_channel, delete_channel
 from .providers import (
     get_providers, get_provider, save_provider, delete_provider,
@@ -132,11 +131,6 @@ async def chat(req: ChatRequest):
                     usage=res.token_usage.model_dump() if res.token_usage else {},
                 )
             queue.put_nowait({"type": "answer", "data": res.model_dump()})
-            # Trigger background proactive learning if due
-            try:
-                await BACKGROUND.process_proactive_goals()
-            except Exception:
-                pass
         except Exception as e:
             queue.put_nowait({"type": "error", "message": str(e)})
         finally:
@@ -878,12 +872,9 @@ def update_goal_priority(goal_id: str, body: PriorityUpdate):
     return {"ok": True}
 
 
-# ---------------- background tasks & autonomic ----------------
-# Router-based: endpoints live next to their module of origin.
-from .background import router as background_router  # noqa: E402
+# ---------------- autonomic router ----------------
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
-app.include_router(background_router)
 app.include_router(autonomic_router)
 
 
