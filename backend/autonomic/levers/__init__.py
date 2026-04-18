@@ -75,11 +75,17 @@ def register_default_immune_levers() -> None:
 def register_default_autonomic_levers() -> None:
     from .capability_scan import FIRE_CAPABILITY_SCAN
     from .goal_propose import FIRE_GOAL_PROPOSE
+    from .graph_maintenance import FIRE_GRAPH_MAINTENANCE
     from .integrity_heartbeat import FIRE_INTEGRITY_HEARTBEAT
     from .memory_consolidation import FIRE_MEMORY_CONSOLIDATION
+    from .note_curation import FIRE_NOTE_CURATION
+    from .proactive_learn import FIRE_PROACTIVE_LEARN
     from .self_study import FIRE_SELF_STUDY
     register_lever(FIRE_INTEGRITY_HEARTBEAT)
     register_lever(FIRE_GOAL_PROPOSE)
     register_lever(FIRE_MEMORY_CONSOLIDATION)
     register_lever(FIRE_CAPABILITY_SCAN)
     register_lever(FIRE_SELF_STUDY)
+    register_lever(FIRE_GRAPH_MAINTENANCE)
+    register_lever(FIRE_PROACTIVE_LEARN)
+    register_lever(FIRE_NOTE_CURATION)

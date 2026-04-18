@@ -130,4 +130,25 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=86400.0,
         ),
+        LayerZeroRule(
+            name="graph_maintenance_tick",
+            predicate=lambda s: True,
+            lever="FIRE_GRAPH_MAINTENANCE",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
+        LayerZeroRule(
+            name="proactive_learn_tick",
+            predicate=lambda s: True,
+            lever="FIRE_PROACTIVE_LEARN",
+            params={},
+            cooldown_seconds=3600.0,
+        ),
+        LayerZeroRule(
+            name="note_curation_tick",
+            predicate=lambda s: True,
+            lever="FIRE_NOTE_CURATION",
+            params={},
+            cooldown_seconds=604800.0,
+        ),
     ]
