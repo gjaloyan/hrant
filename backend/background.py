@@ -7,11 +7,11 @@ see backend/autonomic/ for the reflex/immune tick loop.
 Relationship to Model X (spec section 5, "what changes"):
   - Model X is reflex-driven (L0 rules + immune signatures).
   - This runner is goal-driven (proactive learning from gap_tracker).
-  - They coexist through D-04. D-04's `FIRE_SELF_STUDY` is strictly about
-    the agent reading its OWN source code; user-proactive topic learning
-    is a different concern. D-05's knowledge-curation cohort takes over
-    `learn_topic` (either as a dedicated `FIRE_PROACTIVE_LEARN` lever or
-    folded into `FIRE_NOTE_CURATION`) and this module is retired then.
+  - They coexist through D-04 only. D-05 ships `FIRE_PROACTIVE_LEARN`
+    which absorbs `learn_topic_bg` and the chat-flow trigger; this whole
+    module (and the four `/api/background/*` endpoints) is deleted in the
+    same D-05 plan. See docs/superpowers/specs/2026-04-18-d-05-
+    knowledge-curation-design.md section 4.1.
 
 Key design decisions:
   - Max 1 concurrent background task (avoid API rate limits).
