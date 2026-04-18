@@ -286,3 +286,138 @@ def test_note_curation_caps_at_max_per_tick(tmp_path: Path):
     assert len(captured) == 2
     assert report.outcome["refreshed"] == 2
     assert report.outcome["candidates"] == 5
+
+
+from backend.autonomic.levers.proactive_learn import FIRE_PROACTIVE_LEARN
+
+
+class _FakeGoal:
+    def __init__(self, goal_id: str, description: str, goal_type: str, status: str = "active"):
+        self.id = goal_id
+        self.description = description
+        self.goal_type = goal_type
+        self.status = status
+        self.progress_notes: list[str] = []
+
+    def add_progress(self, note: str) -> None:
+        self.progress_notes.append(note)
+
+
+class _FakeGoalManager:
+    def __init__(self, goals: list[_FakeGoal]):
+        self._goals = goals
+        self.completed: list[tuple[str, str]] = []
+
+    def active_goals(self) -> list[_FakeGoal]:
+        return [g for g in self._goals if g.status == "active"]
+
+    def complete_goal(self, goal_id: str, note: str = "") -> bool:
+        for g in self._goals:
+            if g.id == goal_id:
+                g.status = "completed"
+                self.completed.append((goal_id, note))
+                return True
+        return False
+
+    def get(self, goal_id: str):
+        for g in self._goals:
+            if g.id == goal_id:
+                return g
+        return None
+
+
+def test_proactive_learn_metadata():
+    lever = FIRE_PROACTIVE_LEARN()
+    assert lever.name == "FIRE_PROACTIVE_LEARN"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "claude"
+
+
+def test_proactive_learn_skips_when_no_proactive_goals():
+    goals = _FakeGoalManager([
+        _FakeGoal("u1", "User task: fix bug", "user"),
+        _FakeGoal("done1", "Learn about: python", "proactive", status="completed"),
+    ])
+    lever = FIRE_PROACTIVE_LEARN()
+    with patch("backend.autonomic.levers.proactive_learn.GOALS", goals):
+        report = lever.run({}, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_proactive_goals"
+
+
+def test_proactive_learn_picks_first_proactive_goal_and_completes():
+    goals = _FakeGoalManager([
+        _FakeGoal("u1", "User task", "user"),
+        _FakeGoal("p1", "Learn about: rust", "proactive"),
+        _FakeGoal("p2", "Learn about: elixir", "proactive"),
+    ])
+
+    class _Frontmatter:
+        topic = "rust"
+
+    class _Note:
+        frontmatter = _Frontmatter()
+
+    captured: list[dict] = []
+
+    def fake_learn(topic, *, depth, category, project=None, max_sources=3):
+        captured.append({"topic": topic, "depth": depth, "category": category})
+        return _Note()
+
+    lever = FIRE_PROACTIVE_LEARN()
+    with patch("backend.autonomic.levers.proactive_learn.GOALS", goals), \
+         patch("backend.autonomic.levers.proactive_learn.learn_topic", side_effect=fake_learn):
+        report = lever.run({}, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert captured == [{"topic": "rust", "depth": "quick", "category": "profession"}]
+    assert goals.completed == [("p1", "Learned: rust")]
+
+
+def test_proactive_learn_ignores_non_learn_about_descriptions():
+    goals = _FakeGoalManager([
+        _FakeGoal("p1", "Improve: latency on endpoint X", "proactive"),
+        _FakeGoal("p2", "Learn about: kafka", "proactive"),
+    ])
+
+    class _Note:
+        class frontmatter:
+            topic = "kafka"
+
+    captured: list[str] = []
+
+    def fake_learn(topic, *, depth, category, project=None, max_sources=3):
+        captured.append(topic)
+        return _Note()
+
+    lever = FIRE_PROACTIVE_LEARN()
+    with patch("backend.autonomic.levers.proactive_learn.GOALS", goals), \
+         patch("backend.autonomic.levers.proactive_learn.learn_topic", side_effect=fake_learn):
+        report = lever.run({}, {})
+
+    assert captured == ["kafka"]
+    assert goals.completed == [("p2", "Learned: kafka")]
+
+
+def test_proactive_learn_failure_keeps_goal_active_and_adds_progress():
+    g = _FakeGoal("p1", "Learn about: rust", "proactive")
+    goals = _FakeGoalManager([g])
+
+    def flaky(topic, **kw):
+        raise RuntimeError("no internet")
+
+    lever = FIRE_PROACTIVE_LEARN()
+    with patch("backend.autonomic.levers.proactive_learn.GOALS", goals), \
+         patch("backend.autonomic.levers.proactive_learn.learn_topic", side_effect=flaky):
+        report = lever.run({}, {})
+
+    assert report.status == LeverStatus.FAILURE
+    assert "learn_failed" in report.reason
+    assert g.status == "active"
+    assert any("Lever failed" in n for n in g.progress_notes)
+
+
+def test_proactive_learn_preconditions_true():
+    lever = FIRE_PROACTIVE_LEARN()
+    assert lever.preconditions(_snapshot()) is True
