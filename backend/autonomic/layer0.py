@@ -172,4 +172,25 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=3600.0,
         ),
+        LayerZeroRule(
+            name="self_reflection_tick",
+            predicate=lambda s: True,
+            lever="FIRE_SELF_REFLECTION",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
+        LayerZeroRule(
+            name="finetune_qc_tick",
+            predicate=lambda s: True,
+            lever="FIRE_FINETUNE_QC",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
+        LayerZeroRule(
+            name="gap_detection_tick",
+            predicate=lambda s: True,
+            lever="FIRE_GAP_DETECTION",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
     ]
