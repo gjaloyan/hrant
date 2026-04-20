@@ -111,3 +111,135 @@ def test_model_eval_tolerates_regression_exception(tmp_path: Path):
     entry = json.loads(log_path.read_text(encoding="utf-8").strip())
     assert entry["regressions"] == []
     assert entry["priorities"] == []
+
+
+from backend.autonomic.levers.session_archive import FIRE_SESSION_ARCHIVE
+
+
+def _session(sid: str, ended: str, consolidated: bool = False,
+             archived: bool = False, turns: int = 1) -> dict:
+    s = {
+        "id": sid,
+        "started": "2020-01-01 00:00:00",
+        "ended": ended,
+        "title": f"session-{sid}",
+        "archived": archived,
+        "turns": [{"ts": "x", "user": "hi", "answer": "hi", "intent": "chat"}] * turns,
+    }
+    if consolidated:
+        s["consolidated"] = True
+    return s
+
+
+def _write_sessions(path: Path, sessions: list[dict], current_id: str = "x") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"current_id": current_id, "sessions": sessions}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_session_archive_metadata():
+    lever = FIRE_SESSION_ARCHIVE()
+    assert lever.name == "FIRE_SESSION_ARCHIVE"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "python"
+
+
+def test_session_archive_skips_when_no_candidates(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    history_dir = tmp_path / "_history"
+    _write_sessions(sessions_path, [_session("fresh", "2026-04-17 12:00:00", consolidated=True)])
+
+    lever = FIRE_SESSION_ARCHIVE()
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "history_dir": str(history_dir),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_old_sessions"
+
+
+def test_session_archive_moves_old_consolidated_sessions(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    history_dir = tmp_path / "_history"
+    _write_sessions(sessions_path, [
+        _session("old1", "2024-01-01 00:00:00", consolidated=True),
+        _session("old2", "2024-06-01 00:00:00", consolidated=True),
+        _session("fresh", "2026-04-17 12:00:00", consolidated=True),
+    ])
+
+    lever = FIRE_SESSION_ARCHIVE()
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "history_dir": str(history_dir),
+    }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["archived"] == 2
+
+    assert (history_dir / "old1.json").exists()
+    assert (history_dir / "old2.json").exists()
+
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    ids = [s["id"] for s in saved["sessions"]]
+    assert ids == ["fresh"]
+
+
+def test_session_archive_skips_old_but_unconsolidated(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    history_dir = tmp_path / "_history"
+    _write_sessions(sessions_path, [
+        _session("not_done", "2024-01-01 00:00:00", consolidated=False),
+    ])
+
+    lever = FIRE_SESSION_ARCHIVE()
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "history_dir": str(history_dir),
+    }, {})
+
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_old_sessions"
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    assert saved["sessions"][0]["id"] == "not_done"
+
+
+def test_session_archive_skips_current_session(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    history_dir = tmp_path / "_history"
+    _write_sessions(
+        sessions_path,
+        [_session("active", "2024-01-01 00:00:00", consolidated=True)],
+        current_id="active",
+    )
+
+    lever = FIRE_SESSION_ARCHIVE()
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "history_dir": str(history_dir),
+    }, {})
+
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_old_sessions"
+
+
+def test_session_archive_caps_at_max_per_tick(tmp_path: Path):
+    sessions_path = tmp_path / "sessions.json"
+    history_dir = tmp_path / "_history"
+    _write_sessions(sessions_path, [
+        _session(f"old{i}", "2024-01-01 00:00:00", consolidated=True)
+        for i in range(15)
+    ])
+
+    lever = FIRE_SESSION_ARCHIVE()
+    report = lever.run({
+        "sessions_path": str(sessions_path),
+        "history_dir": str(history_dir),
+        "max_per_tick": 10,
+    }, {})
+
+    assert report.outcome["archived"] == 10
+    saved = json.loads(sessions_path.read_text(encoding="utf-8"))
+    assert len(saved["sessions"]) == 5
