@@ -463,6 +463,20 @@ _Reflection levers (D-07):_
 - `FIRE_FINETUNE_QC` — daily, scores `knowledge/finetune_queue.jsonl` via `FinetuneDataCurator` (pure-python), aggregates distribution (low/medium/high), categories, boosted/verified counts, curated size. Observational; never mutates the queue (green, python).
 - `FIRE_GAP_DETECTION` — daily, aggregates `knowledge/gaps.json` — total gaps, actionable (count >= 2), stale (last > 30 days), top-5 hot topics. Snapshots to `knowledge/autonomic/gap_detection_log.jsonl` (green, python).
 
+_Body + yellow lever (D-08):_
+- `FIRE_TOOL_INSTALL` — yellow safety; supports `pip_install {package}`, `ollama_pull {model}`, `llama_cpp_pull {url→.gguf}`. Enqueued via `POST /api/autonomic/pending`, executed only after `POST /api/autonomic/pending/{id}/approve`. No uninstalls/removes.
+
+**HTTP endpoints** (`backend/autonomic/api.py`):
+- `GET  /api/autonomic/status` — kill switch, scheduler liveness, 19 registered lever names.
+- `GET  /api/autonomic/ticks?limit=50` — recent tick_log entries, newest-first.
+- `GET  /api/autonomic/levers/{name}?limit=10` — recent reports for one lever.
+- `GET  /api/autonomic/pending` — pending yellow approvals.
+- `POST /api/autonomic/pending` body `{lever, params}` — enqueue yellow action (returns `{id}`).
+- `POST /api/autonomic/pending/{id}/approve` — execute approved action, remove from pending.
+- `POST /api/autonomic/pending/{id}/reject` — remove without executing.
+- `GET  /api/autonomic/immune` — immune signatures.
+- `POST /api/autonomic/kill-switch` body `{enabled: bool}` — toggle kill switch.
+
 **Paths:**
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
 - Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
