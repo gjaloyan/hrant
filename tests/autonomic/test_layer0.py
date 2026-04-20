@@ -183,17 +183,28 @@ def test_default_rules_d04_cooldowns():
     assert rules["self_study_tick"].cooldown_seconds == 86400.0
 
 
-def test_default_rules_has_fifteen_rules_after_d06():
+def test_default_rules_has_eighteen_rules_after_d07():
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
-    assert len(rules) == 15
+    assert len(rules) == 18
 
 
-def test_default_rules_d06_scheduled_rules_at_end():
+def test_default_rules_d07_scheduled_rules_at_end():
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
     names_tail = [r.name for r in rules[-3:]]
-    assert names_tail == ["model_eval_tick", "session_archive_tick", "cost_audit_tick"]
+    assert names_tail == ["self_reflection_tick", "finetune_qc_tick", "gap_detection_tick"]
+
+
+def test_default_rules_d07_cooldowns():
+    from backend.autonomic.layer0 import default_rules
+    rules = {r.name: r for r in default_rules()}
+    assert rules["self_reflection_tick"].lever == "FIRE_SELF_REFLECTION"
+    assert rules["self_reflection_tick"].cooldown_seconds == 86400.0
+    assert rules["finetune_qc_tick"].lever == "FIRE_FINETUNE_QC"
+    assert rules["finetune_qc_tick"].cooldown_seconds == 86400.0
+    assert rules["gap_detection_tick"].lever == "FIRE_GAP_DETECTION"
+    assert rules["gap_detection_tick"].cooldown_seconds == 86400.0
 
 
 def test_default_rules_d06_cooldowns():

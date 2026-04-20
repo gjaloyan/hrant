@@ -75,6 +75,8 @@ def register_default_immune_levers() -> None:
 def register_default_autonomic_levers() -> None:
     from .capability_scan import FIRE_CAPABILITY_SCAN
     from .cost_audit import FIRE_COST_AUDIT
+    from .finetune_qc import FIRE_FINETUNE_QC
+    from .gap_detection import FIRE_GAP_DETECTION
     from .goal_propose import FIRE_GOAL_PROPOSE
     from .graph_maintenance import FIRE_GRAPH_MAINTENANCE
     from .integrity_heartbeat import FIRE_INTEGRITY_HEARTBEAT
@@ -82,6 +84,7 @@ def register_default_autonomic_levers() -> None:
     from .model_eval import FIRE_MODEL_EVAL
     from .note_curation import FIRE_NOTE_CURATION
     from .proactive_learn import FIRE_PROACTIVE_LEARN
+    from .self_reflection import FIRE_SELF_REFLECTION
     from .self_study import FIRE_SELF_STUDY
     from .session_archive import FIRE_SESSION_ARCHIVE
     register_lever(FIRE_INTEGRITY_HEARTBEAT)
@@ -95,3 +98,6 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_MODEL_EVAL)
     register_lever(FIRE_SESSION_ARCHIVE)
     register_lever(FIRE_COST_AUDIT)
+    register_lever(FIRE_SELF_REFLECTION)
+    register_lever(FIRE_FINETUNE_QC)
+    register_lever(FIRE_GAP_DETECTION)
