@@ -453,11 +453,18 @@ _Knowledge curation levers (D-05):_
 - `FIRE_PROACTIVE_LEARN` — hourly, picks one `goal_type="proactive"` goal (`"Learn about: X"` description) and runs `learn_topic` to create the note (green, claude). Replaces the retired `backend/background.py`.
 - `FIRE_NOTE_CURATION` — weekly, refreshes notes with `confidence="partial"/"unverified"` or 30+ days old with `access_count >= 5`, up to 2 per tick; excludes `personal/` and `projects/` categories (green, claude).
 
+_Telemetry levers (D-06):_
+- `FIRE_MODEL_EVAL` — daily, aggregates yesterday's `knowledge/eval_log.jsonl` via `EVALUATOR` (daily_report + regressions + priorities) into `knowledge/autonomic/model_eval_log.jsonl` (green, python).
+- `FIRE_SESSION_ARCHIVE` — daily, moves sessions older than 30 days and `consolidated=True` from active `knowledge/sessions.json` into `knowledge/_history/<session_id>.json`. Caps at 10 per tick; never archives the `current_id` (green, python).
+- `FIRE_COST_AUDIT` — hourly, snapshots `knowledge/router_state.json` into `knowledge/autonomic/cost_audit_log.jsonl`. Flags `over_budget` when `api_cost_today > daily_budget_usd` (default 10 USD) (green, python).
+
 **Paths:**
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
 - Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.
 - Immune DB: `knowledge/immune/signatures.jsonl` (seed) + `knowledge/immune/fixes/` (markdown recipes).
 - Self-knowledge: `knowledge/self/modules/`, `knowledge/self/tools/`, `knowledge/self/skills/`, `knowledge/self/mcp_servers/`, `knowledge/self/server_inventory.md` (written by D-04 levers).
+- Telemetry logs (D-06): `knowledge/autonomic/model_eval_log.jsonl`, `knowledge/autonomic/cost_audit_log.jsonl`.
+- Session history: `knowledge/_history/<session_id>.json` (written by `FIRE_SESSION_ARCHIVE`).
 - Design doc: `docs/superpowers/specs/2026-04-16-model-x-autonomic-design.md` (section 11 — phased delivery D-01..D-06).
 - Implementation plans: `docs/superpowers/plans/`.
 
