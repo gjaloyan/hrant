@@ -243,3 +243,84 @@ def test_session_archive_caps_at_max_per_tick(tmp_path: Path):
     assert report.outcome["archived"] == 10
     saved = json.loads(sessions_path.read_text(encoding="utf-8"))
     assert len(saved["sessions"]) == 5
+
+
+from backend.autonomic.levers.cost_audit import FIRE_COST_AUDIT
+
+
+def test_cost_audit_metadata():
+    lever = FIRE_COST_AUDIT()
+    assert lever.name == "FIRE_COST_AUDIT"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "python"
+
+
+def test_cost_audit_skips_when_router_state_missing(tmp_path: Path):
+    lever = FIRE_COST_AUDIT()
+    report = lever.run({
+        "router_state_path": str(tmp_path / "nope.json"),
+        "log_path": str(tmp_path / "cost_audit_log.jsonl"),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_router_state"
+
+
+def test_cost_audit_writes_snapshot_when_under_budget(tmp_path: Path):
+    rs = {
+        "date": "2026-04-18",
+        "api_calls_today": 7,
+        "api_cost_today": 0.03,
+        "model_b_calls_today": 0,
+        "total_a_calls": 287,
+        "total_b_calls": 0,
+        "last_reason": "active model: claude-sonnet",
+    }
+    (tmp_path / "router_state.json").write_text(json.dumps(rs), encoding="utf-8")
+    log_path = tmp_path / "cost_audit_log.jsonl"
+
+    lever = FIRE_COST_AUDIT()
+    report = lever.run({
+        "router_state_path": str(tmp_path / "router_state.json"),
+        "log_path": str(log_path),
+        "daily_budget_usd": 10.0,
+    }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.reason == "cost_audit_ok"
+    assert report.outcome["issues"] == []
+    assert report.outcome["api_cost_today"] == 0.03
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert entry["date"] == "2026-04-18"
+    assert entry["api_calls_today"] == 7
+    assert entry["issues"] == []
+
+
+def test_cost_audit_flags_over_budget(tmp_path: Path):
+    rs = {
+        "date": "2026-04-18",
+        "api_calls_today": 500,
+        "api_cost_today": 15.75,
+        "model_b_calls_today": 0,
+        "total_a_calls": 1000,
+        "total_b_calls": 0,
+        "last_reason": "runaway loop",
+    }
+    (tmp_path / "router_state.json").write_text(json.dumps(rs), encoding="utf-8")
+    log_path = tmp_path / "cost_audit_log.jsonl"
+
+    lever = FIRE_COST_AUDIT()
+    report = lever.run({
+        "router_state_path": str(tmp_path / "router_state.json"),
+        "log_path": str(log_path),
+        "daily_budget_usd": 10.0,
+    }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert "cost_audit:1_issues" == report.reason
+    assert len(report.outcome["issues"]) == 1
+    assert "over_budget" in report.outcome["issues"][0]
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert len(entry["issues"]) == 1
