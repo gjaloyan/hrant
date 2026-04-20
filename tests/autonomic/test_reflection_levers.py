@@ -110,3 +110,171 @@ def test_self_reflection_tolerates_extract_patterns_exception(tmp_path: Path):
     assert report.status == LeverStatus.FAILURE
     assert "reflect_failed" in report.reason
     assert not log_path.exists()
+
+
+from backend.autonomic.levers.finetune_qc import FIRE_FINETUNE_QC
+
+
+def _pair_json(
+    user_text: str = "what is python?",
+    assistant_text: str = "A programming language.",
+    confidence: int = 85,
+    category: str = "factual_qa",
+    boosted: bool = False,
+    verified: bool = True,
+    sources: list[str] | None = None,
+) -> str:
+    obj = {
+        "id": f"id_{hash(user_text) & 0xfff}",
+        "messages": [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text * 3},
+        ],
+        "metadata": {
+            "source_notes": sources or ["python"],
+            "confidence": confidence,
+            "project": None,
+            "timestamp": "2026-04-20T12:00:00",
+            "verified": verified,
+            "category": category,
+            "boosted": boosted,
+            "original_wrong_answer": None,
+        },
+    }
+    return json.dumps(obj)
+
+
+def _legacy_json() -> str:
+    return json.dumps({
+        "instruction": "legacy question",
+        "response": "legacy answer",
+        "sources": ["x"],
+        "confidence": 80,
+        "timestamp": "2026-04-07T10:51:30",
+    })
+
+
+def test_finetune_qc_metadata():
+    lever = FIRE_FINETUNE_QC()
+    assert lever.name == "FIRE_FINETUNE_QC"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "python"
+
+
+def test_finetune_qc_skips_when_queue_missing(tmp_path: Path):
+    lever = FIRE_FINETUNE_QC()
+    report = lever.run({
+        "queue_path": str(tmp_path / "nope.jsonl"),
+        "log_path": str(tmp_path / "finetune_qc_log.jsonl"),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_valid_pairs"
+
+
+def test_finetune_qc_skips_when_only_legacy(tmp_path: Path):
+    queue = tmp_path / "finetune_queue.jsonl"
+    queue.write_text(_legacy_json() + "\n" + _legacy_json() + "\n", encoding="utf-8")
+
+    lever = FIRE_FINETUNE_QC()
+    report = lever.run({
+        "queue_path": str(queue),
+        "log_path": str(tmp_path / "finetune_qc_log.jsonl"),
+    }, {})
+
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_valid_pairs"
+    assert report.outcome["legacy_entries"] == 2
+
+
+def test_finetune_qc_scores_and_writes_snapshot(tmp_path: Path):
+    queue = tmp_path / "finetune_queue.jsonl"
+    queue.write_text(
+        "\n".join([
+            _pair_json(user_text="q1", confidence=90, category="factual_qa"),
+            _pair_json(user_text="q2", confidence=90, category="correction", boosted=True),
+            _pair_json(user_text="q3", confidence=50, category="other"),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "finetune_qc_log.jsonl"
+
+    lever = FIRE_FINETUNE_QC()
+    report = lever.run({
+        "queue_path": str(queue),
+        "log_path": str(log_path),
+    }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["total"] == 3
+    assert report.outcome["legacy_entries"] == 0
+    assert report.outcome["avg_score"] > 0
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert entry["total"] == 3
+    assert entry["low"] + entry["medium"] + entry["high"] == 3
+    assert entry["by_category"]["factual_qa"] == 1
+    assert entry["by_category"]["correction"] == 1
+    assert entry["boosted"] == 1
+    assert entry["verified"] == 3
+
+
+def test_finetune_qc_counts_legacy_alongside_valid(tmp_path: Path):
+    queue = tmp_path / "finetune_queue.jsonl"
+    queue.write_text(
+        "\n".join([
+            _legacy_json(),
+            _pair_json(user_text="q1"),
+            _legacy_json(),
+            _pair_json(user_text="q2"),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "finetune_qc_log.jsonl"
+
+    lever = FIRE_FINETUNE_QC()
+    report = lever.run({
+        "queue_path": str(queue),
+        "log_path": str(log_path),
+    }, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["total"] == 2
+    assert report.outcome["legacy_entries"] == 2
+
+
+def test_finetune_qc_curated_count_applies_min_score_and_dedup(tmp_path: Path):
+    queue = tmp_path / "finetune_queue.jsonl"
+    queue.write_text(
+        "\n".join([
+            _pair_json(user_text="how to install python", confidence=95, category="correction"),
+            _pair_json(user_text="what is asyncio", confidence=95, category="procedure"),
+            _pair_json(user_text="explain decorators", confidence=95, category="factual_qa"),
+            _pair_json(user_text="how to install python", confidence=95, category="correction"),  # dup
+            _pair_json(user_text="random q", confidence=10, category="other", verified=False, sources=[]),  # low
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    log_path = tmp_path / "finetune_qc_log.jsonl"
+
+    lever = FIRE_FINETUNE_QC()
+    report = lever.run({
+        "queue_path": str(queue),
+        "log_path": str(log_path),
+    }, {})
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert entry["total"] == 5
+    assert entry["curated"] == 3
+
+
+def test_finetune_qc_never_mutates_queue(tmp_path: Path):
+    queue = tmp_path / "finetune_queue.jsonl"
+    original = _pair_json(user_text="q1") + "\n" + _legacy_json() + "\n"
+    queue.write_text(original, encoding="utf-8")
+    log_path = tmp_path / "finetune_qc_log.jsonl"
+
+    lever = FIRE_FINETUNE_QC()
+    lever.run({"queue_path": str(queue), "log_path": str(log_path)}, {})
+
+    assert queue.read_text(encoding="utf-8") == original
