@@ -278,3 +278,92 @@ def test_finetune_qc_never_mutates_queue(tmp_path: Path):
     lever.run({"queue_path": str(queue), "log_path": str(log_path)}, {})
 
     assert queue.read_text(encoding="utf-8") == original
+
+
+from backend.autonomic.levers.gap_detection import FIRE_GAP_DETECTION
+
+
+def test_gap_detection_metadata():
+    lever = FIRE_GAP_DETECTION()
+    assert lever.name == "FIRE_GAP_DETECTION"
+    assert lever.category == LeverCategory.AUTONOMIC
+    assert lever.safety == LeverSafety.GREEN
+    assert lever.executor == "python"
+
+
+def test_gap_detection_skips_when_missing(tmp_path: Path):
+    lever = FIRE_GAP_DETECTION()
+    report = lever.run({
+        "gaps_path": str(tmp_path / "nope.json"),
+        "log_path": str(tmp_path / "gap_detection_log.jsonl"),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_gaps"
+
+
+def test_gap_detection_skips_when_empty(tmp_path: Path):
+    gaps = tmp_path / "gaps.json"
+    gaps.write_text("{}", encoding="utf-8")
+
+    lever = FIRE_GAP_DETECTION()
+    report = lever.run({
+        "gaps_path": str(gaps),
+        "log_path": str(tmp_path / "gap_detection_log.jsonl"),
+    }, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert report.reason == "no_gaps"
+
+
+def test_gap_detection_counts_actionable_and_stale(tmp_path: Path):
+    gaps = tmp_path / "gaps.json"
+    gaps.write_text(json.dumps({
+        "rust": {"topic": "rust", "count": 3, "last": "2026-04-18 12:00"},
+        "elixir": {"topic": "elixir", "count": 1, "last": "2026-04-18 12:00"},
+        "cobol": {"topic": "cobol", "count": 5, "last": "2024-01-01 00:00"},
+        "pascal": {"topic": "pascal", "count": 1, "last": "2024-02-01 00:00"},
+    }), encoding="utf-8")
+    log_path = tmp_path / "gap_detection_log.jsonl"
+
+    lever = FIRE_GAP_DETECTION()
+    report = lever.run({"gaps_path": str(gaps), "log_path": str(log_path)}, {})
+
+    assert report.status == LeverStatus.SUCCESS
+    assert report.outcome["total_gaps"] == 4
+    assert report.outcome["actionable_gaps"] == 2
+    assert report.outcome["stale_gaps"] == 2
+
+
+def test_gap_detection_hot_list_sorted_and_capped(tmp_path: Path):
+    gaps_data = {
+        f"topic_{i}": {"topic": f"topic_{i}", "count": i + 1, "last": "2026-04-18 12:00"}
+        for i in range(8)
+    }
+    gaps = tmp_path / "gaps.json"
+    gaps.write_text(json.dumps(gaps_data), encoding="utf-8")
+    log_path = tmp_path / "gap_detection_log.jsonl"
+
+    lever = FIRE_GAP_DETECTION()
+    report = lever.run({"gaps_path": str(gaps), "log_path": str(log_path)}, {})
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert len(entry["hot"]) == 5
+    counts = [h["count"] for h in entry["hot"]]
+    assert counts == sorted(counts, reverse=True)
+    assert counts[0] == 8
+    assert report.outcome["hot_count"] == 5
+
+
+def test_gap_detection_writes_snapshot_structure(tmp_path: Path):
+    gaps = tmp_path / "gaps.json"
+    gaps.write_text(json.dumps({
+        "rust": {"topic": "rust", "count": 3, "last": "2026-04-18 12:00"},
+    }), encoding="utf-8")
+    log_path = tmp_path / "gap_detection_log.jsonl"
+
+    lever = FIRE_GAP_DETECTION()
+    lever.run({"gaps_path": str(gaps), "log_path": str(log_path)}, {})
+
+    entry = json.loads(log_path.read_text(encoding="utf-8").strip())
+    assert set(entry.keys()) >= {"ts", "total", "actionable", "stale", "hot"}
+    assert entry["hot"][0]["topic"] == "rust"
+    assert entry["hot"][0]["count"] == 3
