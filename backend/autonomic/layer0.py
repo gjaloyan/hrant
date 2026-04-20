@@ -151,4 +151,25 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=604800.0,
         ),
+        LayerZeroRule(
+            name="model_eval_tick",
+            predicate=lambda s: True,
+            lever="FIRE_MODEL_EVAL",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
+        LayerZeroRule(
+            name="session_archive_tick",
+            predicate=lambda s: True,
+            lever="FIRE_SESSION_ARCHIVE",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
+        LayerZeroRule(
+            name="cost_audit_tick",
+            predicate=lambda s: True,
+            lever="FIRE_COST_AUDIT",
+            params={},
+            cooldown_seconds=3600.0,
+        ),
     ]

@@ -183,17 +183,28 @@ def test_default_rules_d04_cooldowns():
     assert rules["self_study_tick"].cooldown_seconds == 86400.0
 
 
-def test_default_rules_has_twelve_rules_after_d05():
+def test_default_rules_has_fifteen_rules_after_d06():
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
-    assert len(rules) == 12
+    assert len(rules) == 15
 
 
-def test_default_rules_d05_scheduled_rules_at_end():
+def test_default_rules_d06_scheduled_rules_at_end():
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
     names_tail = [r.name for r in rules[-3:]]
-    assert names_tail == ["graph_maintenance_tick", "proactive_learn_tick", "note_curation_tick"]
+    assert names_tail == ["model_eval_tick", "session_archive_tick", "cost_audit_tick"]
+
+
+def test_default_rules_d06_cooldowns():
+    from backend.autonomic.layer0 import default_rules
+    rules = {r.name: r for r in default_rules()}
+    assert rules["model_eval_tick"].lever == "FIRE_MODEL_EVAL"
+    assert rules["model_eval_tick"].cooldown_seconds == 86400.0
+    assert rules["session_archive_tick"].lever == "FIRE_SESSION_ARCHIVE"
+    assert rules["session_archive_tick"].cooldown_seconds == 86400.0
+    assert rules["cost_audit_tick"].lever == "FIRE_COST_AUDIT"
+    assert rules["cost_audit_tick"].cooldown_seconds == 3600.0
 
 
 def test_default_rules_d05_cooldowns():
