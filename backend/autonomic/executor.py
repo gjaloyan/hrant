@@ -32,14 +32,17 @@ class LeverExecutor:
         lever: Lever,
         params: dict[str, Any],
         state: StateSnapshot,
+        *,
+        bypass_safety: bool = False,
     ) -> LeverReport | None:
-        decision = self._gate.evaluate(lever, params)
-        if decision is SafetyDecision.BLOCK:
-            log.info("LeverExecutor: BLOCK %s", lever.name)
-            return None
-        if decision is SafetyDecision.QUEUE_FOR_APPROVAL:
-            log.info("LeverExecutor: QUEUE %s", lever.name)
-            return None
+        if not bypass_safety:
+            decision = self._gate.evaluate(lever, params)
+            if decision is SafetyDecision.BLOCK:
+                log.info("LeverExecutor: BLOCK %s", lever.name)
+                return None
+            if decision is SafetyDecision.QUEUE_FOR_APPROVAL:
+                log.info("LeverExecutor: QUEUE %s", lever.name)
+                return None
 
         if not lever.preconditions(state):
             now = utcnow()

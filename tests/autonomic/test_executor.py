@@ -143,3 +143,31 @@ def test_event_bus_receives_lever_executed(tmp_path: Path):
     assert len(received) == 1
     assert received[0]["lever"] == "GREEN_STUB"
     assert received[0]["status"] == "success"
+
+
+def test_bypass_safety_runs_yellow_lever_directly(tmp_path: Path):
+    lever_log = tmp_path / "lever_log.jsonl"
+    pending = tmp_path / "pending.jsonl"
+    gate = SafetyGate(pending_approvals_path=pending)
+    execu = LeverExecutor(gate=gate, lever_log_path=lever_log)
+
+    report = execu.execute(_YellowStub(), {"z": 9}, _snapshot(), bypass_safety=True)
+
+    assert report is not None
+    assert report.status == LeverStatus.SUCCESS
+    # Pending file untouched — gate bypassed
+    assert pending.read_text(encoding="utf-8") == ""
+    # Lever log has the execution
+    assert lever_log.read_text(encoding="utf-8").count("\n") == 1
+
+
+def test_yellow_default_still_queues_when_not_bypassed(tmp_path: Path):
+    lever_log = tmp_path / "lever_log.jsonl"
+    pending = tmp_path / "pending.jsonl"
+    gate = SafetyGate(pending_approvals_path=pending)
+    execu = LeverExecutor(gate=gate, lever_log_path=lever_log)
+
+    report = execu.execute(_YellowStub(), {"z": 9}, _snapshot())
+
+    assert report is None  # queued, not executed
+    assert "id" in pending.read_text(encoding="utf-8")
