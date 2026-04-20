@@ -74,3 +74,33 @@ def test_list_pending(gate: SafetyGate):
     assert len(pending) == 2
     assert pending[0]["params"] == {"a": 1}
     assert pending[1]["params"] == {"b": 2}
+
+
+import re
+
+
+def test_queue_writes_unique_id_per_entry(gate: SafetyGate):
+    gate.evaluate(YellowLever(), {"a": 1})
+    gate.evaluate(YellowLever(), {"b": 2})
+
+    entries = gate.list_pending()
+    assert len(entries) == 2
+    assert "id" in entries[0] and "id" in entries[1]
+    assert entries[0]["id"] != entries[1]["id"]
+    assert re.match(r"^[0-9a-f]{12}$", entries[0]["id"])
+
+
+def test_remove_pending_removes_matching_entry(gate: SafetyGate):
+    gate.evaluate(YellowLever(), {"a": 1})
+    gate.evaluate(YellowLever(), {"b": 2})
+    entries = gate.list_pending()
+    target_id = entries[0]["id"]
+
+    assert gate.remove_pending(target_id) is True
+    remaining = gate.list_pending()
+    assert len(remaining) == 1
+    assert remaining[0]["id"] != target_id
+
+
+def test_remove_pending_unknown_id_returns_false(gate: SafetyGate):
+    assert gate.remove_pending("nonexistent") is False
