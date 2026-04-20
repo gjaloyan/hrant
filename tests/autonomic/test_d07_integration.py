@@ -161,5 +161,5 @@ def test_fourteen_autonomic_levers_registered_via_startup(tmp_path: Path, monkey
     from backend.autonomic.startup import build_scheduler
     build_scheduler()
     names = LeverRegistry.instance().names()
-    assert len(names) == 18
+    assert len(names) == 19
     clear_registry()
