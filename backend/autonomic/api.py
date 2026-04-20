@@ -22,8 +22,8 @@ router = APIRouter(prefix="/api/autonomic", tags=["autonomic"])
 def autonomic_status(request: Request) -> dict[str, Any]:
     """Report kill-switch state, scheduler liveness, and registered levers."""
     scheduler = getattr(request.app.state, "autonomic_scheduler", None)
-    ks = KillSwitch(DEFAULT_ENABLED_PATH)
-    registry = LeverRegistry.instance()
+    ks = getattr(request.app.state, "autonomic_kill_switch", None) or KillSwitch(DEFAULT_ENABLED_PATH)
+    registry = getattr(request.app.state, "autonomic_registry", None) or LeverRegistry.instance()
     return {
         "enabled": ks.is_enabled(),
         "enabled_path": str(DEFAULT_ENABLED_PATH),
