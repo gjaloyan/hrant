@@ -1,18 +1,14 @@
 """Glue between the FastAPI app lifespan and the autonomic scheduler.
 
-Reads env vars for configurability:
-  AUTONOMIC_ENABLED_PATH   - kill-switch file (default: knowledge/autonomic/ENABLED)
-  AUTONOMIC_TICK_SECONDS   - base tick interval (default: 30.0)
-  AUTONOMIC_KNOWLEDGE_ROOT - knowledge dir for state builder (default: knowledge)
-  AUTONOMIC_ERROR_LOG_PATH - error_log.jsonl path (default: knowledge/error_log.jsonl)
-  AUTONOMIC_LEVER_LOG_PATH - lever_log.jsonl path (default: knowledge/autonomic/lever_log.jsonl)
-  AUTONOMIC_PENDING_PATH   - pending_approvals.jsonl (default: knowledge/autonomic/pending_approvals.jsonl)
-  AUTONOMIC_TICK_LOG_PATH  - tick_log.jsonl path (default: knowledge/autonomic/tick_log.jsonl)
+Reads env vars for configurability (see AUTONOMIC_*_PATH constants below).
+build_scheduler returns a SchedulerBundle that main.py stashes on app.state
+so the api.py router can reach gate / executor / builder / log paths.
 """
 from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from .events import EventBus
@@ -38,7 +34,19 @@ def _env_path(key: str, default: str) -> Path:
     return Path(os.environ.get(key, default))
 
 
-def build_scheduler() -> AutonomicScheduler:
+@dataclass
+class SchedulerBundle:
+    scheduler: AutonomicScheduler
+    gate: SafetyGate
+    executor: LeverExecutor
+    builder: StateSnapshotBuilder
+    registry: LeverRegistry
+    kill_switch: KillSwitch
+    lever_log_path: Path
+    tick_log_path: Path
+
+
+def build_scheduler() -> SchedulerBundle:
     enabled_path = _env_path("AUTONOMIC_ENABLED_PATH", str(DEFAULT_ENABLED_PATH))
     interval = float(os.environ.get("AUTONOMIC_TICK_SECONDS", "30"))
     knowledge_root = _env_path("AUTONOMIC_KNOWLEDGE_ROOT", "knowledge")
@@ -70,25 +78,35 @@ def build_scheduler() -> AutonomicScheduler:
         tick_log_path=tick_log,
         event_bus=bus,
     )
-
-    return AutonomicScheduler(
-        kill_switch=KillSwitch(enabled_path),
+    kill_switch = KillSwitch(enabled_path)
+    scheduler = AutonomicScheduler(
+        kill_switch=kill_switch,
         on_tick=tick,
         tick_interval_seconds=interval,
     )
+    return SchedulerBundle(
+        scheduler=scheduler,
+        gate=gate,
+        executor=executor,
+        builder=builder,
+        registry=registry,
+        kill_switch=kill_switch,
+        lever_log_path=lever_log,
+        tick_log_path=tick_log,
+    )
 
 
-async def start_autonomic_scheduler(scheduler: AutonomicScheduler) -> None:
+async def start_autonomic_scheduler(bundle: SchedulerBundle) -> None:
     try:
-        await scheduler.start()
+        await bundle.scheduler.start()
         log.info("Autonomic scheduler started")
     except Exception as exc:
         log.error("Autonomic scheduler failed to start: %s", exc)
 
 
-async def stop_autonomic_scheduler(scheduler: AutonomicScheduler) -> None:
+async def stop_autonomic_scheduler(bundle: SchedulerBundle) -> None:
     try:
-        await scheduler.stop()
+        await bundle.scheduler.stop()
         log.info("Autonomic scheduler stopped")
     except Exception as exc:
         log.warning("Autonomic scheduler stop raised: %s", exc)

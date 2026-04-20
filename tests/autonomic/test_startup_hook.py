@@ -23,12 +23,12 @@ async def test_start_and_stop_autonomic(tmp_path, monkeypatch):
 
     from backend.autonomic.levers import clear_registry
     clear_registry()
-    sched = build_scheduler()
-    await start_autonomic_scheduler(sched)
-    assert sched.is_running() is True
+    bundle = build_scheduler()
+    await start_autonomic_scheduler(bundle)
+    assert bundle.scheduler.is_running() is True
     await asyncio.sleep(0.1)
-    await stop_autonomic_scheduler(sched)
-    assert sched.is_running() is False
+    await stop_autonomic_scheduler(bundle)
+    assert bundle.scheduler.is_running() is False
     clear_registry()
 
 
@@ -46,11 +46,11 @@ async def test_stop_is_idempotent(tmp_path, monkeypatch):
 
     from backend.autonomic.levers import clear_registry
     clear_registry()
-    sched = build_scheduler()
-    await start_autonomic_scheduler(sched)
-    await stop_autonomic_scheduler(sched)
-    await stop_autonomic_scheduler(sched)
-    assert sched.is_running() is False
+    bundle = build_scheduler()
+    await start_autonomic_scheduler(bundle)
+    await stop_autonomic_scheduler(bundle)
+    await stop_autonomic_scheduler(bundle)
+    assert bundle.scheduler.is_running() is False
     clear_registry()
 
 
@@ -69,9 +69,9 @@ def test_build_scheduler_uses_real_tick_by_default(tmp_path, monkeypatch):
     clear_registry()
 
     from backend.autonomic.startup import build_scheduler
-    sched = build_scheduler()
-    assert sched is not None
-    assert sched._on_tick.__name__ == "_tick"
+    bundle = build_scheduler()
+    assert bundle is not None
+    assert bundle.scheduler._on_tick.__name__ == "_tick"
     clear_registry()
 
 

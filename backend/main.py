@@ -80,15 +80,23 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("Channel auto-start error: %s", e)
 
-    scheduler = build_scheduler()
-    application.state.autonomic_scheduler = scheduler
-    await start_autonomic_scheduler(scheduler)
+    bundle = build_scheduler()
+    application.state.autonomic_bundle = bundle
+    application.state.autonomic_scheduler = bundle.scheduler
+    application.state.autonomic_gate = bundle.gate
+    application.state.autonomic_executor = bundle.executor
+    application.state.autonomic_builder = bundle.builder
+    application.state.autonomic_registry = bundle.registry
+    application.state.autonomic_kill_switch = bundle.kill_switch
+    application.state.autonomic_lever_log = bundle.lever_log_path
+    application.state.autonomic_tick_log = bundle.tick_log_path
+    await start_autonomic_scheduler(bundle)
 
     yield
     # --- shutdown ---
     log.info("Server shutting down — stopping channels...")
     CHANNELS.stop_all()
-    await stop_autonomic_scheduler(application.state.autonomic_scheduler)
+    await stop_autonomic_scheduler(application.state.autonomic_bundle)
 
 app = FastAPI(title="Self-Learning Agent", lifespan=lifespan)
 app.add_middleware(

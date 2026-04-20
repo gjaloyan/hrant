@@ -174,3 +174,24 @@ def test_autonomic_levers_include_d07_cohort():
     assert "FIRE_FINETUNE_QC" in names
     assert "FIRE_GAP_DETECTION" in names
     clear_registry()
+
+
+def test_tool_install_is_auto_registered():
+    from backend.autonomic.levers import register_default_autonomic_levers
+    clear_registry()
+    register_default_autonomic_levers()
+    reg = LeverRegistry.instance()
+    assert "FIRE_TOOL_INSTALL" in reg.names()
+    clear_registry()
+
+
+def test_autonomic_plus_immune_total_is_nineteen():
+    from backend.autonomic.levers import (
+        register_default_autonomic_levers,
+        register_default_immune_levers,
+    )
+    clear_registry()
+    register_default_immune_levers()
+    register_default_autonomic_levers()
+    assert len(LeverRegistry.instance().names()) == 19
+    clear_registry()
