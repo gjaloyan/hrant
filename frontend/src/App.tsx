@@ -12,7 +12,7 @@ import AutonomicPanel from "./components/AutonomicPanel";
 import UsagePage from "./components/UsagePage";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusBar from "./components/StatusBar";
-import { fetchStatus, newSession, StatusPayload } from "./api";
+import { fetchStatus, newSession, fetchAutonomicStatus, fetchPending, StatusPayload, AutonomicStatus } from "./api";
 
 type Tab = "chat" | "goals" | "knowledge" | "graph" | "sessions" | "intelligence" | "autonomic" | "usage" | "projects" | "finetune" | "settings";
 
@@ -32,14 +32,21 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
 
 export default function App() {
   const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [autonomic, setAutonomic] = useState<AutonomicStatus | null>(null);
+  const [pendingCount, setPendingCount] = useState<number>(0);
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("chat");
   const chatRef = useRef<ChatHandle>(null);
 
   const refresh = async () => {
-    try {
-      setStatus(await fetchStatus());
-    } catch { /* ignore */ }
+    const [statusResult, autonomicResult, pendingResult] = await Promise.allSettled([
+      fetchStatus(),
+      fetchAutonomicStatus(),
+      fetchPending(),
+    ]);
+    if (statusResult.status === "fulfilled") setStatus(statusResult.value);
+    if (autonomicResult.status === "fulfilled") setAutonomic(autonomicResult.value);
+    if (pendingResult.status === "fulfilled") setPendingCount(pendingResult.value.pending.length);
   };
 
   const handleNewSession = useCallback(async () => {
@@ -93,7 +100,7 @@ export default function App() {
         {tab === "settings" && <SettingsPanel />}
       </div>
 
-      <StatusBar status={status} />
+      <StatusBar status={status} autonomic={autonomic} pendingCount={pendingCount} />
       <NoteViewer topic={selectedTopic} onClose={() => setSelectedTopic(null)} />
     </div>
   );
