@@ -251,6 +251,15 @@ npm run dev
 
 Dev-сервер Vite проксирует `/api/*` на `localhost:8000`.
 
+**Одной командой (back + front):**
+```bash
+./dev.bat        # Windows
+./dev.sh         # Unix/macOS
+# или
+.venv/Scripts/python.exe scripts/dev.py
+```
+Префиксует логи `[back]` / `[front]`, Ctrl+C корректно гасит обоих. Требует, чтобы `.venv` и `frontend/node_modules` уже существовали.
+
 ## API
 
 | метод | путь | назначение |
