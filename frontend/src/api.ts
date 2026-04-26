@@ -972,3 +972,88 @@ export const setActiveModel = (provider_id: string, model: string) =>
 
 export const clearActiveModel = () =>
   json_delete<{ ok: boolean }>("/api/active-model");
+
+
+// ---------- Autonomic (Model X) ----------
+
+export type AutonomicStatus = {
+  enabled: boolean;
+  enabled_path: string;
+  scheduler_running: boolean;
+  registered_levers: string[];
+};
+
+export type TickEntry = {
+  ts: string;
+  source: string;
+  lever: string | null;
+  params: Record<string, unknown>;
+  reason: string;
+  rule_name: string | null;
+  executed: boolean;
+  note: string;
+};
+
+export type LeverReport = {
+  lever: string;
+  params: Record<string, unknown>;
+  started_at: string;
+  finished_at: string;
+  status: string;
+  outcome: Record<string, unknown>;
+  cost: {
+    tokens_in: number;
+    tokens_out: number;
+    seconds: number;
+    usd: number;
+  };
+  reason: string;
+  follow_ups: string[];
+};
+
+export type PendingEntry = {
+  id: string;
+  lever: string;
+  params: Record<string, unknown>;
+  requested_at: string;
+  status: string;
+};
+
+export type ImmuneSignature = {
+  id: string;
+  pattern: Record<string, unknown>;
+  severity: string;
+  fix_lever: string;
+  fix_params: Record<string, unknown>;
+  observed_count: number;
+  success_rate: number | null;
+};
+
+export const fetchAutonomicStatus = () =>
+  json_get<AutonomicStatus>("/api/autonomic/status");
+
+export const fetchTicks = (limit = 50) =>
+  json_get<{ ticks: TickEntry[] }>(`/api/autonomic/ticks?limit=${limit}`);
+
+export const fetchLeverHistory = (name: string, limit = 10) =>
+  json_get<{ lever: string; reports: LeverReport[] }>(
+    `/api/autonomic/levers/${encodeURIComponent(name)}?limit=${limit}`,
+  );
+
+export const fetchPending = () =>
+  json_get<{ pending: PendingEntry[] }>("/api/autonomic/pending");
+
+export const enqueuePending = (lever: string, params: Record<string, unknown>) =>
+  json_post<{ id: string; status: string }>("/api/autonomic/pending", { lever, params });
+
+export const approvePending = (id: string) =>
+  json_post<LeverReport>(`/api/autonomic/pending/${id}/approve`);
+
+export const rejectPending = (id: string) =>
+  json_post<{ ok: boolean; rejected_id: string }>(`/api/autonomic/pending/${id}/reject`);
+
+export const fetchImmune = () =>
+  json_get<{ signatures: ImmuneSignature[] }>("/api/autonomic/immune");
+
+export const toggleKillSwitch = (enabled: boolean) =>
+  json_post<{ enabled: boolean }>("/api/autonomic/kill-switch", { enabled });
