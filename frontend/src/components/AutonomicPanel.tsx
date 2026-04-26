@@ -6,11 +6,13 @@ import {
   rejectPending,
   fetchTicks,
   fetchLeverHistory,
+  fetchImmune,
   toggleKillSwitch,
   AutonomicStatus,
   PendingEntry,
   TickEntry,
   LeverReport,
+  ImmuneSignature,
 } from "../api";
 
 const CATEGORY_COLORS: Record<string, string> = {
@@ -43,6 +45,7 @@ export default function AutonomicPanel() {
   const [selectedLever, setSelectedLever] = useState<string | null>(null);
   const [leverHistory, setLeverHistory] = useState<LeverReport[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [immune, setImmune] = useState<ImmuneSignature[]>([]);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -90,6 +93,21 @@ export default function AutonomicPanel() {
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  const refreshSlow = useCallback(async () => {
+    try {
+      const result = await fetchImmune();
+      setImmune(result.signatures);
+    } catch (e: any) {
+      flash("Error: " + e.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSlow();
+    const t = setInterval(refreshSlow, 30000);
+    return () => clearInterval(t);
+  }, [refreshSlow]);
 
   const handleApprove = async (id: string) => {
     setBusy(true);
@@ -277,6 +295,45 @@ export default function AutonomicPanel() {
                 </button>
               ))}
             </div>
+          </section>
+
+          {/* Immune signatures */}
+          <section>
+            <h2 className="font-bold text-sm mb-2">
+              🧬 Immune Signatures ({immune.length})
+            </h2>
+            {immune.length === 0 ? (
+              <div className="opacity-40">No signatures loaded</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[10px]">
+                  <thead>
+                    <tr className="text-slate-400 border-b border-slate-800">
+                      <th className="text-left py-1 pr-2">id</th>
+                      <th className="text-left py-1 pr-2">severity</th>
+                      <th className="text-left py-1 pr-2">fix_lever</th>
+                      <th className="text-right py-1 pr-2">observed</th>
+                      <th className="text-right py-1">success</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {immune.map((s) => (
+                      <tr key={s.id} className="border-b border-slate-800/50">
+                        <td className="py-1 pr-2 font-mono text-violet-400">{s.id}</td>
+                        <td className="py-1 pr-2">{s.severity}</td>
+                        <td className="py-1 pr-2 text-sky-400">{s.fix_lever}</td>
+                        <td className="py-1 pr-2 text-right">{s.observed_count}</td>
+                        <td className="py-1 text-right">
+                          {s.success_rate !== null
+                            ? `${Math.round(s.success_rate * 100)}%`
+                            : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </section>
         </div>
 
