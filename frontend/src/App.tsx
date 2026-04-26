@@ -8,12 +8,13 @@ import NoteViewer from "./components/NoteViewer";
 import ProjectsPanel from "./components/ProjectsPanel";
 import SessionsPanel from "./components/SessionsPanel";
 import IntelligencePanel from "./components/IntelligencePanel";
+import AutonomicPanel from "./components/AutonomicPanel";
 import UsagePage from "./components/UsagePage";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusBar from "./components/StatusBar";
 import { fetchStatus, newSession, StatusPayload } from "./api";
 
-type Tab = "chat" | "goals" | "knowledge" | "graph" | "sessions" | "intelligence" | "usage" | "projects" | "finetune" | "settings";
+type Tab = "chat" | "goals" | "knowledge" | "graph" | "sessions" | "intelligence" | "autonomic" | "usage" | "projects" | "finetune" | "settings";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "chat", label: "Chat", icon: "💬" },
@@ -22,6 +23,7 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "knowledge", label: "Knowledge", icon: "📚" },
   { id: "graph", label: "Graph", icon: "🔗" },
   { id: "intelligence", label: "Intelligence", icon: "🧠" },
+  { id: "autonomic", label: "Autonomic", icon: "🦾" },
   { id: "usage", label: "Usage", icon: "📈" },
   { id: "projects", label: "Projects", icon: "📁" },
   { id: "finetune", label: "Fine-Tune", icon: "🎓" },
@@ -84,6 +86,7 @@ export default function App() {
         {tab === "knowledge" && <KnowledgePanel onSelectTopic={setSelectedTopic} />}
         {tab === "graph" && <GraphViewer />}
         {tab === "intelligence" && <IntelligencePanel />}
+        {tab === "autonomic" && <AutonomicPanel />}
         {tab === "usage" && <UsagePage />}
         {tab === "projects" && <ProjectsPanel onRefresh={refresh} />}
         {tab === "finetune" && <FinetunePanel />}
