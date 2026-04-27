@@ -830,6 +830,11 @@ class CodexLLM(BaseLLM):
         self, system: str, input_items: list[dict], tools: list[dict] | None,
         max_tokens: int | None, temperature: float | None,
     ) -> dict:
+        # ChatGPT-subscription tier (chatgpt.com/backend-api/codex) rejects
+        # `max_output_tokens` ("Unsupported parameter") and likely `temperature`.
+        # We accept the args to keep BaseLLM.complete() signature-compatible
+        # but drop them — the server applies its own defaults per model.
+        _ = max_tokens, temperature
         payload: dict = {
             "model": self.model,
             "instructions": system,
@@ -840,12 +845,6 @@ class CodexLLM(BaseLLM):
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
             payload["parallel_tool_calls"] = True
-        # Codex/ChatGPT models reject max_output_tokens / temperature on some tiers,
-        # so only set them if explicitly requested. Defaults remain server-side.
-        if max_tokens:
-            payload["max_output_tokens"] = max_tokens
-        if temperature is not None:
-            payload["temperature"] = temperature
         return payload
 
     def complete(self, system, user, *, max_tokens=None, temperature=None,
