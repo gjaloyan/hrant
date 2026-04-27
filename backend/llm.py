@@ -946,6 +946,188 @@ class CodexLLM(BaseLLM):
         return final_text or "[max tool-use iterations reached]"
 
 
+class CohereLLM(BaseLLM):
+    """Cohere v2 Chat API (`POST /v2/chat`).
+
+    Differs from OpenAICompatibleLLM:
+      - Endpoint is `/v2/chat`, not `/chat/completions`.
+      - Response shape: `message.content` is an array of `{type, text}`
+        blocks, not a single string under `choices[0].message.content`.
+      - Tool calls live on `message.tool_calls` (mostly OpenAI-shaped).
+      - Tool results re-enter as `{role: "tool", tool_call_id, content}`,
+        same as OpenAI tool-use loop.
+      - Usage is reported under `usage.tokens` (not `usage.prompt_tokens`).
+    """
+
+    DEFAULT_BASE_URL = "https://api.cohere.com/v2"
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.model = cfg["model"]
+        self.api_key = cfg.get("api_key") or os.getenv(cfg.get("api_key_env", "COHERE_API_KEY"), "")
+        if not self.api_key:
+            raise LLMError(f"No API key for Cohere (model={self.model})")
+        base = (cfg.get("base_url") or self.DEFAULT_BASE_URL).rstrip("/")
+        self.url = f"{base}/chat"
+        self.default_max = cfg.get("max_tokens", 2000)
+        self.default_temp = cfg.get("temperature", 0.3)
+        self.provider_name = cfg.get("provider_name", "cohere")
+
+    def _post(self, payload: dict, *, _max_retries: int = 3) -> dict:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        RETRYABLE = {429, 500, 502, 503, 529}
+        last_error: Exception | None = None
+        for attempt in range(_max_retries + 1):
+            try:
+                r = httpx.post(self.url, json=payload, headers=headers, timeout=120.0)
+                r.raise_for_status()
+                return r.json()
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                if e.response.status_code in RETRYABLE and attempt < _max_retries:
+                    time.sleep(min(2 ** attempt * 2, 60.0))
+                    continue
+                body = e.response.text[:500]
+                raise LLMError(
+                    f"Cohere API {e.response.status_code} ({self.provider_name}/{self.model}): {body}"
+                ) from e
+            except (httpx.HTTPError, httpx.TimeoutException) as e:
+                last_error = e
+                if attempt < _max_retries:
+                    time.sleep(min(2 ** attempt * 2, 60.0))
+                    continue
+                raise LLMError(f"Cohere API error after {_max_retries} retries: {e}") from e
+        raise LLMError(f"Cohere API failed: {last_error}")
+
+    @staticmethod
+    def _extract_text(message: dict) -> str:
+        content = message.get("content") or []
+        chunks = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+                chunks.append(c["text"])
+        return "".join(chunks)
+
+    def _record_usage(self, data: dict, _task_type: str, prompt_preview: str, duration_ms: int) -> None:
+        usage = ((data.get("usage") or {}).get("tokens") or {})
+        if not usage:
+            return
+        TOKENS.record(
+            task_type=_task_type,
+            model=self.model,
+            provider=self.provider_name,
+            usage={
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+            },
+            duration_ms=duration_ms,
+            prompt_preview=prompt_preview,
+        )
+
+    def complete(self, system, user, *, max_tokens=None, temperature=None,
+                 _task_type: str = ""):
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "max_tokens": max_tokens or self.default_max,
+            "temperature": temperature if temperature is not None else self.default_temp,
+            "stream": False,
+        }
+        t0 = time.time()
+        data = self._post(payload)
+        duration_ms = int((time.time() - t0) * 1000)
+        self._record_usage(data, _task_type, user[:300], duration_ms)
+        text = self._extract_text(data.get("message") or {})
+        if not text:
+            raise LLMError(f"Cohere returned no text: {str(data)[:300]}")
+        return text
+
+    def complete_with_tools(
+        self, system, user, tools, execute_tool,
+        *, max_tokens=None, temperature=None,
+        max_iterations=6, on_tool_call=None, _task_type: str = "",
+    ) -> str:
+        # Cohere v2 accepts OpenAI-style {type:"function", function:{...}} tools.
+        coh_tools: list[dict] = []
+        for t in tools or []:
+            if t.get("type") == "function" and isinstance(t.get("function"), dict):
+                coh_tools.append(t)
+            else:
+                coh_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema") or t.get("parameters") or {},
+                    },
+                })
+
+        messages: list[dict] = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
+        final_text = ""
+        for _iter in range(max_iterations):
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": max_tokens or self.default_max,
+                "temperature": temperature if temperature is not None else self.default_temp,
+                "stream": False,
+            }
+            if coh_tools:
+                payload["tools"] = coh_tools
+                payload["tool_choice"] = "auto"
+            t0 = time.time()
+            data = self._post(payload)
+            duration_ms = int((time.time() - t0) * 1000)
+            self._record_usage(
+                data,
+                f"{_task_type}:tool_iter_{_iter}",
+                user[:300] if _iter == 0 else f"(tool iteration {_iter})",
+                duration_ms,
+            )
+            msg = data.get("message") or {}
+            text_now = self._extract_text(msg)
+            if text_now:
+                final_text = text_now
+            tool_calls = msg.get("tool_calls") or []
+            if not tool_calls:
+                return final_text
+            # Append assistant message + tool results, loop.
+            messages.append({
+                "role": "assistant",
+                "tool_plan": msg.get("tool_plan", ""),
+                "tool_calls": tool_calls,
+            })
+            for tc in tool_calls:
+                fn = tc.get("function", {}) or {}
+                name = fn.get("name", "")
+                try:
+                    args = json.loads(fn.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                result_text, is_error = execute_tool(name, args)
+                if on_tool_call:
+                    try:
+                        on_tool_call(name, args, result_text, is_error)
+                    except Exception:
+                        pass
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "content": [{"type": "text", "text": result_text}],
+                })
+        return final_text or "[max tool-use iterations reached]"
+
+
 def _consume_responses_sse(line_iter) -> tuple[str, list[dict], dict]:
     """Aggregate an SSE stream from the Responses API.
 
@@ -1145,6 +1327,11 @@ def create_llm(cfg: dict) -> BaseLLM:
         cfg_copy.setdefault("provider_name", "openai_codex")
         cfg_copy.setdefault("base_url", "https://chatgpt.com/backend-api/codex")
         return CodexLLM(cfg_copy)
+    elif provider == "cohere":
+        cfg_copy = dict(cfg)
+        cfg_copy.setdefault("provider_name", "cohere")
+        cfg_copy.setdefault("base_url", "https://api.cohere.com/v2")
+        return CohereLLM(cfg_copy)
     elif provider in (
         # OpenAI-compatible providers — same wire format, only base_url differs.
         "openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter",

@@ -1301,6 +1301,23 @@ async def test_provider(provider_id: str):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    elif ptype == "cohere":
+        if not api_key:
+            return {"ok": False, "error": "No API key"}
+        try:
+            r = httpx.get(
+                "https://api.cohere.com/v1/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=15.0,
+            )
+            if r.status_code == 200:
+                data = r.json()
+                models = [m.get("name", "") for m in data.get("models", [])[:10]]
+                return {"ok": True, "models": models, "message": f"Connected, {len(data.get('models', []))} models"}
+            return {"ok": False, "error": f"HTTP {r.status_code}: {r.text[:200]}"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
     elif ptype == "openai_codex":
         try:
             access, _account = CODEX_AUTH.get_access_token()

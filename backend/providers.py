@@ -107,6 +107,11 @@ KNOWN_PRICING: dict[str, dict[str, float]] = {
     "moonshot-v1-128k": {"input": 8.30, "output": 8.30},
     "kimi-k2-instruct": {"input": 0.55, "output": 2.20},
     # OpenRouter — billed at the upstream model rate; use defaults via fallback.
+    # Cohere
+    "command-a-03-2025": {"input": 2.50, "output": 10.0},
+    "command-r-plus": {"input": 2.50, "output": 10.0},
+    "command-r": {"input": 0.15, "output": 0.60},
+    "command-r7b": {"input": 0.0375, "output": 0.15},
 }
 
 DEFAULT_PRICING = {"input": 3.0, "output": 15.0}
@@ -233,6 +238,11 @@ PROVIDER_CONNECT_INFO: dict[str, dict] = {
         "key_instructions": "No API key needed.\n1. Run vLLM with `vllm serve <model> --port 8000`\n2. Default URL: http://localhost:8000/v1\n3. Set the model to the served name",
         "docs_url": "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
         "extra_fields": ["base_url"],
+    },
+    "cohere": {
+        "key_url": "https://dashboard.cohere.com/api-keys",
+        "key_instructions": "1. Open Cohere dashboard (link above)\n2. Create a Production or Trial API key\n3. Paste below",
+        "docs_url": "https://docs.cohere.com/v2/docs/chat-api",
     },
 }
 
@@ -439,6 +449,14 @@ PROVIDER_TYPES = {
         "models": [],
         "supports_tools": True,
         "auth_types": ["none"],
+    },
+    "cohere": {
+        "label": "Cohere",
+        "base_url": "https://api.cohere.com/v2",
+        "key_env_default": "COHERE_API_KEY",
+        "models": ["command-a-03-2025", "command-r-plus", "command-r", "command-r7b"],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
     },
 }
 
