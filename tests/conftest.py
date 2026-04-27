@@ -7,6 +7,23 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+@pytest.fixture(autouse=True)
+def _isolate_active_model(monkeypatch):
+    """Don't let the user's runtime active-model selection leak into tests.
+
+    Without this, `DualModelRouter._get_active_llm()` would read
+    knowledge/active_model.json (gitignored, written by the Settings UI)
+    and route through that real provider, bypassing whatever fakes a test
+    has installed. monkeypatch reverts the in-memory dict after the test
+    so we never touch the file on disk.
+    """
+    try:
+        from backend.providers import ACTIVE_MODEL
+    except ImportError:
+        return
+    monkeypatch.setattr(ACTIVE_MODEL, "_data", {}, raising=False)
+
+
 @pytest.fixture
 def tmp_kb(tmp_path, monkeypatch):
     """Изолированная база знаний во временной папке."""
