@@ -4,11 +4,12 @@ Stores provider configurations in knowledge/providers.json.
 Each provider has: id, type, name, api_key, base_url, models, enabled, etc.
 
 Supported provider types:
-  - anthropic  (Claude)
-  - openai     (GPT-4, GPT-4o, o1, etc.)
+  - anthropic       (Claude)
+  - openai          (GPT-4, GPT-4o, o1, etc. — API key only)
+  - openai_codex    (ChatGPT subscription via ~/.codex/auth.json)
   - openai_compatible  (Groq, Together, OpenRouter, DeepSeek, Mistral, etc.)
-  - google     (Gemini)
-  - ollama     (local models)
+  - google          (Gemini)
+  - ollama          (local models)
 """
 from __future__ import annotations
 
@@ -89,6 +90,10 @@ DEFAULT_PRICING = {"input": 3.0, "output": 15.0}
 AUTH_TYPES = {
     "api_key": {"label": "API Key", "description": "Paste your API key"},
     "oauth": {"label": "OAuth 2.0", "description": "Browser-based authorization"},
+    "codex_subscription": {
+        "label": "Codex Subscription",
+        "description": "Reuse existing ChatGPT login from `codex login` (~/.codex/auth.json)",
+    },
     "none": {"label": "No Auth", "description": "No authentication needed"},
 }
 
@@ -103,6 +108,15 @@ PROVIDER_CONNECT_INFO: dict[str, dict] = {
         "key_url": "https://platform.openai.com/api-keys",
         "key_instructions": "1. Open link above\n2. Click 'Create new secret key'\n3. Copy the key (starts with sk-)\n4. Paste below",
         "docs_url": "https://platform.openai.com/docs/quickstart",
+    },
+    "openai_codex": {
+        "key_url": "",
+        "key_instructions": (
+            "1. Install Codex CLI: https://github.com/openai/codex\n"
+            "2. Run `codex login` and complete the browser sign-in with your ChatGPT Plus/Pro account\n"
+            "3. Click 'Use this account' below — we read the existing token from ~/.codex/auth.json"
+        ),
+        "docs_url": "https://github.com/openai/codex",
     },
     "google": {
         "key_url": "https://aistudio.google.com/apikey",
@@ -144,21 +158,10 @@ PROVIDER_CONNECT_INFO: dict[str, dict] = {
     },
 }
 
-# OAuth presets for providers that support browser-based auth
+# OAuth presets for providers that support browser-based auth.
+# Note: OpenAI Codex / ChatGPT OAuth lives in its own provider type
+# (`openai_codex` with auth_type=codex_subscription) — see CodexAuthManager.
 OAUTH_PRESETS: dict[str, dict] = {
-    "openai": {
-        "authorize_url": "https://auth.openai.com/oauth/authorize",
-        "token_url": "https://auth.openai.com/oauth/token",
-        "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
-        "redirect_uri": "http://localhost:1455/auth/callback",
-        "scope": "openid profile email offline_access",
-        "grant_type": "authorization_code",
-        "pkce": True,
-        "extra_params": {
-            "id_token_add_organizations": "true",
-            "codex_cli_simplified_flow": "true",
-        },
-    },
     "google": {
         "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
         "token_url": "https://oauth2.googleapis.com/token",
@@ -187,12 +190,22 @@ PROVIDER_TYPES = {
         "auth_types": ["api_key"],
     },
     "openai": {
-        "label": "OpenAI",
+        "label": "OpenAI (API key)",
         "base_url": "https://api.openai.com/v1",
         "key_env_default": "OPENAI_API_KEY",
         "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini", "o3", "o3-mini", "o4-mini"],
         "supports_tools": True,
-        "auth_types": ["api_key", "oauth"],
+        "auth_types": ["api_key"],
+    },
+    "openai_codex": {
+        "label": "OpenAI Codex (ChatGPT subscription)",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "key_env_default": "",
+        # Default static list. Real list is per-account and lives in
+        # ~/.codex/models_cache.json (read by /api/providers/codex/status).
+        "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"],
+        "supports_tools": True,
+        "auth_types": ["codex_subscription"],
     },
     "google": {
         "label": "Google (Gemini)",
@@ -315,6 +328,11 @@ def save_provider(provider: dict) -> dict:
     provider.setdefault("created", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     provider["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Drop nullish oauth so reads downstream can rely on `p.get("oauth") or {}`
+    # without contaminating the JSON file with explicit nulls.
+    if provider.get("oauth") is None:
+        provider.pop("oauth", None)
+
     if existing is not None:
         providers[existing] = provider
     else:
@@ -356,6 +374,8 @@ def resolve_auth_header(provider: dict) -> dict[str, str]:
 
     For api_key: returns Bearer or x-api-key header.
     For oauth: fetches/refreshes token and returns Bearer header.
+    For codex_subscription: reads ~/.codex/auth.json, refreshes if needed,
+      returns Bearer + ChatGPT-Account-ID headers.
     For none: returns empty dict.
     """
     auth_type = provider.get("auth_type", "api_key")
@@ -369,6 +389,17 @@ def resolve_auth_header(provider: dict) -> dict[str, str]:
             return {"Authorization": f"Bearer {token}"}
         log.warning("No valid OAuth token for provider %s", provider["id"])
         return {}
+
+    if auth_type == "codex_subscription":
+        try:
+            access, account_id = CODEX_AUTH.get_access_token()
+        except RuntimeError as e:
+            log.warning("Codex auth failed for provider %s: %s", provider.get("id"), e)
+            return {}
+        headers = {"Authorization": f"Bearer {access}"}
+        if account_id:
+            headers["ChatGPT-Account-ID"] = account_id
+        return headers
 
     # Default: api_key
     key = get_api_key(provider)
@@ -460,7 +491,7 @@ class OAuthTokenManager:
         if not provider:
             return None
 
-        oauth = provider.get("oauth", {})
+        oauth = provider.get("oauth") or {}
         token_url = oauth.get("token_url") or oauth_cfg.get("token_url", "")
         client_id = oauth.get("client_id", "")
         client_secret = oauth.get("client_secret", "")
@@ -503,7 +534,7 @@ class OAuthTokenManager:
         if not provider:
             return {"ok": False, "error": "Provider not found"}
 
-        oauth = provider.get("oauth", {})
+        oauth = provider.get("oauth") or {}
         token_url = oauth.get("token_url", "")
         client_id = oauth.get("client_id", "")
         client_secret = oauth.get("client_secret", "")
@@ -539,7 +570,7 @@ class OAuthTokenManager:
         if not provider:
             return {"ok": False, "error": "Provider not found"}
 
-        oauth = provider.get("oauth", {})
+        oauth = provider.get("oauth") or {}
         token_url = oauth.get("token_url", "")
         client_id = oauth.get("client_id", "")
         client_secret = oauth.get("client_secret", "")
@@ -614,6 +645,260 @@ class OAuthTokenManager:
 
 
 OAUTH_TOKENS = OAuthTokenManager()
+
+
+# ---------- Codex (ChatGPT subscription) auth ----------
+#
+# Reuses the OAuth tokens already produced by `codex login` (Codex CLI),
+# stored at ~/.codex/auth.json. We read access_token + account_id, refresh
+# via the same endpoint Codex uses (POST https://auth.openai.com/oauth/token
+# with JSON body), and write the refreshed tokens back to the same file
+# atomically so Codex CLI keeps working.
+#
+# References (verified from openai/codex source):
+#   codex-rs/login/src/auth/manager.rs       (refresh flow + CLIENT_ID)
+#   codex-rs/login/src/token_data.rs         (auth.json schema)
+#   codex-rs/model-provider/src/bearer_auth_provider.rs (header names)
+
+CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
+CODEX_MODELS_CACHE_FILE = Path.home() / ".codex" / "models_cache.json"
+CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
+
+
+def _decode_jwt_payload(jwt: str) -> dict:
+    """Decode the unsigned payload of a JWT. We only read claims; we don't verify."""
+    try:
+        parts = jwt.split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        # base64url, pad as needed
+        pad = "=" * (-len(payload) % 4)
+        raw = base64.urlsafe_b64decode(payload + pad)
+        return json.loads(raw.decode("utf-8"))
+    except Exception:
+        return {}
+
+
+class CodexAuthManager:
+    """Reads/refreshes ChatGPT OAuth tokens from ~/.codex/auth.json.
+
+    Thread-safe. Refreshes when the JWT exp claim is within REFRESH_BUFFER_SECONDS
+    of now. Writes refreshed tokens atomically (temp file + rename) so a parallel
+    Codex CLI run can also read them safely.
+    """
+
+    REFRESH_BUFFER_SECONDS = 60
+
+    def __init__(self, path: Path = CODEX_AUTH_FILE):
+        self.path = path
+        self._lock = threading.Lock()
+
+    # ----- read -----
+
+    def _read_raw(self) -> Optional[dict]:
+        if not self.path.exists():
+            return None
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("Failed to read %s: %s", self.path, e)
+            return None
+
+    def status(self) -> dict:
+        """Return display-only status: logged_in, email, plan_type, expires_at.
+
+        Personal info (email, plan, account) comes from id_token claims.
+        Expiry comes from access_token claims because the refresh endpoint
+        rotates access_token but not id_token — using id_token.exp would
+        forever report 'expired' even right after a successful refresh.
+        """
+        raw = self._read_raw()
+        if not raw:
+            return {"logged_in": False, "reason": "no_auth_file"}
+        if raw.get("auth_mode") != "chatgpt":
+            return {
+                "logged_in": False,
+                "reason": "wrong_auth_mode",
+                "auth_mode": raw.get("auth_mode"),
+            }
+        tokens = raw.get("tokens") or {}
+        access = tokens.get("access_token") or ""
+        if not access:
+            return {"logged_in": False, "reason": "no_access_token"}
+        id_claims = _decode_jwt_payload(tokens.get("id_token") or "")
+        access_claims = _decode_jwt_payload(access)
+        oai_auth = id_claims.get("https://api.openai.com/auth", {}) or {}
+        oai_profile = id_claims.get("https://api.openai.com/profile", {}) or {}
+        exp = access_claims.get("exp") or id_claims.get("exp", 0)
+        return {
+            "logged_in": True,
+            "email": id_claims.get("email") or oai_profile.get("email") or "",
+            "plan_type": oai_auth.get("chatgpt_plan_type") or "",
+            "account_id": tokens.get("account_id")
+            or oai_auth.get("chatgpt_account_id")
+            or "",
+            "expires_at": (
+                datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M:%S") if exp else ""
+            ),
+            "expires_in_seconds": max(0, int(exp - time.time())) if exp else 0,
+            "expired": bool(exp) and time.time() >= exp,
+            "auth_provider": id_claims.get("auth_provider") or "",
+            "last_refresh": raw.get("last_refresh") or "",
+        }
+
+    # ----- access token (with refresh) -----
+
+    def get_access_token(self) -> tuple[str, str]:
+        """Return (access_token, account_id), refreshing if expired.
+
+        Raises RuntimeError if not logged in or refresh fails.
+        """
+        with self._lock:
+            raw = self._read_raw()
+            if not raw or raw.get("auth_mode") != "chatgpt":
+                raise RuntimeError(
+                    "Codex not logged in — run `codex login` to create ~/.codex/auth.json"
+                )
+            tokens = raw.get("tokens") or {}
+            access = tokens.get("access_token") or ""
+            refresh = tokens.get("refresh_token") or ""
+            account_id = tokens.get("account_id") or ""
+            if not access:
+                raise RuntimeError("Codex auth.json has no access_token")
+
+            # Check expiry from JWT claim
+            exp = _decode_jwt_payload(access).get("exp", 0) or _decode_jwt_payload(
+                tokens.get("id_token") or ""
+            ).get("exp", 0)
+            if exp and time.time() < exp - self.REFRESH_BUFFER_SECONDS:
+                return access, account_id
+
+            # Need refresh
+            if not refresh:
+                raise RuntimeError(
+                    "Codex token expired and no refresh_token — run `codex login` again"
+                )
+            new_tokens = self._refresh(refresh)
+            tokens["access_token"] = new_tokens.get("access_token") or access
+            if new_tokens.get("id_token"):
+                tokens["id_token"] = new_tokens["id_token"]
+            if new_tokens.get("refresh_token"):
+                tokens["refresh_token"] = new_tokens["refresh_token"]
+            raw["tokens"] = tokens
+            raw["last_refresh"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            self._write_atomic(raw)
+            return tokens["access_token"], account_id
+
+    def _refresh(self, refresh_token: str) -> dict:
+        """POST refresh request — JSON body, exactly like Codex CLI does."""
+        try:
+            r = httpx.post(
+                CODEX_OAUTH_TOKEN_URL,
+                json={
+                    "client_id": CODEX_OAUTH_CLIENT_ID,
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=30.0,
+            )
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"Codex token refresh transport error: {e}") from e
+        if r.status_code >= 400:
+            raise RuntimeError(
+                f"Codex token refresh failed ({r.status_code}): {r.text[:200]}"
+            )
+        try:
+            return r.json()
+        except Exception as e:
+            raise RuntimeError(f"Codex token refresh returned non-JSON: {e}") from e
+
+    def _write_atomic(self, raw: dict) -> None:
+        """Atomic write: temp file in same dir + os.replace."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        os.replace(tmp, self.path)
+
+    # ----- model list (per-account, lives next to auth.json) -----
+
+    def models(
+        self,
+        cache_path: Path = CODEX_MODELS_CACHE_FILE,
+        *,
+        fallback: list[str] | None = None,
+    ) -> dict:
+        """Return per-account models the Codex CLI has cached.
+
+        Returns a dict shaped:
+          {
+            "ok": True/False,
+            "models": [{slug, display_name, description, default_reasoning_level,
+                        supported_in_api, visibility}, ...],
+            "fetched_at": "<iso>",
+            "client_version": "<codex cli version>",
+            "source": "cache_file" | "fallback",
+            "reason": "<error when ok=False>",
+          }
+
+        We don't fetch from the network — the Codex CLI manages this file,
+        and re-fetching would require knowing the right backend endpoint and
+        sending the same Codex-internal headers. Stale-by-a-few-hours is fine.
+        """
+        if not cache_path.exists():
+            return {
+                "ok": False,
+                "reason": "no_cache_file",
+                "models": [
+                    {"slug": s, "display_name": s, "supported_in_api": True}
+                    for s in (fallback or [])
+                ],
+                "source": "fallback",
+            }
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {
+                "ok": False,
+                "reason": f"parse_error: {e}",
+                "models": [
+                    {"slug": s, "display_name": s, "supported_in_api": True}
+                    for s in (fallback or [])
+                ],
+                "source": "fallback",
+            }
+        models: list[dict] = []
+        for m in raw.get("models") or []:
+            if not isinstance(m, dict):
+                continue
+            slug = m.get("slug") or ""
+            if not slug:
+                continue
+            # Skip hidden/internal models (e.g. "codex-auto-review" with visibility=hide)
+            if m.get("visibility") not in (None, "list", "default"):
+                continue
+            if m.get("supported_in_api") is False:
+                continue
+            models.append({
+                "slug": slug,
+                "display_name": m.get("display_name") or slug,
+                "description": m.get("description") or "",
+                "default_reasoning_level": m.get("default_reasoning_level") or "",
+                "supported_in_api": bool(m.get("supported_in_api", True)),
+                "visibility": m.get("visibility") or "list",
+            })
+        return {
+            "ok": True,
+            "models": models,
+            "fetched_at": raw.get("fetched_at") or "",
+            "client_version": raw.get("client_version") or "",
+            "source": "cache_file",
+        }
+
+
+CODEX_AUTH = CodexAuthManager()
 
 
 # ---------- Active Model Selection ----------
@@ -716,7 +1001,7 @@ class ActiveModelManager:
         }
         # Pass OAuth config if needed
         if provider.get("auth_type") == "oauth":
-            cfg["oauth"] = provider.get("oauth", {})
+            cfg["oauth"] = provider.get("oauth") or {}
 
         return cfg
 

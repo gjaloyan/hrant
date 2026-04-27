@@ -51,6 +51,7 @@ from .providers import (
     OAUTH_PRESETS, OAUTH_TOKENS, PROVIDER_CONNECT_INFO,
     ACTIVE_MODEL, get_available_models,
     generate_pkce, _pkce_store,
+    CODEX_AUTH,
 )
 from .evaluator import EVALUATOR
 from .goals import GOALS
@@ -952,7 +953,7 @@ def list_providers():
             p["api_key_masked"] = "(env)" if get_api_key(p) else "(not set)"
         p.pop("api_key", None)
         # Mask OAuth secrets
-        oauth = p.get("oauth", {})
+        oauth = p.get("oauth") or {}
         if oauth.get("client_secret"):
             oauth["client_secret_masked"] = "••••" + oauth["client_secret"][-4:]
             del oauth["client_secret"]
@@ -977,6 +978,29 @@ def get_auth_types():
     return {"auth_types": AUTH_TYPES, "oauth_presets": OAUTH_PRESETS}
 
 
+@app.get("/api/providers/codex/status")
+def codex_subscription_status():
+    """Returns whether ~/.codex/auth.json has a valid ChatGPT login.
+
+    The frontend uses this to decide whether the 'OpenAI Codex' connect block
+    is ready or whether the user still needs to run `codex login`.
+    """
+    return CODEX_AUTH.status()
+
+
+@app.get("/api/providers/codex/models")
+def codex_subscription_models():
+    """Returns the per-account model list cached by Codex CLI.
+
+    Read from ~/.codex/models_cache.json — this is what the CLI itself uses
+    to populate its model picker, so it always reflects the user's actual
+    ChatGPT tier (Plus/Pro/Business/Enterprise) without us re-fetching.
+    Falls back to the static list in PROVIDER_TYPES if the cache is missing.
+    """
+    fallback = (PROVIDER_TYPES.get("openai_codex", {}) or {}).get("models", [])
+    return CODEX_AUTH.models(fallback=fallback)
+
+
 # ---- OAuth callback (must be before {provider_id} routes) ----
 @app.get("/api/providers/oauth/callback")
 async def oauth_callback(code: str = "", state: str = "", error: str = ""):
@@ -999,7 +1023,7 @@ async def oauth_callback(code: str = "", state: str = "", error: str = ""):
     if not p:
         raise HTTPException(404, "provider not found")
 
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     redirect_uri = oauth.get(
         "redirect_uri",
         f"http://localhost:{CONFIG.server['port']}/api/providers/oauth/callback",
@@ -1262,6 +1286,23 @@ async def test_provider(provider_id: str):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    elif ptype == "openai_codex":
+        try:
+            access, _account = CODEX_AUTH.get_access_token()
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        st = CODEX_AUTH.status()
+        if not st.get("logged_in"):
+            return {"ok": False, "error": st.get("reason", "not logged in")}
+        if not access:
+            return {"ok": False, "error": "no access token"}
+        models = p.get("models") or PROVIDER_TYPES.get("openai_codex", {}).get("models", [])
+        return {
+            "ok": True,
+            "models": models,
+            "message": f"Codex login OK ({st.get('email', '')}, plan={st.get('plan_type', '')})",
+        }
+
     return {"ok": False, "error": f"Unknown type: {ptype}"}
 
 
@@ -1302,7 +1343,7 @@ def oauth_authorize_url(provider_id: str):
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     authorize_url = oauth.get("authorize_url", "")
     client_id = oauth.get("client_id", "")
     scope = oauth.get("scope", "")
@@ -1403,7 +1444,7 @@ def _start_oauth_callback_listener(port: int, path: str, provider_id: str):
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
 
-            oauth = p.get("oauth", {})
+            oauth = p.get("oauth") or {}
             redir = oauth.get("redirect_uri", f"http://localhost:{port}{path}")
             pkce_verifier = _pkce_store.pop(state, None)
             result = OAUTH_TOKENS.exchange_code(pid, code, redir, pkce_verifier=pkce_verifier)
@@ -1477,7 +1518,7 @@ def oauth_exchange_url(provider_id: str, body: dict):
     if not p:
         raise HTTPException(404, "provider not found")
 
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     redirect_uri = oauth.get("redirect_uri",
         f"http://localhost:{CONFIG.server['port']}/api/providers/oauth/callback")
 
@@ -1500,7 +1541,7 @@ def oauth_manual_token(provider_id: str, body: ManualTokenRequest):
     if not p:
         raise HTTPException(404, "provider not found")
 
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     OAUTH_TOKENS._store_token(provider_id, {
         "access_token": body.access_token,
         "refresh_token": body.refresh_token,

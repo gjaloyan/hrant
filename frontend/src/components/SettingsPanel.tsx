@@ -38,6 +38,10 @@ import {
   fetchAuthTypes,
   fetchProviderConnectInfo,
   type ProviderConnectInfo,
+  fetchCodexStatus,
+  type CodexStatus,
+  fetchCodexModels,
+  type CodexModel,
   fetchActiveModel,
   setActiveModel,
   clearActiveModel,
@@ -94,6 +98,9 @@ export default function SettingsPanel() {
   const [oauthPasteUrl, setOauthPasteUrl] = useState("");
   const [oauthManualTok, setOauthManualTok] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
+  const [codexModelsSource, setCodexModelsSource] = useState<string>("");
 
   const flash = (text: string) => {
     setMsg(text);
@@ -166,6 +173,15 @@ export default function SettingsPanel() {
     try {
       const ci = await fetchProviderConnectInfo();
       if (ci.connect_info) setConnectInfo(ci.connect_info);
+    } catch { /* ignore */ }
+    try {
+      const cs = await fetchCodexStatus();
+      setCodexStatus(cs);
+    } catch { /* ignore */ }
+    try {
+      const cm = await fetchCodexModels();
+      setCodexModels(cm.models || []);
+      setCodexModelsSource(cm.source || "");
     } catch { /* ignore */ }
     try {
       const am = await fetchActiveModel();
@@ -577,7 +593,13 @@ export default function SettingsPanel() {
                                       : "bg-slate-800 text-slate-400 hover:bg-slate-700"
                                   }`}
                                 >
-                                  {at === "api_key" ? "API Key" : at === "oauth" ? "OAuth" : "No Auth"}
+                                  {at === "api_key"
+                                    ? "API Key"
+                                    : at === "oauth"
+                                    ? "OAuth"
+                                    : at === "codex_subscription"
+                                    ? "Codex Login"
+                                    : "No Auth"}
                                 </button>
                               ))}
                             </div>
@@ -767,6 +789,81 @@ export default function SettingsPanel() {
                           </div>
                         )}
 
+                        {/* Codex Subscription block — uses ~/.codex/auth.json */}
+                        {newProv.authMethod === "codex_subscription" && (
+                          <div className="space-y-2 bg-slate-800/50 rounded p-3">
+                            {codexStatus?.logged_in ? (
+                              <div className="space-y-1 text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
+                                  <span className="text-emerald-300 font-semibold">
+                                    Codex login detected
+                                  </span>
+                                </div>
+                                <div className="text-slate-300">
+                                  <span className="text-slate-500">email:</span> {codexStatus.email || "—"}
+                                </div>
+                                <div className="text-slate-300">
+                                  <span className="text-slate-500">plan:</span>{" "}
+                                  <span className="font-mono">{codexStatus.plan_type || "—"}</span>
+                                </div>
+                                <div className="text-slate-300">
+                                  <span className="text-slate-500">expires:</span>{" "}
+                                  {codexStatus.expires_at || "—"}
+                                  {codexStatus.expired ? (
+                                    <span className="ml-2 text-rose-400">(expired — will auto-refresh)</span>
+                                  ) : null}
+                                </div>
+                                <div className="text-[10px] text-slate-500 pt-1">
+                                  Auth file: <span className="font-mono">~/.codex/auth.json</span>. Token is read on each request and refreshed automatically.
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-2 text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                                  <span className="text-amber-300 font-semibold">
+                                    No Codex login found
+                                  </span>
+                                </div>
+                                <ol className="list-decimal ml-5 text-slate-400 space-y-0.5">
+                                  <li>Install Codex CLI: <a href="https://github.com/openai/codex" target="_blank" rel="noreferrer" className="text-sky-400 underline">github.com/openai/codex</a></li>
+                                  <li>Run <span className="font-mono bg-slate-900 px-1 rounded">codex login</span> and complete the browser sign-in</li>
+                                  <li>Click Refresh below</li>
+                                </ol>
+                                {codexStatus?.reason ? (
+                                  <div className="text-[10px] text-slate-500">
+                                    Reason: <span className="font-mono">{codexStatus.reason}</span>
+                                  </div>
+                                ) : null}
+                              </div>
+                            )}
+                            <button
+                              onClick={async () => {
+                                try {
+                                  const [cs, cm] = await Promise.all([
+                                    fetchCodexStatus(),
+                                    fetchCodexModels(),
+                                  ]);
+                                  setCodexStatus(cs);
+                                  setCodexModels(cm.models || []);
+                                  setCodexModelsSource(cm.source || "");
+                                  flash(
+                                    cs.logged_in
+                                      ? `Codex login OK — ${cm.models?.length ?? 0} model(s) loaded`
+                                      : "Still no Codex login",
+                                  );
+                                } catch (e: any) {
+                                  flash("Error: " + (e.message || String(e)));
+                                }
+                              }}
+                              className="bg-slate-700 hover:bg-slate-600 rounded px-2 py-1 text-[10px]"
+                            >
+                              Refresh
+                            </button>
+                          </div>
+                        )}
+
                         {needsBaseUrl && (
                           <div>
                             <label className="text-xs text-slate-400 block mb-1">Base URL</label>
@@ -782,26 +879,62 @@ export default function SettingsPanel() {
                           <label className="text-xs text-slate-400 block mb-1">Default Model</label>
                           <input
                             className="w-full bg-slate-800 rounded px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-sky-600"
-                            placeholder={ptype?.models?.[0] || "model-name"}
+                            placeholder={
+                              newProv.type === "openai_codex" && codexModels[0]
+                                ? codexModels[0].slug
+                                : ptype?.models?.[0] || "model-name"
+                            }
                             value={newProv.model}
                             onChange={(e) => setNewProv({ ...newProv, model: e.target.value })}
                           />
-                          {ptype?.models?.length > 0 && (
-                            <div className="flex gap-1 mt-1 flex-wrap">
-                              {ptype.models.map((m: string) => (
-                                <button
-                                  key={m}
-                                  onClick={() => setNewProv({ ...newProv, model: m })}
-                                  className={`text-[10px] rounded px-1.5 py-0.5 ${
-                                    newProv.model === m
-                                      ? "bg-sky-700 text-white"
-                                      : "bg-slate-700 hover:bg-slate-600"
-                                  }`}
-                                >
-                                  {m}
-                                </button>
-                              ))}
-                            </div>
+                          {newProv.type === "openai_codex" ? (
+                            codexModels.length > 0 ? (
+                              <>
+                                <div className="flex gap-1 mt-1 flex-wrap">
+                                  {codexModels.map((m) => (
+                                    <button
+                                      key={m.slug}
+                                      onClick={() => setNewProv({ ...newProv, model: m.slug })}
+                                      title={m.description || m.display_name}
+                                      className={`text-[10px] rounded px-1.5 py-0.5 ${
+                                        newProv.model === m.slug
+                                          ? "bg-sky-700 text-white"
+                                          : "bg-slate-700 hover:bg-slate-600"
+                                      }`}
+                                    >
+                                      {m.display_name}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div className="text-[10px] text-slate-500 mt-1">
+                                  {codexModelsSource === "cache_file"
+                                    ? `Loaded from ~/.codex/models_cache.json (${codexModels.length} models)`
+                                    : `Using fallback list (${codexModels.length} models) — run any \`codex\` command to populate ~/.codex/models_cache.json`}
+                                </div>
+                              </>
+                            ) : (
+                              <div className="text-[10px] text-amber-400 mt-1">
+                                No Codex models found — run <span className="font-mono">codex login</span>, then any <span className="font-mono">codex</span> command, then click Refresh below.
+                              </div>
+                            )
+                          ) : (
+                            ptype?.models?.length > 0 && (
+                              <div className="flex gap-1 mt-1 flex-wrap">
+                                {ptype.models.map((m: string) => (
+                                  <button
+                                    key={m}
+                                    onClick={() => setNewProv({ ...newProv, model: m })}
+                                    className={`text-[10px] rounded px-1.5 py-0.5 ${
+                                      newProv.model === m
+                                        ? "bg-sky-700 text-white"
+                                        : "bg-slate-700 hover:bg-slate-600"
+                                    }`}
+                                  >
+                                    {m}
+                                  </button>
+                                ))}
+                              </div>
+                            )
                           )}
                         </div>
                       </div>
