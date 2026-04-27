@@ -1145,7 +1145,11 @@ def create_llm(cfg: dict) -> BaseLLM:
         cfg_copy.setdefault("provider_name", "openai_codex")
         cfg_copy.setdefault("base_url", "https://chatgpt.com/backend-api/codex")
         return CodexLLM(cfg_copy)
-    elif provider in ("openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter"):
+    elif provider in (
+        # OpenAI-compatible providers — same wire format, only base_url differs.
+        "openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter",
+        "qwen", "xai", "perplexity", "moonshot", "minimax", "huggingface", "lmstudio", "vllm",
+    ):
         cfg_copy = dict(cfg)
         cfg_copy.setdefault("provider_name", provider)
         # Set default base_url for known providers
@@ -1156,6 +1160,14 @@ def create_llm(cfg: dict) -> BaseLLM:
             "mistral": "https://api.mistral.ai/v1",
             "together": "https://api.together.xyz/v1",
             "openrouter": "https://openrouter.ai/api/v1",
+            "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "xai": "https://api.x.ai/v1",
+            "perplexity": "https://api.perplexity.ai",
+            "moonshot": "https://api.moonshot.cn/v1",
+            "minimax": "https://api.minimaxi.chat/v1",
+            "huggingface": "https://api-inference.huggingface.co/v1",
+            "lmstudio": "http://localhost:1234/v1",
+            "vllm": "http://localhost:8000/v1",
         }
         if not cfg_copy.get("base_url") and provider in base_urls:
             cfg_copy["base_url"] = base_urls[provider]

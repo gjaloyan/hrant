@@ -1232,8 +1232,14 @@ async def test_provider(provider_id: str):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
-    elif ptype in ("openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter"):
-        if not api_key:
+    elif ptype in (
+        # All OpenAI-compatible providers reachable via Bearer + GET /models.
+        "openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter",
+        "qwen", "xai", "perplexity", "moonshot", "minimax", "huggingface", "lmstudio", "vllm",
+    ):
+        # Local servers (lmstudio, vllm) don't need a key.
+        needs_key = ptype not in ("lmstudio", "vllm")
+        if needs_key and not api_key:
             return {"ok": False, "error": "No API key"}
         base_urls = {
             "openai": "https://api.openai.com/v1",
@@ -1242,14 +1248,23 @@ async def test_provider(provider_id: str):
             "mistral": "https://api.mistral.ai/v1",
             "together": "https://api.together.xyz/v1",
             "openrouter": "https://openrouter.ai/api/v1",
+            "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "xai": "https://api.x.ai/v1",
+            "perplexity": "https://api.perplexity.ai",
+            "moonshot": "https://api.moonshot.cn/v1",
+            "minimax": "https://api.minimaxi.chat/v1",
+            "huggingface": "https://api-inference.huggingface.co/v1",
+            "lmstudio": "http://localhost:1234/v1",
+            "vllm": "http://localhost:8000/v1",
         }
         base = p.get("base_url") or base_urls.get(ptype, "")
         if not base:
             return {"ok": False, "error": "No base_url configured"}
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             r = httpx.get(
                 f"{base.rstrip('/')}/models",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 timeout=15.0,
             )
             if r.status_code == 200:

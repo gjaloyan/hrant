@@ -81,6 +81,32 @@ KNOWN_PRICING: dict[str, dict[str, float]] = {
     "mistral-small-latest": {"input": 0.20, "output": 0.60},
     # Together
     "meta-llama/Llama-3.3-70B-Instruct-Turbo": {"input": 0.88, "output": 0.88},
+    "deepseek-ai/DeepSeek-R1": {"input": 3.0, "output": 7.0},
+    "Qwen/Qwen2.5-72B-Instruct-Turbo": {"input": 1.20, "output": 1.20},
+    "mistralai/Mixtral-8x22B-Instruct-v0.1": {"input": 1.20, "output": 1.20},
+    # Qwen / DashScope
+    "qwen-max": {"input": 2.50, "output": 8.00},
+    "qwen-plus": {"input": 0.40, "output": 1.20},
+    "qwen-turbo": {"input": 0.10, "output": 0.40},
+    "qwen2.5-coder-32b-instruct": {"input": 0.50, "output": 1.50},
+    "qwen2.5-72b-instruct": {"input": 0.90, "output": 2.70},
+    # xAI
+    "grok-3": {"input": 3.0, "output": 15.0},
+    "grok-3-mini": {"input": 0.30, "output": 0.50},
+    "grok-3-fast": {"input": 5.0, "output": 25.0},
+    "grok-2-latest": {"input": 2.0, "output": 10.0},
+    "grok-2-1212": {"input": 2.0, "output": 10.0},
+    # Perplexity
+    "sonar": {"input": 1.0, "output": 1.0},
+    "sonar-pro": {"input": 3.0, "output": 15.0},
+    "sonar-reasoning": {"input": 1.0, "output": 5.0},
+    "sonar-reasoning-pro": {"input": 2.0, "output": 8.0},
+    # Moonshot (CNY converted to USD, approx)
+    "moonshot-v1-8k": {"input": 1.70, "output": 1.70},
+    "moonshot-v1-32k": {"input": 3.40, "output": 3.40},
+    "moonshot-v1-128k": {"input": 8.30, "output": 8.30},
+    "kimi-k2-instruct": {"input": 0.55, "output": 2.20},
+    # OpenRouter — billed at the upstream model rate; use defaults via fallback.
 }
 
 DEFAULT_PRICING = {"input": 3.0, "output": 15.0}
@@ -154,6 +180,58 @@ PROVIDER_CONNECT_INFO: dict[str, dict] = {
         "key_url": "",
         "key_instructions": "No API key needed. Make sure Ollama is running locally.\nDefault: http://localhost:11434",
         "docs_url": "https://ollama.com/download",
+        "extra_fields": ["base_url"],
+    },
+    "qwen": {
+        "key_url": "https://bailian.console.aliyun.com/?apiKey=1#/api-key",
+        "key_instructions": "1. Open Alibaba Cloud Bailian console (link above)\n2. Create an API key (starts with sk-)\n3. Paste below",
+        "docs_url": "https://help.aliyun.com/zh/dashscope/developer-reference/compatibility-of-openai-with-dashscope",
+    },
+    "xai": {
+        "key_url": "https://console.x.ai/",
+        "key_instructions": "1. Open xAI console (link above)\n2. Create an API key (starts with xai-)\n3. Paste below",
+        "docs_url": "https://docs.x.ai/",
+    },
+    "together": {
+        "key_url": "https://api.together.xyz/settings/api-keys",
+        "key_instructions": "1. Open Together API keys page (link above)\n2. Create a new key\n3. Paste below",
+        "docs_url": "https://docs.together.ai/docs/quickstart",
+    },
+    "openrouter": {
+        "key_url": "https://openrouter.ai/keys",
+        "key_instructions": "1. Open OpenRouter keys page (link above)\n2. Create a key (starts with sk-or-)\n3. Paste below",
+        "docs_url": "https://openrouter.ai/docs/quickstart",
+    },
+    "perplexity": {
+        "key_url": "https://www.perplexity.ai/settings/api",
+        "key_instructions": "1. Open Perplexity API settings (link above)\n2. Generate an API key (starts with pplx-)\n3. Paste below",
+        "docs_url": "https://docs.perplexity.ai/home",
+    },
+    "moonshot": {
+        "key_url": "https://platform.moonshot.cn/console/api-keys",
+        "key_instructions": "1. Open Moonshot console (link above)\n2. Create an API key (starts with sk-)\n3. Paste below",
+        "docs_url": "https://platform.moonshot.cn/docs",
+    },
+    "minimax": {
+        "key_url": "https://www.minimaxi.com/user-center/basic-information/interface-key",
+        "key_instructions": "1. Open MiniMax interface-key page (link above)\n2. Generate API key\n3. Paste below",
+        "docs_url": "https://www.minimaxi.com/document",
+    },
+    "huggingface": {
+        "key_url": "https://huggingface.co/settings/tokens",
+        "key_instructions": "1. Open HuggingFace tokens page (link above)\n2. Create an Access Token (starts with hf_)\n3. Paste below\n4. Set the model to a HF model id like `meta-llama/Meta-Llama-3.1-8B-Instruct`",
+        "docs_url": "https://huggingface.co/docs/inference-endpoints/index",
+    },
+    "lmstudio": {
+        "key_url": "",
+        "key_instructions": "No API key needed.\n1. Install LM Studio (https://lmstudio.ai/)\n2. Load a model and click 'Start Server'\n3. Default URL: http://localhost:1234/v1\n4. Set the model to whatever you loaded",
+        "docs_url": "https://lmstudio.ai/docs/local-server",
+        "extra_fields": ["base_url"],
+    },
+    "vllm": {
+        "key_url": "",
+        "key_instructions": "No API key needed.\n1. Run vLLM with `vllm serve <model> --port 8000`\n2. Default URL: http://localhost:8000/v1\n3. Set the model to the served name",
+        "docs_url": "https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html",
         "extra_fields": ["base_url"],
     },
 }
@@ -261,6 +339,105 @@ PROVIDER_TYPES = {
         "key_env_default": "",
         "models": [],
         "supports_tools": False,
+        "auth_types": ["none"],
+    },
+    # ---- OpenAI-compatible cloud providers (Bearer api_key + custom base_url) ----
+    "qwen": {
+        "label": "Qwen / DashScope (Alibaba)",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "key_env_default": "DASHSCOPE_API_KEY",
+        "models": ["qwen-max", "qwen-plus", "qwen-turbo", "qwen2.5-coder-32b-instruct", "qwen2.5-72b-instruct"],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    "xai": {
+        "label": "xAI (Grok)",
+        "base_url": "https://api.x.ai/v1",
+        "key_env_default": "XAI_API_KEY",
+        "models": ["grok-3", "grok-3-mini", "grok-3-fast", "grok-2-latest", "grok-2-1212"],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    "together": {
+        "label": "Together AI",
+        "base_url": "https://api.together.xyz/v1",
+        "key_env_default": "TOGETHER_API_KEY",
+        "models": [
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+            "deepseek-ai/DeepSeek-R1",
+            "Qwen/Qwen2.5-72B-Instruct-Turbo",
+            "mistralai/Mixtral-8x22B-Instruct-v0.1",
+        ],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    "openrouter": {
+        "label": "OpenRouter (multi-model gateway)",
+        "base_url": "https://openrouter.ai/api/v1",
+        "key_env_default": "OPENROUTER_API_KEY",
+        "models": [
+            "anthropic/claude-sonnet-4-5",
+            "openai/gpt-4o",
+            "meta-llama/llama-3.3-70b-instruct",
+            "deepseek/deepseek-r1",
+            "google/gemini-2.5-flash",
+        ],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    "perplexity": {
+        "label": "Perplexity (with web search)",
+        "base_url": "https://api.perplexity.ai",
+        "key_env_default": "PERPLEXITY_API_KEY",
+        "models": ["sonar", "sonar-pro", "sonar-reasoning", "sonar-reasoning-pro"],
+        "supports_tools": False,
+        "auth_types": ["api_key"],
+    },
+    "moonshot": {
+        "label": "Moonshot AI (Kimi)",
+        "base_url": "https://api.moonshot.cn/v1",
+        "key_env_default": "MOONSHOT_API_KEY",
+        "models": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k", "kimi-k2-instruct", "kimi-k1.5-32k"],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    "minimax": {
+        "label": "MiniMax",
+        "base_url": "https://api.minimaxi.chat/v1",
+        "key_env_default": "MINIMAX_API_KEY",
+        "models": ["abab6.5-chat", "abab6.5s-chat", "MiniMax-Text-01"],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    "huggingface": {
+        "label": "HuggingFace Inference",
+        "base_url": "https://api-inference.huggingface.co/v1",
+        "key_env_default": "HF_TOKEN",
+        # HF surfaces models per route; user typically pastes a model id
+        # like "meta-llama/Meta-Llama-3.1-8B-Instruct"
+        "models": [
+            "meta-llama/Meta-Llama-3.1-8B-Instruct",
+            "Qwen/Qwen2.5-72B-Instruct",
+            "mistralai/Mistral-7B-Instruct-v0.3",
+        ],
+        "supports_tools": True,
+        "auth_types": ["api_key"],
+    },
+    # ---- Local OpenAI-compatible servers (no auth) ----
+    "lmstudio": {
+        "label": "LM Studio (Local)",
+        "base_url": "http://localhost:1234/v1",
+        "key_env_default": "",
+        "models": [],  # user picks model loaded in LM Studio
+        "supports_tools": True,
+        "auth_types": ["none"],
+    },
+    "vllm": {
+        "label": "vLLM (Local OpenAI-compatible)",
+        "base_url": "http://localhost:8000/v1",
+        "key_env_default": "",
+        "models": [],
+        "supports_tools": True,
         "auth_types": ["none"],
     },
 }
