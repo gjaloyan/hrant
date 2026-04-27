@@ -258,6 +258,38 @@ Rules for this mode:
 - No markdown headers or bullet lists."""
 
 
+def _format_llm_error_short(exc: BaseException, *, max_len: int = 200) -> str:
+    """Compress an LLMError into a single-line user-facing message.
+
+    Surfacing the actual error in chat is much more useful than a generic
+    "API unavailable" fallback. We prefix with ⚠ so the UI clearly marks it
+    as an error message, not a normal answer.
+    """
+    msg = str(exc)
+    # Codex subscription quota — extract reset countdown
+    if "usage_limit_reached" in msg or "quota exhausted" in msg:
+        m = re.search(r'"resets_in_seconds"\s*:\s*(\d+)', msg)
+        if m:
+            sec = int(m.group(1))
+            h = sec // 3600
+            mi = (sec % 3600) // 60
+            return f"⚠ Codex (ChatGPT) quota exhausted. Resets in {h}h {mi}m."
+        return "⚠ Codex (ChatGPT) quota exhausted."
+    # Server error with explicit "detail" field (Codex style)
+    m = re.search(r'"detail"\s*:\s*"([^"]+)"', msg)
+    if m:
+        return f"⚠ {m.group(1)[:max_len]}"
+    # OpenAI / Anthropic style {"error":{"message":"..."}}
+    m = re.search(r'"message"\s*:\s*"([^"]+)"', msg)
+    if m:
+        return f"⚠ {m.group(1)[:max_len]}"
+    # Default: first line, trimmed
+    short = msg.split("\n")[0].strip()
+    if len(short) > max_len:
+        short = short[: max_len - 3] + "..."
+    return f"⚠ {short}"
+
+
 def _with_identity(base_system: str) -> str:
     """Склеивает identity preamble с конкретным system-промптом шага."""
     return f"{IDENTITY.preamble()}\n\n---\n\n{base_system}"
@@ -501,9 +533,10 @@ class Agent:
                 user,
                 max_tokens=300, temperature=0.6,
             )
-        except LLMError:
-            # API down — return a warm fallback instead of crashing on small-talk
-            return self._chat_fallback(task)
+        except LLMError as e:
+            # Surface the actual error short. Better than a generic fallback —
+            # the user can see whether it's quota / bad model / network / etc.
+            return _format_llm_error_short(e)
 
     @staticmethod
     def _chat_fallback(task: str) -> str:
@@ -1145,7 +1178,7 @@ class Agent:
             )
         except LLMError as e:
             return AgentAnswer(
-                answer=f"Ошибка LLM: {e}",
+                answer=_format_llm_error_short(e),
                 verification=VerificationResult(confidence=0),
                 token_usage=self._get_token_usage(),
                 thinking_trace=self._trace,

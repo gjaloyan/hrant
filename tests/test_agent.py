@@ -197,8 +197,11 @@ def test_agent_chat_fallback_when_api_down(tmp_kb):
 
     assert res.is_chat is True
     assert res.verification.confidence == 100
-    assert "недоступен" in res.answer or "Привет" in res.answer
-    # Should NOT be the generic "Ошибка LLM" error
+    # Chat path now surfaces the actual LLM error short instead of a hardcoded
+    # warm fallback — easier to debug what's wrong than to be reassured.
+    assert res.answer.startswith("⚠")
+    assert "529" in res.answer or "overloaded" in res.answer
+    # Should NOT be the old generic "Ошибка LLM" prefix
     assert "Ошибка LLM" not in res.answer
 
 
