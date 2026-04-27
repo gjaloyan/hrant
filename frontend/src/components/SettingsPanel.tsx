@@ -40,6 +40,8 @@ import {
   type ProviderConnectInfo,
   fetchCodexStatus,
   type CodexStatus,
+  fetchCodexModels,
+  type CodexModel,
   fetchActiveModel,
   setActiveModel,
   clearActiveModel,
@@ -97,6 +99,8 @@ export default function SettingsPanel() {
   const [oauthManualTok, setOauthManualTok] = useState("");
   const [oauthBusy, setOauthBusy] = useState(false);
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
+  const [codexModelsSource, setCodexModelsSource] = useState<string>("");
 
   const flash = (text: string) => {
     setMsg(text);
@@ -173,6 +177,11 @@ export default function SettingsPanel() {
     try {
       const cs = await fetchCodexStatus();
       setCodexStatus(cs);
+    } catch { /* ignore */ }
+    try {
+      const cm = await fetchCodexModels();
+      setCodexModels(cm.models || []);
+      setCodexModelsSource(cm.source || "");
     } catch { /* ignore */ }
     try {
       const am = await fetchActiveModel();
@@ -832,9 +841,18 @@ export default function SettingsPanel() {
                             <button
                               onClick={async () => {
                                 try {
-                                  const cs = await fetchCodexStatus();
+                                  const [cs, cm] = await Promise.all([
+                                    fetchCodexStatus(),
+                                    fetchCodexModels(),
+                                  ]);
                                   setCodexStatus(cs);
-                                  flash(cs.logged_in ? "Codex login OK" : "Still no Codex login");
+                                  setCodexModels(cm.models || []);
+                                  setCodexModelsSource(cm.source || "");
+                                  flash(
+                                    cs.logged_in
+                                      ? `Codex login OK — ${cm.models?.length ?? 0} model(s) loaded`
+                                      : "Still no Codex login",
+                                  );
                                 } catch (e: any) {
                                   flash("Error: " + (e.message || String(e)));
                                 }
@@ -861,26 +879,62 @@ export default function SettingsPanel() {
                           <label className="text-xs text-slate-400 block mb-1">Default Model</label>
                           <input
                             className="w-full bg-slate-800 rounded px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-sky-600"
-                            placeholder={ptype?.models?.[0] || "model-name"}
+                            placeholder={
+                              newProv.type === "openai_codex" && codexModels[0]
+                                ? codexModels[0].slug
+                                : ptype?.models?.[0] || "model-name"
+                            }
                             value={newProv.model}
                             onChange={(e) => setNewProv({ ...newProv, model: e.target.value })}
                           />
-                          {ptype?.models?.length > 0 && (
-                            <div className="flex gap-1 mt-1 flex-wrap">
-                              {ptype.models.map((m: string) => (
-                                <button
-                                  key={m}
-                                  onClick={() => setNewProv({ ...newProv, model: m })}
-                                  className={`text-[10px] rounded px-1.5 py-0.5 ${
-                                    newProv.model === m
-                                      ? "bg-sky-700 text-white"
-                                      : "bg-slate-700 hover:bg-slate-600"
-                                  }`}
-                                >
-                                  {m}
-                                </button>
-                              ))}
-                            </div>
+                          {newProv.type === "openai_codex" ? (
+                            codexModels.length > 0 ? (
+                              <>
+                                <div className="flex gap-1 mt-1 flex-wrap">
+                                  {codexModels.map((m) => (
+                                    <button
+                                      key={m.slug}
+                                      onClick={() => setNewProv({ ...newProv, model: m.slug })}
+                                      title={m.description || m.display_name}
+                                      className={`text-[10px] rounded px-1.5 py-0.5 ${
+                                        newProv.model === m.slug
+                                          ? "bg-sky-700 text-white"
+                                          : "bg-slate-700 hover:bg-slate-600"
+                                      }`}
+                                    >
+                                      {m.display_name}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div className="text-[10px] text-slate-500 mt-1">
+                                  {codexModelsSource === "cache_file"
+                                    ? `Loaded from ~/.codex/models_cache.json (${codexModels.length} models)`
+                                    : `Using fallback list (${codexModels.length} models) — run any \`codex\` command to populate ~/.codex/models_cache.json`}
+                                </div>
+                              </>
+                            ) : (
+                              <div className="text-[10px] text-amber-400 mt-1">
+                                No Codex models found — run <span className="font-mono">codex login</span>, then any <span className="font-mono">codex</span> command, then click Refresh below.
+                              </div>
+                            )
+                          ) : (
+                            ptype?.models?.length > 0 && (
+                              <div className="flex gap-1 mt-1 flex-wrap">
+                                {ptype.models.map((m: string) => (
+                                  <button
+                                    key={m}
+                                    onClick={() => setNewProv({ ...newProv, model: m })}
+                                    className={`text-[10px] rounded px-1.5 py-0.5 ${
+                                      newProv.model === m
+                                        ? "bg-sky-700 text-white"
+                                        : "bg-slate-700 hover:bg-slate-600"
+                                    }`}
+                                  >
+                                    {m}
+                                  </button>
+                                ))}
+                              </div>
+                            )
                           )}
                         </div>
                       </div>

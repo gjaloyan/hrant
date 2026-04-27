@@ -661,6 +661,7 @@ OAUTH_TOKENS = OAuthTokenManager()
 #   codex-rs/model-provider/src/bearer_auth_provider.rs (header names)
 
 CODEX_AUTH_FILE = Path.home() / ".codex" / "auth.json"
+CODEX_MODELS_CACHE_FILE = Path.home() / ".codex" / "models_cache.json"
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CODEX_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 
@@ -820,6 +821,81 @@ class CodexAuthManager:
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
         tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
         os.replace(tmp, self.path)
+
+    # ----- model list (per-account, lives next to auth.json) -----
+
+    def models(
+        self,
+        cache_path: Path = CODEX_MODELS_CACHE_FILE,
+        *,
+        fallback: list[str] | None = None,
+    ) -> dict:
+        """Return per-account models the Codex CLI has cached.
+
+        Returns a dict shaped:
+          {
+            "ok": True/False,
+            "models": [{slug, display_name, description, default_reasoning_level,
+                        supported_in_api, visibility}, ...],
+            "fetched_at": "<iso>",
+            "client_version": "<codex cli version>",
+            "source": "cache_file" | "fallback",
+            "reason": "<error when ok=False>",
+          }
+
+        We don't fetch from the network — the Codex CLI manages this file,
+        and re-fetching would require knowing the right backend endpoint and
+        sending the same Codex-internal headers. Stale-by-a-few-hours is fine.
+        """
+        if not cache_path.exists():
+            return {
+                "ok": False,
+                "reason": "no_cache_file",
+                "models": [
+                    {"slug": s, "display_name": s, "supported_in_api": True}
+                    for s in (fallback or [])
+                ],
+                "source": "fallback",
+            }
+        try:
+            raw = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {
+                "ok": False,
+                "reason": f"parse_error: {e}",
+                "models": [
+                    {"slug": s, "display_name": s, "supported_in_api": True}
+                    for s in (fallback or [])
+                ],
+                "source": "fallback",
+            }
+        models: list[dict] = []
+        for m in raw.get("models") or []:
+            if not isinstance(m, dict):
+                continue
+            slug = m.get("slug") or ""
+            if not slug:
+                continue
+            # Skip hidden/internal models (e.g. "codex-auto-review" with visibility=hide)
+            if m.get("visibility") not in (None, "list", "default"):
+                continue
+            if m.get("supported_in_api") is False:
+                continue
+            models.append({
+                "slug": slug,
+                "display_name": m.get("display_name") or slug,
+                "description": m.get("description") or "",
+                "default_reasoning_level": m.get("default_reasoning_level") or "",
+                "supported_in_api": bool(m.get("supported_in_api", True)),
+                "visibility": m.get("visibility") or "list",
+            })
+        return {
+            "ok": True,
+            "models": models,
+            "fetched_at": raw.get("fetched_at") or "",
+            "client_version": raw.get("client_version") or "",
+            "source": "cache_file",
+        }
 
 
 CODEX_AUTH = CodexAuthManager()

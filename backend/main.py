@@ -988,6 +988,19 @@ def codex_subscription_status():
     return CODEX_AUTH.status()
 
 
+@app.get("/api/providers/codex/models")
+def codex_subscription_models():
+    """Returns the per-account model list cached by Codex CLI.
+
+    Read from ~/.codex/models_cache.json — this is what the CLI itself uses
+    to populate its model picker, so it always reflects the user's actual
+    ChatGPT tier (Plus/Pro/Business/Enterprise) without us re-fetching.
+    Falls back to the static list in PROVIDER_TYPES if the cache is missing.
+    """
+    fallback = (PROVIDER_TYPES.get("openai_codex", {}) or {}).get("models", [])
+    return CODEX_AUTH.models(fallback=fallback)
+
+
 # ---- OAuth callback (must be before {provider_id} routes) ----
 @app.get("/api/providers/oauth/callback")
 async def oauth_callback(code: str = "", state: str = "", error: str = ""):

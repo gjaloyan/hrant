@@ -963,6 +963,27 @@ export type CodexStatus = {
 export const fetchCodexStatus = () =>
   json_get<CodexStatus>("/api/providers/codex/status");
 
+export type CodexModel = {
+  slug: string;
+  display_name: string;
+  description?: string;
+  default_reasoning_level?: string;
+  supported_in_api?: boolean;
+  visibility?: string;
+};
+
+export type CodexModelsResponse = {
+  ok: boolean;
+  reason?: string;
+  models: CodexModel[];
+  fetched_at?: string;
+  client_version?: string;
+  source?: "cache_file" | "fallback";
+};
+
+export const fetchCodexModels = () =>
+  json_get<CodexModelsResponse>("/api/providers/codex/models");
+
 
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {
