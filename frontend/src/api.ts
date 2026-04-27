@@ -947,6 +947,22 @@ export interface ProviderConnectInfo {
 export const fetchProviderConnectInfo = () =>
   json_get<{ connect_info: Record<string, ProviderConnectInfo> }>("/api/providers/connect-info");
 
+export type CodexStatus = {
+  logged_in: boolean;
+  reason?: string;
+  email?: string;
+  plan_type?: string;
+  account_id?: string;
+  expires_at?: string;
+  expires_in_seconds?: number;
+  expired?: boolean;
+  auth_provider?: string;
+  last_refresh?: string;
+};
+
+export const fetchCodexStatus = () =>
+  json_get<CodexStatus>("/api/providers/codex/status");
+
 
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {

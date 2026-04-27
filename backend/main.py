@@ -51,6 +51,7 @@ from .providers import (
     OAUTH_PRESETS, OAUTH_TOKENS, PROVIDER_CONNECT_INFO,
     ACTIVE_MODEL, get_available_models,
     generate_pkce, _pkce_store,
+    CODEX_AUTH,
 )
 from .evaluator import EVALUATOR
 from .goals import GOALS
@@ -977,6 +978,16 @@ def get_auth_types():
     return {"auth_types": AUTH_TYPES, "oauth_presets": OAUTH_PRESETS}
 
 
+@app.get("/api/providers/codex/status")
+def codex_subscription_status():
+    """Returns whether ~/.codex/auth.json has a valid ChatGPT login.
+
+    The frontend uses this to decide whether the 'OpenAI Codex' connect block
+    is ready or whether the user still needs to run `codex login`.
+    """
+    return CODEX_AUTH.status()
+
+
 # ---- OAuth callback (must be before {provider_id} routes) ----
 @app.get("/api/providers/oauth/callback")
 async def oauth_callback(code: str = "", state: str = "", error: str = ""):
@@ -1261,6 +1272,23 @@ async def test_provider(provider_id: str):
             return {"ok": False, "error": f"HTTP {r.status_code}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    elif ptype == "openai_codex":
+        try:
+            access, _account = CODEX_AUTH.get_access_token()
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        st = CODEX_AUTH.status()
+        if not st.get("logged_in"):
+            return {"ok": False, "error": st.get("reason", "not logged in")}
+        if not access:
+            return {"ok": False, "error": "no access token"}
+        models = p.get("models") or PROVIDER_TYPES.get("openai_codex", {}).get("models", [])
+        return {
+            "ok": True,
+            "models": models,
+            "message": f"Codex login OK ({st.get('email', '')}, plan={st.get('plan_type', '')})",
+        }
 
     return {"ok": False, "error": f"Unknown type: {ptype}"}
 

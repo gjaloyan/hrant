@@ -716,6 +716,296 @@ class OpenAICompatibleLLM(BaseLLM):
         return final_text or "[max tool-use iterations reached]"
 
 
+class CodexLLM(BaseLLM):
+    """OpenAI Responses API via ChatGPT subscription auth (~/.codex/auth.json).
+
+    Differs from OpenAICompatibleLLM:
+      - Endpoint is `{base_url}/responses` (not /chat/completions).
+      - Server requires `stream: true` — we consume SSE and aggregate events.
+      - Request body uses `instructions` + `input` (not `messages`).
+      - Auth headers include ChatGPT-Account-ID alongside Bearer.
+      - Tools are flat objects: {type, name, description, parameters} (not nested under `function`).
+      - Tool results re-enter the `input` array as `function_call_output` items.
+    """
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.model = cfg["model"]
+        self.provider_id = cfg.get("provider_id", "")
+        base = cfg.get("base_url") or "https://chatgpt.com/backend-api/codex"
+        self.url = f"{base.rstrip('/')}/responses"
+        self.default_max = cfg.get("max_tokens", 2000)
+        self.default_temp = cfg.get("temperature", 0.3)
+        self.provider_name = cfg.get("provider_name", "openai_codex")
+
+    def _auth_headers(self) -> dict[str, str]:
+        from .providers import resolve_auth_header, get_provider
+        if self.provider_id:
+            provider = get_provider(self.provider_id)
+            if provider:
+                return resolve_auth_header(provider)
+        # Fallback: build directly from CodexAuthManager
+        from .providers import CODEX_AUTH
+        try:
+            access, account_id = CODEX_AUTH.get_access_token()
+        except RuntimeError as e:
+            raise LLMError(f"Codex auth: {e}") from e
+        h = {"Authorization": f"Bearer {access}"}
+        if account_id:
+            h["ChatGPT-Account-ID"] = account_id
+        return h
+
+    def _stream_and_aggregate(
+        self, payload: dict, *, _max_retries: int = 3
+    ) -> tuple[str, list[dict], dict]:
+        """Stream the Responses API call and aggregate.
+
+        Returns (final_text, output_items, usage). final_text is the concatenated
+        output_text deltas. output_items is the list of completed items (messages,
+        function_calls) extracted from response.output_item.done events. usage
+        comes from the response.completed event.
+        """
+        # Note: 429 from chatgpt.com/backend-api/codex is usually `usage_limit_reached`
+        # (subscription quota exhausted), not transient rate-limiting — don't retry.
+        RETRYABLE = {500, 502, 503, 529}
+        last_error: Exception | None = None
+        payload = dict(payload)
+        payload["stream"] = True  # server requires stream=true
+
+        for attempt in range(_max_retries + 1):
+            headers = {**self._auth_headers(), "Content-Type": "application/json", "Accept": "text/event-stream"}
+            try:
+                with httpx.stream(
+                    "POST", self.url, json=payload, headers=headers, timeout=180.0
+                ) as r:
+                    if r.status_code in RETRYABLE and attempt < _max_retries:
+                        last_error = httpx.HTTPStatusError(
+                            f"{r.status_code}", request=r.request, response=r
+                        )
+                        time.sleep(min(2 ** attempt * 2, 60.0))
+                        continue
+                    if r.status_code >= 400:
+                        body = b"".join(r.iter_bytes())[:500].decode("utf-8", errors="replace")
+                        if r.status_code == 429 and "usage_limit_reached" in body:
+                            raise LLMError(
+                                f"Codex subscription quota exhausted ({self.provider_name}/{self.model}). "
+                                f"Wait for reset or switch to a different provider. Detail: {body}"
+                            )
+                        raise LLMError(
+                            f"Codex Responses API {r.status_code} ({self.provider_name}/{self.model}): {body}"
+                        )
+                    return _consume_responses_sse(r.iter_lines())
+            except LLMError:
+                raise
+            except (httpx.HTTPError, httpx.TimeoutException) as e:
+                last_error = e
+                if attempt < _max_retries:
+                    time.sleep(min(2 ** attempt * 2, 60.0))
+                    continue
+                raise LLMError(
+                    f"Codex Responses API error after {_max_retries} retries: {e}"
+                ) from e
+        raise LLMError(f"Codex Responses API failed: {last_error}")
+
+    @staticmethod
+    def _function_calls(output: list[dict]) -> list[dict]:
+        return [item for item in output or [] if item.get("type") == "function_call"]
+
+    def _record_usage(self, usage: dict, _task_type: str, prompt_preview: str, duration_ms: int) -> None:
+        if not usage:
+            return
+        TOKENS.record(
+            task_type=_task_type,
+            model=self.model,
+            provider=self.provider_name,
+            usage={
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+            },
+            duration_ms=duration_ms,
+            prompt_preview=prompt_preview,
+        )
+
+    def _build_payload(
+        self, system: str, input_items: list[dict], tools: list[dict] | None,
+        max_tokens: int | None, temperature: float | None,
+    ) -> dict:
+        payload: dict = {
+            "model": self.model,
+            "instructions": system,
+            "input": input_items,
+            "store": False,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = True
+        # Codex/ChatGPT models reject max_output_tokens / temperature on some tiers,
+        # so only set them if explicitly requested. Defaults remain server-side.
+        if max_tokens:
+            payload["max_output_tokens"] = max_tokens
+        if temperature is not None:
+            payload["temperature"] = temperature
+        return payload
+
+    def complete(self, system, user, *, max_tokens=None, temperature=None,
+                 _task_type: str = ""):
+        input_items = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": user}],
+            }
+        ]
+        payload = self._build_payload(system, input_items, None, max_tokens, temperature)
+        t0 = time.time()
+        text, _items, usage = self._stream_and_aggregate(payload)
+        duration_ms = int((time.time() - t0) * 1000)
+        self._record_usage(usage, _task_type, user[:300], duration_ms)
+        if not text:
+            raise LLMError("Codex Responses API returned no text")
+        return text
+
+    def complete_with_tools(
+        self, system, user, tools, execute_tool,
+        *, max_tokens=None, temperature=None,
+        max_iterations=6, on_tool_call=None, _task_type: str = "",
+    ) -> str:
+        # Convert tools to Responses API flat format. Accept either:
+        #   {"name", "description", "input_schema"}                  (Anthropic-ish)
+        #   {"type":"function","function":{"name","description","parameters"}}  (Chat Completions)
+        flat_tools: list[dict] = []
+        for t in tools or []:
+            if t.get("type") == "function" and isinstance(t.get("function"), dict):
+                fn = t["function"]
+                flat_tools.append({
+                    "type": "function",
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "parameters": fn.get("parameters", {}),
+                    "strict": False,
+                })
+            else:
+                flat_tools.append({
+                    "type": "function",
+                    "name": t.get("name", ""),
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema") or t.get("parameters") or {},
+                    "strict": False,
+                })
+
+        input_items: list[dict] = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": user}],
+            }
+        ]
+
+        final_text = ""
+        for _iter in range(max_iterations):
+            payload = self._build_payload(
+                system, input_items, flat_tools or None, max_tokens, temperature
+            )
+            t0 = time.time()
+            text, items, usage = self._stream_and_aggregate(payload)
+            duration_ms = int((time.time() - t0) * 1000)
+            self._record_usage(
+                usage,
+                f"{_task_type}:tool_iter_{_iter}",
+                user[:300] if _iter == 0 else f"(tool iteration {_iter})",
+                duration_ms,
+            )
+            if text:
+                final_text = text
+
+            calls = self._function_calls(items)
+            if not calls:
+                return final_text
+
+            # Re-feed every output item back so the model sees its own state, then add tool results.
+            input_items.extend(items)
+            for fc in calls:
+                name = fc.get("name", "")
+                call_id = fc.get("call_id") or fc.get("id", "")
+                try:
+                    args = json.loads(fc.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                result_text, is_error = execute_tool(name, args)
+                if on_tool_call:
+                    try:
+                        on_tool_call(name, args, result_text, is_error)
+                    except Exception:
+                        pass
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": result_text,
+                })
+
+        return final_text or "[max tool-use iterations reached]"
+
+
+def _consume_responses_sse(line_iter) -> tuple[str, list[dict], dict]:
+    """Aggregate an SSE stream from the Responses API.
+
+    Recognised event types (per openai/codex codex-rs/codex-api/src/sse/responses.rs):
+      response.output_text.delta   → append .delta to text buffer
+      response.output_item.done    → final form of message/function_call → collect
+      response.completed           → response.usage and end-of-turn
+      response.failed              → error
+    """
+    text_chunks: list[str] = []
+    output_items: list[dict] = []
+    usage: dict = {}
+    last_error: str = ""
+
+    for raw in line_iter:
+        if raw is None:
+            continue
+        line = raw.strip() if isinstance(raw, str) else raw.decode("utf-8", errors="replace").strip()
+        if not line or line.startswith(":") or line.startswith("event:"):
+            continue
+        if not line.startswith("data:"):
+            continue
+        data_str = line[5:].strip()
+        if not data_str or data_str == "[DONE]":
+            continue
+        try:
+            evt = json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
+        kind = evt.get("type") or evt.get("kind") or ""
+        if kind == "response.output_text.delta":
+            d = evt.get("delta")
+            if isinstance(d, str):
+                text_chunks.append(d)
+        elif kind == "response.output_item.done":
+            item = evt.get("item")
+            if isinstance(item, dict):
+                output_items.append(item)
+        elif kind == "response.completed":
+            resp = evt.get("response") or {}
+            usage = resp.get("usage") or {}
+            # Fallback: if delta events were not emitted, take text from final output.
+            if not text_chunks:
+                for it in resp.get("output") or []:
+                    if it.get("type") == "message":
+                        for c in it.get("content") or []:
+                            if c.get("type") == "output_text" and c.get("text"):
+                                text_chunks.append(c["text"])
+        elif kind in ("response.failed", "response.incomplete"):
+            err = evt.get("response") or {}
+            err_obj = err.get("error") if isinstance(err, dict) else None
+            last_error = (err_obj or {}).get("message") if isinstance(err_obj, dict) else ""
+            if not last_error:
+                last_error = f"{kind} (no details)"
+            raise LLMError(f"Codex Responses API stream error: {last_error}")
+
+    return "".join(text_chunks), output_items, usage
+
+
 class GoogleLLM(BaseLLM):
     """Google Gemini provider via REST API."""
 
@@ -841,8 +1131,8 @@ def create_llm(cfg: dict) -> BaseLLM:
     """Create an LLM instance from a provider config dict.
 
     cfg must have 'provider' (type) and 'model' keys.
-    Supported providers: anthropic, openai, google, groq, deepseek,
-    mistral, openai_compatible, ollama.
+    Supported providers: anthropic, openai, openai_codex, google, groq,
+    deepseek, mistral, openai_compatible, ollama.
     """
     provider = cfg.get("provider", "")
     if provider == "anthropic":
@@ -851,6 +1141,11 @@ def create_llm(cfg: dict) -> BaseLLM:
         return OllamaLLM(cfg)
     elif provider == "google":
         return GoogleLLM(cfg)
+    elif provider == "openai_codex":
+        cfg_copy = dict(cfg)
+        cfg_copy.setdefault("provider_name", "openai_codex")
+        cfg_copy.setdefault("base_url", "https://chatgpt.com/backend-api/codex")
+        return CodexLLM(cfg_copy)
     elif provider in ("openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter"):
         cfg_copy = dict(cfg)
         cfg_copy.setdefault("provider_name", provider)
