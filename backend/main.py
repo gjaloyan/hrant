@@ -953,7 +953,7 @@ def list_providers():
             p["api_key_masked"] = "(env)" if get_api_key(p) else "(not set)"
         p.pop("api_key", None)
         # Mask OAuth secrets
-        oauth = p.get("oauth", {})
+        oauth = p.get("oauth") or {}
         if oauth.get("client_secret"):
             oauth["client_secret_masked"] = "••••" + oauth["client_secret"][-4:]
             del oauth["client_secret"]
@@ -1010,7 +1010,7 @@ async def oauth_callback(code: str = "", state: str = "", error: str = ""):
     if not p:
         raise HTTPException(404, "provider not found")
 
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     redirect_uri = oauth.get(
         "redirect_uri",
         f"http://localhost:{CONFIG.server['port']}/api/providers/oauth/callback",
@@ -1330,7 +1330,7 @@ def oauth_authorize_url(provider_id: str):
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     authorize_url = oauth.get("authorize_url", "")
     client_id = oauth.get("client_id", "")
     scope = oauth.get("scope", "")
@@ -1431,7 +1431,7 @@ def _start_oauth_callback_listener(port: int, path: str, provider_id: str):
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
                 return
 
-            oauth = p.get("oauth", {})
+            oauth = p.get("oauth") or {}
             redir = oauth.get("redirect_uri", f"http://localhost:{port}{path}")
             pkce_verifier = _pkce_store.pop(state, None)
             result = OAUTH_TOKENS.exchange_code(pid, code, redir, pkce_verifier=pkce_verifier)
@@ -1505,7 +1505,7 @@ def oauth_exchange_url(provider_id: str, body: dict):
     if not p:
         raise HTTPException(404, "provider not found")
 
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     redirect_uri = oauth.get("redirect_uri",
         f"http://localhost:{CONFIG.server['port']}/api/providers/oauth/callback")
 
@@ -1528,7 +1528,7 @@ def oauth_manual_token(provider_id: str, body: ManualTokenRequest):
     if not p:
         raise HTTPException(404, "provider not found")
 
-    oauth = p.get("oauth", {})
+    oauth = p.get("oauth") or {}
     OAUTH_TOKENS._store_token(provider_id, {
         "access_token": body.access_token,
         "refresh_token": body.refresh_token,

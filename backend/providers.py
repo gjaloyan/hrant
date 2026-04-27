@@ -328,6 +328,11 @@ def save_provider(provider: dict) -> dict:
     provider.setdefault("created", datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     provider["updated"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    # Drop nullish oauth so reads downstream can rely on `p.get("oauth") or {}`
+    # without contaminating the JSON file with explicit nulls.
+    if provider.get("oauth") is None:
+        provider.pop("oauth", None)
+
     if existing is not None:
         providers[existing] = provider
     else:
@@ -486,7 +491,7 @@ class OAuthTokenManager:
         if not provider:
             return None
 
-        oauth = provider.get("oauth", {})
+        oauth = provider.get("oauth") or {}
         token_url = oauth.get("token_url") or oauth_cfg.get("token_url", "")
         client_id = oauth.get("client_id", "")
         client_secret = oauth.get("client_secret", "")
@@ -529,7 +534,7 @@ class OAuthTokenManager:
         if not provider:
             return {"ok": False, "error": "Provider not found"}
 
-        oauth = provider.get("oauth", {})
+        oauth = provider.get("oauth") or {}
         token_url = oauth.get("token_url", "")
         client_id = oauth.get("client_id", "")
         client_secret = oauth.get("client_secret", "")
@@ -565,7 +570,7 @@ class OAuthTokenManager:
         if not provider:
             return {"ok": False, "error": "Provider not found"}
 
-        oauth = provider.get("oauth", {})
+        oauth = provider.get("oauth") or {}
         token_url = oauth.get("token_url", "")
         client_id = oauth.get("client_id", "")
         client_secret = oauth.get("client_secret", "")
@@ -920,7 +925,7 @@ class ActiveModelManager:
         }
         # Pass OAuth config if needed
         if provider.get("auth_type") == "oauth":
-            cfg["oauth"] = provider.get("oauth", {})
+            cfg["oauth"] = provider.get("oauth") or {}
 
         return cfg
 
