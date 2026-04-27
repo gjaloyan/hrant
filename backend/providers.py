@@ -125,6 +125,10 @@ AUTH_TYPES = {
         "label": "Codex Subscription",
         "description": "Reuse existing ChatGPT login from `codex login` (~/.codex/auth.json)",
     },
+    "copilot_subscription": {
+        "label": "GitHub Copilot Subscription",
+        "description": "Reuse existing GitHub Copilot login (VS Code / gh / JetBrains)",
+    },
     "none": {"label": "No Auth", "description": "No authentication needed"},
 }
 
@@ -243,6 +247,18 @@ PROVIDER_CONNECT_INFO: dict[str, dict] = {
         "key_url": "https://dashboard.cohere.com/api-keys",
         "key_instructions": "1. Open Cohere dashboard (link above)\n2. Create a Production or Trial API key\n3. Paste below",
         "docs_url": "https://docs.cohere.com/v2/docs/chat-api",
+    },
+    "github_copilot": {
+        "key_url": "",
+        "key_instructions": (
+            "1. Sign in to GitHub Copilot in any client (VS Code Copilot extension, "
+            "JetBrains plugin, or `gh auth login --scopes copilot`).\n"
+            "2. Click 'Use this account' below — we read the existing token from "
+            "~/.config/github-copilot/ (or %APPDATA%\\github-copilot\\ on Windows).\n"
+            "3. Token is exchanged on every request for a short-lived Copilot bearer "
+            "(no edits to your client's auth state)."
+        ),
+        "docs_url": "https://docs.github.com/en/copilot",
     },
 }
 
@@ -458,6 +474,15 @@ PROVIDER_TYPES = {
         "supports_tools": True,
         "auth_types": ["api_key"],
     },
+    "github_copilot": {
+        "label": "GitHub Copilot (subscription)",
+        "base_url": "https://api.githubcopilot.com",
+        "key_env_default": "",
+        # Models exposed through Copilot vary by plan. Conservative defaults.
+        "models": ["gpt-4o", "claude-3.5-sonnet", "claude-sonnet-4", "gpt-4-turbo", "o1-mini", "o3-mini"],
+        "supports_tools": True,
+        "auth_types": ["copilot_subscription"],
+    },
 }
 
 
@@ -595,6 +620,16 @@ def resolve_auth_header(provider: dict) -> dict[str, str]:
         if account_id:
             headers["ChatGPT-Account-ID"] = account_id
         return headers
+
+    if auth_type == "copilot_subscription":
+        try:
+            bearer, _endpoints = COPILOT_AUTH.get_bearer()
+        except RuntimeError as e:
+            log.warning("Copilot auth failed for provider %s: %s", provider.get("id"), e)
+            return {}
+        # Headers required by api.githubcopilot.com — added in CopilotLLM,
+        # but Bearer goes here so the standard auth-header pathway works.
+        return {"Authorization": f"Bearer {bearer}"}
 
     # Default: api_key
     key = get_api_key(provider)
@@ -1094,6 +1129,154 @@ class CodexAuthManager:
 
 
 CODEX_AUTH = CodexAuthManager()
+
+
+# ---------- GitHub Copilot subscription auth ----------
+#
+# Reuses the OAuth token already produced by GitHub Copilot login (VS Code,
+# JetBrains, gh-copilot CLI, etc.). The persistent oauth_token (`gho_...`)
+# lives at one of several paths depending on which client wrote it:
+#
+#   ~/.config/github-copilot/apps.json   (newer schema, multi-host)
+#   ~/.config/github-copilot/hosts.json  (older schema)
+#   %APPDATA%/github-copilot/apps.json   (Windows analogues)
+#
+# The chat endpoint at api.githubcopilot.com requires a *short-lived* Bearer
+# obtained by exchanging the persistent oauth_token at:
+#
+#   GET https://api.github.com/copilot_internal/v2/token
+#       Authorization: token <oauth_token>
+#
+# The exchange returns:
+#   {"token":"<bearer>", "expires_at": <unix>, "endpoints": {"api": "..."}, ...}
+#
+# Bearers last ~30 minutes; we cache in-memory with a small safety buffer.
+
+COPILOT_OAUTH_TOKEN_URL = "https://api.github.com/copilot_internal/v2/token"
+
+
+def _candidate_copilot_paths() -> list[Path]:
+    candidates: list[Path] = []
+    home_cfg = Path.home() / ".config" / "github-copilot"
+    candidates.append(home_cfg / "apps.json")
+    candidates.append(home_cfg / "hosts.json")
+    appdata = os.environ.get("APPDATA", "")
+    if appdata:
+        candidates.append(Path(appdata) / "github-copilot" / "apps.json")
+        candidates.append(Path(appdata) / "github-copilot" / "hosts.json")
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        candidates.append(Path(local_app) / "github-copilot" / "apps.json")
+    return candidates
+
+
+def _extract_copilot_oauth_token(raw: dict) -> tuple[str, str]:
+    """Return (oauth_token, github_user_login) from apps.json or hosts.json.
+
+    Both files have schemas like:
+      apps.json:  {"github.com:<app_id>": {"oauth_token": "gho_...", "user": "..."}}
+      hosts.json: {"github.com": {"oauth_token": "gho_...", "user": "..."}}
+    """
+    for key, val in (raw or {}).items():
+        if not isinstance(val, dict):
+            continue
+        token = val.get("oauth_token") or ""
+        if token and "github.com" in str(key).lower():
+            return token, val.get("user") or ""
+    return "", ""
+
+
+class CopilotAuthManager:
+    """Reads GitHub Copilot OAuth token, exchanges for short-lived Bearer.
+
+    Thread-safe. Refreshes Bearer on demand from the persistent oauth_token,
+    which we never write — the user manages it via VS Code / gh / JetBrains.
+    """
+
+    REFRESH_BUFFER_SECONDS = 60
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._cached_bearer: str = ""
+        self._cached_expires_at: int = 0
+        self._cached_endpoints: dict = {}
+
+    def _read_oauth_token(self) -> tuple[str, str, str]:
+        """Return (oauth_token, user_login, source_path)."""
+        for path in _candidate_copilot_paths():
+            if not path.exists():
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            tok, user = _extract_copilot_oauth_token(raw)
+            if tok:
+                return tok, user, str(path)
+        return "", "", ""
+
+    def status(self) -> dict:
+        tok, user, src = self._read_oauth_token()
+        if not tok:
+            return {
+                "logged_in": False,
+                "reason": "no_oauth_token",
+                "checked_paths": [str(p) for p in _candidate_copilot_paths()],
+            }
+        return {
+            "logged_in": True,
+            "user": user,
+            "source": src,
+            "bearer_cached": bool(self._cached_bearer),
+            "bearer_expires_at": (
+                datetime.fromtimestamp(self._cached_expires_at).strftime("%Y-%m-%d %H:%M:%S")
+                if self._cached_expires_at
+                else ""
+            ),
+        }
+
+    def get_bearer(self) -> tuple[str, dict]:
+        """Return (bearer, endpoints), refreshing if expired."""
+        with self._lock:
+            if (
+                self._cached_bearer
+                and time.time() < self._cached_expires_at - self.REFRESH_BUFFER_SECONDS
+            ):
+                return self._cached_bearer, dict(self._cached_endpoints)
+            tok, _user, _src = self._read_oauth_token()
+            if not tok:
+                raise RuntimeError(
+                    "GitHub Copilot not logged in — sign in via VS Code Copilot "
+                    "extension or `gh auth login` with copilot scope first"
+                )
+            try:
+                r = httpx.get(
+                    COPILOT_OAUTH_TOKEN_URL,
+                    headers={
+                        "Authorization": f"token {tok}",
+                        "Accept": "application/json",
+                        "Editor-Version": "vscode/1.95.0",
+                        "Editor-Plugin-Version": "copilot-chat/0.20.0",
+                        "User-Agent": "GitHubCopilotChat/0.20.0",
+                    },
+                    timeout=15.0,
+                )
+            except httpx.HTTPError as e:
+                raise RuntimeError(f"Copilot token exchange transport error: {e}") from e
+            if r.status_code >= 400:
+                raise RuntimeError(
+                    f"Copilot token exchange failed ({r.status_code}): {r.text[:200]}"
+                )
+            data = r.json()
+            self._cached_bearer = data.get("token") or ""
+            self._cached_expires_at = int(data.get("expires_at") or 0)
+            self._cached_endpoints = data.get("endpoints") or {}
+            if not self._cached_bearer:
+                raise RuntimeError(f"Copilot token exchange returned no token: {data}")
+            return self._cached_bearer, dict(self._cached_endpoints)
+
+
+COPILOT_AUTH = CopilotAuthManager()
 
 
 # ---------- Active Model Selection ----------

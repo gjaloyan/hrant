@@ -984,6 +984,19 @@ export type CodexModelsResponse = {
 export const fetchCodexModels = () =>
   json_get<CodexModelsResponse>("/api/providers/codex/models");
 
+export type CopilotStatus = {
+  logged_in: boolean;
+  reason?: string;
+  user?: string;
+  source?: string;
+  bearer_cached?: boolean;
+  bearer_expires_at?: string;
+  checked_paths?: string[];
+};
+
+export const fetchCopilotStatus = () =>
+  json_get<CopilotStatus>("/api/providers/copilot/status");
+
 
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {

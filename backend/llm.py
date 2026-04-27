@@ -946,6 +946,53 @@ class CodexLLM(BaseLLM):
         return final_text or "[max tool-use iterations reached]"
 
 
+class CopilotLLM(OpenAICompatibleLLM):
+    """GitHub Copilot subscription via api.githubcopilot.com.
+
+    The Copilot chat endpoint is OpenAI-shaped (`/chat/completions` with
+    `messages`, returns `choices[0].message.content`), but it requires a
+    short-lived Bearer obtained by exchanging the persistent oauth_token
+    (`gho_...`) — handled by CopilotAuthManager — and several editor-
+    identification headers without which the request is rejected.
+
+    We extend OpenAICompatibleLLM and only override `_get_auth_headers()`
+    so the rest of the request path (retry, tool-use loop, response parsing)
+    is shared with every other OpenAI-compatible provider.
+    """
+
+    DEFAULT_BASE_URL = "https://api.githubcopilot.com"
+    EDITOR_VERSION = "vscode/1.95.0"
+    EDITOR_PLUGIN_VERSION = "copilot-chat/0.20.0"
+    USER_AGENT = "GitHubCopilotChat/0.20.0"
+    INTEGRATION_ID = "vscode-chat"
+
+    def __init__(self, cfg: dict):
+        cfg_copy = dict(cfg)
+        cfg_copy.setdefault("base_url", self.DEFAULT_BASE_URL)
+        # Skip OpenAICompatibleLLM's "no API key" check — auth is via
+        # CopilotAuthManager, not a static api_key.
+        cfg_copy.setdefault("auth_type", "copilot_subscription")
+        cfg_copy.setdefault("api_key", "x")  # placeholder so init doesn't raise
+        super().__init__(cfg_copy)
+        self.api_key = ""  # never used; auth is via _get_auth_headers
+        self.provider_name = cfg.get("provider_name", "github_copilot")
+
+    def _get_auth_headers(self) -> dict[str, str]:
+        from .providers import COPILOT_AUTH
+        try:
+            bearer, _endpoints = COPILOT_AUTH.get_bearer()
+        except RuntimeError as e:
+            raise LLMError(f"Copilot auth: {e}") from e
+        return {
+            "Authorization": f"Bearer {bearer}",
+            "Editor-Version": self.EDITOR_VERSION,
+            "Editor-Plugin-Version": self.EDITOR_PLUGIN_VERSION,
+            "User-Agent": self.USER_AGENT,
+            "Copilot-Integration-Id": self.INTEGRATION_ID,
+            "OpenAI-Intent": "conversation-panel",
+        }
+
+
 class CohereLLM(BaseLLM):
     """Cohere v2 Chat API (`POST /v2/chat`).
 
@@ -1332,6 +1379,11 @@ def create_llm(cfg: dict) -> BaseLLM:
         cfg_copy.setdefault("provider_name", "cohere")
         cfg_copy.setdefault("base_url", "https://api.cohere.com/v2")
         return CohereLLM(cfg_copy)
+    elif provider == "github_copilot":
+        cfg_copy = dict(cfg)
+        cfg_copy.setdefault("provider_name", "github_copilot")
+        cfg_copy.setdefault("base_url", "https://api.githubcopilot.com")
+        return CopilotLLM(cfg_copy)
     elif provider in (
         # OpenAI-compatible providers — same wire format, only base_url differs.
         "openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter",

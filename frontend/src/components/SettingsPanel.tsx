@@ -42,6 +42,8 @@ import {
   type CodexStatus,
   fetchCodexModels,
   type CodexModel,
+  fetchCopilotStatus,
+  type CopilotStatus,
   fetchActiveModel,
   setActiveModel,
   clearActiveModel,
@@ -101,6 +103,7 @@ export default function SettingsPanel() {
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
   const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [codexModelsSource, setCodexModelsSource] = useState<string>("");
+  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus | null>(null);
 
   const flash = (text: string) => {
     setMsg(text);
@@ -182,6 +185,10 @@ export default function SettingsPanel() {
       const cm = await fetchCodexModels();
       setCodexModels(cm.models || []);
       setCodexModelsSource(cm.source || "");
+    } catch { /* ignore */ }
+    try {
+      const cs = await fetchCopilotStatus();
+      setCopilotStatus(cs);
     } catch { /* ignore */ }
     try {
       const am = await fetchActiveModel();
@@ -599,6 +606,8 @@ export default function SettingsPanel() {
                                     ? "OAuth"
                                     : at === "codex_subscription"
                                     ? "Codex Login"
+                                    : at === "copilot_subscription"
+                                    ? "Copilot Login"
                                     : "No Auth"}
                                 </button>
                               ))}
@@ -853,6 +862,76 @@ export default function SettingsPanel() {
                                       ? `Codex login OK — ${cm.models?.length ?? 0} model(s) loaded`
                                       : "Still no Codex login",
                                   );
+                                } catch (e: any) {
+                                  flash("Error: " + (e.message || String(e)));
+                                }
+                              }}
+                              className="bg-slate-700 hover:bg-slate-600 rounded px-2 py-1 text-[10px]"
+                            >
+                              Refresh
+                            </button>
+                          </div>
+                        )}
+
+                        {/* GitHub Copilot Subscription block */}
+                        {newProv.authMethod === "copilot_subscription" && (
+                          <div className="space-y-2 bg-slate-800/50 rounded p-3">
+                            {copilotStatus?.logged_in ? (
+                              <div className="space-y-1 text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span className="inline-block w-2 h-2 rounded-full bg-emerald-400" />
+                                  <span className="text-emerald-300 font-semibold">
+                                    GitHub Copilot login detected
+                                  </span>
+                                </div>
+                                <div className="text-slate-300">
+                                  <span className="text-slate-500">user:</span>{" "}
+                                  {copilotStatus.user || "—"}
+                                </div>
+                                <div className="text-slate-300">
+                                  <span className="text-slate-500">source:</span>{" "}
+                                  <span className="font-mono text-[10px] break-all">{copilotStatus.source || "—"}</span>
+                                </div>
+                                {copilotStatus.bearer_cached && (
+                                  <div className="text-slate-300">
+                                    <span className="text-slate-500">bearer expires:</span>{" "}
+                                    {copilotStatus.bearer_expires_at || "—"}
+                                  </div>
+                                )}
+                                <div className="text-[10px] text-slate-500 pt-1">
+                                  Persistent oauth_token stays in your editor's auth file. We exchange it for a short-lived bearer per request.
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-2 text-xs">
+                                <div className="flex items-center gap-2">
+                                  <span className="inline-block w-2 h-2 rounded-full bg-amber-400" />
+                                  <span className="text-amber-300 font-semibold">
+                                    No GitHub Copilot login found
+                                  </span>
+                                </div>
+                                <ol className="list-decimal ml-5 text-slate-400 space-y-0.5">
+                                  <li>Sign in to Copilot in VS Code (Copilot extension), JetBrains, or run <span className="font-mono bg-slate-900 px-1 rounded">gh auth login</span> with copilot scope.</li>
+                                  <li>Click Refresh below.</li>
+                                </ol>
+                                {copilotStatus?.checked_paths && copilotStatus.checked_paths.length > 0 && (
+                                  <details className="text-[10px] text-slate-500">
+                                    <summary className="cursor-pointer">checked paths</summary>
+                                    <ul className="mt-1 ml-3 font-mono">
+                                      {copilotStatus.checked_paths.map((p) => (
+                                        <li key={p} className="break-all">{p}</li>
+                                      ))}
+                                    </ul>
+                                  </details>
+                                )}
+                              </div>
+                            )}
+                            <button
+                              onClick={async () => {
+                                try {
+                                  const cs = await fetchCopilotStatus();
+                                  setCopilotStatus(cs);
+                                  flash(cs.logged_in ? `Copilot login OK (${cs.user || ""})` : "Still no Copilot login");
                                 } catch (e: any) {
                                   flash("Error: " + (e.message || String(e)));
                                 }

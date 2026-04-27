@@ -51,7 +51,7 @@ from .providers import (
     OAUTH_PRESETS, OAUTH_TOKENS, PROVIDER_CONNECT_INFO,
     ACTIVE_MODEL, get_available_models,
     generate_pkce, _pkce_store,
-    CODEX_AUTH,
+    CODEX_AUTH, COPILOT_AUTH,
 )
 from .evaluator import EVALUATOR
 from .goals import GOALS
@@ -988,6 +988,12 @@ def codex_subscription_status():
     return CODEX_AUTH.status()
 
 
+@app.get("/api/providers/copilot/status")
+def copilot_subscription_status():
+    """Returns whether GitHub Copilot is logged in on this machine."""
+    return COPILOT_AUTH.status()
+
+
 @app.get("/api/providers/codex/models")
 def codex_subscription_models():
     """Returns the per-account model list cached by Codex CLI.
@@ -1333,6 +1339,23 @@ async def test_provider(provider_id: str):
             "ok": True,
             "models": models,
             "message": f"Codex login OK ({st.get('email', '')}, plan={st.get('plan_type', '')})",
+        }
+
+    elif ptype == "github_copilot":
+        try:
+            bearer, _endpoints = COPILOT_AUTH.get_bearer()
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)}
+        st = COPILOT_AUTH.status()
+        if not st.get("logged_in"):
+            return {"ok": False, "error": st.get("reason", "not logged in")}
+        if not bearer:
+            return {"ok": False, "error": "no bearer"}
+        models = p.get("models") or PROVIDER_TYPES.get("github_copilot", {}).get("models", [])
+        return {
+            "ok": True,
+            "models": models,
+            "message": f"GitHub Copilot OK (user={st.get('user', '')})",
         }
 
     return {"ok": False, "error": f"Unknown type: {ptype}"}
