@@ -1171,6 +1171,8 @@ class ProviderCreateRequest(BaseModel):
     temperature: float = 0.3
     auth_type: str = "api_key"
     oauth: dict | None = None
+    # AWS Bedrock: {access_key_id, secret_access_key, region}
+    aws: dict | None = None
 
 
 @app.post("/api/providers")
@@ -1357,6 +1359,36 @@ async def test_provider(provider_id: str):
             "models": models,
             "message": f"GitHub Copilot OK (user={st.get('user', '')})",
         }
+
+    elif ptype == "aws_bedrock":
+        try:
+            import boto3  # noqa: F401
+        except ImportError:
+            return {
+                "ok": False,
+                "error": "boto3 not installed. Run: .venv/Scripts/python.exe -m pip install boto3",
+            }
+        aws = p.get("aws") or {}
+        if not aws.get("access_key_id") or not aws.get("secret_access_key"):
+            return {"ok": False, "error": "Missing AWS access_key_id / secret_access_key"}
+        region = aws.get("region") or "us-east-1"
+        try:
+            import boto3
+            cli = boto3.client(
+                "bedrock",
+                region_name=region,
+                aws_access_key_id=aws["access_key_id"],
+                aws_secret_access_key=aws["secret_access_key"],
+            )
+            resp = cli.list_foundation_models(byOutputModality="TEXT")
+            models = [m.get("modelId", "") for m in resp.get("modelSummaries", [])[:10]]
+            return {
+                "ok": True,
+                "models": models,
+                "message": f"Bedrock OK ({region}, {len(resp.get('modelSummaries', []))} models)",
+            }
+        except Exception as e:
+            return {"ok": False, "error": f"Bedrock error: {e}"}
 
     return {"ok": False, "error": f"Unknown type: {ptype}"}
 

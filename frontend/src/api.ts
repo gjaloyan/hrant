@@ -859,6 +859,7 @@ export const createProvider = (p: {
   temperature?: number;
   auth_type?: string;
   oauth?: Record<string, string>;
+  aws?: { access_key_id: string; secret_access_key: string; region: string };
 }) => json_post<{ ok: boolean; provider: ProviderConfig }>("/api/providers", p);
 
 export const updateProvider = (

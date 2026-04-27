@@ -129,6 +129,10 @@ AUTH_TYPES = {
         "label": "GitHub Copilot Subscription",
         "description": "Reuse existing GitHub Copilot login (VS Code / gh / JetBrains)",
     },
+    "aws_credentials": {
+        "label": "AWS Credentials",
+        "description": "AWS access key + secret + region (sigv4 signed via boto3)",
+    },
     "none": {"label": "No Auth", "description": "No authentication needed"},
 }
 
@@ -259,6 +263,18 @@ PROVIDER_CONNECT_INFO: dict[str, dict] = {
             "(no edits to your client's auth state)."
         ),
         "docs_url": "https://docs.github.com/en/copilot",
+    },
+    "aws_bedrock": {
+        "key_url": "https://console.aws.amazon.com/iam/home#/security_credentials",
+        "key_instructions": (
+            "1. Open AWS IAM and create an access key (or use one with bedrock:InvokeModel)\n"
+            "2. Copy Access Key ID, Secret Access Key, and pick a region (e.g. us-east-1)\n"
+            "3. Paste all three below — credentials stay in providers.json on disk\n"
+            "4. Make sure the model is enabled in Bedrock Model Access for that region\n"
+            "5. Requires `pip install boto3` in the venv (soft dependency)"
+        ),
+        "docs_url": "https://docs.aws.amazon.com/bedrock/latest/userguide/api-methods-run.html",
+        "extra_fields": ["aws_access_key_id", "aws_secret_access_key", "aws_region"],
     },
 }
 
@@ -482,6 +498,25 @@ PROVIDER_TYPES = {
         "models": ["gpt-4o", "claude-3.5-sonnet", "claude-sonnet-4", "gpt-4-turbo", "o1-mini", "o3-mini"],
         "supports_tools": True,
         "auth_types": ["copilot_subscription"],
+    },
+    "aws_bedrock": {
+        "label": "AWS Bedrock",
+        # Bedrock isn't HTTP-base-url-shaped; we hit it through boto3.
+        # Default region is encoded here for display only.
+        "base_url": "",
+        "key_env_default": "",
+        # v0 supports Anthropic-on-Bedrock model IDs. Other families
+        # (Llama, Cohere, Mistral on Bedrock) need per-family request
+        # shaping — defer.
+        "models": [
+            "anthropic.claude-sonnet-4-5-20250514-v1:0",
+            "anthropic.claude-opus-4-20250514-v1:0",
+            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "anthropic.claude-3-5-haiku-20241022-v1:0",
+            "anthropic.claude-3-opus-20240229-v1:0",
+        ],
+        "supports_tools": True,
+        "auth_types": ["aws_credentials"],
     },
 }
 

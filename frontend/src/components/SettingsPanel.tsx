@@ -104,6 +104,7 @@ export default function SettingsPanel() {
   const [codexModels, setCodexModels] = useState<CodexModel[]>([]);
   const [codexModelsSource, setCodexModelsSource] = useState<string>("");
   const [copilotStatus, setCopilotStatus] = useState<CopilotStatus | null>(null);
+  const [awsForm, setAwsForm] = useState({ access_key_id: "", secret_access_key: "", region: "us-east-1" });
 
   const flash = (text: string) => {
     setMsg(text);
@@ -608,6 +609,8 @@ export default function SettingsPanel() {
                                     ? "Codex Login"
                                     : at === "copilot_subscription"
                                     ? "Copilot Login"
+                                    : at === "aws_credentials"
+                                    ? "AWS Credentials"
                                     : "No Auth"}
                                 </button>
                               ))}
@@ -943,6 +946,43 @@ export default function SettingsPanel() {
                           </div>
                         )}
 
+                        {/* AWS Bedrock credentials block */}
+                        {newProv.authMethod === "aws_credentials" && (
+                          <div className="space-y-2 bg-slate-800/50 rounded p-3">
+                            <div className="text-[10px] text-slate-400">
+                              Stored in <span className="font-mono">knowledge/providers.json</span> (gitignored). Requires <span className="font-mono">pip install boto3</span> in the venv.
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-500 block mb-0.5">Access Key ID</label>
+                              <input
+                                className="w-full bg-slate-800 rounded px-2 py-1 text-xs font-mono outline-none focus:ring-1 focus:ring-sky-600"
+                                placeholder="AKIA..."
+                                value={awsForm.access_key_id}
+                                onChange={(e) => setAwsForm({ ...awsForm, access_key_id: e.target.value })}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-500 block mb-0.5">Secret Access Key</label>
+                              <input
+                                type="password"
+                                className="w-full bg-slate-800 rounded px-2 py-1 text-xs font-mono outline-none focus:ring-1 focus:ring-sky-600"
+                                placeholder="..."
+                                value={awsForm.secret_access_key}
+                                onChange={(e) => setAwsForm({ ...awsForm, secret_access_key: e.target.value })}
+                              />
+                            </div>
+                            <div>
+                              <label className="text-[10px] text-slate-500 block mb-0.5">Region</label>
+                              <input
+                                className="w-full bg-slate-800 rounded px-2 py-1 text-xs font-mono outline-none focus:ring-1 focus:ring-sky-600"
+                                placeholder="us-east-1"
+                                value={awsForm.region}
+                                onChange={(e) => setAwsForm({ ...awsForm, region: e.target.value })}
+                              />
+                            </div>
+                          </div>
+                        )}
+
                         {needsBaseUrl && (
                           <div>
                             <label className="text-xs text-slate-400 block mb-1">Base URL</label>
@@ -1040,12 +1080,13 @@ export default function SettingsPanel() {
                             const id = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
                             const useOAuth = newProv.authMethod === "oauth";
                             try {
+                              const isAws = newProv.authMethod === "aws_credentials";
                               await createProvider({
                                 id,
                                 name,
                                 type: newProv.type,
                                 enabled: true,
-                                api_key: useOAuth ? "" : newProv.apiKey.trim(),
+                                api_key: useOAuth || isAws ? "" : newProv.apiKey.trim(),
                                 api_key_env: ptype?.key_env_default || "",
                                 base_url: newProv.baseUrl.trim() || ptype?.base_url || "",
                                 models: newProv.model ? [newProv.model] : ptype?.models || [],
@@ -1059,6 +1100,13 @@ export default function SettingsPanel() {
                                     token_url: authForm.tokenUrl,
                                     scope: authForm.scope,
                                     grant_type: authForm.grantType,
+                                  },
+                                } : {}),
+                                ...(isAws ? {
+                                  aws: {
+                                    access_key_id: awsForm.access_key_id.trim(),
+                                    secret_access_key: awsForm.secret_access_key.trim(),
+                                    region: awsForm.region.trim() || "us-east-1",
                                   },
                                 } : {}),
                               });

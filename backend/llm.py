@@ -946,6 +946,195 @@ class CodexLLM(BaseLLM):
         return final_text or "[max tool-use iterations reached]"
 
 
+class BedrockLLM(BaseLLM):
+    """AWS Bedrock invoke_model — v0 supports Anthropic Claude on Bedrock only.
+
+    Bedrock isn't a single HTTP API; each model family on Bedrock has its
+    own request body shape (Anthropic, Llama, Cohere on Bedrock, Titan,
+    Mistral on Bedrock). For v0 we focus on the most common case —
+    Anthropic Claude — using the same Messages API shape as native Anthropic
+    but wrapped in a Bedrock invoke.
+
+    boto3 is a soft dependency. If it's not installed we raise an LLMError
+    with a clear `pip install boto3` instruction at construction time.
+
+    Auth: requires `aws.access_key_id`, `aws.secret_access_key`, `aws.region`
+    in the provider config. We don't probe the AWS env / instance metadata
+    fallback because the use case is "user explicitly configured creds in
+    the UI" — env-based auth would silently leak whatever's in the dev shell.
+    """
+
+    def __init__(self, cfg: dict):
+        try:
+            import boto3  # noqa: F401
+        except ImportError as e:
+            raise LLMError(
+                "AWS Bedrock provider requires boto3. Install it with: "
+                ".venv/Scripts/python.exe -m pip install boto3"
+            ) from e
+
+        self.cfg = cfg
+        self.model = cfg["model"]
+        if not self.model.startswith(("anthropic.", "us.anthropic.", "eu.anthropic.", "apac.anthropic.")):
+            raise LLMError(
+                f"Bedrock provider v0 only supports anthropic.* models "
+                f"(got '{self.model}'). Other Bedrock families need per-family "
+                f"request shaping — file an issue if you need them."
+            )
+        aws = cfg.get("aws") or {}
+        self.access_key_id = aws.get("access_key_id") or os.getenv("AWS_ACCESS_KEY_ID", "")
+        self.secret_access_key = aws.get("secret_access_key") or os.getenv("AWS_SECRET_ACCESS_KEY", "")
+        self.region = aws.get("region") or os.getenv("AWS_REGION", "us-east-1")
+        if not self.access_key_id or not self.secret_access_key:
+            raise LLMError(
+                "Bedrock provider needs aws.access_key_id and aws.secret_access_key"
+            )
+        self.default_max = cfg.get("max_tokens", 2000)
+        self.default_temp = cfg.get("temperature", 0.3)
+        self.provider_name = cfg.get("provider_name", "aws_bedrock")
+        self._client = None
+
+    def _bedrock_client(self):
+        if self._client is None:
+            import boto3
+            self._client = boto3.client(
+                "bedrock-runtime",
+                region_name=self.region,
+                aws_access_key_id=self.access_key_id,
+                aws_secret_access_key=self.secret_access_key,
+            )
+        return self._client
+
+    def _invoke(self, payload: dict) -> dict:
+        client = self._bedrock_client()
+        try:
+            t0 = time.time()
+            response = client.invoke_model(
+                modelId=self.model,
+                body=json.dumps(payload).encode("utf-8"),
+                contentType="application/json",
+                accept="application/json",
+            )
+            duration_ms = int((time.time() - t0) * 1000)
+        except Exception as e:
+            raise LLMError(f"Bedrock invoke_model failed ({self.provider_name}/{self.model}): {e}") from e
+        body_bytes = response["body"].read()
+        try:
+            data = json.loads(body_bytes)
+        except Exception as e:
+            raise LLMError(f"Bedrock returned non-JSON body: {e}") from e
+        data["__duration_ms"] = duration_ms
+        return data
+
+    def _record_usage(self, data: dict, _task_type: str, prompt_preview: str, duration_ms: int) -> None:
+        usage = data.get("usage") or {}
+        if not usage:
+            return
+        TOKENS.record(
+            task_type=_task_type,
+            model=self.model,
+            provider=self.provider_name,
+            usage={
+                "input_tokens": usage.get("input_tokens", 0),
+                "output_tokens": usage.get("output_tokens", 0),
+            },
+            duration_ms=duration_ms,
+            prompt_preview=prompt_preview,
+        )
+
+    def complete(self, system, user, *, max_tokens=None, temperature=None,
+                 _task_type: str = ""):
+        payload = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens or self.default_max,
+            "temperature": temperature if temperature is not None else self.default_temp,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+        }
+        data = self._invoke(payload)
+        self._record_usage(data, _task_type, user[:300], data.get("__duration_ms", 0))
+        # Anthropic-on-Bedrock returns content array
+        content = data.get("content") or []
+        text = ""
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text += block.get("text", "")
+        if not text:
+            raise LLMError(f"Bedrock returned no text content: {str(data)[:300]}")
+        return text
+
+    def complete_with_tools(
+        self, system, user, tools, execute_tool,
+        *, max_tokens=None, temperature=None,
+        max_iterations=6, on_tool_call=None, _task_type: str = "",
+    ) -> str:
+        # Convert tools to Anthropic shape: {name, description, input_schema}
+        anthropic_tools = []
+        for t in tools or []:
+            if "input_schema" in t:
+                anthropic_tools.append(t)
+            elif t.get("type") == "function" and isinstance(t.get("function"), dict):
+                fn = t["function"]
+                anthropic_tools.append({
+                    "name": fn.get("name", ""),
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters", {}),
+                })
+
+        messages: list[dict] = [{"role": "user", "content": user}]
+        final_text = ""
+        for _iter in range(max_iterations):
+            payload = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": max_tokens or self.default_max,
+                "temperature": temperature if temperature is not None else self.default_temp,
+                "system": system,
+                "messages": messages,
+            }
+            if anthropic_tools:
+                payload["tools"] = anthropic_tools
+            data = self._invoke(payload)
+            self._record_usage(
+                data,
+                f"{_task_type}:tool_iter_{_iter}",
+                user[:300] if _iter == 0 else f"(tool iteration {_iter})",
+                data.get("__duration_ms", 0),
+            )
+            content = data.get("content") or []
+            text_now = "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+            if text_now:
+                final_text = text_now
+
+            tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+            if not tool_uses:
+                return final_text
+
+            messages.append({"role": "assistant", "content": content})
+            tool_results = []
+            for tu in tool_uses:
+                name = tu.get("name", "")
+                args = tu.get("input") or {}
+                tool_id = tu.get("id", "")
+                result_text, is_error = execute_tool(name, args)
+                if on_tool_call:
+                    try:
+                        on_tool_call(name, args, result_text, is_error)
+                    except Exception:
+                        pass
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_id,
+                    "content": result_text,
+                    **({"is_error": True} if is_error else {}),
+                })
+            messages.append({"role": "user", "content": tool_results})
+
+        return final_text or "[max tool-use iterations reached]"
+
+
 class CopilotLLM(OpenAICompatibleLLM):
     """GitHub Copilot subscription via api.githubcopilot.com.
 
@@ -1384,6 +1573,10 @@ def create_llm(cfg: dict) -> BaseLLM:
         cfg_copy.setdefault("provider_name", "github_copilot")
         cfg_copy.setdefault("base_url", "https://api.githubcopilot.com")
         return CopilotLLM(cfg_copy)
+    elif provider == "aws_bedrock":
+        cfg_copy = dict(cfg)
+        cfg_copy.setdefault("provider_name", "aws_bedrock")
+        return BedrockLLM(cfg_copy)
     elif provider in (
         # OpenAI-compatible providers — same wire format, only base_url differs.
         "openai", "groq", "deepseek", "mistral", "openai_compatible", "together", "openrouter",
