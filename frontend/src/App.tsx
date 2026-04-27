@@ -8,12 +8,13 @@ import NoteViewer from "./components/NoteViewer";
 import ProjectsPanel from "./components/ProjectsPanel";
 import SessionsPanel from "./components/SessionsPanel";
 import IntelligencePanel from "./components/IntelligencePanel";
+import AutonomicPanel from "./components/AutonomicPanel";
 import UsagePage from "./components/UsagePage";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusBar from "./components/StatusBar";
-import { fetchStatus, newSession, StatusPayload } from "./api";
+import { fetchStatus, newSession, fetchAutonomicStatus, fetchPending, StatusPayload, AutonomicStatus } from "./api";
 
-type Tab = "chat" | "goals" | "knowledge" | "graph" | "sessions" | "intelligence" | "usage" | "projects" | "finetune" | "settings";
+type Tab = "chat" | "goals" | "knowledge" | "graph" | "sessions" | "intelligence" | "autonomic" | "usage" | "projects" | "finetune" | "settings";
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "chat", label: "Chat", icon: "💬" },
@@ -22,6 +23,7 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "knowledge", label: "Knowledge", icon: "📚" },
   { id: "graph", label: "Graph", icon: "🔗" },
   { id: "intelligence", label: "Intelligence", icon: "🧠" },
+  { id: "autonomic", label: "Autonomic", icon: "🦾" },
   { id: "usage", label: "Usage", icon: "📈" },
   { id: "projects", label: "Projects", icon: "📁" },
   { id: "finetune", label: "Fine-Tune", icon: "🎓" },
@@ -30,14 +32,21 @@ const TABS: { id: Tab; label: string; icon: string }[] = [
 
 export default function App() {
   const [status, setStatus] = useState<StatusPayload | null>(null);
+  const [autonomic, setAutonomic] = useState<AutonomicStatus | null>(null);
+  const [pendingCount, setPendingCount] = useState<number>(0);
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("chat");
   const chatRef = useRef<ChatHandle>(null);
 
   const refresh = async () => {
-    try {
-      setStatus(await fetchStatus());
-    } catch { /* ignore */ }
+    const [statusResult, autonomicResult, pendingResult] = await Promise.allSettled([
+      fetchStatus(),
+      fetchAutonomicStatus(),
+      fetchPending(),
+    ]);
+    if (statusResult.status === "fulfilled") setStatus(statusResult.value);
+    if (autonomicResult.status === "fulfilled") setAutonomic(autonomicResult.value);
+    if (pendingResult.status === "fulfilled") setPendingCount(pendingResult.value.pending.length);
   };
 
   const handleNewSession = useCallback(async () => {
@@ -84,13 +93,14 @@ export default function App() {
         {tab === "knowledge" && <KnowledgePanel onSelectTopic={setSelectedTopic} />}
         {tab === "graph" && <GraphViewer />}
         {tab === "intelligence" && <IntelligencePanel />}
+        {tab === "autonomic" && <AutonomicPanel />}
         {tab === "usage" && <UsagePage />}
         {tab === "projects" && <ProjectsPanel onRefresh={refresh} />}
         {tab === "finetune" && <FinetunePanel />}
         {tab === "settings" && <SettingsPanel />}
       </div>
 
-      <StatusBar status={status} />
+      <StatusBar status={status} autonomic={autonomic} pendingCount={pendingCount} />
       <NoteViewer topic={selectedTopic} onClose={() => setSelectedTopic(null)} />
     </div>
   );

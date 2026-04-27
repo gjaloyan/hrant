@@ -486,6 +486,10 @@ _Body + yellow lever (D-08):_
 - `GET  /api/autonomic/immune` — immune signatures.
 - `POST /api/autonomic/kill-switch` body `{enabled: bool}` — toggle kill switch.
 
+**Frontend (D-09):**
+- `🦾 Autonomic` tab in the web UI (`frontend/src/components/AutonomicPanel.tsx`) shows kill switch, pending approvals with Approve/Reject, recent ticks, 19-lever grid, immune signatures, and a per-lever history drawer.
+- `StatusBar` at the bottom of every tab shows `autonomic: N levers` with a health dot and `⚠ N pending` badge when yellow actions are queued.
+
 **Paths:**
 - Kill switch: `knowledge/autonomic/ENABLED` — set content to `false` to disable.
 - Logs: `knowledge/autonomic/lever_log.jsonl`, `tick_log.jsonl`, `pending_approvals.jsonl`.

@@ -1,4 +1,4 @@
-import { StatusPayload } from "../api";
+import { StatusPayload, AutonomicStatus } from "../api";
 
 function Dot({ ok, title }: { ok: boolean | undefined; title: string }) {
   const color = ok === undefined ? "bg-slate-500" : ok ? "bg-emerald-400" : "bg-rose-500";
@@ -10,7 +10,15 @@ function Dot({ ok, title }: { ok: boolean | undefined; title: string }) {
   );
 }
 
-export default function StatusBar({ status }: { status: StatusPayload | null }) {
+export default function StatusBar({
+  status,
+  autonomic,
+  pendingCount,
+}: {
+  status: StatusPayload | null;
+  autonomic?: AutonomicStatus | null;
+  pendingCount?: number;
+}) {
   if (!status) return null;
   const r = status.router as any;
   const hasRouter = r && !("error" in r);
@@ -54,6 +62,22 @@ export default function StatusBar({ status }: { status: StatusPayload | null }) 
           </span>
         </>
       )}
+
+      {autonomic && (
+        <span className="border-l border-slate-700 pl-4 flex items-center gap-1">
+          <Dot
+            ok={autonomic.enabled && autonomic.scheduler_running}
+            title="Autonomic"
+          />
+          <span className="text-slate-400">
+            autonomic: {autonomic.registered_levers.length} levers
+          </span>
+          {pendingCount !== undefined && pendingCount > 0 && (
+            <span className="text-amber-400 font-bold">⚠ {pendingCount} pending</span>
+          )}
+        </span>
+      )}
+
       {!hasRouter && <span className="ml-auto text-rose-400">router: {r?.error || "—"}</span>}
     </div>
   );
