@@ -169,7 +169,28 @@ class KnowledgeManager:
             self._snapshot_note(path)
         path.write_text(note.to_markdown(), encoding="utf-8")
         self._upsert_index(note)
+        # Best-effort embedding refresh — never block save on a degraded
+        # vector backend.
+        try:
+            self._embed_note(note)
+        except Exception:
+            pass
         return note
+
+    def _embed_note(self, note: Note) -> None:
+        """Embed `topic + body` and store in the vector index. No-op if disabled."""
+        from .embedder import EMBEDDER
+        from .vector_store import VECTOR_STORE
+        text = f"{note.frontmatter.topic}\n\n{note.body}".strip()
+        vec = EMBEDDER.embed(text)
+        if not vec or EMBEDDER.dim is None or EMBEDDER.backend is None:
+            return
+        if not VECTOR_STORE.is_compatible(EMBEDDER.dim, EMBEDDER.backend, EMBEDDER.model or ""):
+            # Backend changed; we'll reset on the next backfill explicitly.
+            return
+        if VECTOR_STORE.count() == 0:
+            VECTOR_STORE.stamp(EMBEDDER.dim, EMBEDDER.backend, EMBEDDER.model or "")
+        VECTOR_STORE.add(_slug(note.frontmatter.topic), vec)
 
     def _upsert_index(self, note: Note) -> None:
         idx = self._read_index()
@@ -251,6 +272,12 @@ class KnowledgeManager:
         except Exception:
             pass
         self._write_index(idx)
+        # Best-effort vector index cleanup.
+        try:
+            from .vector_store import VECTOR_STORE
+            VECTOR_STORE.remove(key)
+        except Exception:
+            pass
         return True
 
     def list_topics(self) -> list[IndexEntry]:

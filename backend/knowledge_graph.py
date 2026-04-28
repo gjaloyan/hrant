@@ -8,7 +8,11 @@ through the graph even if they don't share keywords.
 
 Design:
   - Graph stored as adjacency list in knowledge/graph.json
-  - Each edge: {source_entity, relation, target_entity, source_note, weight}
+  - Each edge: {source_entity, relation, target_entity, source_note, weight,
+                valid_from, valid_to, confidence}
+  - valid_from / valid_to are optional ISO-date strings; None means
+    "always valid". Lets us answer "what was true on 2026-01-15" without
+    rewriting history.
   - Entity extraction happens during note creation (piggybacks on existing LLM call)
   - Graph search: BFS from query entities, collect related notes within N hops
   - No embeddings, no vector DB, no external dependencies
@@ -17,10 +21,28 @@ from __future__ import annotations
 import json
 import re
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .config import CONFIG
+
+
+def _is_valid_at(edge: dict, as_of: Optional[str]) -> bool:
+    """Return True if the edge is valid at `as_of` (ISO date/datetime str).
+
+    None bounds mean "open" (always valid in that direction). If as_of is
+    None, only edges with valid_to=None pass — i.e. the "current" view.
+    """
+    vf = edge.get("valid_from")
+    vt = edge.get("valid_to")
+    if as_of is None:
+        return vt is None  # current view: only open-ended edges
+    if vf and as_of < vf:
+        return False
+    if vt and as_of >= vt:
+        return False
+    return True
 
 
 class KnowledgeGraph:
@@ -71,6 +93,10 @@ class KnowledgeGraph:
         triples: list[tuple[str, str, str]],
         source_note: str,
         weight: float = 1.0,
+        *,
+        valid_from: Optional[str] = None,
+        valid_to: Optional[str] = None,
+        confidence: float = 1.0,
     ) -> int:
         """Add entity-relation-entity triples from a note.
 
@@ -78,6 +104,9 @@ class KnowledgeGraph:
             triples: list of (subject, relation, object) strings
             source_note: slug of the note these came from
             weight: edge weight (higher = stronger connection)
+            valid_from / valid_to: optional ISO-date strings bounding when
+                this fact was/is true. None = open-ended.
+            confidence: 0..1 — how sure we are this triple holds.
 
         Returns:
             Number of edges added.
@@ -92,34 +121,54 @@ class KnowledgeGraph:
             if subj_n not in self._edges:
                 self._edges[subj_n] = []
 
-            # Avoid exact duplicates
+            # Avoid exact duplicates (same target+note+validity span)
             exists = any(
-                e["target"] == obj_n and e["note"] == source_note
+                e["target"] == obj_n
+                and e["note"] == source_note
+                and e.get("valid_from") == valid_from
+                and e.get("valid_to") == valid_to
                 for e in self._edges[subj_n]
             )
             if not exists:
-                self._edges[subj_n].append({
+                edge: dict = {
                     "target": obj_n,
                     "relation": rel.strip(),
                     "note": source_note,
                     "weight": weight,
-                })
+                }
+                if valid_from is not None:
+                    edge["valid_from"] = valid_from
+                if valid_to is not None:
+                    edge["valid_to"] = valid_to
+                if confidence != 1.0:
+                    edge["confidence"] = confidence
+                self._edges[subj_n].append(edge)
                 added += 1
 
             # Bidirectional: add reverse edge with lower weight
             if obj_n not in self._edges:
                 self._edges[obj_n] = []
             rev_exists = any(
-                e["target"] == subj_n and e["note"] == source_note
+                e["target"] == subj_n
+                and e["note"] == source_note
+                and e.get("valid_from") == valid_from
+                and e.get("valid_to") == valid_to
                 for e in self._edges[obj_n]
             )
             if not rev_exists:
-                self._edges[obj_n].append({
+                rev_edge: dict = {
                     "target": subj_n,
                     "relation": f"inverse:{rel.strip()}",
                     "note": source_note,
                     "weight": weight * 0.5,
-                })
+                }
+                if valid_from is not None:
+                    rev_edge["valid_from"] = valid_from
+                if valid_to is not None:
+                    rev_edge["valid_to"] = valid_to
+                if confidence != 1.0:
+                    rev_edge["confidence"] = confidence
+                self._edges[obj_n].append(rev_edge)
 
             # Update reverse index
             self._note_entities[source_note].add(subj_n)
@@ -259,6 +308,110 @@ class KnowledgeGraph:
 
     def edge_count(self) -> int:
         return sum(len(edges) for edges in self._edges.values())
+
+    # ---- temporal queries ----
+
+    def query_entity(
+        self,
+        entity: str,
+        as_of: Optional[str] = None,
+        direction: str = "out",
+    ) -> list[dict]:
+        """Return edges for an entity, optionally time-filtered.
+
+        Args:
+            entity: entity name (case-insensitive)
+            as_of: ISO date/datetime — if set, only edges valid at that
+                instant. If None, returns currently-open edges (valid_to is None).
+            direction: "out" (subject = entity), "in" (object = entity), "both".
+
+        Returns full edge dicts including subject for caller convenience.
+        """
+        entity_n = self._normalize(entity)
+        results: list[dict] = []
+        if direction in ("out", "both") and entity_n in self._edges:
+            for edge in self._edges[entity_n]:
+                if not _is_valid_at(edge, as_of):
+                    continue
+                results.append({"subject": entity_n, **edge})
+        if direction in ("in", "both"):
+            for subj, edges in self._edges.items():
+                if subj == entity_n:
+                    continue
+                for edge in edges:
+                    if edge.get("target") != entity_n:
+                        continue
+                    if not _is_valid_at(edge, as_of):
+                        continue
+                    results.append({"subject": subj, **edge})
+        return results
+
+    def invalidate(
+        self,
+        subject: str,
+        relation: str,
+        target: str,
+        ended_at: Optional[str] = None,
+    ) -> int:
+        """Close all open edges matching (subject, relation, target).
+
+        Sets `valid_to` on edges that don't have one. `ended_at` defaults
+        to now (UTC ISO date). Returns number of edges closed.
+        Also closes the inverse edge so traversal stays symmetric.
+        """
+        subj_n = self._normalize(subject)
+        target_n = self._normalize(target)
+        rel = relation.strip()
+        ts = ended_at or datetime.utcnow().strftime("%Y-%m-%d")
+
+        closed = 0
+        if subj_n in self._edges:
+            for edge in self._edges[subj_n]:
+                if (
+                    edge.get("target") == target_n
+                    and edge.get("relation") == rel
+                    and edge.get("valid_to") is None
+                ):
+                    edge["valid_to"] = ts
+                    closed += 1
+
+        # Close the inverse too so query_entity from the target side stays consistent.
+        inv_rel = f"inverse:{rel}"
+        if target_n in self._edges:
+            for edge in self._edges[target_n]:
+                if (
+                    edge.get("target") == subj_n
+                    and edge.get("relation") == inv_rel
+                    and edge.get("valid_to") is None
+                ):
+                    edge["valid_to"] = ts
+
+        if closed:
+            self._save()
+        return closed
+
+    def timeline(self, entity: str) -> list[dict]:
+        """All edges for an entity, sorted by valid_from (None first).
+
+        Useful for "show me Max's history" — returns every fact ever
+        recorded about an entity, ordered chronologically.
+        """
+        entries = self.query_entity(entity, as_of=None, direction="both")
+        # Include closed edges too — query_entity with as_of=None only
+        # returns open ones; for timeline we want everything.
+        entity_n = self._normalize(entity)
+        all_edges: list[dict] = []
+        if entity_n in self._edges:
+            for edge in self._edges[entity_n]:
+                all_edges.append({"subject": entity_n, **edge})
+        for subj, edges in self._edges.items():
+            if subj == entity_n:
+                continue
+            for edge in edges:
+                if edge.get("target") == entity_n:
+                    all_edges.append({"subject": subj, **edge})
+        all_edges.sort(key=lambda e: e.get("valid_from") or "0000-00-00")
+        return all_edges
 
 
 def parse_entity_relations(text: str) -> list[tuple[str, str, str]]:

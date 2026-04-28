@@ -5,12 +5,15 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..analogy_engine import ANALOGIES
+from ..embedder import EMBEDDER
+from ..embedding_backfill import backfill_embeddings
 from ..evaluator import EVALUATOR
 from ..knowledge_graph import GRAPH, reindex_all_notes
 from ..llm import TOKENS
 from ..memory_extractor import MEMORY
 from ..meta_learner import META_LEARNER
 from ..self_modifier import SELF_MODIFIER
+from ..vector_store import VECTOR_STORE
 
 router = APIRouter()
 
@@ -156,6 +159,20 @@ def memory_recall(body: MemoryRecallRequest):
 @router.get("/api/analogies")
 def analogy_list():
     return {"patterns": ANALOGIES.all_patterns(), "stats": ANALOGIES.stats()}
+
+
+# ---- embeddings / vector store ----
+@router.get("/api/memory/embeddings/status")
+def embeddings_status():
+    return {
+        "embedder": EMBEDDER.status(),
+        "vector_store": VECTOR_STORE.stats(),
+    }
+
+
+@router.post("/api/memory/embeddings/backfill")
+def embeddings_backfill(force: bool = False):
+    return backfill_embeddings(force=force)
 
 
 # ---- self-modifier ----
