@@ -12,6 +12,11 @@ def router(tmp_kb, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     r = DualModelRouter(state_path=tmp_kb.base / "router_state.json")
 
+    # In claude_only mode CONFIG.model_b is None, which makes _ollama_available()
+    # hardcode False and the model_b property raise. Tests want both providers
+    # available — install a stub cfg_b so cached availability + injected fakes win.
+    r.cfg_b = {"base_url": "http://localhost:11434", "model": "fake-qwen-test"}
+
     # По умолчанию детерминированное поведение: без shift, с fallback, с высоким бюджетом
     r.cfg_router = dict(r.cfg_router)
     r.cfg_router["auto_shift_after_finetune"] = False

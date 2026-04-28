@@ -21,10 +21,12 @@ class ModelVersionRegistry:
         self.path = path or (KM.base / "model_versions.json")
         if not self.path.exists():
             ft = CONFIG.finetune or {}
+            # CONFIG.model_b is None in claude_only mode — defensively coalesce.
+            model_b_cfg = CONFIG.model_b or {}
             base_id = (
                 ft.get("inference_model")
                 or ft.get("base_model")
-                or CONFIG.model_b.get("model", "unknown")
+                or model_b_cfg.get("model", "unknown")
             )
             base = ModelVersion(
                 tag="v0",
