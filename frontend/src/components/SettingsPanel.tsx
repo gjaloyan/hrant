@@ -1,4 +1,9 @@
 import { useEffect, useState } from "react";
+import IdentityEditor from "./settings/IdentityEditor";
+import UserProfileTab from "./settings/UserProfileTab";
+import ConversationTab from "./settings/ConversationTab";
+import CapabilitiesTab from "./settings/CapabilitiesTab";
+import StatusTab from "./settings/StatusTab";
 import {
   clearConversation,
   compareModels,
@@ -264,40 +269,10 @@ export default function SettingsPanel() {
     { id: "status", label: "System Status" },
   ];
 
-  const editorFor = (file: string, value: string, setter: (v: string) => void) => (
-    <div className="flex flex-col h-full">
-      <div className="flex justify-between items-center mb-2">
-        <h3 className="font-bold">{file}.md</h3>
-        <div className="flex gap-2">
-          {dirty && <span className="text-xs text-amber-400">unsaved changes</span>}
-          <button
-            onClick={() => handleSave(file, value)}
-            disabled={!dirty}
-            className="bg-emerald-700 hover:bg-emerald-600 disabled:opacity-40 rounded px-3 py-1 text-xs"
-          >
-            Save
-          </button>
-          <button
-            onClick={loadIdentity}
-            className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs"
-          >
-            Reload
-          </button>
-        </div>
-      </div>
-      <textarea
-        className="flex-1 bg-slate-950 rounded p-3 text-sm font-mono resize-none outline-none focus:ring-1 focus:ring-sky-600"
-        value={value}
-        onChange={(e) => {
-          setter(e.target.value);
-          setDirty(true);
-        }}
-      />
-    </div>
-  );
-
-  const r = status?.router as any;
-  const hasRouter = r && !("error" in r);
+  const editorProps = (file: string, value: string, setter: (v: string) => void) => ({
+    file, value, setter, dirty,
+    onSave: handleSave, onReload: loadIdentity, setDirty,
+  });
 
   return (
     <div className="flex flex-1 min-h-0">
@@ -321,89 +296,31 @@ export default function SettingsPanel() {
 
       {/* Content */}
       <div className="flex-1 p-4 overflow-y-auto flex flex-col">
-        {tab === "soul" && editorFor("soul", soul, setSoul)}
-        {tab === "identity" && editorFor("identity", identity, setIdentity)}
+        {tab === "soul" && <IdentityEditor {...editorProps("soul", soul, setSoul)} />}
+        {tab === "identity" && <IdentityEditor {...editorProps("identity", identity, setIdentity)} />}
         {tab === "user" && (
-          <div className="flex flex-col h-full">
-            {editorFor("user", userProfile, setUserProfile)}
-            {history.length > 0 && (
-              <details className="mt-3">
-                <summary className="text-xs cursor-pointer opacity-60">
-                  Profile history ({history.length} versions)
-                </summary>
-                <div className="mt-1 space-y-0.5 text-xs max-h-32 overflow-y-auto">
-                  {history.map((v, i) => (
-                    <div key={i} className="flex gap-2 opacity-60">
-                      <span>{v.timestamp}</span>
-                      <span>{v.size}b</span>
-                    </div>
-                  ))}
-                </div>
-              </details>
-            )}
-          </div>
+          <UserProfileTab
+            userProfile={userProfile}
+            setUserProfile={setUserProfile}
+            dirty={dirty}
+            onSave={handleSave}
+            onReload={loadIdentity}
+            setDirty={setDirty}
+            history={history}
+          />
         )}
 
         {tab === "conversation" && (
-          <div className="space-y-3">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold">Conversation History ({convCount} turns)</h3>
-              <div className="flex gap-2">
-                <button
-                  onClick={loadConversation}
-                  className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs"
-                >
-                  Refresh
-                </button>
-                <button
-                  onClick={handleClearConversation}
-                  className="bg-rose-700 hover:bg-rose-600 rounded px-3 py-1 text-xs"
-                >
-                  Clear all
-                </button>
-              </div>
-            </div>
-            {conversation.length === 0 && (
-              <div className="opacity-50 text-sm">(no conversation history)</div>
-            )}
-            {conversation.map((turn, i) => (
-              <div key={i} className="bg-slate-800 rounded p-3 text-sm space-y-1">
-                <div className="flex gap-2 text-xs opacity-60">
-                  <span>{turn.ts}</span>
-                  <span className="bg-slate-700 px-1 rounded">{turn.intent}</span>
-                  {turn.confidence ? <span>conf: {turn.confidence}%</span> : null}
-                  {turn.topics?.length ? (
-                    <span>topics: {turn.topics.join(", ")}</span>
-                  ) : null}
-                </div>
-                <div>
-                  <span className="text-sky-400 font-semibold">User: </span>
-                  {turn.user}
-                </div>
-                <div>
-                  <span className="text-emerald-400 font-semibold">Agent: </span>
-                  {turn.answer}
-                </div>
-              </div>
-            ))}
-          </div>
+          <ConversationTab
+            conversation={conversation}
+            convCount={convCount}
+            onRefresh={loadConversation}
+            onClear={handleClearConversation}
+          />
         )}
 
         {tab === "capabilities" && (
-          <div className="space-y-3">
-            <div className="flex justify-between items-center">
-              <h3 className="font-bold">Agent Capabilities</h3>
-              <button
-                onClick={loadCapabilities}
-                className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs"
-              >
-                Refresh
-              </button>
-            </div>
-            <pre className="whitespace-pre-wrap text-sm bg-slate-950 rounded p-4">
-              {capabilities || "(loading...)"}
-            </pre>
-          </div>
+          <CapabilitiesTab capabilities={capabilities} onRefresh={loadCapabilities} />
         )}
 
         {tab === "providers" && (
@@ -1939,106 +1856,7 @@ export default function SettingsPanel() {
         )}
 
         {tab === "status" && status && (
-          <div className="space-y-4">
-            <h3 className="font-bold">System Status</h3>
-
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
-              <div className="bg-slate-800 rounded p-3">
-                <div className="text-xs opacity-60 mb-1">Mode</div>
-                <div className="font-bold">{status.mode}</div>
-                <div className="text-xs opacity-60 mt-1">training: {status.training_location}</div>
-              </div>
-              <div className="bg-slate-800 rounded p-3">
-                <div className="text-xs opacity-60 mb-1">Topics</div>
-                <div className="font-bold">{status.topics_total}</div>
-                <div className="text-xs opacity-60 mt-1">
-                  {Object.entries(status.by_category)
-                    .map(([k, v]) => `${k}: ${v}`)
-                    .join(", ")}
-                </div>
-              </div>
-              <div className="bg-slate-800 rounded p-3">
-                <div className="text-xs opacity-60 mb-1">Core Memory</div>
-                <div className="font-bold">
-                  {status.core_tokens}/{status.core_max} tokens
-                </div>
-              </div>
-              <div className="bg-slate-800 rounded p-3">
-                <div className="text-xs opacity-60 mb-1">Finetune Queue</div>
-                <div className="font-bold">{status.finetune_count}</div>
-                <div className="text-xs opacity-60 mt-1">
-                  enabled: {status.finetune_enabled ? "yes" : "no"}
-                </div>
-              </div>
-              <div className="bg-slate-800 rounded p-3">
-                <div className="text-xs opacity-60 mb-1">Model A</div>
-                <div className="font-bold text-sky-400">{status.model_a || "—"}</div>
-                {hasRouter && (
-                  <div className="text-xs opacity-60 mt-1">
-                    available: {r.model_a_available ? "yes" : "no"}
-                  </div>
-                )}
-              </div>
-              <div className="bg-slate-800 rounded p-3">
-                <div className="text-xs opacity-60 mb-1">Model B</div>
-                <div className="font-bold text-emerald-400">{status.model_b || "—"}</div>
-                {status.model_version && (
-                  <div className="text-xs opacity-60 mt-1">version: {status.model_version}</div>
-                )}
-                {hasRouter && (
-                  <div className="text-xs opacity-60">
-                    available: {r.model_b_available ? "yes" : "no"}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {hasRouter && (
-              <div className="bg-slate-800 rounded p-3 text-sm">
-                <div className="font-semibold mb-2">Router Stats</div>
-                <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                  <div>
-                    A calls today: <b>{r.api_calls_today}</b>
-                  </div>
-                  <div>
-                    B calls today: <b>{r.model_b_calls_today}</b>
-                  </div>
-                  <div>
-                    Cost today: <b>${r.api_cost_today?.toFixed(3)}</b>
-                    {r.budget_usd ? `/${r.budget_usd}` : ""}
-                  </div>
-                  <div>
-                    Total: A={r.total_a_calls} / B={r.total_b_calls}
-                  </div>
-                </div>
-                {r.last_reason && (
-                  <div className="text-xs opacity-60 mt-1">last routing: {r.last_reason}</div>
-                )}
-              </div>
-            )}
-
-            <div className="bg-slate-800 rounded p-3 text-sm">
-              <div className="font-semibold mb-2">Project</div>
-              <div className="text-xs">
-                Active: {status.current_project || "(none)"}
-              </div>
-            </div>
-
-            <div className="flex gap-2">
-              <button
-                onClick={handleCompare}
-                className="bg-violet-700 hover:bg-violet-600 rounded px-3 py-1 text-sm"
-              >
-                Compare Models
-              </button>
-              <button
-                onClick={loadStatus}
-                className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-sm"
-              >
-                Refresh
-              </button>
-            </div>
-          </div>
+          <StatusTab status={status} onCompare={handleCompare} onRefresh={loadStatus} />
         )}
       </div>
     </div>
