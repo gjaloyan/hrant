@@ -103,13 +103,15 @@ QUERIES: list[tuple[str, str]] = [
 ]
 
 
-# ---------- deterministic fake embedder ----------
-# Bag-of-words hash trick: hash each word into a fixed-size vector,
-# accumulate, normalize. Reproducible without external deps; behaves like
-# a very low-quality embedder so we can compare deltas honestly. Real
-# embedders score higher; the *direction* of improvement should match.
+# ---------- embedder selection ----------
+# Two modes:
+#   1. Fake bow-hash (default) — deterministic, no deps, runs in CI.
+#   2. Real EMBEDDER (when AGI_BENCH_REAL_EMBEDDER=1) — uses whatever
+#      backend embedder.py picked (llama.cpp / Ollama / OpenAI / Cohere).
+# The bench reports both signal lines so the delta from a real model is
+# directly visible.
 
-VEC_DIM = 128
+VEC_DIM = 128  # for the fake embedder only; real one uses its native dim
 
 
 def _fake_embed(text: str) -> list[float]:
@@ -124,9 +126,23 @@ def _fake_embed(text: str) -> list[float]:
     return [x / norm for x in vec]
 
 
+def _resolve_embed_fn():
+    """Return (embed_fn, label, native_dim). Falls back to fake on failure."""
+    import os
+    if os.getenv("AGI_BENCH_REAL_EMBEDDER", "").strip() not in ("1", "true", "yes"):
+        return _fake_embed, "fake bow-hash", VEC_DIM
+    from backend.embedder import EMBEDDER
+    status = EMBEDDER.status()
+    if status["backend"] in (None, "disabled"):
+        print(f"  ! AGI_BENCH_REAL_EMBEDDER set but no backend reachable; falling back to fake")
+        return _fake_embed, "fake bow-hash", VEC_DIM
+    label = f"{status['backend']}/{status['model']} ({status['dim']}-dim)"
+    return EMBEDDER.embed, label, status["dim"]
+
+
 # ---------- bench runner ----------
 
-def _build_kb(tmp_path: Path):
+def _build_kb(tmp_path: Path, embed_fn, dim: int, label: str):
     """Build a fresh KB + KG + vector store inside tmp_path.
 
     Patches the global KM module-level singleton so Searcher (which reads
@@ -144,7 +160,7 @@ def _build_kb(tmp_path: Path):
     sr_mod.KM = km
     graph = KnowledgeGraph(path=tmp_path / "graph.json")
     vstore = VectorStore(tmp_path / "vec.json")
-    vstore.stamp(VEC_DIM, "fake", "bow-hash")
+    vstore.stamp(dim, "bench", label)
 
     # Save corpus — KM.save_note now auto-populates the graph from the
     # note's keywords + body, so we don't need any manual `add_relations`.
@@ -157,8 +173,9 @@ def _build_kb(tmp_path: Path):
     try:
         for topic, body, kw in CORPUS:
             km.save_note(topic=topic, body=body, keywords=kw, source="bench")
-            # Embed — explicitly use the fake bow-hash, not the real EMBEDDER
-            vstore.add(topic, _fake_embed(body))
+            vec = embed_fn(body)
+            if vec:
+                vstore.add(topic, vec)
     finally:
         kg_mod.GRAPH = saved_graph
 
@@ -167,8 +184,10 @@ def _build_kb(tmp_path: Path):
     return km, graph, vstore, searcher
 
 
-def _vector_hits(vstore, query: str, k: int) -> dict[str, float]:
-    qvec = _fake_embed(query)
+def _vector_hits(vstore, query: str, k: int, embed_fn) -> dict[str, float]:
+    qvec = embed_fn(query)
+    if not qvec:
+        return {}
     return {slug: max(0.0, score) for slug, score in vstore.search(qvec, k=k * 2)}
 
 
@@ -202,7 +221,7 @@ def _run_signal(
     use_fuzzy: bool,
     use_graph: bool,
     use_vector: bool,
-    km, graph, vstore, searcher,
+    km, graph, vstore, searcher, embed_fn,
 ):
     """Run hybrid search restricted to the given signals; report metrics."""
     from backend.hybrid_searcher import HybridSearcher
@@ -235,7 +254,7 @@ def _run_signal(
         # Vector
         vec_hits: dict[str, float] = {}
         if use_vector:
-            vec_hits = _vector_hits(vstore, query, k=10)
+            vec_hits = _vector_hits(vstore, query, k=10, embed_fn=embed_fn)
 
         # Min-max normalize each
         def norm(d: dict[str, float]) -> dict[str, float]:
@@ -267,25 +286,21 @@ def _run_signal(
 
 
 def run_bench(tmp_path: Path) -> dict:
-    km, graph, vstore, searcher = _build_kb(tmp_path)
+    embed_fn, embed_label, dim = _resolve_embed_fn()
+    km, graph, vstore, searcher = _build_kb(tmp_path, embed_fn, dim, embed_label)
     print(f"\nRetrieval bench — {len(CORPUS)} notes, {len(QUERIES)} queries")
+    print(f"vector backend: {embed_label}")
     print("-" * 72)
 
+    common = dict(km=km, graph=graph, vstore=vstore, searcher=searcher, embed_fn=embed_fn)
     out = {}
-    out["fuzzy_only"] = _run_signal("fuzzy only", use_fuzzy=True, use_graph=False, use_vector=False,
-                                    km=km, graph=graph, vstore=vstore, searcher=searcher)
-    out["graph_only"] = _run_signal("graph only", use_fuzzy=False, use_graph=True, use_vector=False,
-                                    km=km, graph=graph, vstore=vstore, searcher=searcher)
-    out["vector_only"] = _run_signal("vector only (fake bow-hash)", use_fuzzy=False, use_graph=False, use_vector=True,
-                                     km=km, graph=graph, vstore=vstore, searcher=searcher)
-    out["fuzzy_graph"] = _run_signal("fuzzy + graph", use_fuzzy=True, use_graph=True, use_vector=False,
-                                     km=km, graph=graph, vstore=vstore, searcher=searcher)
-    out["fuzzy_vector"] = _run_signal("fuzzy + vector", use_fuzzy=True, use_graph=False, use_vector=True,
-                                      km=km, graph=graph, vstore=vstore, searcher=searcher)
-    out["all_three"] = _run_signal("all three (hybrid)", use_fuzzy=True, use_graph=True, use_vector=True,
-                                   km=km, graph=graph, vstore=vstore, searcher=searcher)
+    out["fuzzy_only"] = _run_signal("fuzzy only", use_fuzzy=True, use_graph=False, use_vector=False, **common)
+    out["graph_only"] = _run_signal("graph only", use_fuzzy=False, use_graph=True, use_vector=False, **common)
+    out["vector_only"] = _run_signal(f"vector only ({embed_label})", use_fuzzy=False, use_graph=False, use_vector=True, **common)
+    out["fuzzy_graph"] = _run_signal("fuzzy + graph", use_fuzzy=True, use_graph=True, use_vector=False, **common)
+    out["fuzzy_vector"] = _run_signal("fuzzy + vector", use_fuzzy=True, use_graph=False, use_vector=True, **common)
+    out["all_three"] = _run_signal("all three (hybrid)", use_fuzzy=True, use_graph=True, use_vector=True, **common)
     print("-" * 72)
-    print("(vector path uses a deterministic fake embedder — real backends should score higher)")
     return out
 
 
