@@ -999,6 +999,75 @@ export const fetchCopilotStatus = () =>
   json_get<CopilotStatus>("/api/providers/copilot/status");
 
 
+// ---------- Embeddings (memory layer) ----------
+
+export type EmbedderConfig = {
+  backend?: "auto" | "llama_cpp" | "ollama" | "openai" | "cohere" | "disabled";
+  llama_cpp?: { url?: string; model?: string };
+  ollama?: { url?: string; model?: string };
+  openai?: { provider_id?: string; model?: string };
+  cohere?: { model?: string };
+};
+
+export type EmbedderStatus = {
+  backend: "llama_cpp" | "ollama" | "openai" | "cohere" | "disabled" | null;
+  model: string | null;
+  dim: number | null;
+  last_error: string | null;
+  config: EmbedderConfig;
+};
+
+export type VectorStoreStats = {
+  count: number;
+  dim: number | null;
+  backend: string | null;
+  model: string | null;
+};
+
+export type EmbeddingsCoverage = {
+  total_notes: number;
+  embedded: number;
+  missing: number;
+  stale_store: boolean;
+  reason: "ok" | "embedder_disabled" | "store_dim_or_model_mismatch" | "missing_notes";
+};
+
+export type EmbeddingsStatusResponse = {
+  embedder: EmbedderStatus;
+  vector_store: VectorStoreStats;
+  coverage: EmbeddingsCoverage;
+};
+
+export type EmbeddingsBackfillResponse = {
+  ok: boolean;
+  reason?: string;
+  backend?: string;
+  model?: string;
+  dim?: number;
+  embedded?: number;
+  skipped?: number;
+  errors?: number;
+  total?: number;
+};
+
+export const fetchEmbeddingsStatus = () =>
+  json_get<EmbeddingsStatusResponse>("/api/memory/embeddings/status");
+
+export const updateEmbeddingsConfig = (cfg: EmbedderConfig) =>
+  json_put<EmbeddingsStatusResponse & { config: EmbedderConfig }>(
+    "/api/memory/embeddings/config",
+    cfg,
+  );
+
+export const resetEmbedder = () =>
+  json_post<EmbeddingsStatusResponse>("/api/memory/embeddings/reset");
+
+export const backfillEmbeddings = (force: boolean = false) =>
+  json_post<EmbeddingsBackfillResponse>(
+    `/api/memory/embeddings/backfill?force=${force ? "true" : "false"}`,
+  );
+
+
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {
   provider_id: string;

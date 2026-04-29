@@ -5,8 +5,8 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..analogy_engine import ANALOGIES
-from ..embedder import EMBEDDER
-from ..embedding_backfill import backfill_embeddings
+from ..embedder import EMBEDDER, load_config as load_embedder_config, save_config as save_embedder_config
+from ..embedding_backfill import backfill_embeddings, missing_count
 from ..evaluator import EVALUATOR
 from ..knowledge_graph import GRAPH, reindex_all_notes
 from ..llm import TOKENS
@@ -167,12 +167,54 @@ def embeddings_status():
     return {
         "embedder": EMBEDDER.status(),
         "vector_store": VECTOR_STORE.stats(),
+        "coverage": missing_count(),
     }
 
 
 @router.post("/api/memory/embeddings/backfill")
 def embeddings_backfill(force: bool = False):
     return backfill_embeddings(force=force)
+
+
+@router.get("/api/memory/embeddings/config")
+def embeddings_config_get():
+    return {"config": load_embedder_config()}
+
+
+class EmbedderConfigUpdate(BaseModel):
+    backend: str | None = None  # "auto" | "llama_cpp" | "ollama" | "openai" | "cohere" | "disabled"
+    llama_cpp: dict | None = None    # {url, model}
+    ollama: dict | None = None       # {url, model}
+    openai: dict | None = None       # {provider_id, model}
+    cohere: dict | None = None       # {model}
+
+
+@router.put("/api/memory/embeddings/config")
+def embeddings_config_put(body: EmbedderConfigUpdate):
+    """Persist embedder config and re-probe. Returns the live status."""
+    cfg = body.model_dump(exclude_none=True)
+    save_embedder_config(cfg)
+    EMBEDDER.reset()
+    return {
+        "ok": True,
+        "config": load_embedder_config(),
+        "embedder": EMBEDDER.status(),
+        "vector_store": VECTOR_STORE.stats(),
+        "coverage": missing_count(),
+    }
+
+
+@router.post("/api/memory/embeddings/reset")
+def embeddings_reset():
+    """Drop cached backend so the next embed re-probes — call after a
+    server outage to retry auto-fallback without restarting the agent."""
+    EMBEDDER.reset()
+    return {
+        "ok": True,
+        "embedder": EMBEDDER.status(),
+        "vector_store": VECTOR_STORE.stats(),
+        "coverage": missing_count(),
+    }
 
 
 # ---- self-modifier ----

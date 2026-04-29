@@ -24,6 +24,28 @@ def _isolate_active_model(monkeypatch):
     monkeypatch.setattr(ACTIVE_MODEL, "_data", {}, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_embedder(monkeypatch):
+    """Don't let the user's runtime embedder config (knowledge/
+    embedder_config.json, written by the Memory tab) bootstrap a real
+    embedder during tests. Tests that want a real embedder should
+    explicitly opt in by re-loading config and resetting EMBEDDER.
+    """
+    try:
+        from backend import embedder as emb_mod
+    except ImportError:
+        return
+    # Force EMBEDDER into the "disabled" state for the duration of the
+    # test, and stub load_config so even auto-probe sees no preferences.
+    emb_mod.EMBEDDER._backend = "disabled"
+    emb_mod.EMBEDDER._model = None
+    emb_mod.EMBEDDER._dim = None
+    emb_mod.EMBEDDER._provider = None
+    emb_mod.EMBEDDER._llama_cpp_base = None
+    emb_mod.EMBEDDER._last_error = None
+    monkeypatch.setattr(emb_mod, "load_config", lambda: {}, raising=True)
+
+
 @pytest.fixture
 def tmp_kb(tmp_path, monkeypatch):
     """Изолированная база знаний во временной папке."""

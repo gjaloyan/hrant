@@ -1,4 +1,4 @@
-"""Embed all knowledge notes (or just unmissing ones) into the vector store.
+"""Embed all knowledge notes (or just missing ones) into the vector store.
 
 Used by:
   - the bootstrap path when an embedder backend first becomes available
@@ -19,6 +19,45 @@ from .knowledge_manager import KM, _slug
 from .vector_store import VECTOR_STORE
 
 log = logging.getLogger(__name__)
+
+
+def missing_count() -> dict:
+    """Return how many KB notes lack a current vector.
+
+    "Missing" = note exists in the index but its slug isn't in
+    VECTOR_STORE *and* the store's stamp matches the current embedder
+    (so we don't false-alarm on a stale-store mismatch).
+    """
+    status = EMBEDDER.status()
+    backend = status.get("backend")
+    dim = status.get("dim") or 0
+    model = status.get("model") or ""
+    notes = KM.list_topics()
+    total = len(notes)
+    if backend in (None, "disabled"):
+        return {
+            "total_notes": total,
+            "embedded": VECTOR_STORE.count(),
+            "missing": total,
+            "stale_store": False,
+            "reason": "embedder_disabled",
+        }
+    if not VECTOR_STORE.is_compatible(dim, backend, model):
+        return {
+            "total_notes": total,
+            "embedded": VECTOR_STORE.count(),
+            "missing": total,
+            "stale_store": True,
+            "reason": "store_dim_or_model_mismatch",
+        }
+    have = sum(1 for entry in notes if VECTOR_STORE.has(_slug(entry.topic)))
+    return {
+        "total_notes": total,
+        "embedded": have,
+        "missing": total - have,
+        "stale_store": False,
+        "reason": "ok" if total == have else "missing_notes",
+    }
 
 
 def backfill_embeddings(*, force: bool = False, limit: Optional[int] = None) -> dict:

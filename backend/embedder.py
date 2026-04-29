@@ -2,9 +2,9 @@
 
 Tries embedding sources in fallback order:
   1. llama.cpp server (POST /v1/embeddings, OpenAI-compat) — local,
-     free, configured via LLAMA_CPP_EMBEDDING_URL env var. Preferred
-     when set because the user explicitly stood it up; we don't probe
-     for it otherwise.
+     free, configured via knowledge/embedder_config.json *or* the
+     LLAMA_CPP_EMBEDDING_URL env var. Preferred when set because the
+     user explicitly stood it up; we don't probe for it otherwise.
   2. Ollama (POST /api/embeddings) — local, free, fastest if running
      locally on the same machine.
   3. OpenAI-compatible providers from providers.json (OpenAI, xAI, etc.)
@@ -15,22 +15,25 @@ If nothing is available, embedder.embed() returns None and the caller
 should treat the vector path as disabled — text + graph search continue
 to work.
 
-Configuration:
-  AGI_EMBEDDER_BACKEND        — "auto" (default), "llama_cpp", "ollama",
-                                "openai", "cohere"
-  AGI_EMBEDDER_MODEL          — backend-specific model id; defaults below
-  LLAMA_CPP_EMBEDDING_URL     — base URL of a llama-server running with
-                                --embedding (e.g. http://host:8080/v1)
-  LLAMA_CPP_EMBEDDING_MODEL   — model name to send in the request body
-                                (llama.cpp echoes this back)
+Configuration precedence (highest first):
+  - knowledge/embedder_config.json   (managed by Settings UI)
+  - AGI_EMBEDDER_BACKEND env var     ("auto" | "llama_cpp" | "ollama" | "openai" | "cohere" | "disabled")
+  - LLAMA_CPP_EMBEDDING_URL env var  (legacy; still works)
+
+The on-disk config is the source of truth when present. EMBEDDER.reset()
+flushes the cached backend so the next embed() call re-probes — used
+after the user changes settings or after a server outage.
 
 We never throw on transient errors; the embedder degrades gracefully so
 chat doesn't break when an embedding source is temporarily down.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import threading
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -44,15 +47,57 @@ DEFAULT_COHERE_MODEL = "embed-english-v3.0"  # 1024 dim
 DEFAULT_LLAMA_CPP_MODEL = "bge-m3"  # what we echo back; server runs whatever GGUF is loaded
 
 
+def _config_path() -> Path:
+    from .config import CONFIG
+    return Path(CONFIG.knowledge["base_dir"]) / "embedder_config.json"
+
+
+def load_config() -> dict:
+    """Load embedder config from disk. Returns {} if missing/unreadable."""
+    p = _config_path()
+    if not p.exists():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def save_config(cfg: dict) -> dict:
+    """Persist embedder config and return the saved dict (no mutation)."""
+    p = _config_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return cfg
+
+
 class Embedder:
     """Lazy embedder. Picks a backend on first use and remembers it."""
 
     def __init__(self):
+        self._lock = threading.Lock()
         self._backend: Optional[str] = None
         self._model: Optional[str] = None
         self._dim: Optional[int] = None
+        self._last_error: Optional[str] = None
         self._provider: Optional[dict] = None  # cached provider config when applicable
         self._llama_cpp_base: Optional[str] = None  # cached base URL for llama.cpp server
+
+    def reset(self) -> None:
+        """Drop cached backend so the next embed() call re-probes.
+
+        Called after the user changes Settings or after a server outage —
+        without this, a backend that was reachable at startup but is now
+        down would keep raising on every embed() call instead of falling
+        through to the next backend in the chain.
+        """
+        with self._lock:
+            self._backend = None
+            self._model = None
+            self._dim = None
+            self._provider = None
+            self._llama_cpp_base = None
+            self._last_error = None
 
     # ---- public ----
 
@@ -97,41 +142,61 @@ class Embedder:
             "backend": self._backend,
             "model": self._model,
             "dim": self._dim,
+            "last_error": self._last_error,
+            "config": load_config(),
         }
 
     # ---- backend selection ----
 
     def _pick_backend(self) -> None:
-        forced = os.getenv("AGI_EMBEDDER_BACKEND", "auto").lower()
+        cfg = load_config()
+        # Disk config wins over env var; env stays as a back-compat path.
+        forced = (
+            cfg.get("backend")
+            or os.getenv("AGI_EMBEDDER_BACKEND", "auto")
+        ).lower()
         forced_model = os.getenv("AGI_EMBEDDER_MODEL", "")
+
+        if forced == "disabled":
+            self._backend = "disabled"
+            return
 
         candidates: list[str]
         if forced == "auto":
-            # llama.cpp goes first when the user has explicitly configured
-            # LLAMA_CPP_EMBEDDING_URL — they stood up a server, use it.
+            # llama.cpp goes first when explicitly configured (URL set in
+            # config or env). Falling through to ollama / providers / cohere.
             candidates = ["llama_cpp", "ollama", "openai", "cohere"]
         else:
             candidates = [forced]
 
         for cand in candidates:
-            if cand == "llama_cpp" and self._try_llama_cpp(forced_model):
+            if cand == "llama_cpp" and self._try_llama_cpp(forced_model, cfg):
                 return
-            if cand == "ollama" and self._try_ollama(forced_model):
+            if cand == "ollama" and self._try_ollama(forced_model, cfg):
                 return
-            if cand == "openai" and self._try_openai(forced_model):
+            if cand == "openai" and self._try_openai(forced_model, cfg):
                 return
-            if cand == "cohere" and self._try_cohere(forced_model):
+            if cand == "cohere" and self._try_cohere(forced_model, cfg):
                 return
         self._backend = "disabled"
 
-    def _try_llama_cpp(self, forced_model: str) -> bool:
-        base = os.getenv("LLAMA_CPP_EMBEDDING_URL", "").rstrip("/")
+    def _try_llama_cpp(self, forced_model: str, cfg: dict) -> bool:
+        # Disk config wins, env var is fallback for back-compat.
+        cfg_llama = (cfg.get("llama_cpp") or {}) if cfg else {}
+        base = (
+            cfg_llama.get("url")
+            or os.getenv("LLAMA_CPP_EMBEDDING_URL", "")
+        ).rstrip("/")
         if not base:
             return False
         # Normalise: accept both "http://host:port" and "http://host:port/v1".
         if not base.endswith("/v1"):
             base = base.rstrip("/") + "/v1"
-        model = forced_model or os.getenv("LLAMA_CPP_EMBEDDING_MODEL", DEFAULT_LLAMA_CPP_MODEL)
+        model = (
+            forced_model
+            or cfg_llama.get("model")
+            or os.getenv("LLAMA_CPP_EMBEDDING_MODEL", DEFAULT_LLAMA_CPP_MODEL)
+        )
         try:
             r = httpx.post(
                 f"{base}/embeddings",
@@ -147,19 +212,25 @@ class Embedder:
             self._model = model
             self._dim = len(vec)
             self._llama_cpp_base = base
+            self._last_error = None
             return True
-        except Exception:
+        except Exception as e:
+            self._last_error = f"llama_cpp probe failed: {e}"
             return False
 
-    def _try_ollama(self, forced_model: str) -> bool:
-        base = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE).rstrip("/")
+    def _try_ollama(self, forced_model: str, cfg: dict) -> bool:
+        cfg_ollama = (cfg.get("ollama") or {}) if cfg else {}
+        base = (
+            cfg_ollama.get("url")
+            or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE)
+        ).rstrip("/")
         try:
             r = httpx.get(f"{base}/api/tags", timeout=2.0)
             r.raise_for_status()
-        except Exception:
+        except Exception as e:
+            self._last_error = f"ollama probe failed: {e}"
             return False
-        model = forced_model or DEFAULT_OLLAMA_MODEL
-        # Probe with a tiny embed call to confirm model is pulled
+        model = forced_model or cfg_ollama.get("model") or DEFAULT_OLLAMA_MODEL
         try:
             r = httpx.post(
                 f"{base}/api/embeddings",
@@ -174,14 +245,24 @@ class Embedder:
             self._backend = "ollama"
             self._model = model
             self._dim = len(vec)
+            self._last_error = None
             return True
-        except Exception:
+        except Exception as e:
+            self._last_error = f"ollama probe failed: {e}"
             return False
 
-    def _try_openai(self, forced_model: str) -> bool:
-        prov = self._find_provider("openai")
+    def _try_openai(self, forced_model: str, cfg: dict) -> bool:
+        cfg_openai = (cfg.get("openai") or {}) if cfg else {}
+        # Optional: pin a specific provider id from config so we don't
+        # accidentally hit Groq/Together/etc when the user wanted OpenAI.
+        pinned_id = cfg_openai.get("provider_id")
+        prov = None
+        if pinned_id:
+            from .providers import get_provider
+            prov = get_provider(pinned_id)
         if not prov:
-            # Try any openai-compatible provider with an api_key (xai, openrouter, ...)
+            prov = self._find_provider("openai")
+        if not prov:
             for ptype in ("openai_compatible", "together", "openrouter", "groq"):
                 prov = self._find_provider(ptype)
                 if prov:
@@ -192,7 +273,7 @@ class Embedder:
         if not api_key:
             return False
         base = (prov.get("base_url") or "https://api.openai.com/v1").rstrip("/")
-        model = forced_model or DEFAULT_OPENAI_MODEL
+        model = forced_model or cfg_openai.get("model") or DEFAULT_OPENAI_MODEL
         try:
             r = httpx.post(
                 f"{base}/embeddings",
@@ -207,18 +288,21 @@ class Embedder:
             self._model = model
             self._provider = prov
             self._dim = len(vec)
+            self._last_error = None
             return True
-        except Exception:
+        except Exception as e:
+            self._last_error = f"openai probe failed: {e}"
             return False
 
-    def _try_cohere(self, forced_model: str) -> bool:
+    def _try_cohere(self, forced_model: str, cfg: dict) -> bool:
+        cfg_cohere = (cfg.get("cohere") or {}) if cfg else {}
         prov = self._find_provider("cohere")
         if not prov:
             return False
         api_key = self._resolve_api_key(prov)
         if not api_key:
             return False
-        model = forced_model or DEFAULT_COHERE_MODEL
+        model = forced_model or cfg_cohere.get("model") or DEFAULT_COHERE_MODEL
         try:
             r = httpx.post(
                 "https://api.cohere.com/v1/embed",
@@ -233,8 +317,10 @@ class Embedder:
             self._model = model
             self._provider = prov
             self._dim = len(vec)
+            self._last_error = None
             return True
-        except Exception:
+        except Exception as e:
+            self._last_error = f"cohere probe failed: {e}"
             return False
 
     @staticmethod
