@@ -28,6 +28,33 @@ from typing import Optional
 from .config import CONFIG
 
 
+# Stop words filtered out of query entity extraction. Picking the
+# question-marker subset matters most ("what is the X" → keep "X", drop
+# the rest). Bilingual because notes and queries mix EN + RU.
+_QUERY_STOPWORDS: frozenset[str] = frozenset({
+    # English
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "what", "when", "where", "who", "whom", "why", "how", "which",
+    "of", "to", "in", "on", "at", "for", "with", "by", "from", "as",
+    "and", "or", "but", "so", "if", "then", "than",
+    "this", "that", "these", "those", "it", "its",
+    "i", "me", "my", "you", "your", "we", "our", "they", "them", "their",
+    "do", "does", "did", "doing", "have", "has", "had", "having",
+    "can", "could", "would", "should", "will", "shall", "may", "might",
+    "not", "no", "none", "any", "some", "all", "each", "every",
+    "about", "into", "over", "under", "between", "through",
+    # Russian
+    "что", "кто", "когда", "где", "куда", "откуда", "почему", "зачем", "как",
+    "и", "или", "но", "а", "же", "ли", "не", "ни",
+    "в", "во", "на", "над", "под", "за", "перед", "у", "о", "об", "к",
+    "с", "со", "из", "по", "при", "до", "после", "для", "без",
+    "это", "то", "тот", "та", "те", "этот", "эта",
+    "я", "ты", "мы", "вы", "он", "она", "они", "его", "её", "их",
+    "быть", "был", "была", "было", "были",
+    "есть", "нет", "уже", "ещё",
+})
+
+
 def _is_valid_at(edge: dict, as_of: Optional[str]) -> bool:
     """Return True if the edge is valid at `as_of` (ISO date/datetime str).
 
@@ -199,78 +226,118 @@ class KnowledgeGraph:
         """Find notes related to query via graph traversal.
 
         Returns list of (note_slug, relevance_score) sorted by score desc.
-        Uses BFS from entities that match the query, collecting notes
-        within max_hops of graph distance.
+
+        Scoring (per query term):
+          - direct match (entity == term)               score 1.0
+          - partial substring overlap                   score 0.7
+          - per-hop decay: hop_score = 0.6 * prev       (was edge.weight*0.5,
+                                                         i.e. 0.25 — too steep)
+          - **topic bonus**: if a query term matches the note's slug
+            verbatim, add +0.5 — fixes the "python_gil" query → "python_gil"
+            note alignment that BFS-only would under-rank.
+          - per-(term, note) cap of 1.0 prevents one query from scoring the
+            same note multiple times via different aliases.
         """
         query_terms = self._extract_query_entities(query)
         if not query_terms:
             return []
 
-        # BFS from matching entities
-        visited: set[str] = set()
-        # note_slug -> accumulated score
         note_scores: dict[str, float] = defaultdict(float)
+        normalized_terms = {self._normalize(t) for t in query_terms}
 
-        # Start from entities that match query terms
-        frontier: list[tuple[str, int, float]] = []  # (entity, hops, score)
+        # Topic-direct boost: query terms that exactly match a note slug
+        # (case-insensitive, slug-style). Cheap and catches the "fuzzy and
+        # graph see the same thing" case where the query is the topic.
+        for note_slug in self._note_entities:
+            slug_clean = note_slug.lower().replace("_", " ").replace("-", " ")
+            if note_slug in normalized_terms or slug_clean in normalized_terms:
+                note_scores[note_slug] += 0.5
+
+        # BFS scoring per query term, with caps so one term contributes <= 1.0
+        # to a single note.
         for term in query_terms:
             term_n = self._normalize(term)
-            # Direct match
+            visited: set[str] = set()
+            frontier: list[tuple[str, int, float]] = []
+
             if term_n in self._edges:
                 frontier.append((term_n, 0, 1.0))
-            # Partial match
+
             for entity in self._edges:
+                if entity == term_n:
+                    continue
                 if term_n in entity or entity in term_n:
-                    if entity != term_n:
-                        frontier.append((entity, 0, 0.7))
+                    frontier.append((entity, 0, 0.7))
 
-        while frontier:
-            entity, hops, score = frontier.pop(0)
-            if entity in visited:
-                continue
-            visited.add(entity)
+            term_scores: dict[str, float] = defaultdict(float)
+            while frontier:
+                entity, hops, score = frontier.pop(0)
+                if entity in visited:
+                    continue
+                visited.add(entity)
+                for note_slug, entities in self._note_entities.items():
+                    if entity in entities:
+                        # Cap the per-(term, note) contribution at the
+                        # current hop's score — so revisits via different
+                        # entity paths don't compound.
+                        if score > term_scores[note_slug]:
+                            term_scores[note_slug] = score
+                if hops < max_hops and entity in self._edges:
+                    for edge in self._edges[entity]:
+                        target = edge["target"]
+                        if target in visited:
+                            continue
+                        # Linear decay per hop instead of weight*0.5: the
+                        # first neighbor is ~0.6 instead of ~0.25, which
+                        # better matches what humans expect.
+                        next_score = score * 0.6
+                        frontier.append((target, hops + 1, next_score))
 
-            # Score all notes this entity appears in
-            for note_slug, entities in self._note_entities.items():
-                if entity in entities:
-                    note_scores[note_slug] += score
+            # Aggregate this term's contribution (capped at 1.0 per note)
+            for note_slug, s in term_scores.items():
+                note_scores[note_slug] += min(s, 1.0)
 
-            # Expand to neighbors if within hop limit
-            if hops < max_hops and entity in self._edges:
-                for edge in self._edges[entity]:
-                    target = edge["target"]
-                    if target not in visited:
-                        decay = edge.get("weight", 1.0) * 0.5  # decay per hop
-                        frontier.append((target, hops + 1, score * decay))
-
-        # Sort by score, return top results
         ranked = sorted(note_scores.items(), key=lambda x: -x[1])
         return ranked[:max_results]
 
     def _extract_query_entities(self, query: str) -> list[str]:
         """Extract potential entity names from a query string.
 
-        Simple approach: split by common delimiters, filter short words,
-        also try the full query as one entity.
+        Strategy:
+          - Keep the full lowered query as one candidate (catches multi-word
+            entities like "global interpreter lock" stored verbatim as edges).
+          - Drop stop words ("what is the X" → keep "X", drop the rest).
+          - Keep tokens >= 4 chars and bigrams of non-stop-words.
+          - Deduplicate while preserving order so direct hits stay first.
         """
-        results = []
-        # Full query as entity
+        results: list[str] = []
+        seen: set[str] = set()
+
+        def _push(token: str) -> None:
+            if token and token not in seen:
+                seen.add(token)
+                results.append(token)
+
         q = query.strip().lower()
-        if q:
-            results.append(q)
+        if not q:
+            return []
+        _push(q)
 
-        # Split into meaningful chunks
-        words = re.split(r"[\s,;.?!]+", q)
-        # Single significant words (>3 chars)
+        words = [w for w in re.split(r"[\s,;.?!]+", q) if w]
+
+        # Significant single words (filter stop words)
         for w in words:
-            if len(w) > 3:
-                results.append(w)
+            if len(w) >= 4 and w not in _QUERY_STOPWORDS:
+                _push(w)
 
-        # Bigrams
+        # Bigrams of non-stopword pairs (rejects "is the", "of the", ...)
         for i in range(len(words) - 1):
-            bigram = f"{words[i]} {words[i+1]}"
+            a, b = words[i], words[i + 1]
+            if a in _QUERY_STOPWORDS or b in _QUERY_STOPWORDS:
+                continue
+            bigram = f"{a} {b}"
             if len(bigram) > 5:
-                results.append(bigram)
+                _push(bigram)
 
         return results
 

@@ -175,6 +175,12 @@ class KnowledgeManager:
             self._embed_note(note)
         except Exception:
             pass
+        # Best-effort graph indexing — every save path gets entity edges,
+        # not just learn_topic.
+        try:
+            self._index_in_graph(note)
+        except Exception:
+            pass
         return note
 
     def _embed_note(self, note: Note) -> None:
@@ -191,6 +197,30 @@ class KnowledgeManager:
         if VECTOR_STORE.count() == 0:
             VECTOR_STORE.stamp(EMBEDDER.dim, EMBEDDER.backend, EMBEDDER.model or "")
         VECTOR_STORE.add(_slug(note.frontmatter.topic), vec)
+
+    def _index_in_graph(self, note: Note) -> None:
+        """Extract triples from a saved note and refresh its graph edges.
+
+        Mirrors the embed-on-save pattern: every save path (learn_topic,
+        quick-note, manual edit, API put) gets graph indexing for free.
+        Re-save replaces the note's edges atomically — no accumulation.
+
+        learn_topic still adds richer edges (causal pairs from a dedicated
+        section) on top; the basic keyword + body-extracted layer lives here.
+        """
+        from .knowledge_graph import GRAPH, extract_relations_from_note_body
+        topic = note.frontmatter.topic
+        slug = _slug(topic)
+        triples = extract_relations_from_note_body(note.body, topic)
+        topic_lower = topic.lower()
+        for kw in note.frontmatter.keywords:
+            if kw.lower() != topic_lower:
+                triples.append((topic_lower, "keyword", kw.lower()))
+        # Drop any prior edges from this note before re-adding so a second
+        # save with different keywords/body doesn't leave stale fan-out.
+        GRAPH.remove_note(slug)
+        if triples:
+            GRAPH.add_relations(triples, source_note=slug)
 
     def _upsert_index(self, note: Note) -> None:
         idx = self._read_index()
@@ -276,6 +306,12 @@ class KnowledgeManager:
         try:
             from .vector_store import VECTOR_STORE
             VECTOR_STORE.remove(key)
+        except Exception:
+            pass
+        # Best-effort graph cleanup.
+        try:
+            from .knowledge_graph import GRAPH
+            GRAPH.remove_note(key)
         except Exception:
             pass
         return True

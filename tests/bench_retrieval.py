@@ -146,29 +146,21 @@ def _build_kb(tmp_path: Path):
     vstore = VectorStore(tmp_path / "vec.json")
     vstore.stamp(VEC_DIM, "fake", "bow-hash")
 
-    # Save corpus + add some hand-crafted graph edges for a few topics
-    # so the graph signal isn't completely empty.
-    for topic, body, kw in CORPUS:
-        km.save_note(topic=topic, body=body, keywords=kw, source="bench")
-        # Embed — explicitly use fake embedder, not the real EMBEDDER
-        vstore.add(topic, _fake_embed(body))
+    # Save corpus — KM.save_note now auto-populates the graph from the
+    # note's keywords + body, so we don't need any manual `add_relations`.
+    # We do need to point GRAPH at our local instance for the duration of
+    # the bench, so the auto-index hooks write into the right graph.
+    from backend import knowledge_graph as kg_mod
+    saved_graph = kg_mod.GRAPH
+    kg_mod.GRAPH = graph
 
-    # A few illustrative cross-topic graph edges so graph BFS has paths
-    graph.add_relations(
-        [
-            ("python", "has", "gil"),
-            ("multiprocessing", "bypasses", "gil"),
-            ("asyncio", "alternative_to", "threading"),
-            ("rust", "uses", "borrow_checker"),
-            ("kubernetes", "deploys", "pods"),
-            ("postgres", "uses", "vacuum"),
-            ("postgres", "uses", "indexes"),
-            ("kafka", "uses", "topics"),
-            ("react", "has", "hooks"),
-            ("react", "has", "context"),
-        ],
-        source_note="bench",
-    )
+    try:
+        for topic, body, kw in CORPUS:
+            km.save_note(topic=topic, body=body, keywords=kw, source="bench")
+            # Embed — explicitly use the fake bow-hash, not the real EMBEDDER
+            vstore.add(topic, _fake_embed(body))
+    finally:
+        kg_mod.GRAPH = saved_graph
 
     # Searcher + Hybrid with NO embedder (we'll inject vector results manually)
     searcher = Searcher()
