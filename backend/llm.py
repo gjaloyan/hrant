@@ -839,13 +839,37 @@ class CodexLLM(BaseLLM):
             "model": self.model,
             "instructions": system,
             "input": input_items,
+            # ChatGPT-subscription tier rejects store=true with HTTP 400
+            # ("Store must be set to false"). With store=false we MUST strip
+            # server-assigned `id` fields from re-fed output items (see
+            # _sanitize_for_input) and ride on encrypted_content instead.
             "store": False,
+            # Carry encrypted reasoning inside each item so we don't lose
+            # chain-of-thought when re-feeding (matches Codex CLI's pattern).
+            "include": ["reasoning.encrypted_content"],
         }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
             payload["parallel_tool_calls"] = True
         return payload
+
+    @staticmethod
+    def _sanitize_for_input(items: list[dict]) -> list[dict]:
+        """Strip server-assigned `id` fields before re-feeding output items
+        as input on the next turn.
+
+        With store=true the IDs would resolve, but stripping them is harmless
+        and protects against accidental store=false flips. `call_id` is kept
+        because it's the tool↔result correlator, not a server lookup key.
+        """
+        cleaned: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            stripped = {k: v for k, v in item.items() if k != "id"}
+            cleaned.append(stripped)
+        return cleaned
 
     def complete(self, system, user, *, max_tokens=None, temperature=None,
                  _task_type: str = ""):
@@ -922,8 +946,10 @@ class CodexLLM(BaseLLM):
             if not calls:
                 return final_text
 
-            # Re-feed every output item back so the model sees its own state, then add tool results.
-            input_items.extend(items)
+            # Re-feed every output item back so the model sees its own state,
+            # then add tool results. Strip server-assigned `id` fields so the
+            # API doesn't try to look them up in its persistent store.
+            input_items.extend(self._sanitize_for_input(items))
             for fc in calls:
                 name = fc.get("name", "")
                 call_id = fc.get("call_id") or fc.get("id", "")
