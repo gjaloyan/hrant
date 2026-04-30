@@ -60,6 +60,10 @@ knowledge/index.json
 knowledge/graph.json
 knowledge/error_log.jsonl
 knowledge/eval_log.jsonl
+knowledge/embedder_config.json
+knowledge/transcriber_config.json
+knowledge/embeddings.json
+knowledge/attachments/
 knowledge/finetune_queue.jsonl
 knowledge/memory_facts.jsonl
 

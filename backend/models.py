@@ -148,6 +148,10 @@ class AgentAnswer(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     project: Optional[str] = None
+    # Attachment sha256s — uploaded separately via /api/attachments and
+    # referenced here by content-hash. Keeps the chat payload compact and
+    # lets the same image be re-used across turns without re-uploading.
+    attachments: list[str] = []
 
 
 class LearnRequest(BaseModel):

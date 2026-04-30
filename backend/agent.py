@@ -526,12 +526,14 @@ class Agent:
         conv = CONVERSATION.context_block(n=4)
         conv_section = f"\n\n{conv}" if conv else ""
         user = f"# CORE MEMORY\n{core.strip()}{conv_section}\n\n# MESSAGE\n{task.strip()}"
+        attachments = getattr(self, "_attachments", None)
         try:
             return router().call(
                 TaskType.QUICK_ANSWER,
                 system,
                 user,
                 max_tokens=300, temperature=0.6,
+                attachments=attachments,
             )
         except LLMError as e:
             # Surface the actual error short. Better than a generic fallback —
@@ -838,6 +840,7 @@ class Agent:
             max_tokens=4000,
             temperature=0.3,
             on_tool_call=_on_tool_call,
+            attachments=getattr(self, "_attachments", None),
         )
         tool_context = "\n\n".join(tool_outputs) if tool_outputs else ""
         return answer, tool_context
@@ -953,11 +956,19 @@ class Agent:
             llm_calls=u["llm_calls"],
         )
 
-    def run(self, task: str, project: str | None = None) -> AgentAnswer:
+    def run(
+        self,
+        task: str,
+        project: str | None = None,
+        attachments: list[str] | None = None,
+    ) -> AgentAnswer:
         import time as _time
         TOKENS.reset_request()
         self._trace = []
         self._t0 = _time.monotonic()
+        # Stash attachments so _chat_reply / _solve can pick them up
+        # without us threading the kwarg through every helper.
+        self._attachments = attachments or None
         try:
             core = self._load_core()
 

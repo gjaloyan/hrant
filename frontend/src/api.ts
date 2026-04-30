@@ -219,9 +219,10 @@ export const fetchStatus = () => json_get<StatusPayload>("/api/status");
 export async function chatStream(
   message: string,
   project: string | null,
-  onEvent: (e: StreamEvent) => void
+  onEvent: (e: StreamEvent) => void,
+  attachments: string[] = [],
 ): Promise<void> {
-  return readSSE("/api/chat", { message, project }, onEvent);
+  return readSSE("/api/chat", { message, project, attachments }, onEvent);
 }
 
 // ---- Knowledge ----
@@ -1066,6 +1067,48 @@ export const backfillEmbeddings = (force: boolean = false) =>
   json_post<EmbeddingsBackfillResponse>(
     `/api/memory/embeddings/backfill?force=${force ? "true" : "false"}`,
   );
+
+
+// ---------- Attachments + voice transcription ----------
+
+export type AttachmentMeta = {
+  sha256: string;
+  kind: "image" | "audio" | "file";
+  mime_type: string;
+  size: number;
+  filename: string;
+  transcript: string;
+  created: string;
+};
+
+export async function uploadAttachment(file: File | Blob, filename?: string): Promise<AttachmentMeta> {
+  const fd = new FormData();
+  fd.append("file", file, filename || (file instanceof File ? file.name : "blob"));
+  const r = await fetch("/api/attachments", { method: "POST", body: fd });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(text || `${r.status}`);
+  }
+  return r.json();
+}
+
+export async function transcribeAudio(
+  blob: Blob,
+  filename = "voice.ogg",
+  language?: string,
+): Promise<{ text: string; sha256: string; backend: string }> {
+  const fd = new FormData();
+  fd.append("file", blob, filename);
+  if (language) fd.append("language", language);
+  const r = await fetch("/api/transcribe", { method: "POST", body: fd });
+  if (!r.ok) {
+    const text = await r.text().catch(() => "");
+    throw new Error(text || `${r.status}`);
+  }
+  return r.json();
+}
+
+export const attachmentUrl = (sha: string) => `/api/attachments/${sha}`;
 
 
 // ---------- Active model selection ----------

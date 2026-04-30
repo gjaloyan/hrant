@@ -145,8 +145,92 @@ class TelegramBot:
                     "Send me any message and the agent will respond."
                 )
 
+            async def _gather_attachments(update: "Update") -> list[str]:
+                """Pull photos / voice / documents off the Telegram message,
+                stash them via the AttachmentStore, transcribe voice, and
+                return the resulting sha256 list ready to feed agent.run().
+
+                Quietly skips anything that fails — network or Telegram
+                API hiccups should not block the text part of the message.
+                """
+                from .attachments import ATTACHMENTS, classify_kind
+                from .transcriber import TRANSCRIBER
+
+                msg = update.message
+                if msg is None:
+                    return []
+                shas: list[str] = []
+
+                # Photos (Telegram sends multiple resolutions; take the
+                # largest — better for vision models)
+                if getattr(msg, "photo", None):
+                    try:
+                        largest = msg.photo[-1]
+                        f = await largest.get_file()
+                        data = await f.download_as_bytearray()
+                        rec = ATTACHMENTS.save(
+                            bytes(data),
+                            "image/jpeg",
+                            filename=f"telegram_{largest.file_unique_id}.jpg",
+                            kind="image",
+                        )
+                        shas.append(rec.sha256)
+                    except Exception as e:
+                        log.warning("Telegram photo download failed: %s", e)
+
+                # Voice → store + try to transcribe
+                if getattr(msg, "voice", None):
+                    try:
+                        f = await msg.voice.get_file()
+                        data = await f.download_as_bytearray()
+                        mime = msg.voice.mime_type or "audio/ogg"
+                        rec = ATTACHMENTS.save(
+                            bytes(data),
+                            mime,
+                            filename=f"telegram_voice_{msg.voice.file_unique_id}.ogg",
+                            kind="audio",
+                        )
+                        text = TRANSCRIBER.transcribe(
+                            bytes(data),
+                            mime_type=mime,
+                            filename=f"voice.ogg",
+                        )
+                        if text:
+                            ATTACHMENTS.set_transcript(rec.sha256, text)
+                        shas.append(rec.sha256)
+                    except Exception as e:
+                        log.warning("Telegram voice handling failed: %s", e)
+
+                # Audio / documents that look like images or audio
+                if getattr(msg, "audio", None):
+                    try:
+                        f = await msg.audio.get_file()
+                        data = await f.download_as_bytearray()
+                        mime = msg.audio.mime_type or "audio/mpeg"
+                        rec = ATTACHMENTS.save(bytes(data), mime, filename=msg.audio.file_name or "audio", kind="audio")
+                        shas.append(rec.sha256)
+                    except Exception as e:
+                        log.warning("Telegram audio download failed: %s", e)
+
+                if getattr(msg, "document", None):
+                    try:
+                        f = await msg.document.get_file()
+                        data = await f.download_as_bytearray()
+                        mime = msg.document.mime_type or "application/octet-stream"
+                        rec = ATTACHMENTS.save(
+                            bytes(data),
+                            mime,
+                            filename=msg.document.file_name or "document",
+                            kind=classify_kind(mime),
+                        )
+                        shas.append(rec.sha256)
+                    except Exception as e:
+                        log.warning("Telegram document download failed: %s", e)
+
+                return shas
+
             async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-                if not update.message or not update.message.text:
+                if not update.message:
                     return
 
                 user = update.effective_user
@@ -157,29 +241,41 @@ class TelegramBot:
                     await update.message.reply_text("Access denied.")
                     return
 
-                text = update.message.text.strip()
-                if not text:
+                # Pull text from message OR caption (photos arrive with caption)
+                text = (update.message.text or update.message.caption or "").strip()
+
+                # Pick up any media (photos / voice / audio / docs)
+                attachment_shas = await _gather_attachments(update)
+
+                # Voice without text → use the transcript as the message body
+                if not text and attachment_shas:
+                    from .attachments import ATTACHMENTS
+                    for sha in attachment_shas:
+                        meta = ATTACHMENTS.get_meta(sha)
+                        if meta and meta.kind == "audio" and meta.transcript:
+                            text = meta.transcript
+                            break
+                    if not text:
+                        # Image-only message — give the agent something to chew on
+                        text = "(see attached file)"
+
+                if not text and not attachment_shas:
                     return
 
-                # Send typing indicator
                 await update.message.chat.send_action("typing")
 
-                # Call the agent
                 try:
                     from .agent import Agent
                     agent = Agent()
-                    result = agent.run(text, project=None)
+                    result = agent.run(text, project=None, attachments=attachment_shas or None)
                     answer = result.answer or "(no answer)"
 
-                    # Telegram max message length is 4096
                     if len(answer) > 4000:
-                        # Split into chunks
                         for i in range(0, len(answer), 4000):
                             await update.message.reply_text(answer[i:i + 4000])
                     else:
                         await update.message.reply_text(answer)
 
-                    # Log the channel interaction
                     _log_channel_message(self.channel_id, username, text, answer)
 
                 except Exception as e:
@@ -188,6 +284,12 @@ class TelegramBot:
 
             app.add_handler(CommandHandler("start", handle_start))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+            # Media handlers route through the same handle_message so caption
+            # text + attachment shas reach the agent in one turn.
+            app.add_handler(MessageHandler(filters.PHOTO, handle_message))
+            app.add_handler(MessageHandler(filters.VOICE, handle_message))
+            app.add_handler(MessageHandler(filters.AUDIO, handle_message))
+            app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
 
             loop.run_until_complete(app.initialize())
             loop.run_until_complete(app.start())

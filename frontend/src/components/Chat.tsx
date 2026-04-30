@@ -3,10 +3,11 @@ import {
   AgentAnswer, chatStream, StreamEvent, addFromChat, addCorrection, fetchCurrentSession,
   fetchActiveModel, setActiveModel, clearActiveModel,
   type ActiveModelSelection, type AvailableModel,
+  type AttachmentMeta, uploadAttachment, transcribeAudio, attachmentUrl,
 } from "../api";
 
 type Msg =
-  | { role: "user"; text: string }
+  | { role: "user"; text: string; attachments?: AttachmentMeta[] }
   | { role: "agent"; text: string; meta?: AgentAnswer; progress?: string[] };
 
 export type ChatHandle = {
@@ -38,6 +39,94 @@ const Chat = forwardRef<ChatHandle, {
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [showModelPicker, setShowModelPicker] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
+
+  // Multimodal: pending attachments + voice recording
+  const [pending, setPending] = useState<AttachmentMeta[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const recordingStreamRef = useRef<MediaStream | null>(null);
+
+  const handleAttachFiles = async (files: FileList | File[] | null) => {
+    if (!files || (files as FileList).length === 0) return;
+    setUploading(true);
+    try {
+      const arr = Array.from(files as FileList);
+      const uploaded: AttachmentMeta[] = [];
+      for (const f of arr) {
+        try {
+          const meta = await uploadAttachment(f);
+          uploaded.push(meta);
+        } catch (e: any) {
+          // eslint-disable-next-line no-alert
+          alert(`Failed to upload ${f.name}: ${e?.message || e}`);
+        }
+      }
+      setPending((p) => [...p, ...uploaded]);
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const removePending = (sha: string) =>
+    setPending((p) => p.filter((a) => a.sha256 !== sha));
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (e.dataTransfer.files?.length) handleAttachFiles(e.dataTransfer.files);
+  };
+  const onPaste = (e: React.ClipboardEvent) => {
+    if (!e.clipboardData?.files?.length) return;
+    handleAttachFiles(e.clipboardData.files);
+  };
+
+  // Voice recording: MediaRecorder → blob → /api/transcribe → fill input
+  const startRecording = async () => {
+    if (recording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordingStreamRef.current = stream;
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      recordedChunksRef.current = [];
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size) recordedChunksRef.current.push(e.data);
+      };
+      mr.onstop = async () => {
+        const blob = new Blob(recordedChunksRef.current, {
+          type: mr.mimeType || "audio/webm",
+        });
+        recordingStreamRef.current?.getTracks().forEach((t) => t.stop());
+        recordingStreamRef.current = null;
+        if (blob.size === 0) return;
+        setTranscribing(true);
+        try {
+          const ext = (blob.type.split("/")[1] || "webm").split(";")[0];
+          const result = await transcribeAudio(blob, `voice.${ext}`);
+          setInput((prev) => (prev ? prev + " " : "") + (result.text || ""));
+        } catch (e: any) {
+          // eslint-disable-next-line no-alert
+          alert(`Transcription failed: ${e?.message || e}`);
+        } finally {
+          setTranscribing(false);
+        }
+      };
+      mr.start();
+      setRecording(true);
+    } catch (e: any) {
+      // eslint-disable-next-line no-alert
+      alert(`Microphone access denied or unavailable: ${e?.message || e}`);
+    }
+  };
+  const stopRecording = () => {
+    if (!recording) return;
+    mediaRecorderRef.current?.stop();
+    setRecording(false);
+  };
 
   useImperativeHandle(ref, () => ({
     clearMessages: () => setMsgs([]),
@@ -96,10 +185,12 @@ const Chat = forwardRef<ChatHandle, {
   }, [loaded]);
 
   const send = async () => {
-    if (!input.trim() || busy) return;
+    if ((!input.trim() && pending.length === 0) || busy) return;
     const text = input.trim();
+    const attached = pending;
     setInput("");
-    setMsgs((m) => [...m, { role: "user", text }]);
+    setPending([]);
+    setMsgs((m) => [...m, { role: "user", text, attachments: attached }]);
     setBusy(true);
 
     const progress: string[] = [];
@@ -135,7 +226,7 @@ const Chat = forwardRef<ChatHandle, {
           return copy;
         });
       }
-    });
+    }, attached.map((a) => a.sha256));
 
     setBusy(false);
     onRefreshStatus();
@@ -208,6 +299,31 @@ const Chat = forwardRef<ChatHandle, {
                 m.role === "user" ? "bg-sky-800" : "bg-slate-800"
               }`}
             >
+              {/* Inline attachments for user turn (images thumbnail, audio link) */}
+              {m.role === "user" && m.attachments && m.attachments.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-1.5 not-prose">
+                  {m.attachments.map((a) => (
+                    a.kind === "image" ? (
+                      <a key={a.sha256} href={attachmentUrl(a.sha256)} target="_blank" rel="noreferrer">
+                        <img
+                          src={attachmentUrl(a.sha256)}
+                          alt={a.filename}
+                          className="max-h-32 max-w-32 rounded border border-slate-700 object-cover"
+                        />
+                      </a>
+                    ) : a.kind === "audio" ? (
+                      <div key={a.sha256} className="bg-slate-900 rounded px-2 py-1 text-xs">
+                        🎤 <a href={attachmentUrl(a.sha256)} target="_blank" rel="noreferrer" className="underline">voice</a>
+                        {a.transcript ? <span className="opacity-70 ml-1">— {a.transcript.slice(0, 80)}{a.transcript.length > 80 ? "…" : ""}</span> : null}
+                      </div>
+                    ) : (
+                      <div key={a.sha256} className="bg-slate-900 rounded px-2 py-1 text-xs">
+                        📎 <a href={attachmentUrl(a.sha256)} target="_blank" rel="noreferrer" className="underline">{a.filename || a.sha256.slice(0, 12)}</a>
+                      </div>
+                    )
+                  ))}
+                </div>
+              )}
               {/* Progress indicators while loading — compact, no tool details */}
               {m.role === "agent" && m.progress && m.progress.length > 0 && !m.text && (
                 <div className="text-xs opacity-60 space-y-0.5">
@@ -423,14 +539,76 @@ const Chat = forwardRef<ChatHandle, {
           )}
         </div>
 
-        <div className="flex gap-2">
+        {/* Pending attachments preview row (above textarea) */}
+        {pending.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mb-1.5">
+            {pending.map((a) => (
+              <div key={a.sha256} className="relative bg-slate-800 rounded p-1 flex items-center gap-1">
+                {a.kind === "image" ? (
+                  <img
+                    src={attachmentUrl(a.sha256)}
+                    alt={a.filename}
+                    className="h-12 w-12 rounded object-cover"
+                  />
+                ) : a.kind === "audio" ? (
+                  <span className="px-2 text-xs">🎤 {a.filename}</span>
+                ) : (
+                  <span className="px-2 text-xs">📎 {a.filename || a.sha256.slice(0, 8)}</span>
+                )}
+                <button
+                  onClick={() => removePending(a.sha256)}
+                  disabled={busy}
+                  title="Remove"
+                  className="text-slate-400 hover:text-rose-400 px-1 text-xs"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div
+          className="flex gap-2"
+          onDrop={onDrop}
+          onDragOver={(e) => e.preventDefault()}
+        >
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,audio/*,application/pdf,text/*"
+            className="hidden"
+            onChange={(e) => handleAttachFiles(e.target.files)}
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy || uploading}
+            title="Attach files (or drag & drop / paste)"
+            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded px-2 text-sm self-start py-1"
+          >
+            {uploading ? "…" : "📎"}
+          </button>
+          <button
+            onClick={recording ? stopRecording : startRecording}
+            disabled={busy || transcribing}
+            title={recording ? "Stop recording" : "Record voice"}
+            className={`rounded px-2 text-sm self-start py-1 disabled:opacity-50 ${
+              recording
+                ? "bg-rose-700 hover:bg-rose-600 animate-pulse"
+                : "bg-slate-700 hover:bg-slate-600"
+            }`}
+          >
+            {transcribing ? "…" : recording ? "⏹" : "🎤"}
+          </button>
           <textarea
             className="flex-1 bg-slate-900 rounded p-2 text-sm resize-none outline-none focus:ring-1 focus:ring-sky-600"
             rows={2}
-            placeholder="Ask something..."
+            placeholder="Ask something... (drag/paste files, 🎤 to record)"
             value={input}
             disabled={busy}
             onChange={(e) => setInput(e.target.value)}
+            onPaste={onPaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();

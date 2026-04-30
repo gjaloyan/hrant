@@ -27,7 +27,12 @@ async def chat(req: ChatRequest):
 
     async def runner():
         try:
-            res = await asyncio.to_thread(agent.run, req.message, req.project or PROJECTS.current)
+            res = await asyncio.to_thread(
+                agent.run,
+                req.message,
+                req.project or PROJECTS.current,
+                req.attachments or None,
+            )
             turn = {
                 "ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "user": req.message,

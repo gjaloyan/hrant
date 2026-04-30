@@ -310,6 +310,29 @@ def _parse_json_response(raw: str) -> dict:
 
 
 # ---------- провайдеры ----------
+def _resolve_attachments(refs: list[str] | None) -> list[tuple]:
+    """Resolve a list of sha256 ids to (meta, bytes) tuples.
+
+    Returns only entries that actually exist on disk; missing ids are
+    silently dropped (they'd be a UX bug in the caller, not the LLM's
+    problem). Used by vision-capable LLM classes to inline image bytes
+    or pull voice transcripts.
+    """
+    from .attachments import ATTACHMENTS
+    out: list[tuple] = []
+    for sha in refs or []:
+        if not sha:
+            continue
+        meta = ATTACHMENTS.get_meta(sha)
+        if not meta:
+            continue
+        data = ATTACHMENTS.get_bytes(sha)
+        if data is None:
+            continue
+        out.append((meta, data))
+    return out
+
+
 class BaseLLM:
     def complete(
         self,
@@ -318,7 +341,11 @@ class BaseLLM:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        attachments: list[str] | None = None,
     ) -> str:
+        """Subclasses override. `attachments` is a list of sha256 ids
+        resolvable via backend.attachments.ATTACHMENTS — vision-capable
+        backends inline image bytes; others ignore (text-only)."""
         raise NotImplementedError
 
 
@@ -401,14 +428,48 @@ class AnthropicLLM(BaseLLM):
         # Should not reach here, but just in case
         raise LLMError(f"Anthropic API failed after {_max_retries} retries: {last_error}")
 
+    @staticmethod
+    def _build_user_content(user: str, attachments: list[str] | None) -> "str | list[dict]":
+        """Anthropic content array with images inlined as base64.
+
+        For audio attachments we use the transcript (Anthropic doesn't
+        accept raw audio); fallback to placeholder if no transcript yet.
+        """
+        resolved = _resolve_attachments(attachments)
+        if not resolved:
+            return user
+        import base64 as _b64
+        blocks: list[dict] = []
+        for meta, data in resolved:
+            if meta.kind == "image":
+                blocks.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": meta.mime_type,
+                        "data": _b64.b64encode(data).decode("ascii"),
+                    },
+                })
+            elif meta.kind == "audio":
+                if meta.transcript:
+                    blocks.append({"type": "text", "text": f"[voice transcript]\n{meta.transcript}"})
+                else:
+                    blocks.append({"type": "text", "text": "[voice attachment, transcript unavailable]"})
+            else:
+                blocks.append({"type": "text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
+        if user:
+            blocks.append({"type": "text", "text": user})
+        return blocks
+
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
+        content = self._build_user_content(user, attachments)
         payload = {
             "model": self.model,
             "max_tokens": max_tokens or self.default_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": system,
-            "messages": [{"role": "user", "content": user}],
+            "messages": [{"role": "user", "content": content}],
         }
         t0 = time.time()
         data = self._post(payload)
@@ -444,6 +505,7 @@ class AnthropicLLM(BaseLLM):
         temperature: float | None = None,
         max_iterations: int = 6,
         on_tool_call: "ToolCallCB | None" = None,
+        attachments: list[str] | None = None,
         _task_type: str = "",
     ) -> str:
         """Multi-turn tool-use loop.
@@ -456,9 +518,11 @@ class AnthropicLLM(BaseLLM):
 
         Возвращает финальный текст ассистента (склеенные text-блоки).
         Безопасно деградирует, если tools пустые или модель сразу
-        возвращает текст.
+        возвращает текст. `attachments` (sha256 list) attach images on
+        the first user turn.
         """
-        messages: list[dict] = [{"role": "user", "content": user}]
+        first_content = self._build_user_content(user, attachments)
+        messages: list[dict] = [{"role": "user", "content": first_content}]
         final_text = ""
         for _iter in range(max_iterations):
             payload = {
@@ -598,15 +662,46 @@ class OpenAICompatibleLLM(BaseLLM):
                 raise LLMError(f"OpenAI API error after {_max_retries} retries: {e}") from e
         raise LLMError(f"OpenAI API failed: {last_error}")
 
+    @staticmethod
+    def _build_user_content(user: str, attachments: list[str] | None) -> "str | list[dict]":
+        """OpenAI chat-completions content array with image_url data URIs.
+
+        Audio attachments fall back to their transcript (text); raw audio
+        in chat-completions isn't broadly supported across compat providers.
+        """
+        resolved = _resolve_attachments(attachments)
+        if not resolved:
+            return user
+        import base64 as _b64
+        blocks: list[dict] = []
+        for meta, data in resolved:
+            if meta.kind == "image":
+                b64 = _b64.b64encode(data).decode("ascii")
+                blocks.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{meta.mime_type};base64,{b64}"},
+                })
+            elif meta.kind == "audio":
+                if meta.transcript:
+                    blocks.append({"type": "text", "text": f"[voice transcript]\n{meta.transcript}"})
+                else:
+                    blocks.append({"type": "text", "text": "[voice attachment, transcript unavailable]"})
+            else:
+                blocks.append({"type": "text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
+        if user:
+            blocks.append({"type": "text", "text": user})
+        return blocks
+
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
+        user_content = self._build_user_content(user, attachments)
         payload = {
             "model": self.model,
             "max_tokens": max_tokens or self.default_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "messages": [
                 {"role": "system", "content": system},
-                {"role": "user", "content": user},
+                {"role": "user", "content": user_content},
             ],
         }
         t0 = time.time()
@@ -633,9 +728,10 @@ class OpenAICompatibleLLM(BaseLLM):
     def complete_with_tools(
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
-        max_iterations=6, on_tool_call=None, _task_type="",
+        max_iterations=6, on_tool_call=None, attachments=None, _task_type="",
     ) -> str:
-        """OpenAI-style tool-use loop."""
+        """OpenAI-style tool-use loop. `attachments` (sha256 list) attach
+        images on the first user turn via image_url data URIs."""
         # Convert Anthropic tool format to OpenAI format if needed
         oai_tools = []
         for t in tools:
@@ -651,9 +747,10 @@ class OpenAICompatibleLLM(BaseLLM):
                     },
                 })
 
+        first_user = self._build_user_content(user, attachments)
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": first_user},
         ]
         final_text = ""
         for _iter in range(max_iterations):
@@ -871,13 +968,42 @@ class CodexLLM(BaseLLM):
             cleaned.append(stripped)
         return cleaned
 
+    @staticmethod
+    def _build_user_content_blocks(user: str, attachments: list[str] | None) -> list[dict]:
+        """Responses API `content` array: input_image for images, text otherwise.
+
+        Audio attachments are inlined as transcript text — Responses API
+        accepts `input_audio` only via Realtime API, not Codex chat path.
+        """
+        resolved = _resolve_attachments(attachments)
+        blocks: list[dict] = []
+        if resolved:
+            import base64 as _b64
+            for meta, data in resolved:
+                if meta.kind == "image":
+                    b64 = _b64.b64encode(data).decode("ascii")
+                    blocks.append({
+                        "type": "input_image",
+                        "image_url": f"data:{meta.mime_type};base64,{b64}",
+                    })
+                elif meta.kind == "audio":
+                    if meta.transcript:
+                        blocks.append({"type": "input_text", "text": f"[voice transcript]\n{meta.transcript}"})
+                    else:
+                        blocks.append({"type": "input_text", "text": "[voice attachment, transcript unavailable]"})
+                else:
+                    blocks.append({"type": "input_text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
+        if user:
+            blocks.append({"type": "input_text", "text": user})
+        return blocks
+
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
         input_items = [
             {
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": user}],
+                "content": self._build_user_content_blocks(user, attachments),
             }
         ]
         payload = self._build_payload(system, input_items, None, max_tokens, temperature)
@@ -892,7 +1018,7 @@ class CodexLLM(BaseLLM):
     def complete_with_tools(
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
-        max_iterations=6, on_tool_call=None, _task_type: str = "",
+        max_iterations=6, on_tool_call=None, attachments=None, _task_type: str = "",
     ) -> str:
         # Convert tools to Responses API flat format. Accept either:
         #   {"name", "description", "input_schema"}                  (Anthropic-ish)
@@ -921,7 +1047,7 @@ class CodexLLM(BaseLLM):
             {
                 "type": "message",
                 "role": "user",
-                "content": [{"type": "input_text", "text": user}],
+                "content": self._build_user_content_blocks(user, attachments),
             }
         ]
 
@@ -1069,7 +1195,10 @@ class BedrockLLM(BaseLLM):
         )
 
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
+        # Vision not supported here — attachments accepted for API
+        # compatibility with the BaseLLM signature, then ignored.
+        _ = attachments
         payload = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens or self.default_max,
@@ -1092,8 +1221,9 @@ class BedrockLLM(BaseLLM):
     def complete_with_tools(
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
-        max_iterations=6, on_tool_call=None, _task_type: str = "",
+        max_iterations=6, on_tool_call=None, attachments=None, _task_type: str = "",
     ) -> str:
+        _ = attachments  # vision not supported on this backend
         # Convert tools to Anthropic shape: {name, description, input_schema}
         anthropic_tools = []
         for t in tools or []:
@@ -1291,7 +1421,10 @@ class CohereLLM(BaseLLM):
         )
 
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
+        # Vision not supported here — attachments accepted for API
+        # compatibility with the BaseLLM signature, then ignored.
+        _ = attachments
         payload = {
             "model": self.model,
             "messages": [
@@ -1314,8 +1447,9 @@ class CohereLLM(BaseLLM):
     def complete_with_tools(
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
-        max_iterations=6, on_tool_call=None, _task_type: str = "",
+        max_iterations=6, on_tool_call=None, attachments=None, _task_type: str = "",
     ) -> str:
+        _ = attachments  # vision not supported on this backend
         # Cohere v2 accepts OpenAI-style {type:"function", function:{...}} tools.
         coh_tools: list[dict] = []
         for t in tools or []:
@@ -1466,7 +1600,10 @@ class GoogleLLM(BaseLLM):
         self.default_temp = cfg.get("temperature", 0.3)
 
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
+        # Vision not supported here — attachments accepted for API
+        # compatibility with the BaseLLM signature, then ignored.
+        _ = attachments
         # For OAuth: use Bearer header instead of query param
         if self.auth_type == "oauth" and self.provider_id:
             from .providers import OAUTH_TOKENS
@@ -1527,7 +1664,10 @@ class OllamaLLM(BaseLLM):
         self.default_temp = cfg.get("temperature", 0.3)
 
     def complete(self, system, user, *, max_tokens=None, temperature=None,
-                 _task_type: str = ""):
+                 attachments=None, _task_type: str = ""):
+        # Vision not supported here — attachments accepted for API
+        # compatibility with the BaseLLM signature, then ignored.
+        _ = attachments
         payload = {
             "model": self.model,
             "stream": False,
@@ -1876,6 +2016,7 @@ class DualModelRouter:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        attachments: list[str] | None = None,
     ) -> str:
         # Check if user selected a specific model
         active = self._get_active_llm()
@@ -1884,7 +2025,7 @@ class DualModelRouter:
             self.state["last_reason"] = f"active model: {self._active_cfg_hash}"
             out = active.complete(
                 system, user, max_tokens=max_tokens, temperature=temperature,
-                _task_type=tt,
+                attachments=attachments, _task_type=tt,
             )
             self.state["api_calls_today"] += 1
             self.state["total_a_calls"] += 1
@@ -1898,7 +2039,7 @@ class DualModelRouter:
             if choice == "a":
                 out = self.model_a.complete(
                     system, user, max_tokens=max_tokens, temperature=temperature,
-                    _task_type=tt,
+                    attachments=attachments, _task_type=tt,
                 )
                 self.state["api_calls_today"] += 1
                 self.state["api_cost_today"] += float(
@@ -1906,6 +2047,9 @@ class DualModelRouter:
                 )
                 self.state["total_a_calls"] += 1
             else:
+                # Local Qwen (Ollama base) doesn't accept image attachments;
+                # they'll be silently dropped by the LLM. That's correct
+                # behaviour for non-vision models.
                 out = self.model_b.complete(
                     system, user, max_tokens=max_tokens, temperature=temperature,
                     _task_type=tt,
@@ -1956,11 +2100,15 @@ class DualModelRouter:
         temperature: float | None = None,
         max_iterations: int = 6,
         on_tool_call: ToolCallCB | None = None,
+        attachments: list[str] | None = None,
     ) -> str:
         """Tool-use loop via selected model.
 
-        If an active model is set and supports tools, use it.
-        Otherwise falls back to default A/B routing.
+        If an active model is set and supports tools, use it. Otherwise
+        falls back to A/B routing — and **B keeps its tool-use loop**
+        when its LLM class implements `complete_with_tools` (fix #4 from
+        the self-review). Only models that lack tool support fall through
+        to plain `call()`.
         """
         tt = task_type.value
 
@@ -1975,6 +2123,7 @@ class DualModelRouter:
                     temperature=temperature,
                     max_iterations=max_iterations,
                     on_tool_call=on_tool_call,
+                    attachments=attachments,
                     _task_type=tt,
                 )
                 self.state["api_calls_today"] += 1
@@ -1987,30 +2136,45 @@ class DualModelRouter:
         choice, reason = self._pick(task_type)
         self.state["last_reason"] = reason
 
-        if choice != "a" or not tools:
+        # Pick the LLM for this turn first so we can probe its capabilities.
+        target = self.model_a if choice == "a" else self.model_b
+        supports_tools = (
+            tools
+            and hasattr(target, "complete_with_tools")
+            and target.complete_with_tools.__qualname__.split(".")[0] != "BaseLLM"
+        )
+
+        if not supports_tools:
             return self.call(
                 task_type, system, user,
                 max_tokens=max_tokens, temperature=temperature,
+                attachments=attachments,
             )
 
         try:
-            out = self.model_a.complete_with_tools(
+            out = target.complete_with_tools(
                 system, user, tools, execute_tool,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 max_iterations=max_iterations,
                 on_tool_call=on_tool_call,
+                attachments=attachments if choice == "a" else None,
                 _task_type=tt,
             )
-            self.state["api_calls_today"] += 1
-            self.state["api_cost_today"] += float(
-                self.cfg_router.get("estimated_cost_per_call_usd", 0.01)
-            )
-            self.state["total_a_calls"] += 1
+            if choice == "a":
+                self.state["api_calls_today"] += 1
+                self.state["api_cost_today"] += float(
+                    self.cfg_router.get("estimated_cost_per_call_usd", 0.01)
+                )
+                self.state["total_a_calls"] += 1
+            else:
+                self.state["model_b_calls_today"] += 1
+                self.state["total_b_calls"] += 1
             self._save_state()
             return out
         except LLMError:
-            self._api_cache = (time.time(), False)
+            if choice == "a":
+                self._api_cache = (time.time(), False)
             raise
 
 
