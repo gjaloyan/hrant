@@ -9,7 +9,7 @@ VERIFIER_SYSTEM = """You are a strict fact-checker.
 You are given: (1) a user question, (2) an assistant's answer, (3) source notes,
 and optionally (4) tool outputs (e.g. file contents the assistant read).
 
-Your task: check EVERY claim in the answer against the available evidence.
+Your task: classify EVERY claim in the answer against the available evidence.
 
 Rules:
 - verified — claim is directly supported by a note OR by a tool output;
@@ -20,15 +20,35 @@ IMPORTANT: Tool outputs (file contents, search results) are PRIMARY evidence.
 If the assistant read a file via read_file and makes claims about its contents,
 those claims CAN be verified against the tool output.
 
-Return strictly JSON:
+Return strictly JSON with the three claim lists and which topics you used.
+DO NOT return a confidence number — the caller computes it deterministically
+from verified / unverified / contradiction counts.
+
 {
-  "confidence": 0-100,
-  "verified_claims": ["..."],
+  "verified_claims":   ["..."],
   "unverified_claims": ["..."],
-  "contradictions": ["..."],
-  "notes_used": ["topic1", "topic2"]
-}
-confidence = 100 * verified / (verified + unverified + 2*contradictions)."""
+  "contradictions":    ["..."],
+  "notes_used":        ["topic1", "topic2"]
+}"""
+
+
+def _compute_confidence(verified: int, unverified: int, contradictions: int) -> int:
+    """Deterministic confidence from claim counts.
+
+    Pulled out of the LLM prompt (where it lived as a formula the model
+    was supposed to evaluate but routinely got wrong) into Python so the
+    same claim split always yields the same score. Formula matches what
+    used to be in the prompt: contradictions are weighted 2× because
+    they're worse than no evidence — they're evidence against.
+
+        confidence = 100 * verified / (verified + unverified + 2*contradictions)
+
+    Edge: zero claims of any kind → 0 (the verifier saw nothing).
+    """
+    denom = verified + unverified + 2 * contradictions
+    if denom <= 0:
+        return 0
+    return max(0, min(100, round(100.0 * verified / denom)))
 
 
 def verify(
@@ -70,10 +90,15 @@ Available topics: {', '.join(used_topics)}"""
             unverified_claims=[f"verifier error: {e}"],
             notes_used=used_topics,
         )
+    verified = list(data.get("verified_claims", []))
+    unverified = list(data.get("unverified_claims", []))
+    contradictions = list(data.get("contradictions", []))
     return VerificationResult(
-        confidence=int(data.get("confidence", 0)),
-        verified_claims=list(data.get("verified_claims", [])),
-        unverified_claims=list(data.get("unverified_claims", [])),
-        contradictions=list(data.get("contradictions", [])),
+        confidence=_compute_confidence(
+            len(verified), len(unverified), len(contradictions)
+        ),
+        verified_claims=verified,
+        unverified_claims=unverified,
+        contradictions=contradictions,
         notes_used=list(data.get("notes_used", used_topics)),
     )

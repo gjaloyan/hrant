@@ -202,12 +202,40 @@ class IdentityManager:
         )
 
     # ---------- запись в user.md ----------
+    @staticmethod
+    def _normalize_fact(s: str) -> str:
+        """Canonical form for dedup comparison.
+
+        Strips the bullet marker, the trailing `_(добавлено YYYY-MM-DD)_`
+        timestamp, leading/trailing whitespace and punctuation, and
+        lowercases. Two bullets that say the same thing in the same
+        language collapse to the same key. Cross-language duplicates
+        (EN vs RU phrasing of the same fact) still pass — semantic
+        dedup is a separate problem we don't tackle here.
+        """
+        import re as _re
+        s = s.strip()
+        # drop leading '- ' or '* '
+        s = _re.sub(r"^[-*]\s*", "", s)
+        # drop the auto-added timestamp marker
+        s = _re.sub(r"\s*_\([Дд]обавлено\s+\d{4}-\d{2}-\d{2}\)_\s*$", "", s)
+        s = _re.sub(r"\s*_\(added\s+\d{4}-\d{2}-\d{2}\)_\s*$", "", s)
+        # collapse whitespace
+        s = _re.sub(r"\s+", " ", s).strip()
+        # strip trailing punctuation that varies between phrasings
+        s = s.rstrip(".!?;:,")
+        return s.lower()
+
     def add_user_fact(
         self,
         fact: str,
         category: UserFactCategory = "about_user",
     ) -> str:
         """Добавляет факт о пользователе в нужный раздел user.md.
+
+        Дедупликация: если такой же факт (после канонизации) уже есть в
+        этой секции — повторно не пишем, возвращаем существующую строку.
+        Снимок-снапшот тоже не делаем — нечего снимать.
 
         Если раздел есть и содержит плейсхолдер «(пока не указано)» —
         плейсхолдер удаляется. Факт добавляется bullet-строкой с датой.
@@ -219,9 +247,7 @@ class IdentityManager:
         stamp = datetime.now().strftime("%Y-%m-%d")
         bullet = f"- {fact}  _(добавлено {stamp})_"
         section = _SECTION_BY_CATEGORY.get(category, _SECTION_BY_CATEGORY["about_user"])
-
-        # Снимок текущего user.md до изменения — история предпочтений.
-        self._snapshot_user_profile()
+        new_key = self._normalize_fact(fact)
 
         text = self.user_profile()
         lines = text.splitlines()
@@ -232,16 +258,29 @@ class IdentityManager:
             )
         except StopIteration:
             # секции нет — добавим в конец как новую
+            self._snapshot_user_profile()
             lines += ["", section, bullet]
             self.user_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return bullet
 
-        # Находим конец секции (до следующего заголовка того же уровня или EOF)
+        # Находим конец секции
         end_idx = len(lines)
         for j in range(sec_idx + 1, len(lines)):
             if lines[j].startswith("## "):
                 end_idx = j
                 break
+
+        # Dedup: scan existing bullets in this section.
+        for existing in lines[sec_idx + 1 : end_idx]:
+            stripped = existing.strip()
+            if not stripped or stripped == "(пока не указано)":
+                continue
+            if self._normalize_fact(stripped) == new_key:
+                # Same fact already present — don't append, don't snapshot.
+                return existing
+
+        # Снимок только если действительно меняем файл.
+        self._snapshot_user_profile()
 
         # Убираем плейсхолдер «(пока не указано)» внутри секции
         body = [

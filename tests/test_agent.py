@@ -82,9 +82,14 @@ def test_agent_uses_existing_note(tmp_kb):
         analyze_json={"required_topics": ["RS-485"], "plan": ["ответить"], "confidence": 90},
         solve_text="RS-485 — дифференциальная шина. [RS-485]",
         verify_json={
-            "confidence": 95,
-            "verified_claims": ["дифференциальная шина"],
-            "unverified_claims": [],
+            # 100*19/(19+1+0) = 95 — Python computes confidence from claim counts.
+            "verified_claims": [
+                "дифференциальная шина", "v2", "v3", "v4", "v5",
+                "v6", "v7", "v8", "v9", "v10",
+                "v11", "v12", "v13", "v14", "v15",
+                "v16", "v17", "v18", "v19",
+            ],
+            "unverified_claims": ["minor"],
             "contradictions": [],
             "notes_used": ["RS-485"],
         },

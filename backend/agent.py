@@ -20,6 +20,7 @@
 строго на основе знаний.
 """
 from __future__ import annotations
+import os
 import re
 from pathlib import Path
 from typing import Callable, Optional
@@ -210,40 +211,56 @@ Categories:
            emotional remark.
            Does not require knowledge and does not change assistant behavior.
 
-  "preference" — user tells HOW to communicate or what to remember about them:
-             * language ("speak Russian", "answer in English")
+  "preference" — user tells HOW to communicate or shares a STABLE personal
+                 fact about themselves:
+             * language preference ("speak Russian", "answer in English")
              * style/tone ("be brief", "no caveats", "use informal you")
-             * facts about the user ("my name is X", "I'm from Y",
-                                      "I'm an engineer", "I'm 30")
-             * rules ("don't mention X", "always add Y", "remember Z")
-           Key indicator: the user is configuring the assistant or sharing
-           personal info, NOT asking a question or requesting an action.
+             * stable personal facts ("my name is X", "I'm from Y",
+                                       "I'm an engineer", "I'm 30")
+             * stable interaction rules ("don't mention X", "always add Y")
+           Key indicator: stable trait of the user or how to talk to them.
+
+           DO NOT classify as "preference" when the user just asks the
+           assistant to remember a TEMPORARY state, follow-up, todo, or
+           project status — phrases like "remember to come back", "remind
+           me later", "запомни что я сейчас иду", "wait for me to fix this".
+           These are tasks (event memory), not user-profile facts.
 
   "task" — everything else: questions requiring knowledge, explanation,
-           search, code, calculation, analysis, instructions, problem-solving.
+           search, code, calculation, analysis, instructions, problem-solving,
+           AND any "remember X" where X is a temporary / follow-up / project
+           state rather than a user trait.
            When in doubt between task and preference — choose task.
 
 Return strictly JSON:
   {"intent": "chat" | "preference" | "task", "reason": "short justification"}"""
 
 PREFERENCE_EXTRACTOR_SYSTEM = """You are a user preference extractor.
-The user said something about how to communicate with them or what to remember.
+The user said something about how to communicate with them or shared a stable
+personal fact. The USER PROFILE block (above) shows what we already know,
+including their preferred language.
 
 Extract the key point and return strictly JSON:
 {
-  "category": "language" | "style" | "about_user" | "rule",
+  "category": "language" | "style" | "about_user" | "rule" | "reject",
   "fact": "short third-person phrase (one sentence)",
-  "acknowledgment": "warm brief confirmation IN THE USER'S LANGUAGE (1 sentence)"
+  "acknowledgment": "warm brief confirmation in the USER PROFILE language (1 sentence)"
 }
 
 Rules:
 - category:
     "language"   — about communication language;
     "style"      — about tone, brevity, formality, formatting;
-    "about_user" — a fact about the user (name, age, profession, city, interests);
-    "rule"       — an instruction "do/don't do X" in conversation.
+    "about_user" — a STABLE fact about the user (name, age, profession, city,
+                   relationships, long-term interests);
+    "rule"       — an instruction "do/don't do X" in conversation;
+    "reject"     — none of the above. Use this when the user is asking to
+                   remember a TEMPORARY task state, follow-up, todo, future
+                   review, or anything that isn't a stable user-profile fact.
 - fact must be in the form "User ..." or "Respond ..." — short and to the point.
-- acknowledgment — a natural phrase in the SAME LANGUAGE the user used.
+- acknowledgment — a natural phrase. If USER PROFILE specifies a preferred
+  language, use THAT language regardless of which language the current message
+  was written in. Otherwise fall back to the message language.
   No templates like "sure!", "great question!", no lists."""
 
 CHAT_SYSTEM_BASE = """This is casual small-talk: greeting, farewell,
@@ -568,32 +585,59 @@ class Agent:
             return "Я — самообучающийся AI-агент. API сейчас недоступен, но спроси позже — расскажу подробнее."
         return "Сейчас API недоступен. Попробуй повторить через минуту — я буду готов помочь."
 
-    # Preference — извлекаем структурированное предпочтение и сохраняем в user.md.
+    # Preference — извлекаем структурированное предпочтение и сохраняем в нужное место.
     def _save_preference(self, task: str) -> tuple[str, str, str]:
         """Возвращает (category, fact, acknowledgment).
 
-        LLM извлекает структуру, мы записываем в user.md через IDENTITY.
-        Ничего не попадает ни в core memory, ни в базу знаний, ни в
-        finetune queue — это настройка поведения агента, а не факт для QA.
+        Triage:
+          language / style / about_user / rule → user.md (IDENTITY)
+          reject                                → conversation memory only;
+                                                  the extractor decided this
+                                                  is not a stable profile fact.
+
+        The LLM sees USER PROFILE in the system prompt so it can answer
+        in the user's preferred language regardless of the message
+        language (fix for "user wrote in English but expects Russian
+        replies per user.md").
         """
         self.progress("preference", "запоминаю предпочтение")
+        # Surface USER PROFILE so the extractor can pick the right language
+        # for the acknowledgment AND make a confident reject/keep decision.
+        profile_block = ""
+        try:
+            profile_block = (IDENTITY.user_profile() or "").strip()
+        except Exception:
+            profile_block = ""
+
+        system_prompt = PREFERENCE_EXTRACTOR_SYSTEM
+        if profile_block:
+            system_prompt = (
+                f"USER PROFILE:\n{profile_block}\n\n---\n\n{PREFERENCE_EXTRACTOR_SYSTEM}"
+            )
+
         try:
             data = router().call_json(
                 TaskType.CLASSIFICATION,
-                PREFERENCE_EXTRACTOR_SYSTEM,
+                system_prompt,
                 f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{task.strip()}",
                 max_tokens=300, temperature=0.1,
             )
         except LLMError:
-            # При ошибке экстрактора — сохраняем исходный текст как «about_user».
-            IDENTITY.add_user_fact(task.strip(), category="about_user")
-            return "about_user", task.strip(), "Запомнил."
+            # On extractor failure — DON'T blindly stuff raw input into user.md.
+            # That's the bug that produced "User will fix everything..." rows.
+            # Acknowledge in conversation memory only.
+            return "reject", task.strip(), "Запомнил в контексте разговора."
 
         category = str(data.get("category", "about_user")).strip().lower()
-        if category not in ("language", "style", "about_user", "rule"):
-            category = "about_user"
+        valid_profile = ("language", "style", "about_user", "rule")
         fact = str(data.get("fact", "")).strip() or task.strip()
         ack = str(data.get("acknowledgment", "")).strip() or "Запомнил."
+
+        if category == "reject" or category not in valid_profile:
+            # Conversation-scoped memory only. CONVERSATION.add_turn at the
+            # caller already records the exchange — nothing to write here.
+            self.progress("preference_skipped", "не сохраняю в user.md (не профильный факт)")
+            return "reject", fact, ack
 
         IDENTITY.add_user_fact(fact, category=category)  # type: ignore[arg-type]
         self.progress("preference_saved", f"записано в user.md → {category}")
@@ -667,13 +711,25 @@ class Agent:
         )
 
     # Шаг 3
-    def _ensure_knowledge(self, topics: list[str], project: str | None) -> tuple[list[Note], list[str]]:
+    def _ensure_knowledge(
+        self,
+        topics: list[str],
+        project: str | None,
+        *,
+        allow_learning: bool = True,
+    ) -> tuple[list[Note], list[str]]:
+        """Resolve topics → loaded notes, optionally learning new ones.
+
+        `allow_learning=False` is used by self_analysis turns: the agent
+        is reading its own code via tools, not asking about external
+        knowledge. Auto-`learn_topic()`-ing "agent architecture" or
+        "tool loop" via web search would pollute the KB with content
+        already encoded in the source files we just read.
+        """
         loaded: list[Note] = []
         learned: list[str] = []
         loaded_slugs: set[str] = set()
-        # Дедуп входного списка тем: анализатор иногда возвращает дубликаты
-        # ("agent architecture" дважды) — мы не должны тащить одну и ту же
-        # заметку в контекст по два раза.
+        # Дедуп входного списка тем
         unique_topics = list(dict.fromkeys(t.strip() for t in topics if t and t.strip()))
         for topic in unique_topics:
             hit = HYBRID.find_best(topic)
@@ -687,9 +743,11 @@ class Agent:
                     loaded.append(note)
                     loaded_slugs.add(hit_slug)
                     continue
-            # не нашли — учим. И запоминаем промах в gap-лог: это сигнал,
-            # что пользователь тянется к темам, которых у нас заранее нет.
+            # Miss. Always log to gap-tracker; only learn if allowed.
             KM.log_miss(topic)
+            if not allow_learning:
+                self.progress("skip_learn", f"skipped (self-analysis): {topic}")
+                continue
             self.progress("learning", f"изучаю: {topic}")
             try:
                 note = learn_topic(topic, depth="quick", project=project)
@@ -820,15 +878,31 @@ class Agent:
 
         tool_outputs: list[str] = []
 
+        # Adaptive caps per tool: a `read_file` of agent.py truncated to
+        # 1500 chars left the verifier looking at the first 25 lines and
+        # marking everything else "unverified". Bigger ceilings for tools
+        # that legitimately produce file-sized output; the original 1500
+        # stays for short tools (web snippets, calc results, etc).
+        _tool_cap = {
+            "read_file": 12000,
+            "view_file": 12000,
+            "read_note": 8000,
+            "list_files": 4000,
+            "glob": 4000,
+            "grep": 4000,
+            "search": 4000,
+        }
+        _DEFAULT_CAP = 1500
+
         def _on_tool_call(name: str, args: dict, result: str, is_error: bool) -> None:
             preview = (result or "").strip().splitlines()[0][:80] if result else ""
             tag = "tool_error" if is_error else "tool"
             self.progress(tag, f"{name}({', '.join(args.keys())}) -> {preview}")
-            # Capture tool results for verifier context (truncate each to 1500 chars)
             if result and not is_error:
-                snippet = result[:1500]
-                if len(result) > 1500:
-                    snippet += "..."
+                cap = _tool_cap.get(name, _DEFAULT_CAP)
+                snippet = result[:cap]
+                if len(result) > cap:
+                    snippet += f"\n…[+{len(result) - cap} more chars truncated]"
                 tool_outputs.append(f"[{name}] {snippet}")
 
         answer = router().call_with_tools(
@@ -1004,7 +1078,18 @@ class Agent:
             # personal info. Save to user.md and acknowledge briefly.
             if intent == "preference":
                 category, fact, ack = self._save_preference(task)
-                reply = f"{ack}\n\n_(saved to user.md -> {category}: {fact})_"
+                # The "_(saved to user.md ...)" debug suffix only shows up
+                # when AGI_DEBUG_MEMORY_ACK is enabled (or category=reject is
+                # never decorated since nothing was actually saved). Plain
+                # users see only the natural-language acknowledgment.
+                debug_suffix = (
+                    os.getenv("AGI_DEBUG_MEMORY_ACK", "").strip().lower()
+                    in ("1", "true", "yes")
+                )
+                if debug_suffix and category != "reject":
+                    reply = f"{ack}\n\n_(saved to user.md -> {category}: {fact})_"
+                else:
+                    reply = ack
                 CONVERSATION.add_turn(task, reply, intent="preference", is_chat=True)
                 self._extract_memories(task, reply, "preference")
                 self._cleanup()
@@ -1028,7 +1113,13 @@ class Agent:
                 f"tools=[{', '.join(thinking.tools_needed)}], "
                 f"confidence={thinking.confidence}%",
             )
-            notes, learned = self._ensure_knowledge(thinking.required_topics, project)
+            # self_analysis answers come from reading the agent's own code,
+            # not from external research — disable web-driven auto-learning
+            # for those turns to avoid polluting the KB with redundant notes.
+            allow_learning = thinking.question_type != "self_analysis"
+            notes, learned = self._ensure_knowledge(
+                thinking.required_topics, project, allow_learning=allow_learning,
+            )
 
             # Load project-specific notes if in project mode
             if project:
@@ -1075,10 +1166,18 @@ class Agent:
             else:
                 answer, tool_context = self._solve(task, core, notes, thinking=thinking)
 
-            # Skip verification for creative/meta/self_analysis tasks where
-            # there's no factual ground truth to verify against — saves 1 LLM call
-            skip_verify = thinking and thinking.question_type in (
-                "creative", "meta", "self_analysis",
+            # Skip verification for creative / meta / pure self_analysis where
+            # there's no factual ground truth — saves 1 LLM call. BUT when
+            # self_analysis came with tool_context (the agent actually
+            # read_file'd its own code) the tool output IS evidence and
+            # must be checked against — otherwise we ship hallucinated
+            # claims about file contents. Same logic for any creative/meta
+            # answer that ended up using tools.
+            qtype = thinking.question_type if thinking else ""
+            no_evidence_types = ("creative", "meta", "self_analysis")
+            skip_verify = (
+                qtype in no_evidence_types
+                and not (tool_context or "").strip()
             )
             if skip_verify:
                 vr = VerificationResult(

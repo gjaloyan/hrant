@@ -85,16 +85,22 @@ def test_self_critic_retries_on_low_confidence(tmp_kb):
         ],
         verify_jsons=[
             {  # first verify: low confidence
-                "confidence": 30,
-                "verified_claims": [],
-                "unverified_claims": ["Python is compiled to machine code"],
-                "contradictions": ["claim 'compiled' contradicts note saying 'interpreted'"],
+                # 100*1/(1+9+0) = 10
+                "verified_claims": ["one ok"],
+                "unverified_claims": [
+                    "Python is compiled to machine code",
+                    "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9",
+                ],
+                "contradictions": [],
                 "notes_used": ["Python"],
             },
             {  # second verify: high confidence after retry
-                "confidence": 90,
-                "verified_claims": ["interpreted language", "GIL"],
-                "unverified_claims": [],
+                # 100*9/(9+1+0) = 90
+                "verified_claims": [
+                    "interpreted language", "GIL", "v3", "v4", "v5",
+                    "v6", "v7", "v8", "v9",
+                ],
+                "unverified_claims": ["minor"],
                 "contradictions": [],
                 "notes_used": ["Python"],
             },
@@ -134,9 +140,14 @@ def test_self_critic_no_retry_when_confidence_high(tmp_kb):
         },
         solve_texts=["RS-485 is a differential serial bus. [RS-485]"],
         verify_jsons=[{
-            "confidence": 95,
-            "verified_claims": ["differential serial bus"],
-            "unverified_claims": [],
+            # 100*19/(19+1+0) = 95
+            "verified_claims": [
+                "differential serial bus", "v2", "v3", "v4", "v5",
+                "v6", "v7", "v8", "v9", "v10",
+                "v11", "v12", "v13", "v14", "v15",
+                "v16", "v17", "v18", "v19",
+            ],
+            "unverified_claims": ["minor"],
             "contradictions": [],
             "notes_used": ["RS-485"],
         }],
@@ -162,7 +173,8 @@ def test_self_critic_max_retries_respected(tmp_kb):
         source="test",
     )
 
-    # All verifications return low confidence — should stop after max retries
+    # All verifications return low confidence — should stop after max retries.
+    # 100*1/(1+4+0) = 20. Non-zero so the "stuck at 0%" guard doesn't trip.
     fake = FakeRouterWithRetry(
         analyze_json={
             "required_topics": ["Topic"],
@@ -171,9 +183,8 @@ def test_self_critic_max_retries_respected(tmp_kb):
         },
         solve_texts=["bad answer"] * 5,
         verify_jsons=[{
-            "confidence": 20,
-            "verified_claims": [],
-            "unverified_claims": ["everything"],
+            "verified_claims": ["one ok"],
+            "unverified_claims": ["u1", "u2", "u3", "u4"],
             "contradictions": [],
             "notes_used": ["Topic"],
         }] * 5,
@@ -217,16 +228,20 @@ def test_self_critic_injects_critique_into_solver(tmp_kb):
         solve_texts=["wrong claim", "fixed answer"],
         verify_jsons=[
             {
-                "confidence": 25,
-                "verified_claims": [],
+                # 100*1/(1+1+2) = 25
+                "verified_claims": ["partial"],
                 "unverified_claims": ["wrong claim is unsupported"],
                 "contradictions": ["contradicts source"],
                 "notes_used": ["Test"],
             },
             {
-                "confidence": 85,
-                "verified_claims": ["fixed"],
-                "unverified_claims": [],
+                # 100*17/(17+3+0) = 85
+                "verified_claims": [
+                    "fixed", "v2", "v3", "v4", "v5", "v6", "v7", "v8",
+                    "v9", "v10", "v11", "v12", "v13", "v14", "v15",
+                    "v16", "v17",
+                ],
+                "unverified_claims": ["u1", "u2", "u3"],
                 "contradictions": [],
                 "notes_used": ["Test"],
             },
@@ -282,8 +297,20 @@ def test_self_critic_progress_events(tmp_kb):
         analyze_json={"required_topics": ["X"], "plan": ["go"], "confidence": 60},
         solve_texts=["bad", "good"],
         verify_jsons=[
-            {"confidence": 30, "unverified_claims": ["all"], "contradictions": [], "notes_used": ["X"]},
-            {"confidence": 80, "verified_claims": ["ok"], "unverified_claims": [], "contradictions": [], "notes_used": ["X"]},
+            # 100*1/(1+9+0) = 10 → low, triggers retry
+            {
+                "verified_claims": ["partial"],
+                "unverified_claims": ["u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8", "u9"],
+                "contradictions": [],
+                "notes_used": ["X"],
+            },
+            # 100*4/(4+1+0) = 80 → high, exits loop
+            {
+                "verified_claims": ["ok", "v2", "v3", "v4"],
+                "unverified_claims": ["minor"],
+                "contradictions": [],
+                "notes_used": ["X"],
+            },
         ],
     )
 
