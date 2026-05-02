@@ -502,6 +502,50 @@ class Agent:
         self.progress("core", "загружаю core memory")
         return CORE.read()
 
+    def _attachment_marker(self) -> str:
+        """Textual hint about attachments on the current turn.
+
+        The image/audio bytes themselves go into the multimodal payload
+        via `attachments=` on the LLM call, but the text prompt also
+        needs to mention them — otherwise classifier / thinker / solver
+        get only the user's question text and bias toward continuing
+        whatever was discussed in conversation history. Concrete repro:
+        user uploads a photo and asks "what do you think about that?",
+        which without this marker reads as a follow-up to the previous
+        thread instead of an image-grounded question.
+        """
+        atts = getattr(self, "_attachments", None) or []
+        if not atts:
+            return ""
+        try:
+            from .attachments import ATTACHMENTS as _A
+            kinds: list[str] = []
+            for sha in atts:
+                meta = _A.get_meta(sha)
+                if meta is not None:
+                    kinds.append(meta.kind)
+        except Exception:
+            kinds = []
+        if not kinds:
+            kinds = ["attachment"] * len(atts)
+        n_img = sum(1 for k in kinds if k == "image")
+        n_audio = sum(1 for k in kinds if k == "audio")
+        n_file = sum(1 for k in kinds if k not in ("image", "audio"))
+        parts: list[str] = []
+        if n_img:
+            parts.append(f"{n_img} image" + ("s" if n_img > 1 else ""))
+        if n_audio:
+            parts.append(f"{n_audio} voice/audio message" + ("s" if n_audio > 1 else ""))
+        if n_file:
+            parts.append(f"{n_file} file" + ("s" if n_file > 1 else ""))
+        what = ", ".join(parts) if parts else f"{len(atts)} attachment"
+        return (
+            f"[ATTACHMENT NOTICE] The user attached {what} on THIS turn. "
+            f"Their question is grounded in the attached content — look at "
+            f"the image / read the file / consider the audio transcript "
+            f"FIRST, before relying on prior conversation history.\n\n"
+        )
+
     # Шаг 1.5 — классификация намерения (chat | preference | task)
     def _classify_intent(self, task: str) -> str:
         """Возвращает одну из строк: 'chat', 'preference', 'task'.
@@ -519,10 +563,11 @@ class Agent:
         if _CHITCHAT_RE.match(trimmed):
             return "chat"
         try:
+            marker = self._attachment_marker()
             data = router().call_json(
                 TaskType.CLASSIFICATION,
                 INTENT_CLASSIFIER_SYSTEM,
-                f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{trimmed}",
+                f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{marker}{trimmed}",
                 max_tokens=150,
                 temperature=0.0,
             )
@@ -542,7 +587,11 @@ class Agent:
             system = f"{system}\n\n---\n\n{_capabilities_block()}"
         conv = CONVERSATION.context_block(n=4)
         conv_section = f"\n\n{conv}" if conv else ""
-        user = f"# CORE MEMORY\n{core.strip()}{conv_section}\n\n# MESSAGE\n{task.strip()}"
+        marker = self._attachment_marker()
+        user = (
+            f"# CORE MEMORY\n{core.strip()}{conv_section}\n\n"
+            f"# MESSAGE\n{marker}{task.strip()}"
+        )
         attachments = getattr(self, "_attachments", None)
         try:
             return router().call(
@@ -669,11 +718,12 @@ class Agent:
                 self.progress("memory", f"recalled {memory_block.count(chr(10)) - 2} facts from memory")
         except Exception:
             pass
+        marker = self._attachment_marker()
         user = (
             f"CORE MEMORY:\n{core}\n\n"
             f"MY CAPABILITIES:\n{caps}"
             f"{conv_section}{goals_section}{memory_section}\n\n"
-            f"USER REQUEST:\n{task}"
+            f"USER REQUEST:\n{marker}{task}"
         )
         data = router().call_json(
             TaskType.TASK_ANALYSIS,
@@ -843,6 +893,7 @@ class Agent:
         except Exception:
             pass
 
+        marker = self._attachment_marker()
         user = f"""# CORE MEMORY
 {core.strip()}
 
@@ -852,7 +903,7 @@ class Agent:
 {think_block}
 {conv_section}{critique_block}
 # USER REQUEST
-{task}"""
+{marker}{task}"""
         registry = get_registry()
         # Load skills lazily — registers their tools in the registry,
         # so SKILLS.ensure_loaded() MUST run before registry.to_anthropic_list().

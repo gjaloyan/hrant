@@ -185,21 +185,68 @@ class IdentityManager:
     def user_profile(self) -> str:
         return self.user_path.read_text(encoding="utf-8")
 
+    @staticmethod
+    def _extract_language_section(profile_text: str) -> str:
+        """Pull the body of the `## Язык общения` section from user.md.
+
+        Empty if the section is missing, holds only the `(пока не указано)`
+        placeholder, or is otherwise blank.
+        """
+        lines = profile_text.splitlines()
+        # Find the section header
+        try:
+            start = next(
+                i for i, ln in enumerate(lines)
+                if ln.strip() in ("## Язык общения", "## Language", "## Язык")
+            )
+        except StopIteration:
+            return ""
+        # Body runs to the next ## header
+        end = len(lines)
+        for j in range(start + 1, len(lines)):
+            if lines[j].startswith("## "):
+                end = j
+                break
+        body_lines = [
+            ln for ln in lines[start + 1 : end]
+            if ln.strip() and ln.strip() != "(пока не указано)"
+        ]
+        return "\n".join(body_lines).strip()
+
     def preamble(self) -> str:
         """Блок, который подмешивается в system prompt всех диалоговых вызовов.
 
-        Порядок важен: сначала характер, потом самоопределение, потом
-        профиль пользователя. Core memory добавляется отдельно в агенте —
-        её ведёт CoreMemory, здесь дублировать нельзя.
+        Order: character first, then self-definition, then user profile.
+        Core memory is appended separately by the agent (CoreMemory owns it).
+
+        If the user profile pins a response language, append a
+        LANGUAGE OVERRIDE block at the END so it carries the most weight
+        in the model's context. Without this, soul.md's "mirror the user's
+        language" rule wins over user.md's "respond in Russian", and the
+        agent flips to whatever language the user's latest message
+        happened to be in.
         """
-        return (
+        profile_text = self.user_profile().strip()
+        out = (
             "# SOUL\n"
             f"{self.soul().strip()}\n\n"
             "# IDENTITY\n"
             f"{self.identity().strip()}\n\n"
             "# USER PROFILE\n"
-            f"{self.user_profile().strip()}\n"
+            f"{profile_text}\n"
         )
+        lang_body = self._extract_language_section(profile_text)
+        if lang_body:
+            out += (
+                "\n# LANGUAGE OVERRIDE\n"
+                "User profile pins the response language below. "
+                "This OVERRIDES the soul-level rule about mirroring the "
+                "user's input language. Even if the current user message "
+                "is in a different language, respond in the language "
+                "specified here:\n"
+                f"{lang_body}\n"
+            )
+        return out
 
     # ---------- запись в user.md ----------
     @staticmethod
