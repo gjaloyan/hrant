@@ -561,7 +561,12 @@ class AnthropicLLM(BaseLLM):
                 elif block.get("type") == "tool_use":
                     tool_uses.append(block)
 
-            if text_parts:
+            # Only capture text when this turn is NOT a tool-use turn.
+            # Otherwise the text is preamble narration ("Now I will check
+            # the source...") that travels alongside a tool_use block —
+            # if we let it overwrite final_text and then hit max_iterations,
+            # we'd return the preamble as the user-facing answer.
+            if text_parts and not tool_uses:
                 final_text = "\n".join(p for p in text_parts if p).strip()
 
             if stop_reason != "tool_use" or not tool_uses:
@@ -590,7 +595,38 @@ class AnthropicLLM(BaseLLM):
                 tool_results.append(result_block)
             messages.append({"role": "user", "content": tool_results})
 
-        # Лимит итераций — возвращаем что есть
+        # Hit max_iterations with the model still wanting to call tools.
+        # Force one final tool-less synthesis call so the user gets a
+        # real answer instead of the last preamble.
+        synth_payload = {
+            "model": self.model,
+            "max_tokens": max_tokens or self.default_max,
+            "temperature": temperature if temperature is not None else self.default_temp,
+            "system": system,
+            "messages": messages,
+        }
+        try:
+            t0 = time.time()
+            data = self._post(synth_payload)
+            duration_ms = int((time.time() - t0) * 1000)
+            usage = data.get("usage", {})
+            if usage:
+                TOKENS.record(
+                    task_type=f"{_task_type}:tool_synth",
+                    model=self.model,
+                    provider="anthropic",
+                    usage=usage,
+                    duration_ms=duration_ms,
+                    prompt_preview="(forced final synthesis)",
+                )
+            synth_text = "\n".join(
+                b.get("text", "") for b in data.get("content", [])
+                if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+            if synth_text:
+                return synth_text
+        except Exception:
+            pass
         return final_text or "[max tool-use iterations reached]"
 
 
@@ -783,10 +819,13 @@ class OpenAICompatibleLLM(BaseLLM):
             msg = choice["message"]
             finish_reason = choice.get("finish_reason", "stop")
 
-            if msg.get("content"):
+            tool_calls = msg.get("tool_calls", [])
+            # Only capture text when this turn is NOT a tool-call turn —
+            # otherwise the text is preamble narration that should not
+            # leak out as the final answer if we hit max_iterations.
+            if msg.get("content") and not tool_calls:
                 final_text = msg["content"]
 
-            tool_calls = msg.get("tool_calls", [])
             if finish_reason != "tool_calls" and not tool_calls:
                 return final_text
 
@@ -810,6 +849,35 @@ class OpenAICompatibleLLM(BaseLLM):
                     "content": result_text,
                 })
 
+        # Forced tool-less synthesis at the cap.
+        synth_payload = {
+            "model": self.model,
+            "max_tokens": max_tokens or self.default_max,
+            "temperature": temperature if temperature is not None else self.default_temp,
+            "messages": messages,
+        }
+        try:
+            t0 = time.time()
+            data = self._post(synth_payload)
+            duration_ms = int((time.time() - t0) * 1000)
+            usage = data.get("usage", {})
+            if usage:
+                TOKENS.record(
+                    task_type=f"{_task_type}:tool_synth",
+                    model=self.model,
+                    provider=self.provider_name,
+                    usage={
+                        "input_tokens": usage.get("prompt_tokens", 0),
+                        "output_tokens": usage.get("completion_tokens", 0),
+                    },
+                    duration_ms=duration_ms,
+                    prompt_preview="(forced final synthesis)",
+                )
+            synth_text = (data["choices"][0]["message"].get("content") or "").strip()
+            if synth_text:
+                return synth_text
+        except Exception:
+            pass
         return final_text or "[max tool-use iterations reached]"
 
 
@@ -1065,10 +1133,11 @@ class CodexLLM(BaseLLM):
                 user[:300] if _iter == 0 else f"(tool iteration {_iter})",
                 duration_ms,
             )
-            if text:
+            calls = self._function_calls(items)
+            # Don't capture preamble text from a turn that also has function calls.
+            if text and not calls:
                 final_text = text
 
-            calls = self._function_calls(items)
             if not calls:
                 return final_text
 
@@ -1095,6 +1164,22 @@ class CodexLLM(BaseLLM):
                     "output": result_text,
                 })
 
+        # Forced tool-less synthesis at the cap — call again with no tools.
+        synth_payload = self._build_payload(
+            system, input_items, None, max_tokens, temperature,
+        )
+        try:
+            t0 = time.time()
+            synth_text, _items, usage = self._stream_and_aggregate(synth_payload)
+            duration_ms = int((time.time() - t0) * 1000)
+            self._record_usage(
+                usage, f"{_task_type}:tool_synth",
+                "(forced final synthesis)", duration_ms,
+            )
+            if synth_text:
+                return synth_text
+        except Exception:
+            pass
         return final_text or "[max tool-use iterations reached]"
 
 
@@ -1261,10 +1346,12 @@ class BedrockLLM(BaseLLM):
                 b.get("text", "") for b in content
                 if isinstance(b, dict) and b.get("type") == "text"
             )
-            if text_now:
+            tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
+
+            # Don't capture preamble text from a turn that also has tool_use.
+            if text_now and not tool_uses:
                 final_text = text_now
 
-            tool_uses = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_use"]
             if not tool_uses:
                 return final_text
 
@@ -1288,6 +1375,30 @@ class BedrockLLM(BaseLLM):
                 })
             messages.append({"role": "user", "content": tool_results})
 
+        # Forced tool-less synthesis at the cap.
+        synth_payload = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens or self.default_max,
+            "temperature": temperature if temperature is not None else self.default_temp,
+            "system": system,
+            "messages": messages,
+        }
+        try:
+            data = self._invoke(synth_payload)
+            self._record_usage(
+                data,
+                f"{_task_type}:tool_synth",
+                "(forced final synthesis)",
+                data.get("__duration_ms", 0),
+            )
+            synth_text = "".join(
+                b.get("text", "") for b in (data.get("content") or [])
+                if isinstance(b, dict) and b.get("type") == "text"
+            ).strip()
+            if synth_text:
+                return synth_text
+        except Exception:
+            pass
         return final_text or "[max tool-use iterations reached]"
 
 
@@ -1492,9 +1603,10 @@ class CohereLLM(BaseLLM):
             )
             msg = data.get("message") or {}
             text_now = self._extract_text(msg)
-            if text_now:
-                final_text = text_now
             tool_calls = msg.get("tool_calls") or []
+            # Don't capture preamble text from a tool-call turn.
+            if text_now and not tool_calls:
+                final_text = text_now
             if not tool_calls:
                 return final_text
             # Append assistant message + tool results, loop.
@@ -1521,6 +1633,27 @@ class CohereLLM(BaseLLM):
                     "tool_call_id": tc.get("id", ""),
                     "content": [{"type": "text", "text": result_text}],
                 })
+        # Forced tool-less synthesis at the cap.
+        synth_payload = {
+            "model": self.model,
+            "messages": messages,
+            "max_tokens": max_tokens or self.default_max,
+            "temperature": temperature if temperature is not None else self.default_temp,
+            "stream": False,
+        }
+        try:
+            t0 = time.time()
+            data = self._post(synth_payload)
+            duration_ms = int((time.time() - t0) * 1000)
+            self._record_usage(
+                data, f"{_task_type}:tool_synth",
+                "(forced final synthesis)", duration_ms,
+            )
+            synth_text = self._extract_text(data.get("message") or {})
+            if synth_text:
+                return synth_text
+        except Exception:
+            pass
         return final_text or "[max tool-use iterations reached]"
 
 

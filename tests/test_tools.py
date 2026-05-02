@@ -308,6 +308,10 @@ def test_ttl_cache_lru_eviction():
 
 
 def test_tool_loop_respects_max_iterations():
+    """When the loop hits its iteration cap, it MUST do one final
+    tool-less synthesis call so we return a real answer instead of
+    whatever preamble text the model emitted just before its last
+    tool_use. See test_tool_loop_does_not_return_preamble_at_cap."""
     reg = ToolRegistry()
     reg.register_func(
         name="ping",
@@ -316,14 +320,20 @@ def test_tool_loop_respects_max_iterations():
         handler=lambda: "pong",
     )
 
-    # Бесконечный tool_use — модель никогда не останавливается.
+    # Model wants to call the tool forever — would never stop on its own.
     def make_tool_use():
         return {
             "stop_reason": "tool_use",
             "content": [{"type": "tool_use", "id": "tuX", "name": "ping", "input": {}}],
         }
 
-    fake = FakeAnthropic(responses=[make_tool_use() for _ in range(10)])
+    # 3 tool-use turns + 1 forced synthesis turn at the cap.
+    fake = FakeAnthropic(responses=[make_tool_use() for _ in range(3)] + [
+        {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Final synthesized answer."}],
+        }
+    ])
 
     out = fake.complete_with_tools(
         system="sys",
@@ -332,6 +342,60 @@ def test_tool_loop_respects_max_iterations():
         execute_tool=reg.execute,
         max_iterations=3,
     )
-    # Не упало, вернулось что-то осмысленное, итераций было ровно 3.
+    # 3 tool-use iterations + 1 final synthesis call.
+    assert len(fake.requests) == 4
+    assert out == "Final synthesized answer."
+    # Last request must have no `tools` field (forced synthesis).
+    assert "tools" not in fake.requests[-1]
+
+
+def test_tool_loop_does_not_return_preamble_at_cap():
+    """Regression: when each tool-use turn also emits a preamble like
+    "Now I will check the source", and the loop hits its cap, the
+    final answer must be a synthesized one — NOT the last preamble.
+
+    This is the exact failure mode the agent showed on a real query:
+    the answer it returned was "Now I will verify the source with
+    concrete procedure/reagents" instead of the actual answer."""
+    reg = ToolRegistry()
+    reg.register_func(
+        name="web_search",
+        description="search.",
+        input_schema={"type": "object", "properties": {"q": {"type": "string"}}},
+        handler=lambda q="": "results for " + q,
+    )
+
+    def preamble_then_tool(text: str, tool_id: str):
+        return {
+            "stop_reason": "tool_use",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": "tool_use", "id": tool_id, "name": "web_search",
+                 "input": {"q": "iodine test"}},
+            ],
+        }
+
+    fake = FakeAnthropic(responses=[
+        preamble_then_tool("Let me search for sources.", "t1"),
+        preamble_then_tool("Now I will verify the procedure.", "t2"),
+        # Forced synthesis after cap:
+        {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Yes, you can test iodized salt with starch and lemon juice."}],
+        },
+    ])
+
+    out = fake.complete_with_tools(
+        system="sys",
+        user="как проверить йод в соли дома",
+        tools=reg.to_anthropic_list(),
+        execute_tool=reg.execute,
+        max_iterations=2,
+    )
+    # Must be the synthesized answer, NOT either preamble.
+    assert "starch" in out
+    assert "Now I will" not in out
+    assert "Let me search" not in out
+    # 2 tool turns + 1 synthesis
     assert len(fake.requests) == 3
-    assert "max tool-use iterations" in out or out == ""
+    assert "tools" not in fake.requests[-1]
