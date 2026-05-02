@@ -285,7 +285,7 @@ const Chat = forwardRef<ChatHandle, {
 
   return (
     <div className="flex flex-col flex-1 min-w-0">
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
         {msgs.length === 0 && (
           <div className="opacity-50 text-sm text-center mt-8">
             Ask a question. The agent will analyze the task, load knowledge,
@@ -295,7 +295,7 @@ const Chat = forwardRef<ChatHandle, {
         {msgs.map((m, i) => (
           <div key={i} className={m.role === "user" ? "text-right" : ""}>
             <div
-              className={`inline-block max-w-[85%] rounded-lg p-3 text-sm whitespace-pre-wrap ${
+              className={`inline-block max-w-[92%] sm:max-w-[85%] rounded-lg p-2.5 sm:p-3 text-sm whitespace-pre-wrap break-words ${
                 m.role === "user" ? "bg-sky-800" : "bg-slate-800"
               }`}
             >
@@ -585,7 +585,7 @@ const Chat = forwardRef<ChatHandle, {
             onClick={() => fileInputRef.current?.click()}
             disabled={busy || uploading}
             title="Attach files (or drag & drop / paste)"
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded px-2 text-sm self-start py-1"
+            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 rounded px-3 text-base self-start min-h-[44px] sm:min-h-0 sm:py-1 sm:px-2 sm:text-sm"
           >
             {uploading ? "…" : "📎"}
           </button>
@@ -593,7 +593,7 @@ const Chat = forwardRef<ChatHandle, {
             onClick={recording ? stopRecording : startRecording}
             disabled={busy || transcribing}
             title={recording ? "Stop recording" : "Record voice"}
-            className={`rounded px-2 text-sm self-start py-1 disabled:opacity-50 ${
+            className={`rounded px-3 text-base self-start min-h-[44px] sm:min-h-0 sm:py-1 sm:px-2 sm:text-sm disabled:opacity-50 ${
               recording
                 ? "bg-rose-700 hover:bg-rose-600 animate-pulse"
                 : "bg-slate-700 hover:bg-slate-600"
@@ -620,7 +620,7 @@ const Chat = forwardRef<ChatHandle, {
             <button
               onClick={send}
               disabled={busy}
-              className="bg-sky-700 hover:bg-sky-600 rounded px-4 py-1 disabled:opacity-50 transition-colors text-sm"
+              className="bg-sky-700 hover:bg-sky-600 rounded px-4 disabled:opacity-50 transition-colors text-sm min-h-[44px] sm:min-h-0 sm:py-1"
             >
               {busy ? "..." : "Send"}
             </button>
@@ -628,7 +628,7 @@ const Chat = forwardRef<ChatHandle, {
               <button
                 onClick={onNewSession}
                 disabled={busy}
-                className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs disabled:opacity-50"
+                className="bg-slate-700 hover:bg-slate-600 rounded px-3 text-xs disabled:opacity-50 min-h-[36px] sm:min-h-0 sm:py-1"
                 title="Start a new session"
               >
                 New

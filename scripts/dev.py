@@ -139,16 +139,18 @@ def main() -> int:
         log(DEV_LABEL, f"ERROR: {exc}")
         return 1
 
-    backend = spawn(
-        BACKEND_LABEL,
-        [str(py), "-m", "uvicorn", "backend.main:app", "--reload", "--port", "8000"],
-        cwd=ROOT,
-    )
-    frontend = spawn(
-        FRONTEND_LABEL,
-        [npm, "run", "dev"],
-        cwd=ROOT / "frontend",
-    )
+    # AGI_DEV_LAN=1 binds both servers to 0.0.0.0 so a second device on
+    # the local network can reach them. Off by default — keeps casual
+    # `dev.bat` runs scoped to localhost.
+    lan = os.environ.get("AGI_DEV_LAN", "").strip().lower() in ("1", "true", "yes")
+    backend_cmd = [str(py), "-m", "uvicorn", "backend.main:app", "--reload", "--port", "8000"]
+    if lan:
+        backend_cmd += ["--host", "0.0.0.0"]
+    backend = spawn(BACKEND_LABEL, backend_cmd, cwd=ROOT)
+    frontend_cmd = [npm, "run", "dev"]
+    if lan:
+        frontend_cmd += ["--", "--host"]
+    frontend = spawn(FRONTEND_LABEL, frontend_cmd, cwd=ROOT / "frontend")
 
     procs: dict[str, subprocess.Popen] = {
         BACKEND_LABEL: backend,
@@ -161,7 +163,10 @@ def main() -> int:
         t.start()
         threads.append(t)
 
-    log(DEV_LABEL, "backend → http://localhost:8000  |  frontend → http://localhost:5173")
+    if lan:
+        log(DEV_LABEL, "LAN mode — backend → http://0.0.0.0:8000  |  frontend → http://0.0.0.0:5173")
+    else:
+        log(DEV_LABEL, "backend → http://localhost:8000  |  frontend → http://localhost:5173")
     log(DEV_LABEL, "Ctrl+C to stop both")
 
     exit_code = 0

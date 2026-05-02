@@ -67,20 +67,36 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen">
-      <header className="px-4 py-2 border-b border-slate-800 bg-slate-900/80 flex items-center gap-4">
-        <h1 className="font-bold text-lg">Self-Learning Agent</h1>
-        <nav className="flex gap-1 text-sm">
+      <header className="border-b border-slate-800 bg-slate-900/80 sticky top-0 z-30">
+        {/* Title row */}
+        <div className="px-3 sm:px-4 py-2 flex items-center justify-between gap-2">
+          <h1 className="font-bold text-base sm:text-lg truncate">
+            <span className="hidden sm:inline">Self-Learning </span>Agent
+          </h1>
+          <span className="text-[10px] sm:hidden text-slate-400 truncate">
+            {TABS.find((t) => t.id === tab)?.label}
+          </span>
+        </div>
+        {/* Tabs row — horizontally scrollable on mobile, icon-only under sm */}
+        <nav
+          className="flex gap-1 text-sm overflow-x-auto px-2 sm:px-4 pb-2 scroll-smooth
+                     [scrollbar-width:none] [-ms-overflow-style:none]
+                     [&::-webkit-scrollbar]:hidden"
+        >
           {TABS.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
-              className={`px-3 py-1.5 rounded transition-colors ${
+              aria-label={t.label}
+              title={t.label}
+              className={`shrink-0 rounded transition-colors px-2.5 py-1.5 sm:px-3 ${
                 tab === t.id
                   ? "bg-sky-700 text-white"
                   : "bg-slate-800 hover:bg-slate-700 text-slate-300"
               }`}
             >
-              {t.icon} {t.label}
+              <span>{t.icon}</span>
+              <span className="hidden sm:inline ml-1">{t.label}</span>
             </button>
           ))}
         </nav>
