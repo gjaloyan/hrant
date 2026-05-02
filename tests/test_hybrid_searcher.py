@@ -141,3 +141,91 @@ def test_custom_weights(graph):
     results = hybrid.search("test")
     assert len(results) == 1
     assert results[0].score == pytest.approx(1.0, abs=0.01)
+
+
+# ---- Score-floor regression: noise-as-best-match ----
+
+class _StubVectorStore:
+    """VectorStore stub yielding pre-set raw cosine scores per slug."""
+
+    def __init__(self, hits: dict[str, float]):
+        self._hits = hits
+
+    def count(self) -> int:
+        return len(self._hits) or 1  # non-zero so HybridSearcher consults us
+
+    def search(self, query_vector, k: int = 5):
+        items = sorted(self._hits.items(), key=lambda kv: kv[1], reverse=True)
+        return items[:k]
+
+
+def test_vector_floor_rejects_noise(graph, monkeypatch, tmp_kb):
+    """Repro: user asks about a topic the KB doesn't have ('iodine').
+    Vector store returns weak cosine matches against unrelated notes.
+    Without the floor, min-max normalization scales the top noise hit
+    to 1.0 and HybridSearcher.find_best returns it as the 'best' match.
+    With the floor, all weak hits are filtered and find_best returns
+    None — exactly what _ensure_knowledge needs to skip the topic."""
+    # Three unrelated notes the KB happens to have.
+    for slug in ("blood-sugar", "source-code-analysis", "mcp"):
+        tmp_kb.save_note(
+            topic=slug.replace("-", " "),
+            body=f"# {slug}\nbody",
+            category="profession",
+            keywords=[slug],
+            source="test",
+        )
+    # Vector returns weak matches (~0.05 cosine = noise).
+    vstore = _StubVectorStore({
+        "blood-sugar": 0.07,
+        "source-code-analysis": 0.05,
+        "mcp": 0.04,
+    })
+    # Ensure the embedder returns SOMETHING so vector path is exercised.
+    monkeypatch.setattr(
+        "backend.hybrid_searcher.EMBEDDER",
+        type("E", (), {"embed": staticmethod(lambda q: [0.1] * 8)})(),
+    )
+
+    searcher = FakeSearcher([])  # fuzzy finds nothing (correct)
+    hybrid = HybridSearcher(
+        searcher=searcher, graph=graph, vector_store=vstore,
+    )
+    # With the floor in place, noise is filtered → no result.
+    assert hybrid.find_best("iodine") is None
+    # And explicit min_raw_score gate also returns None.
+    assert hybrid.find_best("iodine", min_raw_score=0.4) is None
+
+
+def test_vector_floor_keeps_real_matches(graph, monkeypatch, tmp_kb):
+    """Sanity: a strong vector match (cosine 0.6) clears the floor and
+    is returned as the best hit."""
+    tmp_kb.save_note(
+        topic="Python",
+        body="# Python\nGIL.",
+        category="profession",
+        keywords=["python"],
+        source="test",
+    )
+    vstore = _StubVectorStore({"python": 0.62})
+    monkeypatch.setattr(
+        "backend.hybrid_searcher.EMBEDDER",
+        type("E", (), {"embed": staticmethod(lambda q: [0.1] * 8)})(),
+    )
+    hybrid = HybridSearcher(
+        searcher=FakeSearcher([]), graph=graph, vector_store=vstore,
+    )
+    best = hybrid.find_best("python")
+    assert best is not None
+    assert best.topic == "Python"
+
+
+def test_min_raw_score_blocks_only_fuzzy_threshold_hits(graph):
+    """Strong fuzzy hit (raw 0.95) clears any reasonable min_raw_score.
+    Weak fuzzy hit just at the searcher's threshold (0.6) should be
+    rejected when the caller asks for higher quality."""
+    strong = _entry("Python")
+    searcher_strong = FakeSearcher([SearchHit(entry=strong, score=0.95)])
+    hybrid_strong = HybridSearcher(searcher=searcher_strong, graph=graph)
+    assert hybrid_strong.find_best("python", min_raw_score=0.4) is not None
+    assert hybrid_strong.find_best("python", min_raw_score=0.99) is None

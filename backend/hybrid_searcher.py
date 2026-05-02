@@ -49,6 +49,8 @@ class HybridSearcher:
         fuzzy_weight: float = 0.45,
         graph_weight: float = 0.25,
         vector_weight: float = 0.30,
+        vector_score_floor: float = 0.30,
+        graph_score_floor: float = 0.10,
     ):
         self._searcher = searcher or SEARCHER
         self._graph = graph or GRAPH
@@ -56,6 +58,14 @@ class HybridSearcher:
         self.fuzzy_weight = fuzzy_weight
         self.graph_weight = graph_weight
         self.vector_weight = vector_weight
+        # Raw-score floors per signal. Min-max normalization scales the
+        # top hit to 1.0 even when raw scores are tiny — so a query for
+        # a topic the KB doesn't have ("iodine") still got the closest
+        # noise back ("blood sugar") with a fully-confident normalized
+        # score. Fuzzy already self-filters at CONFIG.search.fuzzy_threshold;
+        # vector / graph need their own floors so noise doesn't survive.
+        self.vector_score_floor = vector_score_floor
+        self.graph_score_floor = graph_score_floor
 
     # ---- public ----
 
@@ -101,8 +111,26 @@ class HybridSearcher:
         merged.sort(key=lambda h: h.score, reverse=True)
         return merged[:limit]
 
-    def find_best(self, topic: str) -> IndexEntry | None:
-        """Find the single best match (drop-in for Searcher.find_best)."""
+    def find_best(self, topic: str, *, min_raw_score: float = 0.0) -> IndexEntry | None:
+        """Find the single best match (drop-in for Searcher.find_best).
+
+        `min_raw_score` rejects matches where no individual signal
+        cleared this floor on its raw, pre-normalized score. Pass a
+        non-zero value (e.g. 0.4) when you want a hard "this is
+        actually relevant" gate — the search() method's combined score
+        is post-min-max-normalization, where the top hit is always 1.0
+        regardless of how weak the underlying match is.
+        """
+        if min_raw_score > 0.0:
+            fuzzy_scores, _ = self._fuzzy(topic, 1)
+            graph_scores = self._graph_search(topic, 1)
+            vector_scores = self._vector_search(topic, 1)
+            max_raw = 0.0
+            for d in (fuzzy_scores, graph_scores, vector_scores):
+                if d:
+                    max_raw = max(max_raw, max(d.values()))
+            if max_raw < min_raw_score:
+                return None
         hits = self.search(topic, limit=1)
         return hits[0].entry if hits else None
 
@@ -120,21 +148,27 @@ class HybridSearcher:
     def _graph_search(self, query: str, limit: int) -> dict[str, float]:
         scores: dict[str, float] = {}
         for note_slug, score in self._graph.find_related_notes(query, max_hops=2, max_results=limit * 2):
-            scores[note_slug] = score
+            if score >= self.graph_score_floor:
+                scores[note_slug] = score
         return scores
 
     def _vector_search(self, query: str, limit: int) -> dict[str, float]:
-        """Embed the query and pull top-K cosine matches. Empty dict if disabled."""
+        """Embed the query and pull top-K cosine matches. Empty dict if disabled.
+
+        Drop hits below `vector_score_floor`. Cosine 0.05 between a
+        random pair of bge-m3 embeddings is effectively noise — letting
+        it through means min-max scales it to 1.0 and we ship an
+        unrelated note as the "best" match.
+        """
         if self._vector_store.count() == 0:
             return {}
         qvec = EMBEDDER.embed(query)
         if not qvec:
             return {}
-        # Drop negative similarities — they're worse than no-match.
         return {
             slug: score
             for slug, score in self._vector_store.search(qvec, k=limit * 2)
-            if score > 0.0
+            if score >= self.vector_score_floor
         }
 
     # ---- merge helpers ----

@@ -782,7 +782,11 @@ class Agent:
         # Дедуп входного списка тем
         unique_topics = list(dict.fromkeys(t.strip() for t in topics if t and t.strip()))
         for topic in unique_topics:
-            hit = HYBRID.find_best(topic)
+            # min_raw_score=0.4 rejects "iodine"-vs-"blood sugar" style
+            # weak matches where the KB has nothing actually relevant
+            # but min-max normalization would scale the top noise hit
+            # to 1.0 and load it as a "best" match.
+            hit = HYBRID.find_best(topic, min_raw_score=0.4)
             if hit:
                 hit_slug = _slug(hit.topic)
                 if hit_slug in loaded_slugs:
