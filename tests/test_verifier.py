@@ -34,6 +34,69 @@ def test_verifier_parses_json():
     assert res.unverified_claims == ["B"]
 
 
+def test_verifier_system_prompt_handles_negative_existence():
+    """Review-mode regression: the verifier prompt must explicitly tell
+    the LLM to look for contradictions when the assistant claims a thing
+    is missing or proposes a 'fix' that adds it. Without this guidance
+    the verifier was rubber-stamping hallucinations like 'add reject
+    category' (already there) and 'add fuzzy_threshold check' (already
+    there) — both real cases observed in production self-reviews."""
+    from backend.verifier import VERIFIER_SYSTEM
+    s = VERIFIER_SYSTEM.lower()
+    # Contradictions are the right bucket for false-absence claims.
+    assert "contradiction" in s
+    # Explicit guidance on negative existence / "missing X" patterns.
+    assert "missing" in s
+    # Explicit guidance on "fix" suggestions for non-existent problems.
+    assert "fix" in s
+    # The "absence of evidence is not evidence of absence" rule.
+    assert "absence" in s
+
+
+def test_verifier_marks_false_missing_claim_as_contradiction():
+    """End-to-end: when the assistant claims a feature is missing but
+    the tool output shows it IS present, the verifier should produce a
+    contradiction (low confidence), NOT a verified claim."""
+    # Simulate: assistant said "code has no reject category, add it".
+    # Tool output (file contents the assistant supposedly read) shows
+    # the reject category is right there in the source.
+    answer = (
+        "Problem #1: agent.py is missing the 'reject' category. "
+        "Fix: add a reject branch to _save_preference."
+    )
+    tool_output = (
+        "agent.py:248: \"category\": \"language\" | \"style\" | \"about_user\" | \"rule\" | \"reject\",\n"
+        "agent.py:750: return \"reject\", task.strip(), ...\n"
+    )
+
+    # An attentive verifier sees the contradiction.
+    fake_json = {
+        "verified_claims": [],
+        "unverified_claims": [],
+        "contradictions": [
+            "Answer claims 'reject' category is missing, but tool output "
+            "shows it defined at agent.py:248 and used at :750.",
+        ],
+        "notes_used": [],
+    }
+
+    class FakeRouter:
+        def call_json(self, task_type, system, user, **kw):
+            # The verifier MUST be passing the tool_output to the LLM
+            # — otherwise it can't catch the contradiction.
+            assert "agent.py:248" in user
+            return fake_json
+
+    from unittest.mock import patch as _p
+    with _p("backend.verifier.router", return_value=FakeRouter()):
+        res = verify("review my code", answer, "irrelevant note", [], tool_context=tool_output)
+
+    assert res.contradictions, "verifier should flag a contradiction here"
+    # confidence formula: 0 verified, 0 unverified, 1 contradiction
+    # => 100 * 0 / (0 + 0 + 2) = 0
+    assert res.confidence == 0
+
+
 def test_verifier_confidence_formula():
     """Deterministic confidence: contradictions weighted 2x, no LLM-supplied number."""
     cases = [
