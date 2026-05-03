@@ -186,22 +186,20 @@ class IdentityManager:
         return self.user_path.read_text(encoding="utf-8")
 
     @staticmethod
-    def _extract_language_section(profile_text: str) -> str:
-        """Pull the body of the `## Язык общения` section from user.md.
+    def _extract_section(text: str, headers: tuple[str, ...]) -> str:
+        """Pull the body of the first matching `## <header>` section.
 
-        Empty if the section is missing, holds only the `(пока не указано)`
-        placeholder, or is otherwise blank.
+        Empty if no matching header is found, the section is empty, or
+        the section holds only the `(пока не указано)` placeholder.
         """
-        lines = profile_text.splitlines()
-        # Find the section header
+        lines = text.splitlines()
         try:
             start = next(
                 i for i, ln in enumerate(lines)
-                if ln.strip() in ("## Язык общения", "## Language", "## Язык")
+                if ln.strip() in headers
             )
         except StopIteration:
             return ""
-        # Body runs to the next ## header
         end = len(lines)
         for j in range(start + 1, len(lines)):
             if lines[j].startswith("## "):
@@ -212,6 +210,20 @@ class IdentityManager:
             if ln.strip() and ln.strip() != "(пока не указано)"
         ]
         return "\n".join(body_lines).strip()
+
+    @classmethod
+    def _extract_language_section(cls, profile_text: str) -> str:
+        """Pull the body of the `## Язык общения` section from user.md."""
+        return cls._extract_section(
+            profile_text, ("## Язык общения", "## Language", "## Язык"),
+        )
+
+    @classmethod
+    def _extract_name_section(cls, identity_text: str) -> str:
+        """Pull the body of the `## Имя` section from identity.md."""
+        return cls._extract_section(
+            identity_text, ("## Имя", "## Name"),
+        )
 
     def preamble(self) -> str:
         """Блок, который подмешивается в system prompt всех диалоговых вызовов.
@@ -226,15 +238,31 @@ class IdentityManager:
         agent flips to whatever language the user's latest message
         happened to be in.
         """
+        identity_text = self.identity().strip()
         profile_text = self.user_profile().strip()
         out = (
             "# SOUL\n"
             f"{self.soul().strip()}\n\n"
             "# IDENTITY\n"
-            f"{self.identity().strip()}\n\n"
+            f"{identity_text}\n\n"
             "# USER PROFILE\n"
             f"{profile_text}\n"
         )
+        # Name override: same trick as LANGUAGE OVERRIDE — pull the
+        # `## Имя` body from identity.md and re-state it at the END of
+        # the preamble, where the model's attention weights it highest.
+        # Inside the IDENTITY block alone the name was getting lost
+        # under the longer SOUL section + recent conversation turns
+        # where the agent had previously denied being called by name.
+        name_body = self._extract_name_section(identity_text)
+        if name_body:
+            out += (
+                "\n# AGENT NAME OVERRIDE\n"
+                "When the user addresses you by the name(s) below, "
+                "they ARE talking to YOU. Acknowledge it as your own "
+                "name. Do not deny it. Do not say 'I'm not <name>'.\n"
+                f"{name_body}\n"
+            )
         lang_body = self._extract_language_section(profile_text)
         if lang_body:
             out += (
