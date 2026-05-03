@@ -22,6 +22,62 @@ ROOT = Path(__file__).resolve().parent.parent
 CHANNELS_PATH = ROOT / "knowledge" / "channels.json"
 
 
+class _ConflictNoiseFilter(logging.Filter):
+    """Collapse python-telegram-bot's `Conflict: terminated by other
+    getUpdates request` storms into a single warning line.
+
+    Background: a uvicorn `--reload` race spawns a fresh poller before
+    the old child finishes its in-flight long-poll. Telegram
+    cancels the old `getUpdates` with `Conflict`; the lib's
+    `network_retry_loop` then logs a 30-line stack trace at ERROR
+    level on every retry until the situation resolves (usually
+    seconds). The trace is alarming but harmless.
+
+    This filter:
+      - Drops the stack trace (sets `exc_info` and `exc_text` to None).
+      - Throttles repeats: emits one short WARNING per minute even
+        if the lib retries every few seconds.
+      - Lets all non-Conflict records through unchanged.
+    """
+
+    THROTTLE_SECONDS = 60.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_log_at: float = 0.0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage() if record.args else (record.msg or "")
+        if "Conflict" not in msg and (
+            not record.exc_info or "Conflict" not in str(record.exc_info[1])
+        ):
+            return True
+        now = time.time()
+        if now - self._last_log_at < self.THROTTLE_SECONDS:
+            return False
+        self._last_log_at = now
+        record.levelno = logging.WARNING
+        record.levelname = "WARNING"
+        record.msg = (
+            "Telegram poll preempted by another getUpdates consumer "
+            "(Conflict). Usually a dev-reload race; the lib retries. "
+            "If it persists, check for a duplicate backend with the "
+            "same TELEGRAM token."
+        )
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
+# Install once, on the python-telegram-bot Updater logger that emits
+# the noisy traceback. Module-level so it survives bot restarts within
+# the same process.
+_TG_UPDATER_LOG = logging.getLogger("telegram.ext.Updater")
+if not any(isinstance(f, _ConflictNoiseFilter) for f in _TG_UPDATER_LOG.filters):
+    _TG_UPDATER_LOG.addFilter(_ConflictNoiseFilter())
+
+
 # --------------- storage ---------------
 
 def _load_channels() -> list[dict]:
@@ -292,6 +348,20 @@ class TelegramBot:
             app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
 
             loop.run_until_complete(app.initialize())
+            # Defensive: explicitly clear any webhook before polling.
+            # If anything ever sets a webhook on this token (manual
+            # curl, another deploy), getUpdates would 409 forever.
+            # `drop_pending_updates=True` also flushes the queue so we
+            # don't blast through old messages on restart.
+            try:
+                loop.run_until_complete(
+                    app.bot.delete_webhook(drop_pending_updates=True)
+                )
+            except Exception as e:
+                log.warning(
+                    "Telegram bot %s: delete_webhook on start failed: %s",
+                    self.channel_id, e,
+                )
             loop.run_until_complete(app.start())
             loop.run_until_complete(app.updater.start_polling(drop_pending_updates=True))
             log.info("Telegram bot %s polling started successfully", self.channel_id)
