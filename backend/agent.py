@@ -45,6 +45,7 @@ from .analogy_engine import ANALOGIES
 from .evaluator import EVALUATOR, EvalEntry
 from .goals import GOALS
 from .memory_extractor import MEMORY
+from .project_mode import PROJECTS
 from .mcp_client import MCP, MCPServerConfig
 from .meta_learner import META_LEARNER
 from .note_creator import learn_topic
@@ -502,6 +503,73 @@ class Agent:
         self.progress("core", "загружаю core memory")
         return CORE.read()
 
+    def _shared_context(
+        self,
+        task: str,
+        core: str | None = None,
+        *,
+        n_conv: int = 6,
+        n_memory: int = 8,
+        max_goals: int = 5,
+    ) -> str:
+        """Common per-turn context block used by chat / think / solve.
+
+        Soul / identity / user profile / name+language overrides are
+        already in the system prompt via `_with_identity`. THIS block
+        carries the per-turn state that tells the model "what we are
+        doing right now":
+
+          - CORE memory (long-term persistent facts)
+          - CURRENT PROJECT (active workspace, if any)
+          - ACTIVE GOALS (what the user is working on)
+          - SHORT-TERM MEMORY (semantic recall of facts relevant to
+            this query — pulled from the memory graph)
+          - CONVERSATION (last `n_conv` turns)
+
+        Empty sections are omitted so we don't waste tokens. Returned
+        as a markdown-headed block ready to drop into the user message
+        BEFORE the actual USER REQUEST.
+        """
+        parts: list[str] = []
+
+        if core is None:
+            try:
+                core = CORE.read()
+            except Exception:
+                core = ""
+        if core and core.strip():
+            parts.append(f"# CORE MEMORY\n{core.strip()}")
+
+        try:
+            project = PROJECTS.current
+        except Exception:
+            project = None
+        if project:
+            parts.append(f"# CURRENT PROJECT\n{project}")
+
+        try:
+            goals_block = GOALS.context_block(max_goals=max_goals)
+        except Exception:
+            goals_block = ""
+        if goals_block.strip():
+            parts.append(goals_block.strip())
+
+        try:
+            memory_block = MEMORY.recall_block(task, max_facts=n_memory)
+        except Exception:
+            memory_block = ""
+        if memory_block and memory_block.strip():
+            parts.append(memory_block.strip())
+
+        try:
+            conv = CONVERSATION.context_block(n=n_conv)
+        except Exception:
+            conv = ""
+        if conv and conv.strip():
+            parts.append(conv.strip())
+
+        return "\n\n".join(parts)
+
     def _attachment_marker(self) -> str:
         """Textual hint about attachments on the current turn.
 
@@ -585,11 +653,13 @@ class Agent:
         system = _with_identity(CHAT_SYSTEM_BASE)
         if _is_self_question(task):
             system = f"{system}\n\n---\n\n{_capabilities_block()}"
-        conv = CONVERSATION.context_block(n=4)
-        conv_section = f"\n\n{conv}" if conv else ""
+        # Full per-turn context (core + project + goals + memory recall
+        # + recent conversation) so even a quick chat reply knows who
+        # the user is, what we're working on, and what was just said.
+        ctx = self._shared_context(task, core, n_conv=4, n_memory=6)
         marker = self._attachment_marker()
         user = (
-            f"# CORE MEMORY\n{core.strip()}{conv_section}\n\n"
+            f"{ctx}\n\n"
             f"# MESSAGE\n{marker}{task.strip()}"
         )
         attachments = getattr(self, "_attachments", None)
@@ -703,31 +773,22 @@ class Agent:
         """
         self.progress("think", "thinking...")
         caps = _capabilities_block()
-        conv = CONVERSATION.context_block(n=6)
-        conv_section = f"\n\n{conv}" if conv else ""
-        goals_section = ""
-        goals_block = GOALS.context_block(max_goals=5)
-        if goals_block:
-            goals_section = f"\n\n{goals_block}"
-        # Recall relevant facts from memory graph (previous conversations)
-        memory_section = ""
-        try:
-            memory_block = MEMORY.recall_block(task, max_facts=10)
-            if memory_block:
-                memory_section = f"\n\n{memory_block}"
-                self.progress("memory", f"recalled {memory_block.count(chr(10)) - 2} facts from memory")
-        except Exception:
-            pass
+        ctx = self._shared_context(task, core, n_conv=6, n_memory=10)
         marker = self._attachment_marker()
         user = (
-            f"CORE MEMORY:\n{core}\n\n"
-            f"MY CAPABILITIES:\n{caps}"
-            f"{conv_section}{goals_section}{memory_section}\n\n"
-            f"USER REQUEST:\n{marker}{task}"
+            f"{ctx}\n\n"
+            f"# MY CAPABILITIES\n{caps}\n\n"
+            f"# USER REQUEST\n{marker}{task}"
         )
+        # Identity is part of who's thinking — without it the analyzer
+        # can't tell that "Hrant?" is the user addressing the agent
+        # by name, or that "ответь по-русски" matches the user's
+        # pinned language preference. _think used to skip identity;
+        # now it goes through _with_identity like chat / solve do.
         data = router().call_json(
             TaskType.TASK_ANALYSIS,
-            THINKING_SYSTEM, user, max_tokens=1000, temperature=0.2,
+            _with_identity(THINKING_SYSTEM), user,
+            max_tokens=1000, temperature=0.2,
         )
         result = ThinkingResult(
             question_type=str(data.get("question_type", "factual")).strip(),
@@ -883,29 +944,21 @@ class Agent:
                     think_lines.append(f"  {i}. {step}")
             think_block = "\n".join(think_lines)
 
-        conv = CONVERSATION.context_block(n=6)
-        conv_section = f"\n{conv}\n" if conv else ""
-
         critique_block = f"\n{critique}\n" if critique else ""
 
-        # Recall relevant facts from memory graph
-        memory_block = ""
-        try:
-            mb = MEMORY.recall_block(task, max_facts=8)
-            if mb:
-                memory_block = f"\n{mb}\n"
-        except Exception:
-            pass
-
+        # Unified per-turn context: core + project + goals + memory
+        # recall + recent conversation. Goals + project landed here
+        # alongside the existing memory/conv sections so the solver
+        # knows what we're working on, not just the immediate query.
+        ctx = self._shared_context(task, core, n_conv=6, n_memory=8)
         marker = self._attachment_marker()
-        user = f"""# CORE MEMORY
-{core.strip()}
+        user = f"""{ctx}
 
 # NOTES
 {self._notes_block(notes)}
-{memory_block}
+
 {think_block}
-{conv_section}{critique_block}
+{critique_block}
 # USER REQUEST
 {marker}{task}"""
         registry = get_registry()
