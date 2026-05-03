@@ -142,6 +142,108 @@ def delete_channel(channel_id: str) -> bool:
 # --------------- Telegram bot ---------------
 
 
+class _TgProgressStream:
+    """Streams agent progress events into a single Telegram message in
+    near-real-time, by repeatedly editing one placeholder.
+
+    Why a stream and not one message per event:
+      Telegram rate-limits edits to one chat at ~1/sec; sending one new
+      message per event would also clutter the chat. Editing one
+      placeholder gives a "live" feel without spamming.
+
+    Threading:
+      The agent runs sync inside `loop.run_in_executor(...)` so the
+      event loop stays responsive. Progress callbacks fire from the
+      executor thread; this class bridges with
+      `asyncio.run_coroutine_threadsafe(..., loop)` so the actual
+      `edit_message_text` calls execute on the bot's loop.
+
+    Throttling:
+      An edit happens at most once per `EDIT_INTERVAL_SEC`. If another
+      event arrives mid-throttle, a single deferred edit is scheduled
+      to flush the latest snapshot — so the user always sees the most
+      recent state, but we don't burn rate-limit budget.
+
+    Buffering:
+      Only the last `MAX_LINES` events are rendered, so a long trace
+      doesn't push past Telegram's 4096-char message cap.
+    """
+
+    EDIT_INTERVAL_SEC = 1.2
+    MAX_LINES = 30
+    MAX_LINE_LEN = 180
+
+    def __init__(self, bot: Any, chat_id: int, message_id: int, loop: Any):
+        self.bot = bot
+        self.chat_id = chat_id
+        self.message_id = message_id
+        self.loop = loop
+        self._lines: list[str] = []
+        self._lock = threading.Lock()
+        self._last_edit = 0.0
+        self._pending = False
+        self._closed = False
+
+    def push(self, event: str, message: str) -> None:
+        """Sync entry point — called from the agent thread."""
+        if self._closed:
+            return
+        line = f"{event}: {message}"
+        if len(line) > self.MAX_LINE_LEN:
+            line = line[: self.MAX_LINE_LEN - 1] + "…"
+        with self._lock:
+            self._lines.append(line)
+            if len(self._lines) > self.MAX_LINES:
+                self._lines = self._lines[-self.MAX_LINES :]
+        self._schedule_edit()
+
+    def _schedule_edit(self) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(self._maybe_edit(), self.loop)
+        except Exception:
+            pass
+
+    def _render(self) -> str:
+        with self._lock:
+            body = "\n".join(self._lines[-self.MAX_LINES :])
+        text = "🧠 Thinking…\n" + body
+        if len(text) > 3900:
+            text = text[:3895] + "…"
+        return text
+
+    async def _maybe_edit(self) -> None:
+        now = time.time()
+        wait = self.EDIT_INTERVAL_SEC - (now - self._last_edit)
+        if wait > 0:
+            # Coalesce: if a deferred flush is already pending, drop this one.
+            if self._pending:
+                return
+            self._pending = True
+            try:
+                await asyncio.sleep(wait)
+            finally:
+                self._pending = False
+        self._last_edit = time.time()
+        await self._edit(self._render())
+
+    async def _edit(self, text: str) -> None:
+        try:
+            await self.bot.edit_message_text(
+                chat_id=self.chat_id,
+                message_id=self.message_id,
+                text=text,
+            )
+        except Exception:
+            # Swallow — Telegram occasionally returns "message not modified"
+            # or 429 on bursts; both are non-fatal for a progress stream.
+            pass
+
+    async def finalize(self, summary: str) -> None:
+        """Replace placeholder with the final compact summary."""
+        self._closed = True
+        await self._edit(summary[:4000])
+
+
 def _format_trace_footer(result: Any) -> str:
     """Compact thinking + tools footer for Telegram replies.
 
@@ -368,20 +470,44 @@ class TelegramBot:
 
                 try:
                     from .agent import Agent
-                    agent = Agent()
-                    result = agent.run(text, project=None, attachments=attachment_shas or None)
+
+                    # Live progress placeholder — gets edited in-place as
+                    # the agent thinks, runs tools, verifies. Survives as
+                    # the trace record after the run; the actual answer
+                    # is sent as a separate message.
+                    placeholder = await update.message.reply_text("🧠 Thinking…")
+                    running_loop = asyncio.get_running_loop()
+                    stream = _TgProgressStream(
+                        bot=update.message.get_bot(),
+                        chat_id=update.message.chat.id,
+                        message_id=placeholder.message_id,
+                        loop=running_loop,
+                    )
+
+                    def _progress_cb(event: str, message: str) -> None:
+                        # Called from the executor thread where agent.run runs.
+                        stream.push(event, message)
+
+                    agent = Agent(progress=_progress_cb)
+                    # Don't block the event loop — run the (sync) agent in
+                    # a thread pool so the streamer can keep editing.
+                    result = await running_loop.run_in_executor(
+                        None,
+                        lambda: agent.run(
+                            text, project=None,
+                            attachments=attachment_shas or None,
+                        ),
+                    )
                     answer = result.answer or "(no answer)"
 
                     # Compact thinking + tools footer (between answer and stats).
                     trace_footer = _format_trace_footer(result)
-                    if trace_footer:
-                        answer += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n" + trace_footer
 
                     # Add token usage statistics to end of answer
+                    stats_block = ""
                     if result.token_usage:
                         tu = result.token_usage
                         stats_lines = [
-                            "",
                             "━━━━━━━━━━━━━━━━━━━━━━",
                             f"🔢 Tokens: {tu.total_tokens:,} (in: {tu.input_tokens:,}, out: {tu.output_tokens:,})",
                         ]
@@ -391,10 +517,20 @@ class TelegramBot:
                             stats_lines.append(f"📝 Cache created: {tu.cache_creation_tokens:,}")
                         stats_lines.append(f"💰 Cost: ${tu.cost_usd:.4f}")
                         stats_lines.append(f"🔄 LLM calls: {tu.llm_calls}")
+                        stats_block = "\n".join(stats_lines)
 
-                        answer += "\n".join(stats_lines)
+                    # Replace the placeholder with the final compact summary
+                    # so the user keeps a clean record of WHAT the agent did,
+                    # without the noisy step-by-step trace.
+                    final_summary_parts: list[str] = ["✅ Done"]
+                    if trace_footer:
+                        final_summary_parts.append(trace_footer)
+                    if stats_block:
+                        final_summary_parts.append(stats_block)
+                    await stream.finalize("\n\n".join(final_summary_parts))
 
-
+                    # Send the actual answer as a fresh message (chunked
+                    # if it's bigger than Telegram's 4096-char limit).
                     if len(answer) > 4000:
                         for i in range(0, len(answer), 4000):
                             await update.message.reply_text(answer[i:i + 4000])
