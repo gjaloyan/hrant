@@ -141,6 +141,52 @@ def delete_channel(channel_id: str) -> bool:
 
 # --------------- Telegram bot ---------------
 
+
+def _format_trace_footer(result: Any) -> str:
+    """Compact thinking + tools footer for Telegram replies.
+
+    Telegram has no `<details>` collapsible UI, so we keep this tight:
+      - 🧠 Thinking line: stage names from the trace, joined by →,
+        plus total step count and elapsed seconds. Tool events are
+        excluded so the line stays readable.
+      - 🔧 Tools line: counts of each distinct tool used, e.g.
+        `read_file(2), web_search(1)`. Omitted when no tools ran.
+
+    Returns "" when there's no trace at all (chat-fast-path replies).
+    """
+    trace = getattr(result, "thinking_trace", None) or []
+    if not trace:
+        return ""
+    # Stage chain — drop tool events, drop spammy `found:` repeats.
+    seen: set[str] = set()
+    stages: list[str] = []
+    for s in trace:
+        ev = s.event or ""
+        if ev.startswith("tool"):
+            continue
+        if ev in seen:
+            continue
+        seen.add(ev)
+        stages.append(ev)
+    # Tool tally
+    tool_counts: dict[str, int] = {}
+    last_ts = 0.0
+    for s in trace:
+        last_ts = max(last_ts, s.ts or 0.0)
+        if s.event in ("tool", "tool_error") and s.tool_call:
+            tool_counts[s.tool_call.name] = tool_counts.get(s.tool_call.name, 0) + 1
+    lines: list[str] = []
+    if stages:
+        chain = " → ".join(stages[:8])
+        if len(stages) > 8:
+            chain += f" → … (+{len(stages) - 8})"
+        lines.append(f"🧠 Thinking: {chain}  ({len(trace)} steps · {last_ts:.1f}s)")
+    if tool_counts:
+        tools = ", ".join(f"{n}({c})" for n, c in sorted(tool_counts.items()))
+        lines.append(f"🔧 Tools: {tools}")
+    return "\n".join(lines)
+
+
 class TelegramBot:
     """Runs a Telegram bot that forwards messages to the agent."""
 
@@ -325,6 +371,29 @@ class TelegramBot:
                     agent = Agent()
                     result = agent.run(text, project=None, attachments=attachment_shas or None)
                     answer = result.answer or "(no answer)"
+
+                    # Compact thinking + tools footer (between answer and stats).
+                    trace_footer = _format_trace_footer(result)
+                    if trace_footer:
+                        answer += "\n\n━━━━━━━━━━━━━━━━━━━━━━\n" + trace_footer
+
+                    # Add token usage statistics to end of answer
+                    if result.token_usage:
+                        tu = result.token_usage
+                        stats_lines = [
+                            "",
+                            "━━━━━━━━━━━━━━━━━━━━━━",
+                            f"🔢 Tokens: {tu.total_tokens:,} (in: {tu.input_tokens:,}, out: {tu.output_tokens:,})",
+                        ]
+                        if tu.cache_read_tokens > 0:
+                            stats_lines.append(f"💾 Cache read: {tu.cache_read_tokens:,}")
+                        if tu.cache_creation_tokens > 0:
+                            stats_lines.append(f"📝 Cache created: {tu.cache_creation_tokens:,}")
+                        stats_lines.append(f"💰 Cost: ${tu.cost_usd:.4f}")
+                        stats_lines.append(f"🔄 LLM calls: {tu.llm_calls}")
+
+                        answer += "\n".join(stats_lines)
+
 
                     if len(answer) > 4000:
                         for i in range(0, len(answer), 4000):

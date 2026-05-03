@@ -24,6 +24,55 @@ function ConfidenceBadge({ c }: { c: number }) {
   );
 }
 
+function ToolCallItem({ step }: { step: import("../api").ThinkingStep }) {
+  const tc = step.tool_call;
+  if (!tc) return null;
+  // Compact summary line: tool name + truncated args + first line of result.
+  const argsKeys = Object.keys(tc.args || {});
+  const argsPreview =
+    argsKeys.length === 0
+      ? ""
+      : argsKeys.map((k) => {
+          const v = (tc.args as Record<string, unknown>)[k];
+          const s = typeof v === "string" ? v : JSON.stringify(v);
+          return `${k}=${s.length > 40 ? s.slice(0, 40) + "…" : s}`;
+        }).join(", ");
+  const firstResultLine = (tc.result || "").split("\n").find((l) => l.trim()) || "";
+  const resultPreview =
+    firstResultLine.length > 120 ? firstResultLine.slice(0, 120) + "…" : firstResultLine;
+  const tone = tc.is_error ? "text-rose-400" : "text-sky-300";
+  return (
+    <details className="bg-slate-950/40 rounded px-2 py-1 text-[11px]">
+      <summary className="cursor-pointer flex items-center gap-2 flex-wrap">
+        <span className="text-slate-500">{step.ts.toFixed(1)}s</span>
+        <span className={`font-mono ${tone}`}>{tc.name}</span>
+        {argsPreview && <span className="text-slate-400 truncate">({argsPreview})</span>}
+        {resultPreview && <span className="text-slate-500 truncate">→ {resultPreview}</span>}
+      </summary>
+      <div className="mt-2 space-y-2 text-[10px]">
+        {argsKeys.length > 0 && (
+          <div>
+            <div className="text-slate-500 mb-0.5">args:</div>
+            <pre className="bg-slate-900 rounded p-2 overflow-x-auto whitespace-pre-wrap break-words">
+              {JSON.stringify(tc.args, null, 2)}
+            </pre>
+          </div>
+        )}
+        {tc.result && (
+          <div>
+            <div className="text-slate-500 mb-0.5">
+              result{tc.is_error ? " (error)" : ""}:
+            </div>
+            <pre className="bg-slate-900 rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">
+              {tc.result}
+            </pre>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 const Chat = forwardRef<ChatHandle, {
   onRefreshStatus: () => void;
   project: string | null;
@@ -335,6 +384,25 @@ const Chat = forwardRef<ChatHandle, {
                     ))}
                 </div>
               )}
+              {/* Tool calls — compact list; click any item for full args + result */}
+              {m.role === "agent" && m.meta?.thinking_trace && m.text && (() => {
+                const toolSteps = m.meta.thinking_trace.filter(
+                  (s) => s.tool_call && (s.event === "tool" || s.event === "tool_error")
+                );
+                if (toolSteps.length === 0) return null;
+                return (
+                  <details className="mb-2" open>
+                    <summary className="text-[11px] opacity-60 cursor-pointer hover:opacity-90 mb-1">
+                      🔧 tools: {toolSteps.length} call{toolSteps.length === 1 ? "" : "s"}
+                    </summary>
+                    <div className="space-y-1 mt-1">
+                      {toolSteps.map((s, j) => (
+                        <ToolCallItem key={j} step={s} />
+                      ))}
+                    </div>
+                  </details>
+                );
+              })()}
               {/* Compact thinking trace after answer — show key stages */}
               {m.role === "agent" && m.meta?.thinking_trace && m.meta.thinking_trace.length > 0 && m.text && (
                 <details className="mb-2">

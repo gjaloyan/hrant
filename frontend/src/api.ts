@@ -18,11 +18,20 @@ export type TokenUsage = {
   llm_calls: number;
 };
 
+export type ToolCallDetail = {
+  name: string;
+  args: Record<string, unknown>;
+  result: string;
+  is_error: boolean;
+  duration_ms: number;
+};
+
 export type ThinkingStep = {
   ts: number;
   event: string;
   message: string;
   tokens_so_far: number;
+  tool_call?: ToolCallDetail | null;
 };
 
 export type AgentAnswer = {

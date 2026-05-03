@@ -38,6 +38,7 @@ from .models import (
     TaskAnalysis,
     ThinkingResult,
     ThinkingStep,
+    ToolCallDetail,
     TokenUsage,
     VerificationResult,
 )
@@ -485,8 +486,19 @@ class Agent:
         self._t0: float = 0.0
         _bootstrap_mcp()
 
-    def progress(self, event: str, message: str) -> None:
-        """Record thinking step and forward to user callback."""
+    def progress(
+        self,
+        event: str,
+        message: str,
+        tool_call: "ToolCallDetail | None" = None,
+    ) -> None:
+        """Record thinking step and forward to user callback.
+
+        `tool_call` carries the structured tool-call payload (name, args,
+        full result) for the WebUI's expand view; the trace's `message`
+        keeps holding the same one-liner preview so the existing UI
+        keeps rendering as before.
+        """
         import time as _time
         elapsed = _time.monotonic() - self._t0 if self._t0 else 0.0
         usage = TOKENS.request_usage()
@@ -495,6 +507,7 @@ class Agent:
             event=event,
             message=message,
             tokens_so_far=usage["total_tokens"],
+            tool_call=tool_call,
         ))
         self._user_progress(event, message)
 
@@ -1005,7 +1018,20 @@ class Agent:
         def _on_tool_call(name: str, args: dict, result: str, is_error: bool) -> None:
             preview = (result or "").strip().splitlines()[0][:80] if result else ""
             tag = "tool_error" if is_error else "tool"
-            self.progress(tag, f"{name}({', '.join(args.keys())}) -> {preview}")
+            # Structured detail rides alongside the one-liner so the
+            # WebUI can render a compact summary by default and reveal
+            # full args + result on demand.
+            detail = ToolCallDetail(
+                name=name,
+                args=args or {},
+                result=result or "",
+                is_error=bool(is_error),
+            )
+            self.progress(
+                tag,
+                f"{name}({', '.join(args.keys())}) -> {preview}",
+                tool_call=detail,
+            )
             if result and not is_error:
                 cap = _tool_cap.get(name, _DEFAULT_CAP)
                 snippet = result[:cap]

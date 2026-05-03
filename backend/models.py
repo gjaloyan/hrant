@@ -125,12 +125,29 @@ class TokenUsage(BaseModel):
     llm_calls: int = 0
 
 
+class ToolCallDetail(BaseModel):
+    """Structured details for a tool call event in the thinking trace.
+
+    The trace's free-form `message` field already carries a one-liner
+    preview, but for the WebUI's "show more" expand we need the actual
+    args dict and the full result body. Kept off the message so the
+    short summary stays short. Always present on tool-event steps;
+    never on other event types.
+    """
+    name: str = ""
+    args: dict = {}
+    result: str = ""
+    is_error: bool = False
+    duration_ms: int = 0
+
+
 class ThinkingStep(BaseModel):
     """One step in the agent's thinking trace."""
     ts: float = 0.0          # monotonic timestamp (seconds from request start)
     event: str = ""           # stage name (core, think, solve, tool, verify...)
     message: str = ""         # human-readable description
     tokens_so_far: int = 0    # cumulative tokens at this point
+    tool_call: Optional[ToolCallDetail] = None  # set only on `tool` / `tool_error` events
 
 
 class AgentAnswer(BaseModel):
