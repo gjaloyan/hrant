@@ -153,9 +153,25 @@ class SelfModifier:
         except Exception:
             return []
 
-        # Truncate very large files
-        if len(code) > 8000:
-            code = code[:8000] + "\n# ... (truncated)"
+        # Truncate very large files. 8000 chars used to drop ~75% of
+        # agent.py / llm.py — so suggestions only ever covered the
+        # imports + first few classes. Bumped to 30000, and when a file
+        # exceeds that we keep BOTH ends (head + tail) instead of just
+        # the head, because module-level singletons (`X = ClassName()`),
+        # `if __name__ == "__main__"` blocks, and registry hooks live at
+        # the bottom and matter for self-analysis.
+        max_total = 30000
+        if len(code) > max_total:
+            head_chars = 22000
+            tail_chars = max_total - head_chars - 80  # leave room for marker
+            head = code[:head_chars]
+            tail = code[-tail_chars:]
+            omitted = len(code) - head_chars - tail_chars
+            code = (
+                f"{head}\n"
+                f"# ... [{omitted} chars omitted from middle of file] ...\n"
+                f"{tail}"
+            )
 
         try:
             user_prompt = f"MODULE: backend/{module_name}\n\nSOURCE CODE:\n```python\n{code}\n```"

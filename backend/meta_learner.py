@@ -57,11 +57,20 @@ Only include patterns that appear 2+ times. Max 5 patterns."""
 class MetaLearner:
     """Analyzes agent failures and creates corrective actions."""
 
+    # Run extract_patterns() automatically every Nth analyzed failure.
+    # extract_patterns is one extra LLM call (~500 tokens), so we don't
+    # do it after every single failure — but waiting for a manual call
+    # means recurring patterns never become goals. 5 is the agent's own
+    # suggestion and matches typical "user noticed something repeats"
+    # cadence.
+    AUTO_EXTRACT_EVERY_N_FAILURES = 5
+
     def __init__(self, path: Optional[Path] = None, patterns_path: Optional[Path] = None):
         kb_dir = Path(CONFIG.knowledge["base_dir"])
         self.log_path = path or (kb_dir / "error_log.jsonl")
         self.patterns_path = patterns_path or (kb_dir / "error_patterns.json")
         self._patterns: list[dict] = []
+        self._failure_count: int = 0  # in-process counter for auto-extract
         self._load_patterns()
 
     def _load_patterns(self) -> None:
@@ -146,6 +155,16 @@ class MetaLearner:
             entry["analysis"] = analysis
             self._append_log(entry)
             self._auto_fix(analysis)
+            # Auto-extract patterns every N analyzed failures so the
+            # feedback loop closes without waiting for a manual call.
+            # extract_patterns logs nothing useful for the current
+            # turn's caller, so swallow its errors — best-effort.
+            self._failure_count += 1
+            if self._failure_count % self.AUTO_EXTRACT_EVERY_N_FAILURES == 0:
+                try:
+                    self.extract_patterns()
+                except Exception:
+                    pass
             return analysis
         except LLMError:
             # If LLM is down, still log the failure without analysis
