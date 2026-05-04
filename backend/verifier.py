@@ -22,6 +22,65 @@ _IDENT_PATTERNS = (
 )
 
 
+# Patterns the agent uses when proposing to "add" something that's
+# allegedly missing. Each pattern has the candidate identifier in
+# group 1. We anchor on lowercase verbs / negation phrasings in EN +
+# RU; the trailing identifier is matched permissively (Python-shape).
+_FALSE_ABSENCE_PATTERNS = (
+    # add/create X (verb-first, identifier follows)
+    re.compile(r"\b(?:add|added|adding|create|creating)\s+(?:a\s+|an\s+|the\s+)?[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
+    # missing/not-implemented X (verb-first, identifier follows)
+    re.compile(r"\b(?:missing|absent|not\s+implemented|not\s+called|not\s+invoked|not\s+handled|not\s+used)\s*[:`']?\s*([A-Za-z_]\w{2,})", re.IGNORECASE),
+    # X is missing / X doesn't exist (identifier-first)
+    re.compile(r"[`']?(?:[\w.]*\.)?([A-Za-z_]\w{2,})[`']?\s+(?:is\s+missing|doesn['’]?t\s+exist|isn['’]?t\s+(?:there|defined|implemented|called)|not\s+called|not\s+invoked|is\s+not\s+called)", re.IGNORECASE),
+    re.compile(r"\b(?:there['’]?s\s+no|no\s+such)\s+[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
+    re.compile(r"\b(?:fix\s*:?\s*add|recommend(?:ation)?\s*:?\s*add|TODO\s*:?\s*add)\s+[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
+    # Russian: добавь/создай X (verb-first)
+    re.compile(r"\b(?:добав(?:ь|ить|им|лен)|создать?|реализовать)\s+[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
+    # Russian: identifier-first — `X не вызывается`, `Foo.bar не реализован`,
+    # `mod.func не существует`. Allows a dotted prefix; group 1 captures
+    # the trailing identifier (the part that's in EXTRACTED IDENTIFIERS).
+    re.compile(r"[`']?(?:[\w.]*\.)?([A-Za-z_]\w{2,})[`']?\s+не\s+(?:вызыва(?:ется|ют)|реализован|обрабатыва(?:ется|ют)|существует|использует(?:ся|ют))", re.IGNORECASE),
+)
+
+
+def detect_false_absence_contradictions(
+    answer: str,
+    identifiers: list[str],
+) -> list[str]:
+    """Deterministic catch for the 'agent suggests adding X when X is
+    already in the code' hallucination. Scans the answer for common
+    "add/missing X" phrasings, checks each candidate against the set
+    of identifiers extracted from tool output, and returns one
+    contradiction string per match.
+
+    LLM-side verification (the prompt rules in VERIFIER_SYSTEM) is
+    still the primary path, but Sonnet has been observed missing these
+    even with explicit guidance. This is the belt to that suspenders.
+    Empty list when there's no overlap, so quiet on healthy answers.
+    """
+    if not answer or not identifiers:
+        return []
+    ident_set = {i for i in identifiers if i}
+    seen: set[str] = set()
+    out: list[str] = []
+    for pattern in _FALSE_ABSENCE_PATTERNS:
+        for m in pattern.finditer(answer):
+            candidate = m.group(1)
+            if candidate in ident_set and candidate not in seen:
+                seen.add(candidate)
+                # Snippet of surrounding context for the verifier UI.
+                start = max(0, m.start() - 40)
+                end = min(len(answer), m.end() + 40)
+                snippet = answer[start:end].replace("\n", " ").strip()
+                out.append(
+                    f"Answer claims '{candidate}' is missing or proposes adding it, "
+                    f"but '{candidate}' is already present in the code per tool "
+                    f"output. Context: …{snippet}…"
+                )
+    return out
+
+
 def _extract_code_identifiers(tool_context: str, *, max_idents: int = 200) -> list[str]:
     """Pull class / function / attr names from tool output.
 
@@ -141,20 +200,21 @@ def verify(
         )
 
     tool_section = ""
+    extracted_idents: list[str] = []
     if tool_context.strip():
         # Pre-extract identifiers so the LLM has an explicit "already
         # in code" keyword set. Catches the common review hallucination
         # "fix: add reject category" when reject is right there at line
         # 248 — without this list the model has to spot the line in a
         # 12k-char dump, which it routinely fails to do.
-        idents = _extract_code_identifiers(tool_context)
+        extracted_idents = _extract_code_identifiers(tool_context)
         idents_section = ""
-        if idents:
+        if extracted_idents:
             idents_section = (
                 "\n\nEXTRACTED IDENTIFIERS — ALREADY PRESENT IN THE CODE\n"
                 "(if the assistant proposes adding any of these as a 'fix', "
                 "that is a CONTRADICTION):\n"
-                + ", ".join(idents)
+                + ", ".join(extracted_idents)
             )
         tool_section = (
             f"\n\nTOOL OUTPUTS (file contents, search results — primary evidence):\n"
@@ -185,6 +245,29 @@ Available topics: {', '.join(used_topics)}"""
     verified = list(data.get("verified_claims", []))
     unverified = list(data.get("unverified_claims", []))
     contradictions = list(data.get("contradictions", []))
+
+    # Belt-and-suspenders: deterministic detector for the
+    # "agent claims X is missing, but X is in the code" pattern.
+    # The LLM verifier was observed missing these even with the
+    # negative-existence rule + EXTRACTED IDENTIFIERS list spelled
+    # out for it (Sonnet, real session). Anything caught here is
+    # promoted to a contradiction; if the LLM also caught it, we
+    # dedup so the same issue doesn't double-count toward confidence.
+    auto_contradictions = detect_false_absence_contradictions(answer, extracted_idents)
+    if auto_contradictions:
+        existing_lower = {c.lower() for c in contradictions}
+        for c in auto_contradictions:
+            # Cheap dedup: if the auto detector and the LLM both flagged
+            # the same identifier, the LLM's natural-language version
+            # already covers it. Match on the quoted identifier word.
+            ident_token = c.split("'")[1] if "'" in c else ""
+            if ident_token and any(
+                ident_token in c_existing.lower() for c_existing in contradictions
+            ):
+                continue
+            if c.lower() not in existing_lower:
+                contradictions.append(c)
+                existing_lower.add(c.lower())
     return VerificationResult(
         confidence=_compute_confidence(
             len(verified), len(unverified), len(contradictions)

@@ -1119,8 +1119,14 @@ class Agent:
         # that legitimately produce file-sized output; the original 1500
         # stays for short tools (web snippets, calc results, etc).
         _tool_cap = {
-            "read_file": 12000,
-            "view_file": 12000,
+            # Match the tool's own default (builtin_tools.py: read_file
+            # default max_chars=20000). When this was 12000 and the tool
+            # returned 20000, the model saw a truncated body, decided
+            # "I need to re-read with bigger max_chars", and called
+            # read_file AGAIN — paying for the same file twice. Lining
+            # the two caps up removes that double-read.
+            "read_file": 20000,
+            "view_file": 20000,
             "read_note": 8000,
             "list_files": 4000,
             "glob": 4000,
