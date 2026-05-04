@@ -597,10 +597,14 @@ class AnthropicLLM(BaseLLM):
 
         # Hit max_iterations with the model still wanting to call tools.
         # Force one final tool-less synthesis call so the user gets a
-        # real answer instead of the last preamble.
+        # real answer instead of the last preamble. The synthesis budget
+        # is generous — review-style tasks (`analyze your code`) ran into
+        # the regular default and ended mid-sentence. 6000 fits the
+        # longest reviews we've seen and stays well under model caps.
+        synth_max = max(max_tokens or self.default_max, 6000)
         synth_payload = {
             "model": self.model,
-            "max_tokens": max_tokens or self.default_max,
+            "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": system,
             "messages": messages,
@@ -849,10 +853,12 @@ class OpenAICompatibleLLM(BaseLLM):
                     "content": result_text,
                 })
 
-        # Forced tool-less synthesis at the cap.
+        # Forced tool-less synthesis at the cap. Generous budget so
+        # review-style answers don't truncate (see Anthropic synth note).
+        synth_max = max(max_tokens or self.default_max, 6000)
         synth_payload = {
             "model": self.model,
-            "max_tokens": max_tokens or self.default_max,
+            "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "messages": messages,
         }
@@ -1165,8 +1171,10 @@ class CodexLLM(BaseLLM):
                 })
 
         # Forced tool-less synthesis at the cap — call again with no tools.
+        # Generous budget for review-style answers (see Anthropic synth note).
+        synth_max = max(max_tokens or self.default_max, 6000)
         synth_payload = self._build_payload(
-            system, input_items, None, max_tokens, temperature,
+            system, input_items, None, synth_max, temperature,
         )
         try:
             t0 = time.time()
@@ -1375,10 +1383,11 @@ class BedrockLLM(BaseLLM):
                 })
             messages.append({"role": "user", "content": tool_results})
 
-        # Forced tool-less synthesis at the cap.
+        # Forced tool-less synthesis at the cap (see Anthropic synth note).
+        synth_max = max(max_tokens or self.default_max, 6000)
         synth_payload = {
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens or self.default_max,
+            "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": system,
             "messages": messages,
@@ -1633,11 +1642,12 @@ class CohereLLM(BaseLLM):
                     "tool_call_id": tc.get("id", ""),
                     "content": [{"type": "text", "text": result_text}],
                 })
-        # Forced tool-less synthesis at the cap.
+        # Forced tool-less synthesis at the cap (see Anthropic synth note).
+        synth_max = max(max_tokens or self.default_max, 6000)
         synth_payload = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens or self.default_max,
+            "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "stream": False,
         }

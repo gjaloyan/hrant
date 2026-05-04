@@ -177,6 +177,14 @@ THINKING section of the user message. Use it as your roadmap:
 - Between tool calls, briefly reason: what did I learn, what's still missing,
   what do I call next and why.
 
+# ARITHMETIC RULE (HARD)
+For any arithmetic — `2+2`, `15 * 3`, `(5+3)/2`, `10%` of N, square roots,
+powers — you MUST call `calc` or `run_python`. Do NOT compute it from your
+training data. Answering arithmetic from memory is the documented source of
+hallucinations on this agent (a tracked goal exists for it). Even when the
+answer "looks obvious", call the tool — it costs nothing and prevents the
+silent off-by-one.
+
 # SELF-ANALYSIS RULE (CRITICAL)
 When the question is about yourself (architecture, code, improvements, capabilities):
 - FIRST check CORE MEMORY — it lists your existing modules and architecture.
@@ -406,6 +414,31 @@ def _capabilities_block() -> str:
 # Быстрый фильтр для самых очевидных случаев — без единого LLM-вызова.
 # Сознательно узкий: ловит только бесспорную болтовню, всё неоднозначное
 # уходит в LLM-классификатор.
+# Arithmetic detector — any expression with two numbers (incl. decimals,
+# percent, parentheses) and a binary operator. We don't try to be a full
+# calculator parser; just enough that "2+2", "15 * 3", "(5+3)/2", "10%
+# of 200", "2^10" trigger the marker. False positives are cheap (one
+# wasted run_python call); false negatives are expensive (hallucinated
+# arithmetic answers, which already showed up as a tracked goal).
+_ARITHMETIC_RE = re.compile(
+    r"(?:"
+    r"\d+(?:\.\d+)?\s*[+\-*/^×÷%]\s*\d+(?:\.\d+)?"
+    r"|\d+\s*\^\s*\d+"
+    r"|sqrt\s*\(\s*\d"
+    r"|\d+\s*%\s*(?:of|от)\s+\d+"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_arithmetic(s: str) -> bool:
+    """True if `s` contains an arithmetic-looking expression. Used to
+    force the solver into a calc/run_python path instead of letting it
+    answer from training data — answering arithmetic from memory is the
+    classic source of "2+2 = 5" hallucinations."""
+    return bool(_ARITHMETIC_RE.search(s or ""))
+
+
 _CHITCHAT_RE = re.compile(
     r"^\s*(?:"
     r"hi|hello|hey|yo|hola|"
@@ -516,6 +549,31 @@ class Agent:
         self.progress("core", "загружаю core memory")
         return CORE.read()
 
+    @staticmethod
+    def _git_log_block(n: int = 50) -> str:
+        """Recent commit log so the agent knows what its own code
+        actually contains right now — not what it remembered from a
+        snapshot in the knowledge base.
+
+        For self-analysis turns this beats `MEMORY.recall_block` (which
+        replays past observations about possibly-old code) and points
+        the agent at fresh state. Best-effort: returns "" outside a
+        git working tree or if the binary isn't present.
+        """
+        import subprocess
+        from pathlib import Path
+        repo = Path(__file__).resolve().parent.parent
+        try:
+            out = subprocess.run(
+                ["git", "log", f"-{int(n)}", "--oneline", "--no-decorate"],
+                cwd=repo, capture_output=True, text=True, timeout=5,
+            )
+        except Exception:
+            return ""
+        if out.returncode != 0 or not out.stdout.strip():
+            return ""
+        return "# RECENT COMMITS (latest first — what the code looks like now)\n" + out.stdout.strip()
+
     def _shared_context(
         self,
         task: str,
@@ -524,6 +582,7 @@ class Agent:
         n_conv: int = 6,
         n_memory: int = 8,
         max_goals: int = 5,
+        for_self_analysis: bool = False,
     ) -> str:
         """Common per-turn context block used by chat / think / solve.
 
@@ -538,6 +597,14 @@ class Agent:
           - SHORT-TERM MEMORY (semantic recall of facts relevant to
             this query — pulled from the memory graph)
           - CONVERSATION (last `n_conv` turns)
+
+        When `for_self_analysis=True` (the agent is being asked to
+        review its own code), short-term memory is REPLACED with a
+        recent git log. Memory holds past observations about possibly-
+        old code state; for code review the only authoritative source
+        is the file on disk + what changed lately. This is the fix for
+        the recurring "agent finds bugs that were already fixed last
+        commit" pattern — recall was reproducing stale findings.
 
         Empty sections are omitted so we don't waste tokens. Returned
         as a markdown-headed block ready to drop into the user message
@@ -567,12 +634,18 @@ class Agent:
         if goals_block.strip():
             parts.append(goals_block.strip())
 
-        try:
-            memory_block = MEMORY.recall_block(task, max_facts=n_memory)
-        except Exception:
-            memory_block = ""
-        if memory_block and memory_block.strip():
-            parts.append(memory_block.strip())
+        if for_self_analysis:
+            # Trade stale recall for fresh git log on self-analysis turns.
+            git_block = self._git_log_block(n=50)
+            if git_block:
+                parts.append(git_block)
+        else:
+            try:
+                memory_block = MEMORY.recall_block(task, max_facts=n_memory)
+            except Exception:
+                memory_block = ""
+            if memory_block and memory_block.strip():
+                parts.append(memory_block.strip())
 
         try:
             conv = CONVERSATION.context_block(n=n_conv)
@@ -582,6 +655,22 @@ class Agent:
             parts.append(conv.strip())
 
         return "\n\n".join(parts)
+
+    def _arithmetic_marker(self, task: str) -> str:
+        """Notice prepended to the user prompt when arithmetic is
+        detected. Forces the solver to run a calculator tool instead of
+        answering from training data. Empty when the task isn't
+        arithmetic, so unrelated turns aren't polluted.
+        """
+        if not _looks_like_arithmetic(task):
+            return ""
+        return (
+            "[ARITHMETIC DETECTED] The user's message contains an "
+            "arithmetic expression. You MUST call `calc` or `run_python` "
+            "to compute the answer. Do NOT answer arithmetic from "
+            "memory — answering from training data is the documented "
+            "source of '2+2 = 5'-style hallucinations on this agent.\n\n"
+        )
 
     def _attachment_marker(self) -> str:
         """Textual hint about attachments on the current turn.
@@ -641,6 +730,12 @@ class Agent:
         trimmed = task.strip()
         if len(trimmed) > 300:
             return "task"
+        # Arithmetic must take the task path so the solver can call
+        # calc / run_python. Skip chitchat regex AND the LLM classifier
+        # for this — both have been observed routing "2+2" to chat,
+        # where the model answers from training data.
+        if _looks_like_arithmetic(trimmed):
+            return "task"
         if _CHITCHAT_RE.match(trimmed):
             return "chat"
         try:
@@ -670,7 +765,7 @@ class Agent:
         # + recent conversation) so even a quick chat reply knows who
         # the user is, what we're working on, and what was just said.
         ctx = self._shared_context(task, core, n_conv=4, n_memory=6)
-        marker = self._attachment_marker()
+        marker = self._attachment_marker() + self._arithmetic_marker(task)
         user = (
             f"{ctx}\n\n"
             f"# MESSAGE\n{marker}{task.strip()}"
@@ -787,7 +882,7 @@ class Agent:
         self.progress("think", "thinking...")
         caps = _capabilities_block()
         ctx = self._shared_context(task, core, n_conv=6, n_memory=10)
-        marker = self._attachment_marker()
+        marker = self._attachment_marker() + self._arithmetic_marker(task)
         user = (
             f"{ctx}\n\n"
             f"# MY CAPABILITIES\n{caps}\n\n"
@@ -963,12 +1058,31 @@ class Agent:
         # recall + recent conversation. Goals + project landed here
         # alongside the existing memory/conv sections so the solver
         # knows what we're working on, not just the immediate query.
-        ctx = self._shared_context(task, core, n_conv=6, n_memory=8)
-        marker = self._attachment_marker()
+        is_self_analysis = bool(thinking and thinking.question_type == "self_analysis")
+        ctx = self._shared_context(
+            task, core, n_conv=6, n_memory=8,
+            for_self_analysis=is_self_analysis,
+        )
+        marker = self._attachment_marker() + self._arithmetic_marker(task)
+        # On self-analysis turns the NOTES block is dropped — KB notes
+        # are snapshots and reproduce stale code state. The solver
+        # MUST read live source via read_file. A short directive
+        # replaces the section so the model knows why it's empty.
+        if is_self_analysis:
+            notes_section = (
+                "# SOURCE OF TRUTH\n"
+                "This is a self-analysis turn. KB notes about the code "
+                "are intentionally omitted because they're snapshots and "
+                "may report state that has since been fixed. Read the "
+                "actual source files via `read_file` and the recent "
+                "commits in `# RECENT COMMITS` above. Do NOT propose "
+                "fixes for code you haven't read this turn."
+            )
+        else:
+            notes_section = f"# NOTES\n{self._notes_block(notes)}"
         user = f"""{ctx}
 
-# NOTES
-{self._notes_block(notes)}
+{notes_section}
 
 {think_block}
 {critique_block}
@@ -1250,10 +1364,17 @@ class Agent:
             # self_analysis answers come from reading the agent's own code,
             # not from external research — disable web-driven auto-learning
             # for those turns to avoid polluting the KB with redundant notes.
-            allow_learning = thinking.question_type != "self_analysis"
-            notes, learned = self._ensure_knowledge(
-                thinking.required_topics, project, allow_learning=allow_learning,
-            )
+            # AND skip topic loading entirely: KB notes about the code are
+            # snapshots that reproduce stale findings ("agent finds bugs
+            # already fixed last commit"). The git log + read_file are the
+            # only authoritative sources for self-analysis.
+            is_self_analysis = thinking.question_type == "self_analysis"
+            if is_self_analysis:
+                notes, learned = [], []
+            else:
+                notes, learned = self._ensure_knowledge(
+                    thinking.required_topics, project, allow_learning=True,
+                )
 
             # Load project-specific notes if in project mode
             if project:

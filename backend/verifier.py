@@ -1,9 +1,49 @@
 """Self-verification of agent answers against loaded notes and tool outputs."""
 from __future__ import annotations
 import json
+import re
 
 from .llm import TaskType, router
 from .models import VerificationResult
+
+
+# Pulls names of classes / functions / module-level vars / dotted attrs
+# out of a Python-ish tool output. We're not parsing the AST — that
+# would be overkill for fuzzy verification — just enough patterns that
+# the verifier LLM has an explicit "things that already exist" list.
+_IDENT_PATTERNS = (
+    re.compile(r"\bclass\s+([A-Za-z_]\w*)"),
+    re.compile(r"\bdef\s+([A-Za-z_]\w*)"),
+    # MODULE_CONST = ... — module-level uppercase constants. Allows
+    # leading whitespace because file dumps from read_file may include
+    # indentation or `cat -n` line-number prefixes.
+    re.compile(r"^\s*([A-Z][A-Z0-9_]+)\s*=", re.MULTILINE),
+    re.compile(r"\bself\.([A-Za-z_]\w*)\s*="),
+)
+
+
+def _extract_code_identifiers(tool_context: str, *, max_idents: int = 200) -> list[str]:
+    """Pull class / function / attr names from tool output.
+
+    Returned sorted, deduplicated, capped at `max_idents` so the
+    verifier prompt doesn't balloon when a 12k-char file dump goes in.
+    Empty string in → [] out, never raises.
+    """
+    if not tool_context:
+        return []
+    found: set[str] = set()
+    for pattern in _IDENT_PATTERNS:
+        for m in pattern.finditer(tool_context):
+            for grp in m.groups():
+                if grp and len(grp) >= 2:
+                    found.add(grp)
+                    if len(found) >= max_idents:
+                        break
+            if len(found) >= max_idents:
+                break
+        if len(found) >= max_idents:
+            break
+    return sorted(found)
 
 VERIFIER_SYSTEM = """You are a strict fact-checker for an AI assistant's
 answers. Your job is to surface hallucinations the assistant may have
@@ -102,7 +142,24 @@ def verify(
 
     tool_section = ""
     if tool_context.strip():
-        tool_section = f"\n\nTOOL OUTPUTS (file contents, search results — primary evidence):\n{tool_context}"
+        # Pre-extract identifiers so the LLM has an explicit "already
+        # in code" keyword set. Catches the common review hallucination
+        # "fix: add reject category" when reject is right there at line
+        # 248 — without this list the model has to spot the line in a
+        # 12k-char dump, which it routinely fails to do.
+        idents = _extract_code_identifiers(tool_context)
+        idents_section = ""
+        if idents:
+            idents_section = (
+                "\n\nEXTRACTED IDENTIFIERS — ALREADY PRESENT IN THE CODE\n"
+                "(if the assistant proposes adding any of these as a 'fix', "
+                "that is a CONTRADICTION):\n"
+                + ", ".join(idents)
+            )
+        tool_section = (
+            f"\n\nTOOL OUTPUTS (file contents, search results — primary evidence):\n"
+            f"{tool_context}{idents_section}"
+        )
 
     user = f"""QUESTION:
 {question}
