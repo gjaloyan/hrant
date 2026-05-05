@@ -1995,6 +1995,17 @@ class DualModelRouter:
             "model_b_calls_today": 0,
             "total_a_calls": 0,
             "total_b_calls": 0,
+            # When the user pins a specific model (Codex / Cohere /
+            # Copilot / OpenAI-compatible / a non-default Anthropic),
+            # the call doesn't go through the A/B picker — count it
+            # separately so dashboards don't muddle pinned-model usage
+            # into model-A totals.
+            "active_model_calls_today": 0,
+            "total_active_model_calls": 0,
+            # provider_id:model -> lifetime call count. Lets the
+            # WebUI break down "where did today's calls go" without
+            # parsing every TokenTracker record.
+            "active_model_breakdown": {},
             "last_reason": "",
         }
         try:
@@ -2006,6 +2017,7 @@ class DualModelRouter:
             raw["api_calls_today"] = 0
             raw["api_cost_today"] = 0.0
             raw["model_b_calls_today"] = 0
+            raw["active_model_calls_today"] = 0
         for k, v in default.items():
             raw.setdefault(k, v)
         return raw
@@ -2019,6 +2031,26 @@ class DualModelRouter:
             )
         except Exception:
             pass
+
+    def _track_active_model_call(self) -> None:
+        """Bump counters for a call that went through the user-pinned
+        model branch. Kept separate from the A/B totals so dashboards
+        and `stats()` consumers can tell pinned usage from auto-routed
+        usage. The previous implementation lumped pinned calls under
+        `total_a_calls` regardless of which provider the model lived
+        on (Codex / Cohere / Copilot / Bedrock / OpenAI-compatible),
+        which the agent's own self-review correctly flagged as muddled.
+        """
+        self.state["api_calls_today"] += 1
+        self.state["active_model_calls_today"] = (
+            int(self.state.get("active_model_calls_today", 0)) + 1
+        )
+        self.state["total_active_model_calls"] = (
+            int(self.state.get("total_active_model_calls", 0)) + 1
+        )
+        breakdown = self.state.setdefault("active_model_breakdown", {})
+        key = self._active_cfg_hash or "unknown"
+        breakdown[key] = int(breakdown.get(key, 0)) + 1
 
     def stats(self) -> dict:
         out = dict(self.state)
@@ -2181,8 +2213,7 @@ class DualModelRouter:
                 system, user, max_tokens=max_tokens, temperature=temperature,
                 attachments=attachments, _task_type=tt,
             )
-            self.state["api_calls_today"] += 1
-            self.state["total_a_calls"] += 1
+            self._track_active_model_call()
             self._save_state()
             return out
 
@@ -2280,8 +2311,7 @@ class DualModelRouter:
                     attachments=attachments,
                     _task_type=tt,
                 )
-                self.state["api_calls_today"] += 1
-                self.state["total_a_calls"] += 1
+                self._track_active_model_call()
                 self._save_state()
                 return out
             except LLMError:
