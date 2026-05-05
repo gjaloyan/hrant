@@ -50,6 +50,34 @@ def test_no_match_on_legitimate_add_suggestions():
     assert out == []
 
 
+def test_normalizes_case_and_leading_underscore():
+    """Same concept can appear under different conventions:
+      FILE_CACHE (module const) vs _file_cache (private dict)
+      TokenTracker (class) vs _token_tracker (instance var)
+    The detector must match across these forms."""
+    answer = (
+        "Recommendation: add `_file_cache` to avoid double reads. "
+        "Also create `_token_tracker` for usage logging."
+    )
+    out = detect_false_absence_contradictions(
+        answer, ["FILE_CACHE", "TokenTracker"],
+    )
+    assert len(out) == 2
+    # Both source-form and answer-form should appear in the message
+    # so the operator can see what got matched.
+    assert any("_file_cache" in c and "FILE_CACHE" in c for c in out)
+    assert any("_token_tracker" in c and "TokenTracker" in c for c in out)
+
+
+def test_exact_match_no_double_naming_in_message():
+    """When candidate == identifier exactly, the contradiction message
+    should not say 'matches' redundantly."""
+    answer = "Add reject category."
+    out = detect_false_absence_contradictions(answer, ["reject"])
+    assert len(out) == 1
+    assert "matches" not in out[0]
+
+
 def test_dedups_same_identifier():
     """Two phrasings of the same fault don't double-count."""
     answer = (

@@ -61,22 +61,48 @@ def detect_false_absence_contradictions(
     """
     if not answer or not identifiers:
         return []
-    ident_set = {i for i in identifiers if i}
+
+    def _norm(s: str) -> str:
+        """Canonical form for cross-matching identifiers in answer text
+        against identifiers extracted from source. Both sides may use
+        different conventions for the SAME concept:
+          - `FILE_CACHE` (module const) vs `_file_cache` (private dict)
+          - `TokenTracker` (class) vs `_token_tracker` (instance var)
+          - `web_search` (snake) vs `WebSearch` (Pascal) vs `_webSearch`
+        Lowercase + strip ALL underscores collapses snake_case,
+        SCREAMING_CASE, _private, and CamelCase to one bucket, so
+        "add `_token_tracker`" matches `TokenTracker` in extracted.
+        """
+        return s.replace("_", "").lower()
+
+    norm_to_original: dict[str, str] = {}
+    for ident in identifiers:
+        if ident:
+            norm_to_original.setdefault(_norm(ident), ident)
     seen: set[str] = set()
     out: list[str] = []
     for pattern in _FALSE_ABSENCE_PATTERNS:
         for m in pattern.finditer(answer):
             candidate = m.group(1)
-            if candidate in ident_set and candidate not in seen:
-                seen.add(candidate)
+            key = _norm(candidate)
+            if key in norm_to_original and key not in seen:
+                seen.add(key)
+                source_form = norm_to_original[key]
                 # Snippet of surrounding context for the verifier UI.
                 start = max(0, m.start() - 40)
                 end = min(len(answer), m.end() + 40)
                 snippet = answer[start:end].replace("\n", " ").strip()
+                # Show both names if they differ — clarifies that the
+                # match was case/underscore-normalized.
+                ref = (
+                    f"'{candidate}' (matches '{source_form}')"
+                    if candidate != source_form
+                    else f"'{candidate}'"
+                )
                 out.append(
-                    f"Answer claims '{candidate}' is missing or proposes adding it, "
-                    f"but '{candidate}' is already present in the code per tool "
-                    f"output. Context: …{snippet}…"
+                    f"Answer claims {ref} is missing or proposes adding it, "
+                    f"but it is already present in the code per tool output. "
+                    f"Context: …{snippet}…"
                 )
     return out
 

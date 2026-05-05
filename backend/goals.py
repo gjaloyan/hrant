@@ -13,6 +13,7 @@ Persistence: goals are saved to goals.json in the knowledge directory.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -108,6 +109,26 @@ class Goal:
             self.subtasks[index]["result"] = result
 
 
+def _normalize_description(s: str) -> str:
+    """Canonical form for goal-description dedup.
+
+    The previous dedup compared `description.strip().lower()`, so:
+
+      "Learn: Python GIL"   →  "learn: python gil"
+      "Learn  Python  GIL"  →  "learn  python  gil"
+      "learn python gil."   →  "learn python gil."
+
+    All three describe the same goal but produced three rows in
+    `goals.json`. This collapses whitespace runs and drops
+    non-alphanumerics so they hash to the same key. Keeps it
+    Unicode-safe (`\\W` with default flags treats Cyrillic letters
+    as word chars) so Russian descriptions normalize correctly too.
+    """
+    s = s.strip().lower()
+    s = re.sub(r"\W+", " ", s, flags=re.UNICODE)
+    return s.strip()
+
+
 class GoalManager:
     """Manages a prioritized stack of goals with disk persistence."""
 
@@ -156,10 +177,13 @@ class GoalManager:
         subtasks: list[str] | None = None,
     ) -> Goal:
         """Add a new goal. Returns the created Goal."""
-        # Deduplicate: don't add if an active goal with same description exists
-        desc_lower = description.strip().lower()
+        # Deduplicate: don't add if an active goal with same description
+        # exists. Normalization collapses whitespace + punctuation so
+        # "Learn: Python GIL", "Learn  Python  GIL", and "learn python gil."
+        # all match — they describe the same goal.
+        desc_norm = _normalize_description(description)
         for g in self._goals:
-            if g.status == "active" and g.description.strip().lower() == desc_lower:
+            if g.status == "active" and _normalize_description(g.description) == desc_norm:
                 return g
 
         goal = Goal(
@@ -274,14 +298,17 @@ class GoalManager:
         gaps: list of {topic, count, last, has_note_now} from KM.open_gaps()
         Only creates goals for topics asked >= 2 times that don't already have goals.
         """
-        existing = {g.description.lower() for g in self._goals if g.status in ("active", "paused")}
+        existing = {
+            _normalize_description(g.description)
+            for g in self._goals if g.status in ("active", "paused")
+        }
         created: list[Goal] = []
 
         for gap in gaps[:max_goals * 2]:
             if gap["count"] < 2:
                 continue
             desc = f"Learn about: {gap['topic']}"
-            if desc.lower() in existing:
+            if _normalize_description(desc) in existing:
                 continue
             goal = self.add(
                 description=desc,
@@ -299,8 +326,11 @@ class GoalManager:
     def suggest_from_errors(self, error_type: str, topic: str) -> Goal | None:
         """Create improvement goal from repeated error pattern."""
         desc = f"Improve: {topic} (fix {error_type})"
-        existing = {g.description.lower() for g in self._goals if g.status in ("active", "paused")}
-        if desc.lower() in existing:
+        existing = {
+            _normalize_description(g.description)
+            for g in self._goals if g.status in ("active", "paused")
+        }
+        if _normalize_description(desc) in existing:
             return None
         return self.add(
             description=desc,
