@@ -78,6 +78,9 @@ def test_redact_caps_pathological_input():
 
 
 def test_save_dev_capture_writes_redacted_payload(tmp_path, monkeypatch):
+    # Tests run under PYTEST_CURRENT_TEST which the persistence path
+    # respects (it skips writing). Drop it so the actual write happens.
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr("backend.dev_capture.DEV_DIR", tmp_path)
     rid = new_request_id()
     path = save_dev_capture(
@@ -108,9 +111,26 @@ def test_save_dev_capture_writes_redacted_payload(tmp_path, monkeypatch):
     assert "[file:" in payload["llm_calls"][0]["system_redacted"]
 
 
+def test_save_dev_capture_skipped_under_pytest(tmp_path, monkeypatch):
+    """When run under pytest (PYTEST_CURRENT_TEST set), the capture is
+    a no-op so the dev/ folder doesn't fill with mock-router noise."""
+    monkeypatch.setattr("backend.dev_capture.DEV_DIR", tmp_path)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "test_x (call)")
+    out = save_dev_capture(
+        request_id="abc",
+        question="q",
+        llm_calls=[{"label": "_solve"}],
+        answer_preview="a",
+        confidence=80,
+    )
+    assert out is None
+    assert list(tmp_path.glob("*.json")) == []
+
+
 def test_save_dev_capture_handles_disk_failure(monkeypatch):
     """If the dev/ folder can't be written, save_dev_capture returns
     None instead of raising — capture is best-effort."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     monkeypatch.setattr("backend.dev_capture._ensure_dev_dir",
                         lambda: (_ for _ in ()).throw(OSError("read-only fs")))
     out = save_dev_capture(

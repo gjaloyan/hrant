@@ -134,7 +134,17 @@ def save_dev_capture(
     Filename `dev/<YYYY-MM-DD_HH-MM-SS>_<short-id>.json`. Returns the
     written path, or None if writing failed (rare — disk full, locked).
     Best-effort: never raises.
+
+    Skipped under pytest: tests fire many `Agent().run(...)` calls
+    against mock routers, and persisting each run produced bursts of
+    20-40 mock captures per `pytest tests/` invocation that swamped
+    real-usage entries in dev/. PYTEST_CURRENT_TEST is the canonical
+    pytest env signal; AGI_DISABLE_DEV_CAPTURE is an explicit override
+    for users who want this off entirely.
     """
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST") or os.environ.get("AGI_DISABLE_DEV_CAPTURE"):
+        return None
     try:
         _ensure_dev_dir()
         ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
