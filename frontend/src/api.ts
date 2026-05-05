@@ -34,6 +34,18 @@ export type ThinkingStep = {
   tool_call?: ToolCallDetail | null;
 };
 
+export type LLMCallDetail = {
+  label: string;
+  task_type: string;
+  model: string;
+  system_redacted: string;
+  user_redacted: string;
+  response_preview: string;
+  duration_ms: number;
+  input_tokens: number;
+  output_tokens: number;
+};
+
 export type AgentAnswer = {
   answer: string;
   verification: VerificationResult;
@@ -43,6 +55,7 @@ export type AgentAnswer = {
   is_chat?: boolean;
   token_usage?: TokenUsage | null;
   thinking_trace?: ThinkingStep[];
+  llm_calls?: LLMCallDetail[];
 };
 
 export type IndexEntry = {

@@ -150,6 +150,29 @@ class ThinkingStep(BaseModel):
     tool_call: Optional[ToolCallDetail] = None  # set only on `tool` / `tool_error` events
 
 
+class LLMCallDetail(BaseModel):
+    """Per-LLM-call record for the dev-mode prompt viewer.
+
+    Captures what was actually sent to the LLM with file blobs
+    REDACTED — `# SOUL\\n…soul.md body…` becomes
+    `# SOUL\\n[file: knowledge/identity/soul.md, 1234 chars]`. The
+    point is to see prompt STRUCTURE without dumping multi-kilobyte
+    file contents back into the response (the file is a click away
+    on disk anyway). For the same reason `system_redacted` and
+    `user_redacted` are length-capped — see `verifier.detect_false_*`
+    docstring for the same trade-off.
+    """
+    label: str = ""                   # e.g. "_solve", "_think", "_verify"
+    task_type: str = ""               # TaskType.value, e.g. "complex_solving"
+    model: str = ""                   # provider's model id at call time
+    system_redacted: str = ""         # system prompt, file blobs replaced with markers
+    user_redacted: str = ""           # user prompt, same redaction rules
+    response_preview: str = ""        # first 600 chars of LLM response
+    duration_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 class AgentAnswer(BaseModel):
     answer: str
     verification: VerificationResult
@@ -160,6 +183,9 @@ class AgentAnswer(BaseModel):
     is_chat: bool = False
     token_usage: Optional[TokenUsage] = None
     thinking_trace: list[ThinkingStep] = []
+    # Dev-mode payload: per-LLM-call captures with file blobs redacted.
+    # Empty list when nothing was recorded (chat fast-path or skipped).
+    llm_calls: list[LLMCallDetail] = []
 
 
 class ChatRequest(BaseModel):

@@ -91,3 +91,7 @@ text.txt
 # ---------- Claude / plugin caches ----------
 .claude/cache/
 .claude/settings.local.json
+
+# ---------- Dev mode captures ----------
+# Per-request redacted LLM-call snapshots; user prunes manually.
+dev/

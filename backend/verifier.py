@@ -217,7 +217,15 @@ def verify(
     notes_text: str,
     used_topics: list[str],
     tool_context: str = "",
+    on_llm_call=None,
 ) -> VerificationResult:
+    """Verify the answer against notes + tool output.
+
+    `on_llm_call(system, user, response, duration_ms)` is an optional
+    callback fired after the verifier's LLM call returns. Used by the
+    agent's dev-mode capture to record the verifier's actual prompts
+    without re-constructing them. Best-effort — exceptions swallowed.
+    """
     if not notes_text.strip() and not tool_context.strip():
         return VerificationResult(
             confidence=0,
@@ -258,10 +266,22 @@ SOURCE NOTES:
 
 Available topics: {', '.join(used_topics)}"""
     try:
+        import time as _t
+        _t0 = _t.monotonic()
         data = router().call_json(
             TaskType.VERIFICATION,
             VERIFIER_SYSTEM, user, max_tokens=1500, temperature=0.0,
         )
+        if on_llm_call is not None:
+            try:
+                on_llm_call(
+                    VERIFIER_SYSTEM,
+                    user,
+                    str(data),
+                    int((_t.monotonic() - _t0) * 1000),
+                )
+            except Exception:
+                pass
     except Exception as e:
         return VerificationResult(
             confidence=50,

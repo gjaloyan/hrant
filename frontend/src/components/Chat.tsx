@@ -24,6 +24,49 @@ function ConfidenceBadge({ c }: { c: number }) {
   );
 }
 
+function LLMCallItem({ call }: { call: import("../api").LLMCallDetail }) {
+  // Compact summary; expand for redacted system + user prompts.
+  return (
+    <details className="bg-slate-950/40 rounded px-2 py-1 text-[11px]">
+      <summary className="cursor-pointer flex items-center gap-2 flex-wrap">
+        <span className="text-slate-400 font-mono">{call.label}</span>
+        <span className="text-slate-500">{call.task_type}</span>
+        {call.model && <span className="text-slate-500 font-mono">{call.model}</span>}
+        {call.duration_ms > 0 && (
+          <span className="text-slate-500">{(call.duration_ms / 1000).toFixed(1)}s</span>
+        )}
+        {(call.input_tokens > 0 || call.output_tokens > 0) && (
+          <span className="text-slate-500">
+            {call.input_tokens.toLocaleString()} in / {call.output_tokens.toLocaleString()} out
+          </span>
+        )}
+      </summary>
+      <div className="mt-2 space-y-2 text-[10px]">
+        <div>
+          <div className="text-slate-500 mb-0.5">system (redacted, file blobs replaced):</div>
+          <pre className="bg-slate-900 rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">
+            {call.system_redacted}
+          </pre>
+        </div>
+        <div>
+          <div className="text-slate-500 mb-0.5">user (redacted):</div>
+          <pre className="bg-slate-900 rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">
+            {call.user_redacted}
+          </pre>
+        </div>
+        {call.response_preview && (
+          <div>
+            <div className="text-slate-500 mb-0.5">response (first 600 chars):</div>
+            <pre className="bg-slate-900 rounded p-2 max-h-32 overflow-auto whitespace-pre-wrap break-words">
+              {call.response_preview}
+            </pre>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function ToolCallItem({ step }: { step: import("../api").ThinkingStep }) {
   const tc = step.tool_call;
   if (!tc) return null;
@@ -87,6 +130,17 @@ const Chat = forwardRef<ChatHandle, {
   const [activeModel, setActiveModelState] = useState<ActiveModelSelection | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableModel[]>([]);
   const [showModelPicker, setShowModelPicker] = useState(false);
+  // Dev mode: when on, render a 🔬 LLM calls panel under each agent
+  // turn that shows the redacted system + user prompt for every LLM
+  // call we made. Persists across reloads via localStorage so the
+  // operator doesn't have to re-enable it on every page load.
+  const [devMode, setDevMode] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("agi.devMode") === "1";
+    } catch {
+      return false;
+    }
+  });
   const endRef = useRef<HTMLDivElement>(null);
 
   // Multimodal: pending attachments + voice recording
@@ -403,6 +457,19 @@ const Chat = forwardRef<ChatHandle, {
                   </details>
                 );
               })()}
+              {/* Dev mode: redacted system+user prompts per LLM call */}
+              {devMode && m.role === "agent" && m.meta?.llm_calls && m.meta.llm_calls.length > 0 && m.text && (
+                <details className="mb-2">
+                  <summary className="text-[11px] opacity-70 cursor-pointer hover:opacity-100 mb-1 text-amber-300">
+                    🔬 LLM calls: {m.meta.llm_calls.length} (dev mode)
+                  </summary>
+                  <div className="space-y-1 mt-1">
+                    {m.meta.llm_calls.map((c, j) => (
+                      <LLMCallItem key={j} call={c} />
+                    ))}
+                  </div>
+                </details>
+              )}
               {/* Compact thinking trace after answer — show key stages */}
               {m.role === "agent" && m.meta?.thinking_trace && m.meta.thinking_trace.length > 0 && m.text && (
                 <details className="mb-2">
@@ -531,7 +598,7 @@ const Chat = forwardRef<ChatHandle, {
       </div>
 
       <div className="border-t border-slate-800 p-3 space-y-2">
-        {/* Model selector */}
+        {/* Model selector + dev-mode toggle */}
         <div className="flex items-center gap-2 relative">
           <button
             onClick={() => { setShowModelPicker(!showModelPicker); if (!showModelPicker) loadModels(); }}
@@ -547,6 +614,22 @@ const Chat = forwardRef<ChatHandle, {
             <svg className="w-3 h-3 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
             </svg>
+          </button>
+
+          <button
+            onClick={() => {
+              const next = !devMode;
+              setDevMode(next);
+              try { localStorage.setItem("agi.devMode", next ? "1" : "0"); } catch {}
+            }}
+            title={devMode ? "Dev mode ON — click to disable" : "Dev mode OFF — click to show LLM prompts"}
+            className={`flex items-center gap-1 rounded px-2 py-1 text-xs transition-colors ${
+              devMode
+                ? "bg-amber-700 hover:bg-amber-600 text-white"
+                : "bg-slate-800 hover:bg-slate-700 text-slate-400"
+            }`}
+          >
+            🔬 dev
           </button>
 
           {showModelPicker && (

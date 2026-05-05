@@ -35,6 +35,7 @@ from .llm import LLMError, TaskType, TOKENS, router
 from .models import (
     AgentAnswer,
     Note,
+    LLMCallDetail,
     TaskAnalysis,
     ThinkingResult,
     ThinkingStep,
@@ -42,6 +43,7 @@ from .models import (
     TokenUsage,
     VerificationResult,
 )
+from .dev_capture import redact_prompt, save_dev_capture, new_request_id
 from .analogy_engine import ANALOGIES
 from .evaluator import EVALUATOR, EvalEntry
 from .goals import GOALS
@@ -516,8 +518,46 @@ class Agent:
     def __init__(self, progress: Optional[ProgressCB] = None):
         self._user_progress = progress or _noop
         self._trace: list[ThinkingStep] = []
+        self._llm_calls: list[LLMCallDetail] = []
+        self._request_id: str = new_request_id()
         self._t0: float = 0.0
         _bootstrap_mcp()
+
+    def _record_llm_call(
+        self,
+        *,
+        label: str,
+        task_type: "TaskType | str",
+        system: str,
+        user: str,
+        response: str,
+        duration_ms: int = 0,
+        model: str = "",
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+    ) -> None:
+        """Capture one LLM invocation with file blobs redacted, for the
+        WebUI dev-mode panel. Best-effort: errors here must NEVER crash
+        the agent — if redaction throws (regex catastrophic backtrack,
+        encoding glitch), we still want the answer to ship.
+        """
+        try:
+            tt_value = task_type.value if hasattr(task_type, "value") else str(task_type)
+            sys_red = redact_prompt(system or "")
+            usr_red = redact_prompt(user or "")
+            self._llm_calls.append(LLMCallDetail(
+                label=label,
+                task_type=tt_value,
+                model=model,
+                system_redacted=sys_red,
+                user_redacted=usr_red,
+                response_preview=(response or "")[:600],
+                duration_ms=duration_ms,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ))
+        except Exception:
+            pass
 
     def progress(
         self,
@@ -740,12 +780,23 @@ class Agent:
             return "chat"
         try:
             marker = self._attachment_marker()
+            user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{marker}{trimmed}"
+            import time as _t
+            t0 = _t.monotonic()
             data = router().call_json(
                 TaskType.CLASSIFICATION,
                 INTENT_CLASSIFIER_SYSTEM,
-                f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{marker}{trimmed}",
+                user_prompt,
                 max_tokens=150,
                 temperature=0.0,
+            )
+            self._record_llm_call(
+                label="_classify_intent",
+                task_type=TaskType.CLASSIFICATION,
+                system=INTENT_CLASSIFIER_SYSTEM,
+                user=user_prompt,
+                response=str(data),
+                duration_ms=int((_t.monotonic() - t0) * 1000),
             )
             intent = str(data.get("intent", "task")).strip().lower()
             if intent in ("chat", "preference", "task"):
@@ -772,13 +823,24 @@ class Agent:
         )
         attachments = getattr(self, "_attachments", None)
         try:
-            return router().call(
+            import time as _t
+            t0 = _t.monotonic()
+            out = router().call(
                 TaskType.QUICK_ANSWER,
                 system,
                 user,
                 max_tokens=300, temperature=0.6,
                 attachments=attachments,
             )
+            self._record_llm_call(
+                label="_chat_reply",
+                task_type=TaskType.QUICK_ANSWER,
+                system=system,
+                user=user,
+                response=out,
+                duration_ms=int((_t.monotonic() - t0) * 1000),
+            )
+            return out
         except LLMError as e:
             # Surface the actual error short. Better than a generic fallback —
             # the user can see whether it's quota / bad model / network / etc.
@@ -842,12 +904,23 @@ class Agent:
                 f"USER PROFILE:\n{profile_block}\n\n---\n\n{PREFERENCE_EXTRACTOR_SYSTEM}"
             )
 
+        user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{task.strip()}"
         try:
+            import time as _t
+            t0 = _t.monotonic()
             data = router().call_json(
                 TaskType.CLASSIFICATION,
                 system_prompt,
-                f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{task.strip()}",
+                user_prompt,
                 max_tokens=300, temperature=0.1,
+            )
+            self._record_llm_call(
+                label="_save_preference",
+                task_type=TaskType.CLASSIFICATION,
+                system=system_prompt,
+                user=user_prompt,
+                response=str(data),
+                duration_ms=int((_t.monotonic() - t0) * 1000),
             )
         except LLMError:
             # On extractor failure — DON'T blindly stuff raw input into user.md.
@@ -893,10 +966,21 @@ class Agent:
         # by name, or that "ответь по-русски" matches the user's
         # pinned language preference. _think used to skip identity;
         # now it goes through _with_identity like chat / solve do.
+        import time as _t
+        _t0 = _t.monotonic()
+        think_system = _with_identity(THINKING_SYSTEM)
         data = router().call_json(
             TaskType.TASK_ANALYSIS,
-            _with_identity(THINKING_SYSTEM), user,
+            think_system, user,
             max_tokens=1000, temperature=0.2,
+        )
+        self._record_llm_call(
+            label="_think",
+            task_type=TaskType.TASK_ANALYSIS,
+            system=think_system,
+            user=user,
+            response=str(data),
+            duration_ms=int((_t.monotonic() - _t0) * 1000),
         )
         result = ThinkingResult(
             question_type=str(data.get("question_type", "factual")).strip(),
@@ -1159,6 +1243,8 @@ class Agent:
                     snippet += f"\n…[+{len(result) - cap} more chars truncated]"
                 tool_outputs.append(f"[{name}] {snippet}")
 
+        import time as _t
+        _t0 = _t.monotonic()
         answer = router().call_with_tools(
             TaskType.COMPLEX_SOLVING,
             system,
@@ -1169,6 +1255,17 @@ class Agent:
             temperature=0.3,
             on_tool_call=_on_tool_call,
             attachments=getattr(self, "_attachments", None),
+        )
+        # Capture only the FIRST turn's system + user. Tool-loop iterations
+        # repeat the same system and grow user with tool_results — those
+        # are visible per-step via `tool_call` entries in thinking_trace.
+        self._record_llm_call(
+            label="_solve",
+            task_type=TaskType.COMPLEX_SOLVING,
+            system=system,
+            user=user,
+            response=answer,
+            duration_ms=int((_t.monotonic() - _t0) * 1000),
         )
         tool_context = "\n\n".join(tool_outputs) if tool_outputs else ""
         return answer, tool_context
@@ -1198,12 +1295,24 @@ class Agent:
         if not CONFIG.verification["enabled"]:
             return VerificationResult(confidence=100, notes_used=[n.frontmatter.topic for n in notes])
         self.progress("verify", "verifying answer...")
+
+        def _capture(system, user, response, duration_ms):
+            self._record_llm_call(
+                label="_verify",
+                task_type=TaskType.VERIFICATION,
+                system=system,
+                user=user,
+                response=response,
+                duration_ms=duration_ms,
+            )
+
         return verify(
             question=task,
             answer=answer,
             notes_text=self._notes_block(notes),
             used_topics=[n.frontmatter.topic for n in notes],
             tool_context=tool_context,
+            on_llm_call=_capture,
         )
 
     # Шаг 6
@@ -1284,6 +1393,22 @@ class Agent:
             llm_calls=u["llm_calls"],
         )
 
+    def _persist_dev_capture(self, task: str, answer: str, confidence: int) -> None:
+        """Save redacted LLM-call captures to `dev/` for offline review.
+        Best-effort: never raises, never blocks the response."""
+        if not self._llm_calls:
+            return
+        try:
+            save_dev_capture(
+                request_id=self._request_id,
+                question=task,
+                llm_calls=[c.model_dump() for c in self._llm_calls],
+                answer_preview=answer or "",
+                confidence=int(confidence or 0),
+            )
+        except Exception:
+            pass
+
     def run(
         self,
         task: str,
@@ -1293,6 +1418,8 @@ class Agent:
         import time as _time
         TOKENS.reset_request()
         self._trace = []
+        self._llm_calls = []
+        self._request_id = new_request_id()
         self._t0 = _time.monotonic()
         # Stash attachments so _chat_reply / _solve can pick them up
         # without us threading the kwarg through every helper.
@@ -1317,6 +1444,7 @@ class Agent:
                     pass
                 self._cleanup()
                 self._tick_goals()
+                self._persist_dev_capture(task, answer, 100)
                 return AgentAnswer(
                     answer=answer,
                     verification=VerificationResult(confidence=100),
@@ -1326,6 +1454,7 @@ class Agent:
                     is_chat=True,
                     token_usage=self._get_token_usage(),
                     thinking_trace=self._trace,
+                    llm_calls=self._llm_calls,
                 )
 
             # Branch 2: preference — user configures the agent or shares
@@ -1348,6 +1477,7 @@ class Agent:
                 self._extract_memories(task, reply, "preference")
                 self._cleanup()
                 self._tick_goals()
+                self._persist_dev_capture(task, reply, 100)
                 return AgentAnswer(
                     answer=reply,
                     verification=VerificationResult(confidence=100),
@@ -1357,6 +1487,7 @@ class Agent:
                     is_chat=True,
                     token_usage=self._get_token_usage(),
                     thinking_trace=self._trace,
+                    llm_calls=self._llm_calls,
                 )
 
             # Branch 3: real task — full thinking → knowledge → solve → verify cycle.
@@ -1537,6 +1668,7 @@ class Agent:
             self._extract_memories(task, answer, thinking.question_type if thinking else "task")
             self._cleanup()
             self._tick_goals()
+            self._persist_dev_capture(task, answer, vr.confidence)
 
             return AgentAnswer(
                 answer=answer,
@@ -1546,11 +1678,15 @@ class Agent:
                 project=project,
                 token_usage=self._get_token_usage(),
                 thinking_trace=self._trace,
+                llm_calls=self._llm_calls,
             )
         except LLMError as e:
+            err_text = _format_llm_error_short(e)
+            self._persist_dev_capture(task, err_text, 0)
             return AgentAnswer(
-                answer=_format_llm_error_short(e),
+                answer=err_text,
                 verification=VerificationResult(confidence=0),
                 token_usage=self._get_token_usage(),
                 thinking_trace=self._trace,
+                llm_calls=self._llm_calls,
             )
