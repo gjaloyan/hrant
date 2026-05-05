@@ -82,6 +82,12 @@ class KnowledgeGraph:
         self._edges: dict[str, list[dict]] = {}
         # Reverse index: note_slug -> set of entities mentioned in it
         self._note_entities: dict[str, set[str]] = defaultdict(set)
+        # Reverse target index: target_n -> list of (subject, edge_dict).
+        # Built once at load + maintained on add/remove. Without this,
+        # memory_extractor.recall scans the entire graph for every
+        # query term — O(N×M). With it, "where is X mentioned as a
+        # target?" is O(1).
+        self._target_index: dict[str, list[tuple[str, dict]]] = defaultdict(list)
         self._load()
 
     def _load(self) -> None:
@@ -89,17 +95,33 @@ class KnowledgeGraph:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 self._edges = data.get("edges", {})
-                # Rebuild reverse index
-                self._note_entities = defaultdict(set)
-                for entity, targets in self._edges.items():
-                    for edge in targets:
-                        note = edge.get("note", "")
-                        if note:
-                            self._note_entities[note].add(entity)
-                            self._note_entities[note].add(edge.get("target", ""))
+                self._rebuild_indexes()
             except Exception:
                 self._edges = {}
                 self._note_entities = defaultdict(set)
+                self._target_index = defaultdict(list)
+
+    def _rebuild_indexes(self) -> None:
+        """Rebuild both reverse indexes from `self._edges`. Called on
+        load and after destructive operations (remove_note)."""
+        self._note_entities = defaultdict(set)
+        self._target_index = defaultdict(list)
+        for entity, targets in self._edges.items():
+            for edge in targets:
+                note = edge.get("note", "")
+                if note:
+                    self._note_entities[note].add(entity)
+                    self._note_entities[note].add(edge.get("target", ""))
+                tgt = edge.get("target", "")
+                if tgt:
+                    self._target_index[tgt].append((entity, edge))
+
+    def find_facts_by_target(self, target: str) -> list[tuple[str, dict]]:
+        """O(1) reverse lookup: given an entity that appears as the
+        TARGET of some edge, return the (subject, edge) pairs that
+        point to it. Used by memory_extractor.recall instead of the
+        old full-graph scan."""
+        return list(self._target_index.get(self._normalize(target), []))
 
     def _save(self) -> None:
         try:
@@ -115,6 +137,22 @@ class KnowledgeGraph:
         """Normalize entity name for consistent matching."""
         return entity.strip().lower()
 
+    # Relations where the same subject can only have ONE current target
+    # at a time. A new `(subject, relation, new_target)` implies any
+    # earlier `(subject, relation, old_target)` is no longer "current".
+    # We auto-invalidate the old edge with `valid_to = today` and stamp
+    # the new edge with `valid_from = today`. Listed conservatively —
+    # `brother_of`, `is_a`, `contains` are NOT here because they're
+    # multi-valued or permanent.
+    SINGLE_VALUED_RELATIONS: frozenset[str] = frozenset({
+        "lives_in", "lives", "located_at", "is_at",
+        "works_at", "works_for", "works_as", "employed_at", "manages",
+        "costs", "has_price", "price", "salary",
+        "status", "current_status", "current_model", "version",
+        "owns", "uses",
+        "married_to", "partner_of",
+    })
+
     def add_relations(
         self,
         triples: list[tuple[str, str, str]],
@@ -124,6 +162,7 @@ class KnowledgeGraph:
         valid_from: Optional[str] = None,
         valid_to: Optional[str] = None,
         confidence: float = 1.0,
+        auto_invalidate: bool = True,
     ) -> int:
         """Add entity-relation-entity triples from a note.
 
@@ -148,6 +187,58 @@ class KnowledgeGraph:
             if subj_n not in self._edges:
                 self._edges[subj_n] = []
 
+            # Temporal auto-invalidation: for single-valued relations
+            # (`lives_in`, `costs`, `status`, …) close any existing OPEN
+            # edge that points to a DIFFERENT target — the new fact
+            # supersedes the old one. Stamp valid_from on the new edge
+            # if the caller didn't supply one. Skip when caller is
+            # explicitly back-filling history (valid_to set).
+            rel_clean = rel.strip()
+            current_vfrom = valid_from
+            if (
+                auto_invalidate
+                and valid_to is None
+                and rel_clean in self.SINGLE_VALUED_RELATIONS
+            ):
+                # Idempotence guard: if the same target is already an
+                # OPEN edge, this isn't an update — it's a re-add. Skip
+                # all timestamping so a duplicate call hits the regular
+                # exact-dedup branch below and becomes a no-op.
+                same_target_open = any(
+                    e.get("relation") == rel_clean
+                    and e.get("target") == obj_n
+                    and e.get("valid_to") is None
+                    for e in self._edges[subj_n]
+                )
+                if not same_target_open:
+                    today = datetime.utcnow().strftime("%Y-%m-%d")
+                    closed_something = False
+                    for existing in self._edges[subj_n]:
+                        if (
+                            existing.get("relation") == rel_clean
+                            and existing.get("target") != obj_n
+                            and existing.get("valid_to") is None
+                        ):
+                            existing["valid_to"] = today
+                            closed_something = True
+                            # Mirror on the inverse edge so traversal stays consistent.
+                            old_target = existing.get("target", "")
+                            for inv in self._edges.get(old_target, []):
+                                if (
+                                    inv.get("target") == subj_n
+                                    and inv.get("relation") == f"inverse:{rel_clean}"
+                                    and inv.get("valid_to") is None
+                                ):
+                                    inv["valid_to"] = today
+                    # Only stamp valid_from when we actually closed
+                    # something — `valid_from` records the moment of
+                    # transition, not the moment of first insertion.
+                    # Without this guard, fresh first-time inserts get
+                    # today's date and break exact-dedup on later
+                    # idempotent re-adds.
+                    if closed_something and current_vfrom is None:
+                        current_vfrom = today
+
             # Avoid exact duplicates (same target+note+validity span)
             exists = any(
                 e["target"] == obj_n
@@ -159,17 +250,18 @@ class KnowledgeGraph:
             if not exists:
                 edge: dict = {
                     "target": obj_n,
-                    "relation": rel.strip(),
+                    "relation": rel_clean,
                     "note": source_note,
                     "weight": weight,
                 }
-                if valid_from is not None:
-                    edge["valid_from"] = valid_from
+                if current_vfrom is not None:
+                    edge["valid_from"] = current_vfrom
                 if valid_to is not None:
                     edge["valid_to"] = valid_to
                 if confidence != 1.0:
                     edge["confidence"] = confidence
                 self._edges[subj_n].append(edge)
+                self._target_index[obj_n].append((subj_n, edge))
                 added += 1
 
             # Bidirectional: add reverse edge with lower weight
@@ -196,6 +288,7 @@ class KnowledgeGraph:
                 if confidence != 1.0:
                     rev_edge["confidence"] = confidence
                 self._edges[obj_n].append(rev_edge)
+                self._target_index[subj_n].append((obj_n, rev_edge))
 
             # Update reverse index
             self._note_entities[source_note].add(subj_n)
@@ -215,6 +308,10 @@ class KnowledgeGraph:
             if not self._edges[entity]:
                 del self._edges[entity]
         self._note_entities.pop(source_note, None)
+        # Bulk-rebuild target_index — selective removal would have to
+        # walk every list looking for tuples whose edge_dict's `note`
+        # matches; the rebuild scan is the same cost and simpler.
+        self._rebuild_indexes()
         self._save()
 
     def find_related_notes(

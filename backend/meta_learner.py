@@ -203,13 +203,66 @@ class MetaLearner:
                 source="meta_learner",
             )
         elif action == "improve_prompt" and detail:
+            # Goal stays for visibility, but if severity is high enough
+            # ALSO ask self_modifier to look at the most likely module
+            # and propose an actual patch. The proposal needs explicit
+            # user approval before it ever touches the file (gated by
+            # self_modifier.apply), so this is safe to fire automatically.
+            target_module = self._guess_target_module(detail)
             GOALS.add(
                 description=f"Improve prompt: {detail[:80]}",
                 priority=min(6, severity),
                 goal_type="improvement",
-                context=f"Meta-learner: prompt engineering needed — {detail}",
+                context=(
+                    f"Meta-learner: prompt engineering needed — {detail}\n"
+                    f"Target module guess: {target_module or 'unknown'}"
+                ),
                 source="meta_learner",
+                subtasks=(
+                    [
+                        f"Run SELF_MODIFIER.analyze_module('{target_module}')",
+                        "Review the resulting proposal in the WebUI",
+                        "Approve or reject explicitly",
+                    ]
+                    if target_module else None
+                ),
             )
+            if severity >= 7 and target_module:
+                try:
+                    from .self_modifier import SELF_MODIFIER
+                    SELF_MODIFIER.analyze_module(target_module)
+                    # The proposal lands in self_modifier's queue;
+                    # apply() still requires explicit user approval.
+                except Exception:
+                    pass  # best-effort bridge
+
+    @staticmethod
+    def _guess_target_module(detail: str) -> str:
+        """Map a free-form 'improve prompt' detail to a backend module
+        name. Returns "" when the detail doesn't mention anything we
+        recognize — better than picking a wrong module to patch.
+        """
+        d = (detail or "").lower()
+        candidates = (
+            ("verifier", "verifier"),
+            ("verif", "verifier"),
+            ("agent", "agent"),
+            ("classif", "agent"),  # intent classifier lives in agent.py
+            ("classify", "agent"),
+            ("solver", "agent"),
+            ("think", "agent"),
+            ("identity", "identity"),
+            ("memory_extractor", "memory_extractor"),
+            ("memory extract", "memory_extractor"),
+            ("knowledge_graph", "knowledge_graph"),
+            ("hybrid_searcher", "hybrid_searcher"),
+            ("self_modifier", "self_modifier"),
+            ("goals", "goals"),
+        )
+        for needle, module in candidates:
+            if needle in d:
+                return module
+        return ""
 
     def extract_patterns(self) -> list[dict]:
         """Analyze recent failures to find recurring error patterns."""

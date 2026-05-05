@@ -167,6 +167,13 @@ class GoalManager:
 
     # ---- goal CRUD ----
 
+    # Fuzzy semantic dedup threshold. token_set_ratio is order-
+    # and duplicate-insensitive, so "Fix arithmetic hallucination" vs
+    # "Fix basic math hallucination" still scores high. 80 was the
+    # rapidfuzz consensus default for "same meaning"; lower → too
+    # many false collapses, higher → semantic dups still pile up.
+    SEMANTIC_DEDUP_THRESHOLD = 80.0
+
     def add(
         self,
         description: str,
@@ -185,6 +192,31 @@ class GoalManager:
         for g in self._goals:
             if g.status == "active" and _normalize_description(g.description) == desc_norm:
                 return g
+
+        # Semantic dedup: catches "Fix arithmetic hallucination" vs
+        # "Fix basic math hallucination" that exact-norm misses but
+        # describe the same problem. Auto-generated goals (from
+        # meta_learner / gap_tracker / error_analysis) are the main
+        # source of these — without this every new failure variant
+        # plants another row in goals.json. User-typed goals skip
+        # the fuzzy step so an explicit "Fix RS-485 timing" doesn't
+        # silently merge with an unrelated existing one.
+        if goal_type != "user":
+            from rapidfuzz import fuzz
+            for g in self._goals:
+                if g.status != "active":
+                    continue
+                score = fuzz.token_set_ratio(
+                    desc_norm, _normalize_description(g.description),
+                )
+                if score >= self.SEMANTIC_DEDUP_THRESHOLD:
+                    # Append progress note instead of creating dup.
+                    g.add_progress(
+                        f"merged duplicate proposal: {description[:80]} "
+                        f"(score {int(score)})"
+                    )
+                    self._save()
+                    return g
 
         goal = Goal(
             description=description,

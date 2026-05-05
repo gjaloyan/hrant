@@ -268,22 +268,23 @@ class MemoryExtractor:
                             seen_summaries.add(key)
                             relevant_facts.append(fact_info)
 
-            # Also check if term appears as a target in memory edges
-            for entity, edges in GRAPH._edges.items():
-                for edge in edges:
-                    if (
-                        edge.get("note") == self.GRAPH_SOURCE
-                        and (term_n in edge["target"] or term_n in entity)
-                    ):
-                        key = f"{entity}|{edge['relation']}|{edge['target']}"
-                        if key not in seen_summaries:
-                            seen_summaries.add(key)
-                            relevant_facts.append({
-                                "entity": entity,
-                                "relation": edge["relation"],
-                                "target": edge["target"],
-                                "weight": edge.get("weight", 1.0),
-                            })
+            # Also check if term appears as a target in memory edges.
+            # Old impl scanned the entire graph (`for entity, edges in
+            # GRAPH._edges.items()` × inner loop) which was O(N×M) per
+            # query term — a real cost as the graph grows. Now we hit
+            # the reverse target index in O(1) per term.
+            for entity, edge in GRAPH.find_facts_by_target(term_n):
+                if edge.get("note") != self.GRAPH_SOURCE:
+                    continue
+                key = f"{entity}|{edge['relation']}|{edge['target']}"
+                if key not in seen_summaries:
+                    seen_summaries.add(key)
+                    relevant_facts.append({
+                        "entity": entity,
+                        "relation": edge["relation"],
+                        "target": edge["target"],
+                        "weight": edge.get("weight", 1.0),
+                    })
 
         # Sort by weight and return top results
         relevant_facts.sort(key=lambda f: -f["weight"])
