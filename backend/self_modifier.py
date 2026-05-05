@@ -252,14 +252,52 @@ class SelfModifier:
 
         try:
             content = file_path.read_text(encoding="utf-8")
-            if proposal.old_code not in content:
+            match_count = content.count(proposal.old_code)
+            if match_count == 0:
                 proposal.status = "failed"
                 proposal.review_note += " | old_code not found in file"
                 self._save()
                 return {"ok": False, "message": "old_code not found in file — code may have changed"}
+            if match_count > 1:
+                # Ambiguous patch: a generic snippet matches several
+                # places in the file. Refuse rather than guess — the
+                # `replace(..., 1)` we used to do silently picked the
+                # FIRST hit, which is exactly how patches end up in
+                # the wrong function.
+                proposal.status = "failed"
+                proposal.review_note += (
+                    f" | ambiguous: old_code matches {match_count} places, "
+                    "expand the snippet to a unique window"
+                )
+                self._save()
+                return {
+                    "ok": False,
+                    "message": (
+                        f"Ambiguous old_code: matched {match_count} times. "
+                        "Expand the snippet to a unique window before applying."
+                    ),
+                }
 
             new_content = content.replace(proposal.old_code, proposal.new_code, 1)
             file_path.write_text(new_content, encoding="utf-8")
+
+            # Validate by compile. If the patch produced a SyntaxError,
+            # roll back IMMEDIATELY — a half-applied .py file is worse
+            # than a rejected proposal because it can break the agent
+            # itself on next import.
+            import py_compile
+            try:
+                py_compile.compile(str(file_path), doraise=True)
+            except py_compile.PyCompileError as e:
+                file_path.write_text(content, encoding="utf-8")  # rollback
+                proposal.status = "failed"
+                proposal.review_note += f" | py_compile rejected: {e}"
+                self._save()
+                return {
+                    "ok": False,
+                    "message": f"Patch rolled back — py_compile failed: {e}",
+                }
+
             proposal.status = "applied"
             self._save()
             return {"ok": True, "message": f"Applied to {proposal.module}"}

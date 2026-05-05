@@ -142,20 +142,35 @@ class MemoryExtractor:
         user_message: str,
         agent_answer: str,
         intent: str = "task",
+        *,
+        confidence: int = 100,
+        contradictions: int = 0,
     ) -> list[MemoryFact]:
         """Extract facts from a conversation turn and store in graph.
 
         Called after every agent response. Skips pure chat/greetings
         (handled by intent filter). Returns list of extracted facts.
+
+        `confidence` and `contradictions` are the verifier's output
+        for THIS turn. When the answer is low-confidence (<60) or has
+        any contradictions, we DROP the agent_answer side from the
+        extraction prompt and only mine the user_message — otherwise
+        the graph would absorb claims the verifier already flagged
+        as wrong, polluting future retrieval.
         """
         # Skip trivial chat — no facts to extract
         if intent == "chat" and len(user_message.strip()) < 30:
             return []
 
+        # Confidence gate: if the answer didn't hold up, don't mine
+        # facts from it. User-stated facts still safe to extract.
+        trust_answer = confidence >= 60 and contradictions == 0
+        answer_for_extraction = agent_answer if trust_answer else ""
+
         try:
             user_prompt = (
                 f"USER MESSAGE:\n{user_message[:1000]}\n\n"
-                f"AGENT ANSWER:\n{agent_answer[:1500]}"
+                f"AGENT ANSWER:\n{answer_for_extraction[:1500]}"
             )
             data = router().call_json(
                 TaskType.CLASSIFICATION,

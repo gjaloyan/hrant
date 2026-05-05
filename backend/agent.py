@@ -432,13 +432,53 @@ _ARITHMETIC_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Word-form arithmetic ("сколько будет два плюс два", "calculate 2+2",
+# "10 процентов от 250"). Triggers ONLY when the message ALSO contains
+# at least one digit — keeps conversational uses of the words ("просто
+# минус один") from misfiring.
+_ARITHMETIC_WORDS_RE = re.compile(
+    "(?:" + "|".join([
+        # Russian operator words
+        r"\bплюс\b", r"\bминус\b", r"\bумнож", r"\bраздел",
+        r"\bделит", r"\bв\s+степен", r"\bкорень\s+из",
+        r"\bпроцент(?:а|ов|ы)?\b",
+        # Russian "compute it" verbs
+        r"\bсколько\s+(?:будет|это|равно)\b",
+        r"\bпосчита(?:й|ть|ем)",
+        r"\bвычисл",
+        r"\bподсчита(?:й|ть)",
+        # English operator + verb words
+        r"\bplus\b", r"\bminus\b", r"\bmultiply", r"\bdivid",
+        r"\btimes\b",
+        r"\bsquare\s+root\b", r"\bsqrt\b",
+        r"\bto\s+the\s+power\b", r"\bpower\s+of\b",
+        r"\bcalculat", r"\bcompute",
+        r"\bsum\s+of\b", r"\bproduct\s+of\b", r"\bpercent\s+of\b",
+    ]) + ")",
+    re.IGNORECASE | re.UNICODE,
+)
+_ARITHMETIC_DIGIT_RE = re.compile(r"\d")
+
 
 def _looks_like_arithmetic(s: str) -> bool:
     """True if `s` contains an arithmetic-looking expression. Used to
     force the solver into a calc/run_python path instead of letting it
     answer from training data — answering arithmetic from memory is the
-    classic source of "2+2 = 5" hallucinations."""
-    return bool(_ARITHMETIC_RE.search(s or ""))
+    classic source of "2+2 = 5" hallucinations.
+
+    Two complementary detectors:
+      - symbolic form (`2+2`, `15 * 3`, `sqrt(16)`)
+      - word form ("сколько будет 25 умножить на 3", "calculate 12 times 4")
+    Word form requires at least one digit to fire so generic prose with
+    "minus" / "plus" doesn't trigger.
+    """
+    if not s:
+        return False
+    if _ARITHMETIC_RE.search(s):
+        return True
+    if _ARITHMETIC_DIGIT_RE.search(s) and _ARITHMETIC_WORDS_RE.search(s):
+        return True
+    return False
 
 
 _CHITCHAT_RE = re.compile(
@@ -1202,15 +1242,20 @@ class Agent:
         # marking everything else "unverified". Bigger ceilings for tools
         # that legitimately produce file-sized output; the original 1500
         # stays for short tools (web snippets, calc results, etc).
+        # Adaptive caps per tool. On self_analysis turns we widen
+        # read_file/view_file because actual source files (agent.py
+        # ~78k, llm.py ~98k) need more than the default 20k; the
+        # verifier needs to see what the solver actually claimed
+        # against, otherwise reviews flag arbitrary chunks as
+        # "unverified". For non-self-analysis turns we keep the
+        # tighter cap to limit tokens in the verifier prompt.
+        if is_self_analysis:
+            read_cap = 60000
+        else:
+            read_cap = 20000
         _tool_cap = {
-            # Match the tool's own default (builtin_tools.py: read_file
-            # default max_chars=20000). When this was 12000 and the tool
-            # returned 20000, the model saw a truncated body, decided
-            # "I need to re-read with bigger max_chars", and called
-            # read_file AGAIN — paying for the same file twice. Lining
-            # the two caps up removes that double-read.
-            "read_file": 20000,
-            "view_file": 20000,
+            "read_file": read_cap,
+            "view_file": read_cap,
             "read_note": 8000,
             "list_files": 4000,
             "glob": 4000,
@@ -1355,10 +1400,26 @@ class Agent:
     def _cleanup(self) -> None:
         self.progress("cleanup", "готово")
 
-    def _extract_memories(self, user_msg: str, answer: str, intent: str) -> None:
-        """Extract memorable facts from conversation and store in graph."""
+    def _extract_memories(
+        self,
+        user_msg: str,
+        answer: str,
+        intent: str,
+        *,
+        confidence: int = 100,
+        contradictions: int = 0,
+    ) -> None:
+        """Extract memorable facts from conversation and store in graph.
+
+        `confidence` + `contradictions` come from the verifier; the
+        extractor uses them to drop agent-answer mining on low-confidence
+        turns so we don't pollute the graph with wrong claims.
+        """
         try:
-            facts = MEMORY.extract_and_store(user_msg, answer, intent=intent)
+            facts = MEMORY.extract_and_store(
+                user_msg, answer, intent=intent,
+                confidence=confidence, contradictions=contradictions,
+            )
             if facts:
                 summaries = "; ".join(f.summary for f in facts[:3])
                 self.progress("memory_save", f"remembered {len(facts)} facts: {summaries[:100]}")
@@ -1558,6 +1619,34 @@ class Agent:
             else:
                 answer, tool_context = self._solve(task, core, notes, thinking=thinking)
 
+            # Hard enforcement for self_analysis: the only authoritative
+            # source for "is X in the code" is read_file output. If the
+            # solver answered without reading anything (no tool_context),
+            # force ONE retry with a critique that names the rule. Without
+            # this, skip_verify below would short-circuit verification and
+            # we'd ship pure hallucinations on review questions.
+            if is_self_analysis and not (tool_context or "").strip():
+                self.progress(
+                    "self_analysis_guard",
+                    "no read_file in self-analysis turn — forcing retry",
+                )
+                forced_critique = (
+                    "STRICT GUARD: This is a self-analysis turn but you "
+                    "answered without calling `read_file` on any source. "
+                    "Claims about your own code MUST be grounded in the "
+                    "actual file contents — read agent.py, llm.py, "
+                    "verifier.py, or whichever modules your answer "
+                    "references, THEN re-answer. Do not propose fixes "
+                    "for code you have not read this turn."
+                )
+                try:
+                    answer, tool_context = self._solve(
+                        task, core, notes, thinking=thinking,
+                        critique=forced_critique,
+                    )
+                except LLMError:
+                    pass  # keep the original answer if retry fails
+
             # Skip verification for creative / meta / pure self_analysis where
             # there's no factual ground truth — saves 1 LLM call. BUT when
             # self_analysis came with tool_context (the agent actually
@@ -1665,7 +1754,12 @@ class Agent:
                 confidence=vr.confidence,
                 topics_used=used,
             )
-            self._extract_memories(task, answer, thinking.question_type if thinking else "task")
+            self._extract_memories(
+                task, answer,
+                thinking.question_type if thinking else "task",
+                confidence=vr.confidence,
+                contradictions=len(vr.contradictions),
+            )
             self._cleanup()
             self._tick_goals()
             self._persist_dev_capture(task, answer, vr.confidence)
