@@ -108,12 +108,23 @@ def _fetch_url_handler(url: str, max_chars: int = 8000) -> str:
 FILE_CACHE = _TTLCache(max_size=64, ttl_seconds=300.0)
 
 
-def _read_file_handler(path: str, max_chars: int = 20000) -> str:
-    args = {"path": path, "max_chars": max_chars}
+def _read_file_handler(
+    path: str,
+    max_chars: int = 20000,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    args = {
+        "path": path, "max_chars": max_chars,
+        "start_line": start_line, "end_line": end_line,
+    }
     cached = FILE_CACHE.get("read_file", args)
     if cached is not None:
         return cached
-    result = read_file(path, max_chars=max_chars)
+    result = read_file(
+        path, max_chars=max_chars,
+        start_line=start_line, end_line=end_line,
+    )
     if not _is_error_result(result):
         FILE_CACHE.set("read_file", args, result)
     return result
@@ -185,7 +196,11 @@ def register_builtin_tools() -> None:
         name="read_file",
         description=(
             "Read a local file (txt/md/py/json/yaml/pdf/docx) and return its text. "
-            "Use when the user references a file path or asks you to summarize a document."
+            "For text formats, you can ALSO pass start_line / end_line (1-based, "
+            "inclusive) to read just a slice — output is prefixed with each "
+            "line's number so quotes are unambiguous. Use this for large source "
+            "files (`agent.py` ~78k chars, `llm.py` ~98k) instead of re-reading "
+            "the whole body just to see a different region."
         ),
         input_schema={
             "type": "object",
@@ -196,6 +211,14 @@ def register_builtin_tools() -> None:
                     "description": "Truncate to N chars (default 20000).",
                     "default": 20000,
                 },
+                "start_line": {
+                    "type": "integer",
+                    "description": "1-based first line to include (text formats only).",
+                },
+                "end_line": {
+                    "type": "integer",
+                    "description": "1-based last line to include, inclusive.",
+                },
             },
             "required": ["path"],
         },
@@ -205,9 +228,12 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="run_python",
         description=(
-            "Execute a short Python snippet in a sandboxed subprocess and return "
-            "stdout/stderr. Use for arithmetic, data manipulation, parsing, "
-            "or quick verification of an idea. NO network or persistent state."
+            "Run a Python snippet via the system interpreter (subprocess + "
+            "wall-clock timeout). NOT a sandbox: full filesystem, imports, "
+            "network and OS access — caller's responsibility. For pure "
+            "arithmetic ALWAYS prefer `calc` (faster, no subprocess, "
+            "restricted AST). Use `run_python` for data parsing, multi-line "
+            "logic, or verification scripts."
         ),
         input_schema={
             "type": "object",
@@ -223,3 +249,4 @@ def register_builtin_tools() -> None:
         },
         handler=_run_python_handler,
     )
+

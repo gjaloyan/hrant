@@ -386,7 +386,9 @@ def _capabilities_block() -> str:
         "backend/goals.py": "IMPLEMENTED: goal manager with auto-suggestions from knowledge gaps, proactive learning",
         # --- Tools & skills ---
         "backend/tool_registry.py": "tool registry (register/execute)",
-        "backend/builtin_tools.py": "builtin tools: web_search, fetch_url, read_file, run_python, calc",
+        "backend/builtin_tools.py": "builtin tools: web_search, fetch_url, read_file (with start_line/end_line), run_python",
+        "backend/tools/calc.py": "safe AST-based arithmetic evaluator (backing for the `calc` skill)",
+        "backend/skills/calc/handler.py": "registers the `calc` tool — use it for arithmetic instead of run_python",
         "backend/skills.py": "skill loader from SKILL.md + handler.py",
         "backend/mcp_client.py": "MCP client (sync-async bridge)",
         # --- Identity & config ---
@@ -575,16 +577,41 @@ class Agent:
         model: str = "",
         input_tokens: int = 0,
         output_tokens: int = 0,
+        usage_before: dict | None = None,
     ) -> None:
         """Capture one LLM invocation with file blobs redacted, for the
         WebUI dev-mode panel. Best-effort: errors here must NEVER crash
         the agent — if redaction throws (regex catastrophic backtrack,
         encoding glitch), we still want the answer to ship.
+
+        `usage_before` is a snapshot of `TOKENS.request_usage()` taken
+        BEFORE the LLM call. We diff it against the current usage to
+        attribute tokens / cost / model to THIS specific call. Without
+        the diff trick we'd have to plumb counts through every LLM
+        class — this keeps the call sites clean.
         """
         try:
             tt_value = task_type.value if hasattr(task_type, "value") else str(task_type)
             sys_red = redact_prompt(system or "")
             usr_red = redact_prompt(user or "")
+            # Diff token counts against the snapshot. Solve's tool loop
+            # makes many LLM iterations under one logical call; the diff
+            # totals them, which is what dev-panel readers want anyway.
+            if usage_before is not None and (input_tokens == 0 and output_tokens == 0):
+                try:
+                    after = TOKENS.request_usage()
+                    input_tokens = max(0, int(after.get("input_tokens", 0)) - int(usage_before.get("input_tokens", 0)))
+                    output_tokens = max(0, int(after.get("output_tokens", 0)) - int(usage_before.get("output_tokens", 0)))
+                except Exception:
+                    pass
+            if not model:
+                # Pull the most recently logged model from TokenTracker.
+                try:
+                    last = TOKENS.last_record()
+                    if last is not None:
+                        model = last.get("model") or model
+                except Exception:
+                    pass
             self._llm_calls.append(LLMCallDetail(
                 label=label,
                 task_type=tt_value,
@@ -823,6 +850,7 @@ class Agent:
             user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{marker}{trimmed}"
             import time as _t
             t0 = _t.monotonic()
+            usage_before = TOKENS.request_usage()
             data = router().call_json(
                 TaskType.CLASSIFICATION,
                 INTENT_CLASSIFIER_SYSTEM,
@@ -837,6 +865,7 @@ class Agent:
                 user=user_prompt,
                 response=str(data),
                 duration_ms=int((_t.monotonic() - t0) * 1000),
+                usage_before=usage_before,
             )
             intent = str(data.get("intent", "task")).strip().lower()
             if intent in ("chat", "preference", "task"):
@@ -865,6 +894,7 @@ class Agent:
         try:
             import time as _t
             t0 = _t.monotonic()
+            usage_before = TOKENS.request_usage()
             out = router().call(
                 TaskType.QUICK_ANSWER,
                 system,
@@ -879,6 +909,7 @@ class Agent:
                 user=user,
                 response=out,
                 duration_ms=int((_t.monotonic() - t0) * 1000),
+                usage_before=usage_before,
             )
             return out
         except LLMError as e:
@@ -948,6 +979,7 @@ class Agent:
         try:
             import time as _t
             t0 = _t.monotonic()
+            usage_before = TOKENS.request_usage()
             data = router().call_json(
                 TaskType.CLASSIFICATION,
                 system_prompt,
@@ -961,6 +993,7 @@ class Agent:
                 user=user_prompt,
                 response=str(data),
                 duration_ms=int((_t.monotonic() - t0) * 1000),
+                usage_before=usage_before,
             )
         except LLMError:
             # On extractor failure — DON'T blindly stuff raw input into user.md.
@@ -1009,6 +1042,7 @@ class Agent:
         import time as _t
         _t0 = _t.monotonic()
         think_system = _with_identity(THINKING_SYSTEM)
+        usage_before = TOKENS.request_usage()
         data = router().call_json(
             TaskType.TASK_ANALYSIS,
             think_system, user,
@@ -1021,6 +1055,7 @@ class Agent:
             user=user,
             response=str(data),
             duration_ms=int((_t.monotonic() - _t0) * 1000),
+            usage_before=usage_before,
         )
         result = ThinkingResult(
             question_type=str(data.get("question_type", "factual")).strip(),
@@ -1290,6 +1325,7 @@ class Agent:
 
         import time as _t
         _t0 = _t.monotonic()
+        usage_before = TOKENS.request_usage()
         answer = router().call_with_tools(
             TaskType.COMPLEX_SOLVING,
             system,
@@ -1304,6 +1340,9 @@ class Agent:
         # Capture only the FIRST turn's system + user. Tool-loop iterations
         # repeat the same system and grow user with tool_results — those
         # are visible per-step via `tool_call` entries in thinking_trace.
+        # The usage_before snapshot makes `input_tokens` / `output_tokens`
+        # in the dev panel cover the WHOLE tool loop (all iterations) —
+        # the right rollup for "cost of one solve call".
         self._record_llm_call(
             label="_solve",
             task_type=TaskType.COMPLEX_SOLVING,
@@ -1311,6 +1350,7 @@ class Agent:
             user=user,
             response=answer,
             duration_ms=int((_t.monotonic() - _t0) * 1000),
+            usage_before=usage_before,
         )
         tool_context = "\n\n".join(tool_outputs) if tool_outputs else ""
         return answer, tool_context
@@ -1341,6 +1381,8 @@ class Agent:
             return VerificationResult(confidence=100, notes_used=[n.frontmatter.topic for n in notes])
         self.progress("verify", "verifying answer...")
 
+        usage_before = TOKENS.request_usage()
+
         def _capture(system, user, response, duration_ms):
             self._record_llm_call(
                 label="_verify",
@@ -1349,6 +1391,7 @@ class Agent:
                 user=user,
                 response=response,
                 duration_ms=duration_ms,
+                usage_before=usage_before,
             )
 
         return verify(

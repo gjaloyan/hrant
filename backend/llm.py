@@ -192,6 +192,17 @@ class TokenTracker:
         with self._lock:
             return list(reversed(self._traces[-limit:]))
 
+    def last_record(self) -> dict | None:
+        """Snapshot of the most recently recorded `CallRecord` as a
+        dict. Used by Agent._record_llm_call to attribute model name
+        to a per-call dev capture without plumbing it through every
+        LLM class signature. Returns None when nothing has been
+        recorded yet (cold start)."""
+        with self._lock:
+            if not self._log:
+                return None
+            return self._log[-1].to_dict()
+
     def reset_request(self) -> None:
         """Reset per-request counters (called at start of agent.run())."""
         with self._lock:

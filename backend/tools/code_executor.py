@@ -1,4 +1,13 @@
-"""Песочница для исполнения Python-кода (subprocess, таймаут)."""
+"""Run Python code via subprocess with a wall-clock timeout.
+
+NOT a sandbox: the snippet runs under the same Python interpreter as
+the agent itself, with full filesystem, network, OS and import access.
+The only enforced bound is `timeout`. Honest naming matters because
+the previous `# Песочница` comment misled the agent's own self-review.
+For arithmetic where isolation matters, use `backend.tools.calc`
+instead — it walks the AST and rejects everything except numbers and
+a small whitelist of math operations.
+"""
 from __future__ import annotations
 import subprocess
 import sys

@@ -11,10 +11,12 @@ from backend.verifier import detect_false_absence_contradictions, verify
 
 
 def test_detects_add_x_when_x_is_in_identifiers():
-    answer = "Recommendation: add reject category to _save_preference."
-    out = detect_false_absence_contradictions(answer, ["reject", "_save_preference"])
-    assert out, "should flag 'add reject' when reject is in identifiers"
-    assert "reject" in out[0]
+    answer = "Recommendation: add _save_preference handler to the router."
+    out = detect_false_absence_contradictions(
+        answer, ["_save_preference", "RouterTable"],
+    )
+    assert out, "should flag 'add _save_preference' when it is in identifiers"
+    assert "_save_preference" in out[0]
 
 
 def test_detects_missing_x_in_russian():
@@ -72,8 +74,8 @@ def test_normalizes_case_and_leading_underscore():
 def test_exact_match_no_double_naming_in_message():
     """When candidate == identifier exactly, the contradiction message
     should not say 'matches' redundantly."""
-    answer = "Add reject category."
-    out = detect_false_absence_contradictions(answer, ["reject"])
+    answer = "Add TokenTracker class."
+    out = detect_false_absence_contradictions(answer, ["TokenTracker"])
     assert len(out) == 1
     assert "matches" not in out[0]
 
@@ -81,9 +83,9 @@ def test_exact_match_no_double_naming_in_message():
 def test_dedups_same_identifier():
     """Two phrasings of the same fault don't double-count."""
     answer = (
-        "Add reject category here. Also note: reject is missing from _save_preference."
+        "Add TokenTracker here. Also note: TokenTracker is missing from llm.py."
     )
-    out = detect_false_absence_contradictions(answer, ["reject"])
+    out = detect_false_absence_contradictions(answer, ["TokenTracker"])
     assert len(out) == 1
 
 
@@ -120,20 +122,17 @@ def test_verify_promotes_auto_contradiction_to_result():
         def call_json(self, task_type, system, user, **kw):
             return fake_json
 
-    answer = "fix: add reject category to _save_preference."
+    answer = "fix: add TokenTracker to llm.py."
     tool_output = (
-        'agent.py:248: "category": "language" | "style" | "about_user" | "rule" | "reject",\n'
-        'agent.py:750: return "reject", task.strip(), ...\n'
-        # Identifier extraction needs class/def/SELF.attr/CONST style;
-        # add a def for `reject` so the extractor picks it up.
-        'def reject(): ...\n'
+        'class TokenTracker:\n'
+        '    def record(self, ...): ...\n'
     )
 
     with patch("backend.verifier.router", return_value=FakeRouter()):
         res = verify("review", answer, "", [], tool_context=tool_output)
 
     assert res.contradictions, "deterministic detector must add a contradiction"
-    assert any("reject" in c for c in res.contradictions)
+    assert any("TokenTracker" in c for c in res.contradictions)
     # 0 verified, 0 unverified, 1 contradiction → confidence 0.
     assert res.confidence == 0
 
@@ -146,7 +145,7 @@ def test_verify_dedups_against_llm_contradictions():
         "verified_claims": [],
         "unverified_claims": [],
         "contradictions": [
-            "Answer says 'reject category is missing' but agent.py:248 defines it.",
+            "Answer says 'TokenTracker is missing' but llm.py defines it.",
         ],
         "notes_used": [],
     }
@@ -155,12 +154,13 @@ def test_verify_dedups_against_llm_contradictions():
         def call_json(self, task_type, system, user, **kw):
             return fake_json
 
-    answer = "Recommendation: add reject category to handler."
-    tool_output = "def reject(): ...\n"
+    answer = "Recommendation: add TokenTracker to handler."
+    tool_output = "class TokenTracker: ...\n"
 
     with patch("backend.verifier.router", return_value=FakeRouter()):
         res = verify("q", answer, "", [], tool_context=tool_output)
 
-    # Only ONE contradiction, not two — the auto detector saw 'reject'
-    # but the LLM's contradiction already mentions reject, so dedup.
+    # Only ONE contradiction, not two — the auto detector saw
+    # 'TokenTracker' but the LLM's contradiction already mentions it,
+    # so dedup.
     assert len(res.contradictions) == 1

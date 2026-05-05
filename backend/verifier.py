@@ -75,15 +75,44 @@ def detect_false_absence_contradictions(
         """
         return s.replace("_", "").lower()
 
+    def _looks_like_code_identifier(s: str) -> bool:
+        """A candidate from the answer must look code-shaped before
+        we treat it as an identifier reference. Otherwise plain
+        English words ("tool", "view", "logic") collide with class
+        names like `Tool`, `View`, `Logic` after case-normalization
+        and produce a false-positive contradiction. A real identifier
+        usually has at least one of:
+          - an underscore (snake / SCREAMING_CASE / _private)
+          - an internal uppercase (PascalCase / camelCase, NOT just
+            a capitalized first word in prose like "Tool")
+          - a digit
+        Plus a length floor — a 3-letter lowercase word is too
+        likely to be prose."""
+        if not s or len(s) < 4:
+            return False
+        if "_" in s:
+            return True
+        if any(ch.isdigit() for ch in s):
+            return True
+        # Internal uppercase: a capital letter at any position other
+        # than the first. `Tool` (just sentence-cased) -> False.
+        # `TokenTracker`, `webSearch` -> True.
+        for i, ch in enumerate(s):
+            if i > 0 and ch.isupper():
+                return True
+        return False
+
     norm_to_original: dict[str, str] = {}
     for ident in identifiers:
-        if ident:
+        if ident and _looks_like_code_identifier(ident):
             norm_to_original.setdefault(_norm(ident), ident)
     seen: set[str] = set()
     out: list[str] = []
     for pattern in _FALSE_ABSENCE_PATTERNS:
         for m in pattern.finditer(answer):
             candidate = m.group(1)
+            if not _looks_like_code_identifier(candidate):
+                continue
             key = _norm(candidate)
             if key in norm_to_original and key not in seen:
                 seen.add(key)
@@ -308,7 +337,7 @@ Available topics: {', '.join(used_topics)}"""
             # already covers it. Match on the quoted identifier word.
             ident_token = c.split("'")[1] if "'" in c else ""
             if ident_token and any(
-                ident_token in c_existing.lower() for c_existing in contradictions
+                ident_token.lower() in c_existing.lower() for c_existing in contradictions
             ):
                 continue
             if c.lower() not in existing_lower:
