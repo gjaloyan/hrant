@@ -888,28 +888,37 @@ class Agent:
         via `attachments=` on the LLM call, but the text prompt also
         needs to mention them — otherwise classifier / thinker / solver
         get only the user's question text and bias toward continuing
-        whatever was discussed in conversation history. Concrete repro:
-        user uploads a photo and asks "what do you think about that?",
-        which without this marker reads as a follow-up to the previous
-        thread instead of an image-grounded question.
+        whatever was discussed in conversation history.
+
+        Each attachment is also mirrored into `workspace/inbox/<name>`
+        (see workspace.py) so the model can call `read_file` on a path
+        it actually sees in the prompt — that fixes the "file not found"
+        loop where the LLM tried `read_file("contract.pdf")` against the
+        cwd. The marker now lists those paths explicitly.
         """
         atts = getattr(self, "_attachments", None) or []
         if not atts:
             return ""
         try:
             from .attachments import ATTACHMENTS as _A
-            kinds: list[str] = []
+            metas = []
             for sha in atts:
-                meta = _A.get_meta(sha)
-                if meta is not None:
-                    kinds.append(meta.kind)
+                m = _A.get_meta(sha)
+                if m is not None:
+                    metas.append(m)
         except Exception:
-            kinds = []
-        if not kinds:
-            kinds = ["attachment"] * len(atts)
-        n_img = sum(1 for k in kinds if k == "image")
-        n_audio = sum(1 for k in kinds if k == "audio")
-        n_file = sum(1 for k in kinds if k not in ("image", "audio"))
+            metas = []
+        if not metas:
+            return (
+                f"[ATTACHMENT NOTICE] The user attached {len(atts)} item(s) on "
+                f"THIS turn. Their question is grounded in the attached content.\n\n"
+            )
+        n_img = sum(1 for m in metas if getattr(m, "kind", "") == "image")
+        n_audio = sum(1 for m in metas if getattr(m, "kind", "") == "audio")
+        n_file = sum(
+            1 for m in metas
+            if getattr(m, "kind", "") not in ("image", "audio")
+        )
         parts: list[str] = []
         if n_img:
             parts.append(f"{n_img} image" + ("s" if n_img > 1 else ""))
@@ -918,11 +927,32 @@ class Agent:
         if n_file:
             parts.append(f"{n_file} file" + ("s" if n_file > 1 else ""))
         what = ", ".join(parts) if parts else f"{len(atts)} attachment"
+        # Per-item path lines so the model can `read_file(path)` directly.
+        # Use getattr fallbacks because some test stubs and older serialised
+        # records expose a smaller surface than the full Attachment dataclass.
+        lines: list[str] = []
+        for m in metas:
+            kind = getattr(m, "kind", "attachment")
+            label = getattr(m, "filename", "") or kind
+            path = (
+                getattr(m, "workspace_path", "")
+                or "(not mirrored — bytes only available via multimodal)"
+            )
+            extra = ""
+            transcript = getattr(m, "transcript", "") or ""
+            if kind == "audio" and transcript:
+                preview = transcript[:100].replace("\n", " ")
+                extra = f" (transcript: {preview}{'…' if len(transcript) > 100 else ''})"
+            lines.append(f"  - {kind} `{label}` → {path}{extra}")
+        path_block = "\n".join(lines)
         return (
             f"[ATTACHMENT NOTICE] The user attached {what} on THIS turn. "
             f"Their question is grounded in the attached content — look at "
             f"the image / read the file / consider the audio transcript "
-            f"FIRST, before relying on prior conversation history.\n\n"
+            f"FIRST, before relying on prior conversation history.\n"
+            f"Workspace paths (use `read_file` for text/pdf/docx; image and "
+            f"audio bytes are already attached to the LLM call):\n"
+            f"{path_block}\n\n"
         )
 
     # Шаг 1.5 — классификация намерения (chat | preference | task)

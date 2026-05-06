@@ -143,6 +143,41 @@ def _run_python_handler(code: str, timeout: int = 10) -> str:
     )
 
 
+def _save_to_workspace_handler(
+    filename: str, content: str, subdir: str = "outbox", overwrite: bool = False,
+) -> str:
+    """Write a file into the agent's workspace and return where it landed.
+
+    `subdir` ∈ {outbox, notes}. Inbox is reserved for user uploads — the
+    handler rejects writes there so a runaway tool call can't clobber a
+    file the user just sent. Filenames are sanitised by the workspace
+    layer; the returned path is what actually exists on disk.
+    """
+    from .workspace import get_workspace
+    sub = (subdir or "outbox").strip().lower()
+    if sub not in ("outbox", "notes"):
+        return json.dumps({
+            "ok": False,
+            "error": f"subdir must be 'outbox' or 'notes', got {subdir!r}",
+        }, ensure_ascii=False)
+    try:
+        path = get_workspace().save_outbox(
+            filename=filename or "untitled",
+            content=content or "",
+            subdir=sub,
+            overwrite=bool(overwrite),
+        )
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+    rel = get_workspace().relative_to_repo(path)
+    return json.dumps({
+        "ok": True,
+        "path": rel,
+        "absolute_path": str(path),
+        "size": path.stat().st_size,
+    }, ensure_ascii=False)
+
+
 # ---------- регистрация ----------
 def register_builtin_tools() -> None:
     reg = get_registry()
@@ -248,5 +283,49 @@ def register_builtin_tools() -> None:
             "required": ["code"],
         },
         handler=_run_python_handler,
+    )
+
+    reg.register_func(
+        name="save_to_workspace",
+        description=(
+            "Save a text file into the agent's workspace (`outbox/` or "
+            "`notes/`). Use `outbox` for artifacts you intend to send back "
+            "or share with the user (drafts, generated reports, code "
+            "snippets, etc.); use `notes` for your own scratch / running "
+            "research that should persist across sessions. Inbox is "
+            "reserved for files the user uploaded — don't try to write "
+            "there. Returns JSON: {ok, path, absolute_path, size}. "
+            "Filename collisions are auto-resolved with a timestamp suffix "
+            "unless `overwrite=true`."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "filename": {
+                    "type": "string",
+                    "description": "Filename (with extension). Path separators are stripped.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "UTF-8 text content to write.",
+                },
+                "subdir": {
+                    "type": "string",
+                    "enum": ["outbox", "notes"],
+                    "description": "Which workspace subtree to write into (default outbox).",
+                    "default": "outbox",
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": (
+                        "If true, replace an existing file with the same name. "
+                        "If false (default), the new file gets a timestamp suffix."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": ["filename", "content"],
+        },
+        handler=_save_to_workspace_handler,
     )
 

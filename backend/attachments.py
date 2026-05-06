@@ -71,6 +71,13 @@ class Attachment:
     filename: str = ""        # original upload name, optional
     transcript: str = ""      # set later by /api/transcribe for audio
     created: str = ""         # ISO-8601 first-seen timestamp
+    workspace_path: str = ""  # repo-relative path to the workspace mirror
+
+    @classmethod
+    def from_record(cls, rec: dict) -> "Attachment":
+        """Tolerant constructor — old index entries lack newer fields."""
+        known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
+        return cls(**{k: v for k, v in rec.items() if k in known})
 
 
 class AttachmentStore:
@@ -122,7 +129,13 @@ class AttachmentStore:
                 if filename and not existing.get("filename"):
                     existing["filename"] = filename
                     self._save_index()
-                return Attachment(**existing)
+                # Backfill the workspace mirror if the record predates this
+                # feature OR if the mirror was deleted by retention sweep
+                # since last upload — the user uploading the same bytes
+                # again clearly wants access to it now.
+                if not existing.get("workspace_path"):
+                    self._try_mirror(existing, sha)
+                return Attachment.from_record(existing)
 
             blob_path = self._blob_path(sha)
             if not blob_path.exists():
@@ -136,13 +149,15 @@ class AttachmentStore:
                 transcript="",
                 created=datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
-            self._index[sha] = asdict(record)
+            rec_dict = asdict(record)
+            self._index[sha] = rec_dict
+            self._try_mirror(rec_dict, sha)
             self._save_index()
-            return record
+            return Attachment.from_record(rec_dict)
 
     def get_meta(self, sha256: str) -> Optional[Attachment]:
         rec = self._index.get(sha256)
-        return Attachment(**rec) if rec else None
+        return Attachment.from_record(rec) if rec else None
 
     def get_bytes(self, sha256: str) -> Optional[bytes]:
         path = self._blob_path(sha256)
@@ -166,7 +181,7 @@ class AttachmentStore:
             return True
 
     def list_all(self) -> list[Attachment]:
-        return [Attachment(**v) for v in self._index.values()]
+        return [Attachment.from_record(v) for v in self._index.values()]
 
     def stats(self) -> dict:
         total_bytes = sum(int(v.get("size") or 0) for v in self._index.values())
@@ -185,6 +200,27 @@ class AttachmentStore:
         # Keep it flat — at the chat scale we expect, < 10k entries; a
         # single dir is fine and easier to inspect than a fan-out tree.
         return self.root / f"{sha256}.bin"
+
+    def _try_mirror(self, rec: dict, sha: str) -> None:
+        """Best-effort copy of the blob into `workspace/inbox/` under the
+        original filename. Failures here must not break the upload — the
+        attachment record is the source of truth and the bytes are
+        already on disk in the sha-keyed store."""
+        try:
+            from .workspace import get_workspace
+            blob = self._blob_path(sha)
+            if not blob.exists():
+                return
+            ws_path = get_workspace().mirror_attachment(
+                sha=sha,
+                original_name=rec.get("filename") or "",
+                blob_path=blob,
+                kind=rec.get("kind", "file"),
+                mime=rec.get("mime_type", ""),
+            )
+            rec["workspace_path"] = get_workspace().relative_to_repo(ws_path)
+        except Exception as e:
+            log.warning("attachment mirror failed for sha=%s: %s", sha[:12], e)
 
     def _load_index(self) -> dict[str, dict]:
         if not self._index_path.exists():

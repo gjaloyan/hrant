@@ -234,6 +234,21 @@ _COMMON_OTHER = {
         "finetune_min_examples": 50,
         "note_max_tokens": 1500,
     },
+    "workspace": {
+        # Real on-disk tree the agent reads from / writes to. Uploaded
+        # files are mirrored from the sha-keyed attachment store into
+        # `inbox/` under their original filename so `read_file` works
+        # on the path the model already saw in the prompt. Outbox and
+        # notes are agent-driven (via the `save_to_workspace` tool).
+        "root": "./workspace",
+        # Retention sweep, in days. 0 = never auto-delete that subtree.
+        # Inbox defaults to 90 days because user uploads accumulate
+        # quickly; outbox/notes default to 0 so the agent's own work
+        # doesn't vanish on a timer.
+        "inbox_retention_days": 90,
+        "outbox_retention_days": 0,
+        "notes_retention_days": 0,
+    },
     "search": {
         "method": "keyword",
         "fuzzy_threshold": 0.6,
@@ -324,6 +339,10 @@ class Config:
     @property
     def knowledge(self) -> dict:
         return self._data["knowledge"]
+
+    @property
+    def workspace(self) -> dict:
+        return self._data.get("workspace") or {}
 
     @property
     def verification(self) -> dict:
