@@ -159,6 +159,87 @@ def _extract_code_identifiers(tool_context: str, *, max_idents: int = 200) -> li
             break
     return sorted(found)
 
+
+# Verifier prompt compression
+# ---------------------------
+# Round 5 made the verifier see all retry + subtask evidence — useful
+# for catching cross-attempt contradictions, but the prompt grew to
+# 60-80 KB. Most of that body is code the verifier never quotes back;
+# only snippets around identifiers the assistant actually MENTIONED
+# in its answer matter for fact-checking.
+#
+# Strategy:
+#   1. Pull mentioned identifiers from the answer itself (same regex
+#      as `_extract_code_identifiers` but applied to the answer side
+#      so we know what the verifier needs to fact-check).
+#   2. For each mention, keep ±5 lines of context from the tool
+#      output where that identifier appears.
+#   3. If the compressed body is still bigger than `keep_full_under`,
+#      stop — return the original body untruncated. Compression isn't
+#      worth it for short outputs.
+#   4. If nothing in the answer maps to the tool output (rare),
+#      keep the original — verifier needs SOMETHING to compare.
+
+_ANSWER_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b")
+_CONTEXT_LINES_AROUND = 5
+_FULL_KEEP_UNDER = 8000
+
+
+def _compress_tool_context(
+    answer: str,
+    tool_context: str,
+    *,
+    max_chars: int = 12000,
+) -> str:
+    """Replace raw tool_context with snippets around identifiers the
+    assistant's answer actually mentions. Falls back to the original
+    string when:
+      - tool_context is short (compression overhead not worth it),
+      - no answer-side identifiers overlap with tool_context,
+      - the compressed result somehow ends up larger than the source
+        (pathological inputs).
+    """
+    if not tool_context or len(tool_context) < _FULL_KEEP_UNDER:
+        return tool_context
+    answer_idents = {
+        m.group(1) for m in _ANSWER_IDENT_RE.finditer(answer or "")
+        if len(m.group(1)) >= 4
+    }
+    if not answer_idents:
+        return tool_context[:max_chars]
+
+    lines = tool_context.splitlines()
+    keep_idx: set[int] = set()
+    found_any = False
+    for i, line in enumerate(lines):
+        for ident in answer_idents:
+            if ident in line:
+                found_any = True
+                lo = max(0, i - _CONTEXT_LINES_AROUND)
+                hi = min(len(lines), i + _CONTEXT_LINES_AROUND + 1)
+                keep_idx.update(range(lo, hi))
+                break
+
+    if not found_any:
+        # The answer cites nothing the tool output covers — verifier
+        # still needs evidence to check the rest, so keep a head slice.
+        return tool_context[:max_chars]
+
+    out_parts: list[str] = []
+    prev_i = -2
+    for i in sorted(keep_idx):
+        if i != prev_i + 1:
+            out_parts.append("…")
+        out_parts.append(lines[i])
+        prev_i = i
+    compressed = "\n".join(out_parts)
+    # Don't compress UP — if our snippets ended up bigger than the
+    # source (only possible on weird short inputs), use the source.
+    if len(compressed) >= len(tool_context):
+        return tool_context[:max_chars]
+    return compressed[:max_chars]
+
+
 VERIFIER_SYSTEM = """You are a strict fact-checker for an AI assistant's
 answers. Your job is to surface hallucinations the assistant may have
 introduced — including false claims about what the source code, notes,
@@ -279,9 +360,17 @@ def verify(
                 "that is a CONTRADICTION):\n"
                 + ", ".join(extracted_idents)
             )
+        # Compress the raw tool_context: a 60-80k accumulated buffer
+        # (post Round 5 retry/subtask accumulation) is mostly source
+        # code the verifier never quotes back. Keep snippets around
+        # the identifiers the answer ACTUALLY mentions; everything
+        # else collapses to a one-line summary. The full body is only
+        # kept when nothing in the answer maps to the tool output at
+        # all (the rare "answer cites nothing concrete" case).
+        compressed = _compress_tool_context(answer, tool_context)
         tool_section = (
             f"\n\nTOOL OUTPUTS (file contents, search results — primary evidence):\n"
-            f"{tool_context}{idents_section}"
+            f"{compressed}{idents_section}"
         )
 
     user = f"""QUESTION:

@@ -328,13 +328,19 @@ def _with_identity(base_system: str) -> str:
     return f"{IDENTITY.preamble()}\n\n---\n\n{base_system}"
 
 
-def _capabilities_block() -> str:
+def _capabilities_block(compact: bool = False) -> str:
     """Динамический блок «MY CAPABILITIES» для system prompt.
 
     Перечисляет конкретные вещи, которые агент имеет и умеет прямо сейчас:
     зарегистрированные tools, загруженные skills, подключённые MCP серверы,
     и карту своего исходного кода на диске — чтобы при вопросах о себе агент
     знал, куда смотреть (read_file), а не фантазировал.
+
+    `compact=True` skips the source map (~2-3 KB) and trims tool
+    descriptions to 60 chars. Used for paths that don't need to know
+    "where am I implemented?" — chat and intent classification.
+    The full block stays for solver and self-analysis where the model
+    may want to read its own code.
     """
     registry = get_registry()
     SKILLS.ensure_loaded()
@@ -345,23 +351,31 @@ def _capabilities_block() -> str:
     tools = registry.tools
     if tools:
         lines.append("\n## Инструменты (tools)")
+        desc_cap = 60 if compact else 100
         for name, tool in sorted(tools.items()):
             origin_label = f"  [{tool.origin}]" if tool.origin != "builtin" else ""
-            lines.append(f"- `{name}` — {tool.description[:100]}{origin_label}")
+            lines.append(f"- `{name}` — {tool.description[:desc_cap]}{origin_label}")
 
     # --- Skills ---
     if SKILLS.skills:
         lines.append("\n## Навыки (skills)")
         for sk in SKILLS.skills:
             triggers = ", ".join(sk.triggers[:5]) if sk.triggers else "—"
-            lines.append(f"- **{sk.name}**: {sk.description[:80]}  (triggers: {triggers})")
+            desc_cap = 60 if compact else 80
+            lines.append(f"- **{sk.name}**: {sk.description[:desc_cap]}  (triggers: {triggers})")
 
     # --- MCP ---
-    if MCP.servers:
+    if MCP.servers and not compact:
         lines.append("\n## Подключённые MCP-серверы")
         for srv_name, srv in MCP.servers.items():
             tool_count = len([t for t in tools if t.startswith(f"mcp_{srv_name}__")])
             lines.append(f"- `{srv_name}` ({tool_count} tools)")
+
+    if compact:
+        # Compact stops here. The big source map is only useful when
+        # the model is going to actually read its own code; chat /
+        # think don't need it and pay for those ~3k chars on every turn.
+        return "\n".join(lines)
 
     # --- Source map (для вопросов о себе) ---
     root = Path(__file__).resolve().parent.parent
@@ -494,6 +508,45 @@ def _looks_like_arithmetic(s: str) -> bool:
 # pulled in unrelated content (a wiki page, an arithmetic result)
 # and still hallucinated about its own architecture.
 SOURCE_READ_TOOLS = frozenset({"read_file", "view_file"})
+
+
+# Micro-acknowledgements: messages that are clearly just "I heard you"
+# and don't deserve an LLM call. Tighter than _CHITCHAT_RE — that one
+# also matches "who are you" / "how are you" which DO need a real
+# answer from _chat_reply. _MICRO_ACK_RE matches only one-liners that
+# the agent can answer with a static "✓".
+_MICRO_ACK_RE = re.compile(
+    # "continue" / "продолжай" / "go on" intentionally NOT here:
+    # users frequently mean "do more work, pick up where you left
+    # off" rather than an ack — that needs the full pipeline.
+    r"^\s*(?:"
+    r"ok|okay|окей|ок|"
+    r"thanks?|thank\s*you|спасибо|благодарю|thx|спс|мерси|ty|"
+    r"got\s*it|gotcha|понял|поняла|ясно|ага|угу|"
+    r"cool|nice|круто|здорово|awesome|👍|"
+    r"yes|yep|да|нет|no|nope"
+    r")"
+    r"[\s!?.,…)✀-➿\U0001F300-\U0001FAFF:]*$",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _micro_ack_reply(task: str) -> str | None:
+    """Static reply for trivial acknowledgements. Returns None when
+    the message needs a real LLM response. Saves one LLM call (~300
+    tokens) plus identity preamble (~5-10k tokens) per ack — the
+    accumulated cost was real on long sessions where the user types
+    "ok" / "thanks" / "continue" between substantive turns.
+
+    Length cap: only fires for very short messages. A long message
+    that happens to start with "ok" might actually be content
+    ("ok so the issue is...") and needs a real reply.
+    """
+    if not task or len(task.strip()) > 30:
+        return None
+    if _MICRO_ACK_RE.match(task.strip()):
+        return "✓"
+    return None
 
 
 _CHITCHAT_RE = re.compile(
@@ -1039,8 +1092,19 @@ class Agent:
         solver prompting).
         """
         self.progress("think", "thinking...")
-        caps = _capabilities_block()
-        ctx = self._shared_context(task, core, n_conv=6, n_memory=10)
+        # _think is the planning step — it picks question_type / tools /
+        # required_topics. The full ~3k-char source map is only useful
+        # for self-analysis (where it suggests where to look). For
+        # everything else the compact view (tools + skills, no map) is
+        # sufficient. Plus narrower convo/memory windows: 3/4 vs 6/10.
+        # The previous defaults were tuned for solving, not classifying.
+        is_selfish = _is_self_question(task)
+        caps = _capabilities_block(compact=not is_selfish)
+        ctx = self._shared_context(
+            task, core,
+            n_conv=6 if is_selfish else 3,
+            n_memory=10 if is_selfish else 4,
+        )
         marker = self._attachment_marker() + self._arithmetic_marker(task)
         user = (
             f"{ctx}\n\n"
@@ -1562,13 +1626,46 @@ class Agent:
         try:
             core = self._load_core()
 
+            # Branch 0: micro-ack. "ok" / "thanks" / "continue" /
+            # "понял" — short messages that don't need any LLM call.
+            # Hits before _classify_intent because the classifier
+            # itself is an LLM call, and asking Sonnet to classify
+            # "ok" is wasteful. ~300+ tokens saved per ack message.
+            micro = _micro_ack_reply(task)
+            if micro is not None:
+                self.progress("micro_ack", "static reply (no LLM)")
+                CONVERSATION.add_turn(task, micro, intent="chat", is_chat=True)
+                # Memory extraction gate: short acks have nothing to
+                # extract — skipping saves another LLM call. The
+                # lookups in EVALUATOR / GOALS still get the turn
+                # via add_turn → recall_block.
+                self._cleanup()
+                self._tick_goals()
+                self._persist_dev_capture(task, micro, 100)
+                return AgentAnswer(
+                    answer=micro,
+                    verification=VerificationResult(confidence=100),
+                    learned_topics=[],
+                    used_topics=[],
+                    project=project,
+                    is_chat=True,
+                    token_usage=self._get_token_usage(),
+                    thinking_trace=self._trace,
+                    llm_calls=self._llm_calls,
+                )
+
             intent = self._classify_intent(task)
 
             # Branch 1: chitchat / small-talk. One warm reply, no pipeline.
             if intent == "chat":
                 answer = self._chat_reply(task, core)
                 CONVERSATION.add_turn(task, answer, intent="chat", is_chat=True)
-                self._extract_memories(task, answer, "chat")
+                # Memory extraction gate: skip on very short chat
+                # turns ("привет", "thanks for the help") — the
+                # extractor LLM call can't pull useful facts from
+                # 5-15 chars, but it still costs ~300 input tokens.
+                if len(task.strip()) >= 30:
+                    self._extract_memories(task, answer, "chat")
                 try:
                     EVALUATOR.log(EvalEntry(
                         question=task, intent="chat", confidence=100,
@@ -1832,6 +1929,16 @@ class Agent:
             # - Break if token budget exceeded during retries
             critic_threshold = CONFIG.verification.get("critic_threshold", 50)
             max_retries = CONFIG.verification.get("critic_max_retries", 2)
+            # Hard token budget for retries. Without this, a turn that
+            # already burned ~50k tokens on think/solve/verify could
+            # spend another ~50k per retry × 2 retries = potentially
+            # $0.50+ on a single low-confidence answer. The comment
+            # below the guard list claimed this was already implemented;
+            # it wasn't. 60000 is a reasonable default — covers a
+            # full self-review with one retry but stops a runaway.
+            retry_token_budget = CONFIG.verification.get(
+                "critic_retry_token_budget", 60000
+            )
             retry = 0
             no_notes = not notes and not tool_context
             should_retry = (
@@ -1849,6 +1956,18 @@ class Agent:
             # prompt past sensible limits.
             _MAX_ACCUMULATED_CTX = 80000
             while should_retry and retry < max_retries:
+                # Pre-flight token check. Cheaper to bail with the
+                # current answer than to spend another solve+verify
+                # cycle with no headroom — the next call would fail
+                # downstream on context-window or budget limits anyway.
+                used_so_far = TOKENS.request_usage().get("total_tokens", 0)
+                if used_so_far >= retry_token_budget:
+                    self.progress(
+                        "self_critic",
+                        f"token budget exhausted ({used_so_far} ≥ "
+                        f"{retry_token_budget}), stopping retries",
+                    )
+                    break
                 retry += 1
                 self.progress(
                     "self_critic",

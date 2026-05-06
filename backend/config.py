@@ -204,6 +204,11 @@ _COMMON_OTHER = {
         "always_use_model_a": True,
         "critic_threshold": 50,
         "critic_max_retries": 2,
+        # Stop retrying once the request has already consumed this many
+        # total tokens (input + output) across all stages. Default keeps
+        # a typical self-review w/ one retry under control while letting
+        # short tasks retry up to max_retries without tripping.
+        "critic_retry_token_budget": 60000,
     },
     "knowledge": {
         "base_dir": "./knowledge",

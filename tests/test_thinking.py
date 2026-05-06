@@ -107,7 +107,13 @@ class FakeRouter:
 
 
 def test_think_receives_capabilities_in_user_message(tmp_kb):
-    """The thinking module must see MY CAPABILITIES to know what tools exist."""
+    """The thinking module must see MY CAPABILITIES to know what tools exist.
+
+    For non-self-analysis questions the COMPACT view is used (tools +
+    skills, no source map) — the full source map only matters when
+    the model is actually going to read its own code. For a
+    self-question we keep the full view including the source map.
+    """
     fake = FakeRouter(think_json={
         "question_type": "factual",
         "core_question": "What is RS-485?",
@@ -120,10 +126,38 @@ def test_think_receives_capabilities_in_user_message(tmp_kb):
         agent = Agent()
         agent._think("What is RS-485?", "some core memory")
 
-    # The user message sent to thinking must contain capabilities
+    # The user message sent to thinking must contain capabilities (compact form):
+    #   - MY CAPABILITIES header
+    #   - tool names so planner knows what's available
     user_msg = fake.last_user[TaskType.TASK_ANALYSIS]
     assert "MY CAPABILITIES" in user_msg
     assert "web_search" in user_msg
+    # NON-self-analysis turn: source map is intentionally omitted to
+    # save ~3k tokens per turn. Don't expect it here.
+    assert "backend/agent.py" not in user_msg, "non-self-analysis _think must use compact caps"
+
+
+def test_think_with_self_question_keeps_source_map(tmp_kb):
+    """For self-questions ('расскажи про себя', 'who are you',
+    'analyze your code') the FULL capabilities — including the
+    source map — go into the planner so it can plan which files
+    to read."""
+    from backend.agent import Agent
+
+    fake = FakeRouter(think_json={
+        "question_type": "self_analysis",
+        "core_question": "self-review",
+        "required_topics": [],
+        "plan": ["read"],
+        "confidence": 80,
+    })
+    with patch("backend.agent.router", return_value=fake), \
+         patch("backend.agent.learn_topic"):
+        agent = Agent()
+        agent._think("расскажи о себе", "core mem")
+    user_msg = fake.last_user[TaskType.TASK_ANALYSIS]
+    assert "MY CAPABILITIES" in user_msg
+    # Source map IS present for self-questions.
     assert "backend/agent.py" in user_msg
 
 
