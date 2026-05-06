@@ -13,6 +13,7 @@ from typing import Any
 from .tool_registry import get_registry
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
+from .tools.locate_symbol import locate_symbol
 from .tools.web_search import fetch_url, web_search
 
 
@@ -139,6 +140,34 @@ def _run_python_handler(code: str, timeout: int = 10) -> str:
             "returncode": res.returncode,
             "timed_out": res.timed_out,
         },
+        ensure_ascii=False,
+    )
+
+
+def _locate_symbol_handler(
+    path: str, name: str, kinds: str = "", max_hits: int = 20,
+) -> str:
+    """Look up a symbol's line range so the agent can read just the
+    interesting bit instead of the whole file. Returns JSON list of
+    hits — empty list = symbol not found."""
+    kind_list: list[str] | None = None
+    if kinds:
+        kind_list = [k.strip() for k in kinds.split(",") if k.strip()]
+    try:
+        hits = locate_symbol(path, name, kinds=kind_list, max_hits=int(max_hits))
+    except Exception as e:
+        return json.dumps({"error": str(e), "hits": []}, ensure_ascii=False)
+    return json.dumps(
+        [
+            {
+                "name": h.name,
+                "kind": h.kind,
+                "start_line": h.start_line,
+                "end_line": h.end_line,
+                "qualified_name": h.qualified_name,
+            }
+            for h in hits
+        ],
         ensure_ascii=False,
     )
 
@@ -283,6 +312,50 @@ def register_builtin_tools() -> None:
             "required": ["code"],
         },
         handler=_run_python_handler,
+    )
+
+    reg.register_func(
+        name="locate_symbol",
+        description=(
+            "Find the exact line range of a Python function / class / "
+            "module-level constant inside a source file (also supports "
+            "markdown headings and a regex fallback for other text "
+            "formats). Returns a JSON list of hits with "
+            "start_line/end_line — feed those into `read_file` to grab "
+            "just the symbol's body instead of dumping the whole file. "
+            "Empty list means the symbol isn't defined in that file. "
+            "Use this BEFORE `read_file` whenever you know what you're "
+            "looking for: it cuts a 2k-line file's read down to a few "
+            "dozen lines and avoids the grep+read round-trip."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the source file (absolute or repo-relative).",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Symbol name to find (e.g. `complete_with_tools`, `Agent`).",
+                },
+                "kinds": {
+                    "type": "string",
+                    "description": (
+                        "Optional comma-separated filter: function, method, class, "
+                        "var, heading, match. Empty = all kinds."
+                    ),
+                    "default": "",
+                },
+                "max_hits": {
+                    "type": "integer",
+                    "description": "Max hits to return (default 20).",
+                    "default": 20,
+                },
+            },
+            "required": ["path", "name"],
+        },
+        handler=_locate_symbol_handler,
     )
 
     reg.register_func(

@@ -1691,6 +1691,10 @@ class Agent:
     def _get_token_usage(self) -> TokenUsage:
         """Capture token usage for the current request."""
         u = TOKENS.request_usage()
+        try:
+            stages = TOKENS.request_breakdown().get("stages", {})
+        except Exception:
+            stages = {}
         return TokenUsage(
             input_tokens=u["input_tokens"],
             output_tokens=u["output_tokens"],
@@ -1699,6 +1703,7 @@ class Agent:
             cache_creation_tokens=u["cache_creation_tokens"],
             cost_usd=u["cost_usd"],
             llm_calls=u["llm_calls"],
+            by_stage=stages,
         )
 
     def _persist_dev_capture(self, task: str, answer: str, confidence: int) -> None:

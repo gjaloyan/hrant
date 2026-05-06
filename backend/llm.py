@@ -109,6 +109,12 @@ class TokenTracker:
         self._request_cache_create = 0
         self._request_cost = 0.0
         self._request_calls = 0
+        # Per-request call list — preserved separately from the global log
+        # so `request_breakdown()` can answer "which stage burned the
+        # tokens on THIS turn" without scanning history. Cleared on
+        # `reset_request()`. Bounded by the same max_log to keep memory
+        # bounded if someone forgets to reset between requests.
+        self._request_calls_log: list[CallRecord] = []
         # Global totals
         self._total_input = 0
         self._total_output = 0
@@ -162,6 +168,9 @@ class TokenTracker:
             self._log.append(rec)
             if len(self._log) > self._max_log:
                 self._log = self._log[-self._max_log:]
+            self._request_calls_log.append(rec)
+            if len(self._request_calls_log) > self._max_log:
+                self._request_calls_log = self._request_calls_log[-self._max_log:]
             self._request_input += input_tok
             self._request_output += output_tok
             self._request_cache_read += cache_read
@@ -212,6 +221,64 @@ class TokenTracker:
             self._request_cache_create = 0
             self._request_cost = 0.0
             self._request_calls = 0
+            self._request_calls_log = []
+
+    def request_breakdown(self) -> dict:
+        """Per-stage attribution for the current request.
+
+        Group calls by `task_type`. Stage = the prefix before the first
+        colon (`solve:tool_iter_0` → "solve"); subtask = the full
+        task_type. Both views are returned so callers can:
+          - show a coarse "where did the tokens go" stat (stages)
+          - drill into a tool-loop iteration when debugging (subtasks)
+
+        This is the diagnostic baseline for any future structural
+        optimisation — once we can see which stage owns the bill, the
+        next change isn't a guess.
+        """
+        with self._lock:
+            calls = list(self._request_calls_log)
+
+        def _empty() -> dict:
+            return {
+                "calls": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+                "cost_usd": 0.0,
+                "duration_ms": 0,
+            }
+
+        stages: dict[str, dict] = {}
+        subtasks: dict[str, dict] = {}
+        for rec in calls:
+            full = rec.task_type or "(unknown)"
+            stage = full.split(":", 1)[0] or "(unknown)"
+            for bucket in (stages.setdefault(stage, _empty()),
+                           subtasks.setdefault(full, _empty())):
+                bucket["calls"] += 1
+                bucket["input_tokens"] += rec.input_tokens
+                bucket["output_tokens"] += rec.output_tokens
+                bucket["cache_read_tokens"] += rec.cache_read_tokens
+                bucket["cache_creation_tokens"] += rec.cache_creation_tokens
+                bucket["cost_usd"] += rec.cost_usd
+                bucket["duration_ms"] += rec.duration_ms
+
+        # Round costs and add total_tokens convenience field, sort by
+        # input_tokens descending so the heaviest stage is up top.
+        def _finalize(d: dict) -> dict:
+            for v in d.values():
+                v["total_tokens"] = v["input_tokens"] + v["output_tokens"]
+                v["cost_usd"] = round(v["cost_usd"], 6)
+            return dict(sorted(
+                d.items(), key=lambda kv: kv[1]["input_tokens"], reverse=True,
+            ))
+
+        return {
+            "stages": _finalize(stages),
+            "subtasks": _finalize(subtasks),
+        }
 
     def request_usage(self) -> dict:
         """Get token usage for the current request."""

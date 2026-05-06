@@ -522,6 +522,25 @@ class TelegramBot:
                             stats_lines.append(f"📝 Cache created: {tu.cache_creation_tokens:,}")
                         stats_lines.append(f"💰 Cost: ${tu.cost_usd:.4f}")
                         stats_lines.append(f"🔄 LLM calls: {tu.llm_calls}")
+                        # Per-stage breakdown — top 3 by input tokens. Lets
+                        # the user see at a glance which stage owned the
+                        # bill ("solve: 220k in" vs "verify: 8k in") so
+                        # the next optimisation isn't a guess. Skip when
+                        # there's only one stage or all stages are tiny.
+                        stages = tu.by_stage or {}
+                        if len(stages) > 1 and tu.input_tokens >= 5_000:
+                            top = list(stages.items())[:3]
+                            parts = []
+                            for name, s in top:
+                                pct = (
+                                    s.get("input_tokens", 0) / tu.input_tokens * 100
+                                    if tu.input_tokens else 0
+                                )
+                                parts.append(
+                                    f"{name} {int(s.get('input_tokens', 0)):,}"
+                                    f" ({pct:.0f}%)"
+                                )
+                            stats_lines.append("📊 Stages: " + " · ".join(parts))
                         stats_block = "\n".join(stats_lines)
 
                     # Build the answer with footer + stats appended.

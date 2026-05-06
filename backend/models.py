@@ -123,6 +123,13 @@ class TokenUsage(BaseModel):
     cache_creation_tokens: int = 0
     cost_usd: float = 0.0
     llm_calls: int = 0
+    # Per-stage attribution for the current request (populated from
+    # TokenTracker.request_breakdown). Top-level key is the stage name
+    # (`solve`, `verify`, `think`, `classify`, …); inner dict carries
+    # calls / input_tokens / output_tokens / cost_usd / total_tokens.
+    # Sorted by input_tokens descending so the heaviest stage is up
+    # top; consumer just renders in iteration order.
+    by_stage: dict[str, dict[str, float]] = {}
 
 
 class ToolCallDetail(BaseModel):
