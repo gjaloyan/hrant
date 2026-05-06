@@ -1928,6 +1928,26 @@ def create_llm(cfg: dict) -> BaseLLM:
         raise LLMError(f"Unknown provider type: {provider}")
 
 
+def _supports_tools(llm: "BaseLLM", tools: list[dict] | None) -> bool:
+    """Check that an LLM concretely overrides `complete_with_tools`.
+
+    Some provider classes (GoogleLLM, OllamaLLM) extend BaseLLM but
+    never implement the tool-use loop, and `BaseLLM` itself doesn't
+    define one. Without this guard, calling `complete_with_tools` on
+    them raises AttributeError mid-request — the caller can't tell
+    whether it was a code bug or a routing decision. The qualname
+    check rejects `BaseLLM.complete_with_tools` if it ever gets added
+    later as a stub; only real subclass overrides count as supporting.
+    """
+    if not tools:
+        return False
+    fn = getattr(llm, "complete_with_tools", None)
+    if fn is None:
+        return False
+    qual = getattr(fn, "__qualname__", "")
+    return qual.split(".")[0] != "BaseLLM"
+
+
 # ---------- DualModelRouter ----------
 class DualModelRouter:
     def __init__(self, state_path: Path | None = None):
@@ -2301,6 +2321,22 @@ class DualModelRouter:
         active = self._get_active_llm()
         if active is not None and tools:
             self.state["last_reason"] = f"active model: {self._active_cfg_hash}"
+            if not _supports_tools(active, tools):
+                # Pinned providers like GoogleLLM and OllamaLLM extend
+                # BaseLLM but never override `complete_with_tools` —
+                # the previous code unconditionally called it and got
+                # `AttributeError`. Surface a clear LLMError instead so
+                # the operator sees WHY their pinned model can't run a
+                # tool task. Falling back to default A/B silently would
+                # also be wrong: the user explicitly pinned a model
+                # for a reason, swapping it out without a signal hides
+                # bugs.
+                raise LLMError(
+                    f"Active model {self._active_cfg_hash!r} does not "
+                    f"support tool use. Switch to a tool-capable provider "
+                    f"(Anthropic / OpenAI / Codex / Cohere / Bedrock) or "
+                    f"clear the pinned model for this task."
+                )
             try:
                 out = active.complete_with_tools(
                     system, user, tools, execute_tool,
@@ -2322,13 +2358,7 @@ class DualModelRouter:
 
         # Pick the LLM for this turn first so we can probe its capabilities.
         target = self.model_a if choice == "a" else self.model_b
-        supports_tools = (
-            tools
-            and hasattr(target, "complete_with_tools")
-            and target.complete_with_tools.__qualname__.split(".")[0] != "BaseLLM"
-        )
-
-        if not supports_tools:
+        if not _supports_tools(target, tools):
             return self.call(
                 task_type, system, user,
                 max_tokens=max_tokens, temperature=temperature,

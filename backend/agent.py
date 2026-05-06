@@ -487,6 +487,15 @@ def _looks_like_arithmetic(s: str) -> bool:
     return False
 
 
+# Tools that count as "reading the source" for self-analysis guard.
+# Only these prove the solver actually grounded its claims in the
+# current file contents — calc/web_search/run_python don't qualify
+# even if they produced tool_context, because the agent could have
+# pulled in unrelated content (a wiki page, an arithmetic result)
+# and still hallucinated about its own architecture.
+SOURCE_READ_TOOLS = frozenset({"read_file", "view_file"})
+
+
 _CHITCHAT_RE = re.compile(
     r"^\s*(?:"
     r"hi|hello|hey|yo|hola|"
@@ -1672,19 +1681,31 @@ class Agent:
             # force ONE retry with a critique that names the rule. Without
             # this, skip_verify below would short-circuit verification and
             # we'd ship pure hallucinations on review questions.
-            if is_self_analysis and not (tool_context or "").strip():
+            # Source-read check: tool_context being non-empty isn't
+            # enough — solver might have called calc / web_search /
+            # run_python and still not read a single source file. The
+            # guard fires unless the trace shows at least one
+            # read_file or view_file call THIS turn.
+            source_files_read = any(
+                step.tool_call is not None
+                and step.tool_call.name in SOURCE_READ_TOOLS
+                for step in self._trace
+            )
+            if is_self_analysis and not source_files_read:
                 self.progress(
                     "self_analysis_guard",
-                    "no read_file in self-analysis turn — forcing retry",
+                    "no read_file/view_file in self-analysis turn — forcing retry",
                 )
                 forced_critique = (
                     "STRICT GUARD: This is a self-analysis turn but you "
-                    "answered without calling `read_file` on any source. "
-                    "Claims about your own code MUST be grounded in the "
-                    "actual file contents — read agent.py, llm.py, "
-                    "verifier.py, or whichever modules your answer "
+                    "answered without calling `read_file` or `view_file` "
+                    "on any source. Claims about your own code MUST be "
+                    "grounded in the actual file contents — read agent.py, "
+                    "llm.py, verifier.py, or whichever modules your answer "
                     "references, THEN re-answer. Do not propose fixes "
-                    "for code you have not read this turn."
+                    "for code you have not read this turn. Other tools "
+                    "(calc, web_search, run_python) do NOT count as "
+                    "reading source."
                 )
                 try:
                     answer, tool_context = self._solve(
@@ -1732,6 +1753,16 @@ class Agent:
                 vr.confidence < critic_threshold
                 and not no_notes  # don't retry if there's no evidence at all
             )
+            # Accumulate tool_context across retry attempts. The solver
+            # may call read_file on different files each pass; verifying
+            # the FINAL answer needs all evidence the agent has gathered
+            # so far, not just the last attempt's. Without this, evidence
+            # collected on attempt 1 (e.g. agent.py contents) is invisible
+            # to the verifier when attempt 2 only re-read llm.py.
+            accumulated_tool_context = tool_context or ""
+            # Cap so a runaway-retry case doesn't push the verifier
+            # prompt past sensible limits.
+            _MAX_ACCUMULATED_CTX = 80000
             while should_retry and retry < max_retries:
                 retry += 1
                 self.progress(
@@ -1744,7 +1775,25 @@ class Agent:
                     answer, tool_context = self._solve(
                         task, core, notes, thinking=thinking, critique=critique,
                     )
-                    vr = self._verify(task, answer, notes, tool_context=tool_context)
+                    if tool_context and tool_context.strip():
+                        # Append this attempt's evidence to the running
+                        # collection (skip if we already have the same
+                        # content — solver often re-reads identical
+                        # files between retries).
+                        if tool_context not in accumulated_tool_context:
+                            accumulated_tool_context = (
+                                f"{accumulated_tool_context}\n\n--- retry {retry} ---\n\n{tool_context}"
+                                if accumulated_tool_context
+                                else tool_context
+                            )
+                            if len(accumulated_tool_context) > _MAX_ACCUMULATED_CTX:
+                                accumulated_tool_context = (
+                                    accumulated_tool_context[-_MAX_ACCUMULATED_CTX:]
+                                )
+                    vr = self._verify(
+                        task, answer, notes,
+                        tool_context=accumulated_tool_context,
+                    )
                     self.progress(
                         "self_critic",
                         f"retry {retry} confidence: {vr.confidence}%",
