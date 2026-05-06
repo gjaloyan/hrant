@@ -195,55 +195,71 @@ class KnowledgeGraph:
             # explicitly back-filling history (valid_to set).
             rel_clean = rel.strip()
             current_vfrom = valid_from
+            # Idempotence guard at the top: if a SINGLE_VALUED_RELATIONS
+            # add comes in for the same (subject, target) that already
+            # has an OPEN edge, the call is a no-op regardless of the
+            # caller's valid_from. Skip the entire write block — both
+            # forward and reverse — so we don't write a duplicate that
+            # disagrees on metadata. (Earlier the auto-invalidation
+            # path stamped today on a transition; a re-add then had
+            # `current_vfrom = None` mismatching the existing edge's
+            # stamped today, producing a duplicate.)
             if (
                 auto_invalidate
                 and valid_to is None
                 and rel_clean in self.SINGLE_VALUED_RELATIONS
-            ):
-                # Idempotence guard: if the same target is already an
-                # OPEN edge, this isn't an update — it's a re-add. Skip
-                # all timestamping so a duplicate call hits the regular
-                # exact-dedup branch below and becomes a no-op.
-                same_target_open = any(
+                and any(
                     e.get("relation") == rel_clean
                     and e.get("target") == obj_n
                     and e.get("valid_to") is None
                     for e in self._edges[subj_n]
                 )
-                if not same_target_open:
-                    today = datetime.utcnow().strftime("%Y-%m-%d")
-                    closed_something = False
-                    for existing in self._edges[subj_n]:
-                        if (
-                            existing.get("relation") == rel_clean
-                            and existing.get("target") != obj_n
-                            and existing.get("valid_to") is None
-                        ):
-                            existing["valid_to"] = today
-                            closed_something = True
-                            # Mirror on the inverse edge so traversal stays consistent.
-                            old_target = existing.get("target", "")
-                            for inv in self._edges.get(old_target, []):
-                                if (
-                                    inv.get("target") == subj_n
-                                    and inv.get("relation") == f"inverse:{rel_clean}"
-                                    and inv.get("valid_to") is None
-                                ):
-                                    inv["valid_to"] = today
-                    # Only stamp valid_from when we actually closed
-                    # something — `valid_from` records the moment of
-                    # transition, not the moment of first insertion.
-                    # Without this guard, fresh first-time inserts get
-                    # today's date and break exact-dedup on later
-                    # idempotent re-adds.
-                    if closed_something and current_vfrom is None:
-                        current_vfrom = today
+            ):
+                continue
+            if (
+                auto_invalidate
+                and valid_to is None
+                and rel_clean in self.SINGLE_VALUED_RELATIONS
+            ):
+                # Reaching here means: single-valued relation, NEW
+                # target. Close any existing open edges with a
+                # DIFFERENT target and stamp the new edge with today's
+                # date (only if we actually closed something — the
+                # date is a transition timestamp, not a creation
+                # timestamp).
+                today = datetime.utcnow().strftime("%Y-%m-%d")
+                closed_something = False
+                for existing in self._edges[subj_n]:
+                    if (
+                        existing.get("relation") == rel_clean
+                        and existing.get("target") != obj_n
+                        and existing.get("valid_to") is None
+                    ):
+                        existing["valid_to"] = today
+                        closed_something = True
+                        # Mirror on the inverse edge so traversal stays consistent.
+                        old_target = existing.get("target", "")
+                        for inv in self._edges.get(old_target, []):
+                            if (
+                                inv.get("target") == subj_n
+                                and inv.get("relation") == f"inverse:{rel_clean}"
+                                and inv.get("valid_to") is None
+                            ):
+                                inv["valid_to"] = today
+                if closed_something and current_vfrom is None:
+                    current_vfrom = today
 
-            # Avoid exact duplicates (same target+note+validity span)
+            # Avoid exact duplicates (same target+note+validity span).
+            # Compare against the SAME values the new edge will be
+            # written with, not the caller's parameter — when
+            # auto-invalidation stamped `current_vfrom = today` above,
+            # `valid_from` (the parameter) is still None and would
+            # always mismatch the freshly-written edge, producing a
+            # duplicate on every idempotent re-add.
             exists = any(
                 e["target"] == obj_n
                 and e["note"] == source_note
-                and e.get("valid_from") == valid_from
+                and e.get("valid_from") == current_vfrom
                 and e.get("valid_to") == valid_to
                 for e in self._edges[subj_n]
             )
@@ -267,10 +283,13 @@ class KnowledgeGraph:
             # Bidirectional: add reverse edge with lower weight
             if obj_n not in self._edges:
                 self._edges[obj_n] = []
+            # Reverse edge dedup + write must also see `current_vfrom`,
+            # otherwise forward and inverse edges drift apart on
+            # temporal metadata.
             rev_exists = any(
                 e["target"] == subj_n
                 and e["note"] == source_note
-                and e.get("valid_from") == valid_from
+                and e.get("valid_from") == current_vfrom
                 and e.get("valid_to") == valid_to
                 for e in self._edges[obj_n]
             )
@@ -281,8 +300,8 @@ class KnowledgeGraph:
                     "note": source_note,
                     "weight": weight * 0.5,
                 }
-                if valid_from is not None:
-                    rev_edge["valid_from"] = valid_from
+                if current_vfrom is not None:
+                    rev_edge["valid_from"] = current_vfrom
                 if valid_to is not None:
                     rev_edge["valid_to"] = valid_to
                 if confidence != 1.0:

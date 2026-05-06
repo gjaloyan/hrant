@@ -2060,8 +2060,18 @@ class DualModelRouter:
         `total_a_calls` regardless of which provider the model lived
         on (Codex / Cohere / Copilot / Bedrock / OpenAI-compatible),
         which the agent's own self-review correctly flagged as muddled.
+
+        Also bumps `api_cost_today` by the same per-call estimate the
+        regular A path uses. Without this, the daily-budget gate
+        `api_cost_today >= budget` never fires on pinned-only days
+        and a runaway pinned model could spend past the cap silently.
+        Real per-token cost is still tracked by TokenTracker; this
+        is the router-side budget tally.
         """
         self.state["api_calls_today"] += 1
+        self.state["api_cost_today"] += float(
+            self.cfg_router.get("estimated_cost_per_call_usd", 0.01)
+        )
         self.state["active_model_calls_today"] = (
             int(self.state.get("active_model_calls_today", 0)) + 1
         )
