@@ -129,14 +129,26 @@ class ToolCallDetail(BaseModel):
     """Structured details for a tool call event in the thinking trace.
 
     The trace's free-form `message` field already carries a one-liner
-    preview, but for the WebUI's "show more" expand we need the actual
-    args dict and the full result body. Kept off the message so the
-    short summary stays short. Always present on tool-event steps;
-    never on other event types.
+    preview, but for the WebUI's "show more" expand we need a chunk
+    of the actual result body. Kept off the message so the short
+    summary stays short. Always present on tool-event steps; never
+    on other event types.
+
+    `result` carries a TRUNCATED preview, not the full body. A 60k
+    `read_file` output going into every `AgentAnswer.thinking_trace`
+    item used to bloat:
+      - the API response shipped to WebUI on every chat reply
+      - the dev-mode capture file persisted to disk
+      - the SSE payload for streaming
+    The verifier already gets the cap'd version through `tool_outputs`;
+    the trace just needs enough for an operator to know what the
+    tool returned, not the whole file.
     """
     name: str = ""
     args: dict = {}
-    result: str = ""
+    result: str = ""           # truncated preview, see RESULT_PREVIEW_CAP
+    result_truncated: bool = False  # True if the original body was longer
+    result_full_len: int = 0   # original byte length, for dev panel display
     is_error: bool = False
     duration_ms: int = 0
 

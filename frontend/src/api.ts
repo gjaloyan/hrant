@@ -21,7 +21,9 @@ export type TokenUsage = {
 export type ToolCallDetail = {
   name: string;
   args: Record<string, unknown>;
-  result: string;
+  result: string;             // truncated preview (first ~4000 chars)
+  result_truncated?: boolean; // true if backend truncated the body
+  result_full_len?: number;   // original body length in chars
   is_error: boolean;
   duration_ms: number;
 };

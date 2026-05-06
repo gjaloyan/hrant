@@ -1381,11 +1381,23 @@ class Agent:
             tag = "tool_error" if is_error else "tool"
             # Structured detail rides alongside the one-liner so the
             # WebUI can render a compact summary by default and reveal
-            # full args + result on demand.
+            # the result body on demand. We DON'T put the full body in
+            # the trace — a 60k `read_file` of agent.py going into
+            # every AgentAnswer would bloat the SSE / WebUI / dev
+            # capture payloads even though the verifier-side
+            # `tool_outputs` is already cap'd. Trace gets a 4000-char
+            # preview; the full body is still alive in `tool_outputs`
+            # for verification and on disk for read_file calls.
+            _trace_result_cap = 4000
+            full_result = result or ""
+            full_len = len(full_result)
+            preview_body = full_result[:_trace_result_cap]
             detail = ToolCallDetail(
                 name=name,
                 args=args or {},
-                result=result or "",
+                result=preview_body,
+                result_truncated=full_len > _trace_result_cap,
+                result_full_len=full_len,
                 is_error=bool(is_error),
             )
             self.progress(

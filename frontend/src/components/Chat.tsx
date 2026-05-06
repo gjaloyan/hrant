@@ -104,7 +104,13 @@ function ToolCallItem({ step }: { step: import("../api").ThinkingStep }) {
         {tc.result && (
           <div>
             <div className="text-slate-500 mb-0.5">
-              result{tc.is_error ? " (error)" : ""}:
+              result{tc.is_error ? " (error)" : ""}
+              {tc.result_truncated && tc.result_full_len ? (
+                <span className="text-amber-400 ml-1">
+                  (preview, {tc.result.length.toLocaleString()} of{" "}
+                  {tc.result_full_len.toLocaleString()} chars)
+                </span>
+              ) : null}:
             </div>
             <pre className="bg-slate-900 rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">
               {tc.result}

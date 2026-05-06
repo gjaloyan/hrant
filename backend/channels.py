@@ -503,7 +503,12 @@ class TelegramBot:
                     # Compact thinking + tools footer (between answer and stats).
                     trace_footer = _format_trace_footer(result)
 
-                    # Add token usage statistics to end of answer
+                    # Token usage statistics — appended to the END of
+                    # the main answer (not the placeholder summary)
+                    # because that's where the user expects to find
+                    # them: at the bottom of the message they're
+                    # actually reading. Placeholder gets a minimal
+                    # `✅ Done` so it's clear the work finished.
                     stats_block = ""
                     if result.token_usage:
                         tu = result.token_usage
@@ -519,23 +524,30 @@ class TelegramBot:
                         stats_lines.append(f"🔄 LLM calls: {tu.llm_calls}")
                         stats_block = "\n".join(stats_lines)
 
-                    # Replace the placeholder with the final compact summary
-                    # so the user keeps a clean record of WHAT the agent did,
-                    # without the noisy step-by-step trace.
-                    final_summary_parts: list[str] = ["✅ Done"]
+                    # Build the answer with footer + stats appended.
+                    # When the combined message would exceed Telegram's
+                    # 4096-char limit, the LAST chunk carries the
+                    # footer/stats so the bottom of the conversation
+                    # always shows totals — no chunk in the middle.
+                    answer_parts: list[str] = [answer]
                     if trace_footer:
-                        final_summary_parts.append(trace_footer)
+                        answer_parts.append(trace_footer)
                     if stats_block:
-                        final_summary_parts.append(stats_block)
-                    await stream.finalize("\n\n".join(final_summary_parts))
+                        answer_parts.append(stats_block)
+                    answer_with_stats = "\n\n".join(answer_parts)
 
-                    # Send the actual answer as a fresh message (chunked
-                    # if it's bigger than Telegram's 4096-char limit).
-                    if len(answer) > 4000:
-                        for i in range(0, len(answer), 4000):
-                            await update.message.reply_text(answer[i:i + 4000])
+                    # Replace the placeholder with a minimal "done"
+                    # marker. Stats and trace are now in the answer,
+                    # not here.
+                    await stream.finalize("✅ Done")
+
+                    # Send chunked answer with stats at the bottom of
+                    # the LAST chunk.
+                    if len(answer_with_stats) > 4000:
+                        for i in range(0, len(answer_with_stats), 4000):
+                            await update.message.reply_text(answer_with_stats[i:i + 4000])
                     else:
-                        await update.message.reply_text(answer)
+                        await update.message.reply_text(answer_with_stats)
 
                     _log_channel_message(self.channel_id, username, text, answer)
 
