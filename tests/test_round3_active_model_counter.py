@@ -125,10 +125,12 @@ def test_today_counter_resets_on_date_rollover(monkeypatch, tmp_path):
     assert r.state["total_active_model_calls"] == 500
 
 
-def test_default_state_includes_new_keys():
+def test_default_state_includes_new_keys(tmp_path):
     """Cold-start state has the new fields with safe zero defaults
-    so older deployments don't trip on missing keys."""
+    so older deployments don't trip on missing keys. Use an isolated
+    state path so we don't read a previous test's residue."""
     r = DualModelRouter()
+    r.state_path = tmp_path / "router_state_fresh.json"  # nonexistent
     s = r._load_state()
     assert "active_model_calls_today" in s
     assert "total_active_model_calls" in s

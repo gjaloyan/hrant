@@ -92,14 +92,18 @@ Available tools (use only if needed):
 - web_search — for fresh facts not in notes
 - fetch_url — to read a specific URL in detail (after web_search)
 - read_file — to read local files (including the agent's own source code!)
-- run_python — for calculation, data processing, verification
+- calc — pure arithmetic (a single expression). Faster than run_python,
+  no subprocess, can't touch the filesystem.
+- run_python — multi-line code, parsing, data processing, verification.
+  Full Python (NOT a sandbox); use only when calc isn't enough.
 - (other tools may be listed in MY CAPABILITIES block)
 
 CRITICAL RULES for strategy:
 - For "self_analysis" questions: you MUST plan to read_file your own source code.
   Never guess about your own architecture — read the actual files.
 - For "factual" questions: check if NOTES will cover it. Only use web_search if not.
-- For "calculation": prefer run_python over guessing numbers.
+- For "calculation": prefer `calc` for arithmetic ("2+2", "sqrt(16)", "100*0.17");
+  use `run_python` for multi-line logic or parsing. Never guess numbers.
 - For every tool you list, explain WHY you need it — not just "might be useful".
 
 TOKEN EFFICIENCY (important — each tool call costs ~10K+ tokens):
