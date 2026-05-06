@@ -2359,11 +2359,39 @@ class DualModelRouter:
         # Pick the LLM for this turn first so we can probe its capabilities.
         target = self.model_a if choice == "a" else self.model_b
         if not _supports_tools(target, tools):
-            return self.call(
-                task_type, system, user,
-                max_tokens=max_tokens, temperature=temperature,
-                attachments=attachments,
-            )
+            # The previous code here `return self.call(...)` SILENTLY
+            # stripped tools and ran a plain completion when the
+            # routed-to model lacked complete_with_tools. That's
+            # actively wrong for tool-required tasks: arithmetic
+            # demands `calc`, self-analysis demands `read_file`, etc.
+            # — losing tools means hallucinating where the model
+            # would otherwise have called the right tool.
+            #
+            # Two safe paths instead:
+            #   - If we picked B but A is available AND tool-capable,
+            #     escalate to A (the same fallback shape `_pick`
+            #     already uses for budget / health failures).
+            #   - Otherwise raise LLMError so the caller knows tools
+            #     are unavailable. Empty `tools` is impossible here
+            #     because _supports_tools only returns False if the
+            #     class lacks the override — empty tools would have
+            #     been short-circuited earlier in the function.
+            if (
+                choice == "b"
+                and _supports_tools(self.model_a, tools)
+                and self._api_available()
+            ):
+                target = self.model_a
+                self.state["last_reason"] = (
+                    f"{reason} → B lacks tool support, escalate A"
+                )
+            else:
+                raise LLMError(
+                    f"Selected model ({choice.upper()}) does not support "
+                    f"tool use, and no tool-capable fallback is available. "
+                    f"Configure a tool-capable model A (Anthropic / OpenAI / "
+                    f"Codex / Cohere / Bedrock) or remove tools from this task."
+                )
 
         try:
             out = target.complete_with_tools(

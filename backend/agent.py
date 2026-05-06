@@ -1329,12 +1329,27 @@ class Agent:
                 f"{name}({', '.join(args.keys())}) -> {preview}",
                 tool_call=detail,
             )
-            if result and not is_error:
-                cap = _tool_cap.get(name, _DEFAULT_CAP)
-                snippet = result[:cap]
-                if len(result) > cap:
-                    snippet += f"\n…[+{len(result) - cap} more chars truncated]"
-                tool_outputs.append(f"[{name}] {snippet}")
+            if result:
+                if is_error:
+                    # Errors are evidence too: "I couldn't read the
+                    # file" / "web_search returned 503" / "run_python
+                    # SyntaxError" — verifier needs these to confirm
+                    # an answer like "I couldn't access X" or to flag
+                    # an answer that claims success despite the error.
+                    # Cap tighter than success cap; error messages are
+                    # short and we don't want long stack traces eating
+                    # the verifier prompt.
+                    err_cap = 2000
+                    snippet = result[:err_cap]
+                    if len(result) > err_cap:
+                        snippet += f"\n…[+{len(result) - err_cap} more chars truncated]"
+                    tool_outputs.append(f"[{name} ERROR] {snippet}")
+                else:
+                    cap = _tool_cap.get(name, _DEFAULT_CAP)
+                    snippet = result[:cap]
+                    if len(result) > cap:
+                        snippet += f"\n…[+{len(result) - cap} more chars truncated]"
+                    tool_outputs.append(f"[{name}] {snippet}")
 
         import time as _t
         _t0 = _t.monotonic()
@@ -1537,6 +1552,9 @@ class Agent:
         self._trace = []
         self._llm_calls = []
         self._request_id = new_request_id()
+        # Cleared at start of each request so a flagged self-analysis
+        # answer from a previous turn doesn't leak into this one.
+        self._self_analysis_unverified = False
         self._t0 = _time.monotonic()
         # Stash attachments so _chat_reply / _solve can pick them up
         # without us threading the kwarg through every helper.
@@ -1648,6 +1666,12 @@ class Agent:
                 thinking.subtasks = thinking.subtasks[:3]
             if thinking.subtasks and len(thinking.subtasks) >= 2:
                 subtask_results: list[str] = []
+                # Tool evidence collected across subtasks so the final
+                # verifier can fact-check synthesis claims against ALL
+                # files the agent read, not just whatever the synthesis
+                # solve happened to re-read. Especially important for
+                # code review / self-analysis decomposed into chunks.
+                subtask_tool_contexts: list[str] = []
                 for i, subtask in enumerate(thinking.subtasks):
                     self.progress("subtask", f"[{i+1}/{len(thinking.subtasks)}] {subtask[:60]}")
                     enriched_thinking = thinking.model_copy()
@@ -1660,10 +1684,14 @@ class Agent:
                             f"PRIOR SUBTASK RESULTS (use this info, do NOT re-read "
                             f"files already analyzed here):\n{prior}"
                         )
-                    sub_answer, _ = self._solve(
+                    sub_answer, sub_tool_ctx = self._solve(
                         subtask, core, notes, thinking=enriched_thinking,
                     )
                     subtask_results.append(f"## {subtask}\n{sub_answer}")
+                    if sub_tool_ctx and sub_tool_ctx.strip():
+                        subtask_tool_contexts.append(
+                            f"--- subtask {i+1}: {subtask[:60]} ---\n{sub_tool_ctx}"
+                        )
                 # Synthesize: solve the full task with subtask results as context
                 synthesis_context = "\n\n".join(subtask_results)
                 thinking_with_synthesis = thinking.model_copy()
@@ -1672,6 +1700,17 @@ class Agent:
                     f"SUBTASK RESULTS:\n{synthesis_context}"
                 )
                 answer, tool_context = self._solve(task, core, notes, thinking=thinking_with_synthesis)
+                # Prepend subtask evidence to the synthesis tool_context
+                # so verify() sees both layers. Cap to keep verifier
+                # prompt sane.
+                if subtask_tool_contexts:
+                    combined = "\n\n".join(subtask_tool_contexts)
+                    if tool_context and tool_context.strip():
+                        tool_context = f"{combined}\n\n--- synthesis ---\n{tool_context}"
+                    else:
+                        tool_context = combined
+                    if len(tool_context) > 80000:
+                        tool_context = tool_context[-80000:]
             else:
                 answer, tool_context = self._solve(task, core, notes, thinking=thinking)
 
@@ -1715,6 +1754,36 @@ class Agent:
                 except LLMError:
                     pass  # keep the original answer if retry fails
 
+                # Re-check after the forced retry. If the model STILL
+                # didn't call read_file/view_file, downgrade gracefully
+                # instead of letting `skip_verify` short-circuit and
+                # ship the unverified answer. Without this re-check, a
+                # solver that ignored both attempts would still produce
+                # a "confidence: thinking.confidence" verdict (often
+                # 70-90) on pure narrative.
+                source_files_read_after = any(
+                    step.tool_call is not None
+                    and step.tool_call.name in SOURCE_READ_TOOLS
+                    for step in self._trace
+                )
+                if not source_files_read_after:
+                    self.progress(
+                        "self_analysis_guard",
+                        "retry also skipped source reads — answer flagged",
+                    )
+                    answer = (
+                        "⚠️ Self-analysis answer below was generated WITHOUT "
+                        "reading the actual source files (the solver did not "
+                        "call `read_file` or `view_file` even after a forced "
+                        "retry). Treat any specific code claims as unverified.\n\n"
+                        + (answer or "")
+                    )
+                    # Force a low-confidence VerificationResult right
+                    # here so the downstream skip_verify path can't
+                    # paper over the gap. Empty tool_context downstream
+                    # means skip_verify would otherwise fire.
+                    self._self_analysis_unverified = True
+
             # Skip verification for creative / meta / pure self_analysis where
             # there's no factual ground truth — saves 1 LLM call. BUT when
             # self_analysis came with tool_context (the agent actually
@@ -1727,12 +1796,28 @@ class Agent:
             skip_verify = (
                 qtype in no_evidence_types
                 and not (tool_context or "").strip()
+                # Don't skip verify when the self-analysis guard flagged
+                # the answer — a low-confidence VerificationResult is
+                # the whole point of flagging it.
+                and not getattr(self, "_self_analysis_unverified", False)
             )
             if skip_verify:
                 vr = VerificationResult(
                     confidence=thinking.confidence if thinking else 75,
                     notes_used=[n.frontmatter.topic for n in notes],
                 )
+            elif getattr(self, "_self_analysis_unverified", False):
+                # Manual low-confidence verdict for the no-source-read
+                # path (verifier has nothing to check against).
+                vr = VerificationResult(
+                    confidence=15,
+                    unverified_claims=[
+                        "self-analysis answer not grounded in source — "
+                        "no read_file/view_file in trace"
+                    ],
+                    notes_used=[],
+                )
+                self._self_analysis_unverified = False  # reset for next request
             else:
                 vr = self._verify(task, answer, notes, tool_context=tool_context)
 
