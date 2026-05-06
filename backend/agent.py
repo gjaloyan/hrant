@@ -733,9 +733,13 @@ class Agent:
         """Record thinking step and forward to user callback.
 
         `tool_call` carries the structured tool-call payload (name, args,
-        full result) for the WebUI's expand view; the trace's `message`
-        keeps holding the same one-liner preview so the existing UI
-        keeps rendering as before.
+        TRUNCATED result preview, plus result_truncated/result_full_len
+        metadata so the WebUI panel can show "preview, 4000 of 50000
+        chars"). The full body is NOT in the trace — it's available
+        only to the verifier-side `tool_outputs` buffer and the
+        immediate next iteration of the LLM tool-loop, both of which
+        have their own (separate) caps. See `_on_tool_call` and
+        `_compact_tool_result_for_llm`.
         """
         import time as _time
         elapsed = _time.monotonic() - self._t0 if self._t0 else 0.0
@@ -1359,7 +1363,26 @@ class Agent:
                 "may report state that has since been fixed. Read the "
                 "actual source files via `read_file` and the recent "
                 "commits in `# RECENT COMMITS` above. Do NOT propose "
-                "fixes for code you haven't read this turn."
+                "fixes for code you haven't read this turn.\n\n"
+                "## TOKEN-EFFICIENT READING (mandatory)\n"
+                "Backend source files are large — `agent.py` is "
+                "~2000 lines, `llm.py` ~2500 lines. Reading the WHOLE "
+                "file is wasteful and the result gets truncated when "
+                "re-fed to me on the next iteration anyway (12k char "
+                "cap per `read_file` result).\n\n"
+                "RULES:\n"
+                "1. Files <1000 lines: full read is fine.\n"
+                "2. Files ≥1000 lines: ALWAYS pass `start_line` and "
+                "`end_line` for the region you actually need. The "
+                "file_reader prefixes each line with its number so you "
+                "can quote them back unambiguously.\n"
+                "3. Use `# RECENT COMMITS` above as your map: a commit "
+                "message like `fix(verifier): ...` tells you to look "
+                "in `backend/verifier.py`, narrow first via `grep` or "
+                "the commit's described change before reading.\n"
+                "4. Don't re-read the same file with bigger `max_chars` "
+                "if a chunk got truncated — request a different "
+                "`start_line`/`end_line` range instead."
             )
         else:
             notes_section = f"# NOTES\n{self._notes_block(notes)}"

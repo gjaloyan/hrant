@@ -1,0 +1,162 @@
+"""Round 10 — token-usage findings from a self-review where `_solve`
+hit 278k input tokens on a single self-analysis turn even with the
+Round 9 caps in place.
+
+Three changes covered here:
+  1. `read_file` / `view_file` per-call cap tightened 16k -> 12k
+     (the cumulative-across-iterations bill dominates, so the cap
+     has to bite harder than the single-turn budget seems to need).
+  2. New per-loop input-token budget: once a tool-use loop has
+     burned `CONFIG.router.tool_loop_input_budget` cumulative input
+     tokens, break out and let the forced synthesis call wrap up.
+  3. Solver prompt on self-analysis turns now demands
+     `start_line`/`end_line` for files >=1000 lines so the model
+     stops dumping `agent.py` whole into the loop.
+
+Plus a contradiction-detector regression: agent.progress's docstring
+no longer claims it carries the FULL tool result (it carries a
+truncated preview).
+"""
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+
+# --- #2: read_file/view_file cap tightened ---------------------------------
+
+
+def test_read_file_cap_is_12k_not_16k():
+    from backend.llm import _TOOL_LLM_RESULT_CAPS
+    assert _TOOL_LLM_RESULT_CAPS["read_file"] == 12_000
+    assert _TOOL_LLM_RESULT_CAPS["view_file"] == 12_000
+
+
+def test_read_file_compact_respects_new_cap():
+    from backend.llm import _compact_tool_result_for_llm
+    big = "z" * 60_000
+    out = _compact_tool_result_for_llm("read_file", big)
+    # 12k cap + truncation marker; safely under 13k.
+    assert len(out) < 13_000
+    # And the marker still points at the line-range alternative
+    # (carried over from Round 9 — guard against regression).
+    assert "start_line" in out and "end_line" in out
+
+
+# --- #4: per-loop input-token budget --------------------------------------
+
+
+def test_tool_loop_input_budget_in_config():
+    from backend.config import CONFIG
+    val = CONFIG.router.get("tool_loop_input_budget")
+    assert isinstance(val, int)
+    # Sane bounds: too low chokes legit deep reviews, too high
+    # defeats the guard. 200k is the chosen default.
+    assert 50_000 <= val <= 1_000_000
+
+
+def test_budget_helper_false_when_under_cap():
+    from backend.llm import TOKENS, _tool_loop_input_budget_exceeded
+    TOKENS.reset_request()
+    try:
+        # Cold start: zero usage, guard does NOT fire.
+        assert _tool_loop_input_budget_exceeded() is False
+    finally:
+        TOKENS.reset_request()
+
+
+def test_budget_helper_true_when_over_cap():
+    """Simulate a tool-loop that has already eaten through the
+    configured cap — helper must report exceeded so callers can
+    short-circuit."""
+    from backend.config import CONFIG
+    from backend.llm import TOKENS, _tool_loop_input_budget_exceeded
+
+    cap = int(CONFIG.router.get("tool_loop_input_budget", 200_000))
+    TOKENS.reset_request()
+    try:
+        # Push input counter past the cap (using the internal
+        # field is the simplest path; production code always
+        # reaches usage via record_call which bumps the same
+        # field).
+        TOKENS._request_input = cap + 1
+        assert _tool_loop_input_budget_exceeded() is True
+    finally:
+        TOKENS.reset_request()
+
+
+def test_budget_helper_safe_when_tracker_blows_up(monkeypatch):
+    """Whatever happens inside TokenTracker, the helper must NEVER
+    raise — a tool loop that crashes on its own budget guard would
+    be worse than no guard at all."""
+    from backend.llm import TOKENS, _tool_loop_input_budget_exceeded
+
+    def boom():  # pragma: no cover - just raises
+        raise RuntimeError("tracker offline")
+
+    monkeypatch.setattr(TOKENS, "request_usage", boom)
+    # Should swallow and return False — let the loop continue
+    # rather than exit prematurely.
+    assert _tool_loop_input_budget_exceeded() is False
+
+
+def test_budget_guard_applied_at_every_tool_loop():
+    """All five `complete_with_tools` implementations (Anthropic,
+    OpenAI-compat, Codex Responses, Bedrock, Cohere) must call the
+    guard — otherwise the loop in one provider runs unbounded
+    while the others honour the cap."""
+    import backend.llm as llm_mod
+
+    src = inspect.getsource(llm_mod)
+    # Rough lower bound: helper call appears once per provider's
+    # loop. Five providers + the helper definition itself = 6.
+    occurrences = src.count("_tool_loop_input_budget_exceeded()")
+    assert occurrences >= 6, (
+        f"expected the budget guard at every tool-loop site, "
+        f"saw only {occurrences} call sites"
+    )
+
+
+# --- #5: solver prompt requires start_line/end_line on big files ----------
+
+
+def test_self_analysis_solver_prompt_demands_line_ranges():
+    """The SOURCE OF TRUTH directive on self-analysis turns must
+    tell the model to use start_line/end_line for big files —
+    otherwise it dumps agent.py / llm.py whole and the cumulative
+    tool_results destroy the input bill."""
+    import backend.agent as agent_mod
+
+    src = inspect.getsource(agent_mod)
+    assert "TOKEN-EFFICIENT READING" in src
+    # Must mention the 1000-line threshold and the two line-range
+    # arguments by name.
+    assert "1000 lines" in src
+    assert "start_line" in src and "end_line" in src
+    # Must explicitly forbid the "just bump max_chars" workaround
+    # that used to cause doubled reads.
+    assert "max_chars" in src
+
+
+# --- docstring contradiction (caught by detect_false_absence) -------------
+
+
+def test_progress_docstring_no_longer_claims_full_result():
+    """The contradiction detector flagged this in the last review
+    cycle: docstring said `tool_call carries (name, args, full
+    result)` but the implementation truncates to a 4k preview.
+    Guard against the stale phrasing creeping back."""
+    from backend.agent import Agent
+
+    doc = Agent.progress.__doc__ or ""
+    lower = doc.lower()
+    # The phrase "full result" should not appear ungated; a stale
+    # claim there mis-describes the trace payload.
+    assert "full result" not in lower, (
+        "progress() docstring must not claim it carries the full "
+        "tool result — it carries a truncated preview"
+    )
+    # Positive marker so a future rewrite can't accidentally drop
+    # the truncation contract from the doc.
+    assert "truncat" in lower

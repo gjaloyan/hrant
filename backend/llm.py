@@ -354,8 +354,16 @@ _TOOL_LLM_RESULT_CAPS: dict[str, int] = {
     "calc": 1000,
     "web_search": 4000,
     "fetch_url": 8000,
-    "read_file": 16000,
-    "view_file": 16000,
+    # Tightened from 16k to 12k after watching `_solve` on Codex hit
+    # 278k input on a self-analysis turn even with the Round 9 cap.
+    # Cumulative tool_results across iterations dominate; tighter
+    # per-call cap + the solver's start_line/end_line directive
+    # together push self-reviews from ~250-380k down toward
+    # ~80-150k. Verifier-side tool_outputs cap is separate (60k for
+    # self-analysis); that one's job is to give the verifier enough
+    # context to fact-check, not to feed the next solver turn.
+    "read_file": 12000,
+    "view_file": 12000,
     "read_note": 8000,
     "run_python": 12000,
     "list_files": 4000,
@@ -365,6 +373,20 @@ _TOOL_LLM_RESULT_CAPS: dict[str, int] = {
 }
 _TOOL_LLM_DEFAULT_CAP = 6000
 _TOOL_LLM_ERROR_CAP = 2000
+
+
+def _tool_loop_input_budget_exceeded() -> bool:
+    """Has the current request already burned through the per-loop
+    input-token budget? Used by every `complete_with_tools` to break
+    a long-running tool-use chain before it spirals further. Single
+    source of truth so a future tweak (lower cap, separate caps per
+    provider) only changes one place."""
+    try:
+        used = TOKENS.request_usage().get("input_tokens", 0)
+    except Exception:
+        return False
+    cap = int(CONFIG.router.get("tool_loop_input_budget", 200000) or 0)
+    return cap > 0 and used >= cap
 
 
 def _compact_tool_result_for_llm(
@@ -588,6 +610,12 @@ class AnthropicLLM(BaseLLM):
         messages: list[dict] = [{"role": "user", "content": first_content}]
         final_text = ""
         for _iter in range(max_iterations):
+            # Per-loop input budget guard. The first iteration always
+            # runs (we need to call the LLM at least once); subsequent
+            # ones break out if we've already burned through the cap
+            # so the forced synthesis below can wrap up cheaply.
+            if _iter > 0 and _tool_loop_input_budget_exceeded():
+                break
             payload = {
                 "model": self.model,
                 "max_tokens": max_tokens or self.default_max,
@@ -868,6 +896,8 @@ class OpenAICompatibleLLM(BaseLLM):
         ]
         final_text = ""
         for _iter in range(max_iterations):
+            if _iter > 0 and _tool_loop_input_budget_exceeded():
+                break
             payload = {
                 "model": self.model,
                 "max_tokens": max_tokens or self.default_max,
@@ -1210,6 +1240,8 @@ class CodexLLM(BaseLLM):
 
         final_text = ""
         for _iter in range(max_iterations):
+            if _iter > 0 and _tool_loop_input_budget_exceeded():
+                break
             payload = self._build_payload(
                 system, input_items, flat_tools or None, max_tokens, temperature
             )
@@ -1424,6 +1456,8 @@ class BedrockLLM(BaseLLM):
         messages: list[dict] = [{"role": "user", "content": user}]
         final_text = ""
         for _iter in range(max_iterations):
+            if _iter > 0 and _tool_loop_input_budget_exceeded():
+                break
             payload = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": max_tokens or self.default_max,
@@ -1690,6 +1724,8 @@ class CohereLLM(BaseLLM):
         ]
         final_text = ""
         for _iter in range(max_iterations):
+            if _iter > 0 and _tool_loop_input_budget_exceeded():
+                break
             payload = {
                 "model": self.model,
                 "messages": messages,

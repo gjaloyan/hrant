@@ -219,6 +219,14 @@ _COMMON_OTHER = {
         # room for a real review-style answer. 4000 covers the longest
         # answers we've shipped without truncating.
         "tool_synth_max_tokens": 4000,
+        # Hard budget for the WHOLE tool-loop's accumulated input
+        # tokens (sum across iterations). Once a tool-use loop has
+        # already consumed this many cumulative input tokens, stop
+        # the loop and let the forced synthesis call wrap up. Real
+        # observed cap: a self-analysis on Codex hit 278k in a single
+        # _solve before this guard existed. 200k is a comfortable
+        # ceiling for legit deep reviews; runaway loops trip earlier.
+        "tool_loop_input_budget": 200000,
     },
     "knowledge": {
         "base_dir": "./knowledge",
