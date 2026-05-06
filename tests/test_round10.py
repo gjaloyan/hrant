@@ -24,21 +24,26 @@ import inspect
 import pytest
 
 
-# --- #2: read_file/view_file cap tightened ---------------------------------
+# --- #2: read_file/view_file cap (Round 10 set 12k; Round 11 reverted to 16k
+# because the tighter cap was costing more in answer quality than it saved
+# — the real fix landed in Round 11 with curated forced-synthesis payloads.
+# These tests now guard against re-tightening without revisiting that
+# trade-off; the 16k cap belongs in test_round11 conceptually but sits here
+# for chronological clarity.) -----------------------------------------------
 
 
-def test_read_file_cap_is_12k_not_16k():
+def test_read_file_cap_is_16k():
     from backend.llm import _TOOL_LLM_RESULT_CAPS
-    assert _TOOL_LLM_RESULT_CAPS["read_file"] == 12_000
-    assert _TOOL_LLM_RESULT_CAPS["view_file"] == 12_000
+    assert _TOOL_LLM_RESULT_CAPS["read_file"] == 16_000
+    assert _TOOL_LLM_RESULT_CAPS["view_file"] == 16_000
 
 
-def test_read_file_compact_respects_new_cap():
+def test_read_file_compact_respects_cap():
     from backend.llm import _compact_tool_result_for_llm
     big = "z" * 60_000
     out = _compact_tool_result_for_llm("read_file", big)
-    # 12k cap + truncation marker; safely under 13k.
-    assert len(out) < 13_000
+    # 16k cap + truncation marker; safely under 17k.
+    assert len(out) < 17_000
     # And the marker still points at the line-range alternative
     # (carried over from Round 9 — guard against regression).
     assert "start_line" in out and "end_line" in out

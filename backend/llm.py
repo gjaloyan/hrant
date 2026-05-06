@@ -354,16 +354,15 @@ _TOOL_LLM_RESULT_CAPS: dict[str, int] = {
     "calc": 1000,
     "web_search": 4000,
     "fetch_url": 8000,
-    # Tightened from 16k to 12k after watching `_solve` on Codex hit
-    # 278k input on a self-analysis turn even with the Round 9 cap.
-    # Cumulative tool_results across iterations dominate; tighter
-    # per-call cap + the solver's start_line/end_line directive
-    # together push self-reviews from ~250-380k down toward
-    # ~80-150k. Verifier-side tool_outputs cap is separate (60k for
-    # self-analysis); that one's job is to give the verifier enough
-    # context to fact-check, not to feed the next solver turn.
-    "read_file": 12000,
-    "view_file": 12000,
+    # Round 11: reverted 12k -> 16k. Tighter cap from Round 10 was
+    # starving the model of context (verifier confidence dropped
+    # noticeably on self-analysis turns — answers cited line ranges
+    # they hadn't actually seen). The real fix for the 278k blowup
+    # is the curated forced-synthesis payload below — caps are a
+    # blunt instrument and they were costing more in answer quality
+    # than they were saving in input tokens.
+    "read_file": 16000,
+    "view_file": 16000,
     "read_note": 8000,
     "run_python": 12000,
     "list_files": 4000,
@@ -416,6 +415,384 @@ def _compact_tool_result_for_llm(
         f"to the LLM. Use `read_file(start_line=…, end_line=…)` for "
         f"specific regions.]"
     )
+
+
+# --- Curated forced-synthesis payload ---------------------------------------
+#
+# Round 11. Every `complete_with_tools` runs a final tool-less call when
+# `max_iterations` is hit so the user gets a real answer instead of the
+# last tool-call preamble. Before this round, that synthesis call inherited
+# the WHOLE accumulated `messages` array — every assistant tool_use, every
+# tool_result. On long self-reviews this dominated the input bill (a
+# 14-iteration loop carried 14 × ~12k tool_results into the final synth).
+#
+# We replace `messages` for the synth call with one curated user turn:
+#   - the original task verbatim
+#   - a one-line digest per tool call (name + short args + first line of
+#     result + "(+N more)") — gives the model a ledger without the bodies
+#   - the model's own running narration (assistant text from prior turns)
+#   - a "now answer, no tools" directive
+#
+# Tool result bodies never reach the synth payload. The model has been
+# reasoning about them across iterations; the digest is enough for it to
+# write the final answer it was already drafting.
+_SYNTH_DIGEST_CHAR_CAP = 3000
+_SYNTH_NARRATION_CHAR_CAP = 4000
+
+
+def _summarize_tool_call_for_synth(
+    name: str, args, result: str, *, is_error: bool = False
+) -> str:
+    """One-line digest of a tool call for the curated synthesis prompt."""
+    try:
+        if isinstance(args, str):
+            args_str = args
+        else:
+            args_str = json.dumps(args, ensure_ascii=False)
+    except Exception:
+        args_str = str(args)
+    if len(args_str) > 200:
+        args_str = args_str[:200] + "…}"
+    result_str = (result or "").strip()
+    if not result_str:
+        head = "(empty result)"
+        more = 0
+    else:
+        lines = result_str.splitlines()
+        head = lines[0]
+        if len(head) > 280:
+            head = head[:280] + "…"
+        more = len(lines) - 1
+    err_marker = " [ERR]" if is_error else ""
+    suffix = f" (+{more} more lines)" if more > 0 else ""
+    return f"- {name}({args_str}){err_marker} → {head}{suffix}"
+
+
+def _build_synth_user_text(
+    original_user: str,
+    digest_lines: list[str],
+    narration_chunks: list[str],
+    *,
+    digest_cap: int = _SYNTH_DIGEST_CHAR_CAP,
+    narration_cap: int = _SYNTH_NARRATION_CHAR_CAP,
+) -> str:
+    """Compose the single user message sent to the forced synthesis call.
+    Caps prevent a runaway loop's digest from itself blowing out the synth
+    input — same reason we cap individual tool results."""
+    parts = [original_user.rstrip()]
+    if digest_lines:
+        digest_text = "\n".join(digest_lines)
+        if len(digest_text) > digest_cap:
+            digest_text = digest_text[:digest_cap] + "\n… (digest truncated)"
+        parts.append(
+            "\n\n## Investigation already done (do NOT repeat these calls)\n"
+            + digest_text
+        )
+    if narration_chunks:
+        narration = "\n\n".join(narration_chunks)
+        if len(narration) > narration_cap:
+            narration = narration[:narration_cap] + "\n… (narration truncated)"
+        parts.append("\n\n## My running analysis from prior turns\n" + narration)
+    parts.append(
+        "\n\nProvide the FINAL answer now based on the investigation above. "
+        "Tools are disabled for this turn. If you don't have enough evidence, "
+        "say so honestly rather than guessing."
+    )
+    return "".join(parts)
+
+
+def _flatten_anthropic_text(content) -> str:
+    """Anthropic content can be a string or a list of blocks. Return only
+    the text portion (text + input_text); ignore image / tool_use blocks."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content) if content is not None else ""
+    out: list[str] = []
+    for b in content:
+        if isinstance(b, dict) and b.get("type") in ("text", "input_text"):
+            out.append(b.get("text", "") or "")
+    return "".join(out)
+
+
+def _extract_synth_inputs_anthropic(
+    messages: list[dict],
+) -> tuple[str, list[str], list[str]]:
+    """Walk Anthropic-format tool-loop messages and return
+    (original_user_text, digest_lines, narration_chunks)."""
+    if not messages:
+        return ("", [], [])
+    original_user = _flatten_anthropic_text(messages[0].get("content", ""))
+    digest_lines: list[str] = []
+    narration_chunks: list[str] = []
+    pending: dict[str, dict] = {}
+    for msg in messages[1:]:
+        role = msg.get("role")
+        content = msg.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            continue
+        if role == "assistant":
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                btype = b.get("type")
+                if btype == "text":
+                    txt = (b.get("text") or "").strip()
+                    if txt:
+                        narration_chunks.append(txt)
+                elif btype == "tool_use":
+                    pending[b.get("id", "")] = {
+                        "name": b.get("name", ""),
+                        "args": b.get("input") or {},
+                    }
+        elif role == "user":
+            for b in content:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_result":
+                    info = pending.pop(b.get("tool_use_id", ""), {})
+                    raw = b.get("content", "")
+                    if isinstance(raw, list):
+                        result_text = "".join(
+                            x.get("text", "") for x in raw
+                            if isinstance(x, dict) and x.get("type") == "text"
+                        )
+                    else:
+                        result_text = str(raw or "")
+                    digest_lines.append(_summarize_tool_call_for_synth(
+                        info.get("name", "?"),
+                        info.get("args", {}),
+                        result_text,
+                        is_error=bool(b.get("is_error")),
+                    ))
+    return (original_user, digest_lines, narration_chunks)
+
+
+def _curate_synth_messages_anthropic(messages: list[dict]) -> list[dict]:
+    """Anthropic / Bedrock: replace accumulated tool-loop messages with
+    one curated user turn. Caller still passes `system` separately."""
+    original, digest, narration = _extract_synth_inputs_anthropic(messages)
+    return [{"role": "user", "content": _build_synth_user_text(
+        original, digest, narration,
+    )}]
+
+
+def _extract_synth_inputs_openai(
+    messages: list[dict],
+) -> tuple[str, list[str], list[str]]:
+    """OpenAI-compat: assistant has `tool_calls`, tool role has
+    `tool_call_id` + content."""
+    if not messages:
+        return ("", [], [])
+    original_user = ""
+    pending: dict[str, dict] = {}
+    digest_lines: list[str] = []
+    narration_chunks: list[str] = []
+    user_seen = False
+    for m in messages:
+        role = m.get("role")
+        if role == "user" and not user_seen:
+            content = m.get("content", "")
+            if isinstance(content, list):
+                original_user = "".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") in ("text", "input_text")
+                )
+            else:
+                original_user = str(content or "")
+            user_seen = True
+            continue
+        if not user_seen:
+            continue
+        if role == "assistant":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                narration_chunks.append(content.strip())
+            for tc in m.get("tool_calls") or []:
+                func = tc.get("function", {}) or {}
+                pending[tc.get("id", "")] = {
+                    "name": func.get("name", ""),
+                    "args": func.get("arguments", "{}"),
+                }
+        elif role == "tool":
+            info = pending.pop(m.get("tool_call_id", ""), {})
+            args_raw = info.get("args", "{}")
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {"_raw": args_raw}
+            content = m.get("content", "")
+            if isinstance(content, list):
+                result_text = "".join(
+                    x.get("text", "") for x in content
+                    if isinstance(x, dict)
+                )
+            else:
+                result_text = str(content or "")
+            digest_lines.append(_summarize_tool_call_for_synth(
+                info.get("name", "?"), args, result_text,
+            ))
+    return (original_user, digest_lines, narration_chunks)
+
+
+def _curate_synth_messages_openai(messages: list[dict]) -> list[dict]:
+    """OpenAI-compat: keep leading system message(s), replace the rest
+    with one curated user turn."""
+    if not messages:
+        return messages
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") == "system":
+            out.append(m)
+        else:
+            break
+    original, digest, narration = _extract_synth_inputs_openai(messages)
+    out.append({"role": "user", "content": _build_synth_user_text(
+        original, digest, narration,
+    )})
+    return out
+
+
+def _extract_synth_inputs_codex(
+    input_items: list[dict],
+) -> tuple[str, list[str], list[str]]:
+    """Codex Responses API uses `input_items` with `message`,
+    `function_call`, `function_call_output`, and reasoning items.
+    Reasoning items are tied to the live tool-use chain — useless for
+    a tool-less synth call, drop them."""
+    if not input_items:
+        return ("", [], [])
+    original_user = ""
+    pending: dict[str, dict] = {}
+    digest_lines: list[str] = []
+    narration_chunks: list[str] = []
+    user_seen = False
+    for item in input_items:
+        itype = item.get("type")
+        if itype == "message":
+            role = item.get("role")
+            content = item.get("content", [])
+            text = ""
+            if isinstance(content, list):
+                text = "".join(
+                    b.get("text", "") for b in content
+                    if isinstance(b, dict) and b.get("type") in (
+                        "input_text", "output_text", "text"
+                    )
+                )
+            elif isinstance(content, str):
+                text = content
+            if role == "user" and not user_seen:
+                original_user = text
+                user_seen = True
+            elif role == "assistant" and text.strip():
+                narration_chunks.append(text.strip())
+        elif itype == "function_call":
+            cid = item.get("call_id") or item.get("id", "")
+            pending[cid] = {
+                "name": item.get("name", ""),
+                "args": item.get("arguments", "{}"),
+            }
+        elif itype == "function_call_output":
+            info = pending.pop(item.get("call_id", ""), {})
+            args_raw = info.get("args", "{}")
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {"_raw": args_raw}
+            digest_lines.append(_summarize_tool_call_for_synth(
+                info.get("name", "?"), args, item.get("output", "") or "",
+            ))
+    return (original_user, digest_lines, narration_chunks)
+
+
+def _curate_synth_input_items_codex(input_items: list[dict]) -> list[dict]:
+    """Codex Responses API: replace input_items with one curated user
+    message. Drops all function_call / function_call_output / reasoning
+    items — none are needed for a tool-less synth."""
+    original, digest, narration = _extract_synth_inputs_codex(input_items)
+    return [{
+        "type": "message",
+        "role": "user",
+        "content": [{
+            "type": "input_text",
+            "text": _build_synth_user_text(original, digest, narration),
+        }],
+    }]
+
+
+def _extract_synth_inputs_cohere(
+    messages: list[dict],
+) -> tuple[str, list[str], list[str]]:
+    """Cohere v2: assistant has `tool_plan` plus `tool_calls`; tool role
+    has `tool_call_id` and content as `[{"type":"text","text":...}]`."""
+    if not messages:
+        return ("", [], [])
+    original_user = ""
+    pending: dict[str, dict] = {}
+    digest_lines: list[str] = []
+    narration_chunks: list[str] = []
+    user_seen = False
+    for m in messages:
+        role = m.get("role")
+        if role == "system":
+            continue
+        if role == "user" and not user_seen:
+            original_user = str(m.get("content", "") or "")
+            user_seen = True
+            continue
+        if not user_seen:
+            continue
+        if role == "assistant":
+            plan = (m.get("tool_plan") or "").strip()
+            if plan:
+                narration_chunks.append(plan)
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                narration_chunks.append(content.strip())
+            for tc in m.get("tool_calls") or []:
+                func = tc.get("function", {}) or {}
+                pending[tc.get("id", "")] = {
+                    "name": func.get("name", ""),
+                    "args": func.get("arguments", "{}"),
+                }
+        elif role == "tool":
+            info = pending.pop(m.get("tool_call_id", ""), {})
+            args_raw = info.get("args", "{}")
+            try:
+                args = json.loads(args_raw) if isinstance(args_raw, str) else args_raw
+            except Exception:
+                args = {"_raw": args_raw}
+            content = m.get("content", "")
+            if isinstance(content, list):
+                result_text = "".join(
+                    x.get("text", "") for x in content
+                    if isinstance(x, dict) and x.get("type") == "text"
+                )
+            else:
+                result_text = str(content or "")
+            digest_lines.append(_summarize_tool_call_for_synth(
+                info.get("name", "?"), args, result_text,
+            ))
+    return (original_user, digest_lines, narration_chunks)
+
+
+def _curate_synth_messages_cohere(messages: list[dict]) -> list[dict]:
+    if not messages:
+        return messages
+    out: list[dict] = []
+    for m in messages:
+        if m.get("role") == "system":
+            out.append(m)
+        else:
+            break
+    original, digest, narration = _extract_synth_inputs_cohere(messages)
+    out.append({"role": "user", "content": _build_synth_user_text(
+        original, digest, narration,
+    )})
+    return out
 
 
 class BaseLLM:
@@ -709,7 +1086,7 @@ class AnthropicLLM(BaseLLM):
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": system,
-            "messages": messages,
+            "messages": _curate_synth_messages_anthropic(messages),
         }
         try:
             t0 = time.time()
@@ -973,7 +1350,7 @@ class OpenAICompatibleLLM(BaseLLM):
             "model": self.model,
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
-            "messages": messages,
+            "messages": _curate_synth_messages_openai(messages),
         }
         try:
             t0 = time.time()
@@ -1297,7 +1674,8 @@ class CodexLLM(BaseLLM):
             int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
         )
         synth_payload = self._build_payload(
-            system, input_items, None, synth_max, temperature,
+            system, _curate_synth_input_items_codex(input_items),
+            None, synth_max, temperature,
         )
         try:
             t0 = time.time()
@@ -1523,7 +1901,7 @@ class BedrockLLM(BaseLLM):
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": system,
-            "messages": messages,
+            "messages": _curate_synth_messages_anthropic(messages),
         }
         try:
             data = self._invoke(synth_payload)
@@ -1789,7 +2167,7 @@ class CohereLLM(BaseLLM):
         )
         synth_payload = {
             "model": self.model,
-            "messages": messages,
+            "messages": _curate_synth_messages_cohere(messages),
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "stream": False,

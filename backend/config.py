@@ -220,13 +220,12 @@ _COMMON_OTHER = {
         # answers we've shipped without truncating.
         "tool_synth_max_tokens": 4000,
         # Hard budget for the WHOLE tool-loop's accumulated input
-        # tokens (sum across iterations). Once a tool-use loop has
-        # already consumed this many cumulative input tokens, stop
-        # the loop and let the forced synthesis call wrap up. Real
-        # observed cap: a self-analysis on Codex hit 278k in a single
-        # _solve before this guard existed. 200k is a comfortable
-        # ceiling for legit deep reviews; runaway loops trip earlier.
-        "tool_loop_input_budget": 200000,
+        # tokens (sum across iterations). Acts as a runaway-guard,
+        # NOT the primary token-saving knob (that's the curated
+        # synthesis payload — see `_curate_synth_messages_*`). 300k
+        # leaves room for legit deep self-reviews while still
+        # catching pathological loops before they cost real money.
+        "tool_loop_input_budget": 300000,
     },
     "knowledge": {
         "base_dir": "./knowledge",
