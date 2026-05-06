@@ -586,6 +586,38 @@ def _is_self_question(text: str) -> bool:
     return bool(_SELF_QUESTION_RE.search(text))
 
 
+# Wider net: catches code-review / self-improvement / token-usage
+# requests that aren't phrased as "who are you" but DO require the
+# agent to read its own source (and therefore want the full source
+# map + git log + skipped KB notes). Keeps planning aligned with
+# the eventual solver path.
+_SELF_ANALYSIS_HINT_RE = re.compile(
+    r"(?:"
+    r"\byour\s+(?:code|source|architecture|implementation|prompts?)\b"
+    r"|\bsource\s+code\b|\bself[\s-]?analysis\b|\bself[\s-]?review\b"
+    r"|\btoken\s+usage\b|\boptim(?:i[zs]e|i[sz]ation|i[zs]ed)\b"
+    r"|backend/[a-z_/]+\.py"
+    r"|\bagent\.py\b|\bllm\.py\b|\bverifier\.py\b"
+    # Russian
+    r"|твой\s+код|своего?\s+код|исходны?й\s+код|архитектур"
+    r"|оптимизац|самоанализ|проверь\s+(?:свой\s+)?код"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _looks_like_self_analysis_request(text: str) -> bool:
+    """Cheap pre-classifier for self-analysis intent. The LLM
+    classifier still runs and wins, but `_think`'s prompt-shaping
+    needs the answer earlier — before we know `question_type`.
+    Conservative: only matches phrases that strongly imply the
+    agent will need to read its own code.
+    """
+    if not text:
+        return False
+    return bool(_SELF_ANALYSIS_HINT_RE.search(text))
+
+
 # ---------- тип колбэка для прогресса ----------
 ProgressCB = Callable[[str, str], None]  # (event, message)
 
@@ -1098,12 +1130,27 @@ class Agent:
         # everything else the compact view (tools + skills, no map) is
         # sufficient. Plus narrower convo/memory windows: 3/4 vs 6/10.
         # The previous defaults were tuned for solving, not classifying.
-        is_selfish = _is_self_question(task)
+        #
+        # Self-analysis also includes implicit code-review requests
+        # ("check your token usage", "review the verifier", "look at
+        # backend/agent.py"). These don't trip _is_self_question (which
+        # is "who are you"-shaped) but DO need the full source map to
+        # plan reads — and crucially, must NOT pull stale memory recall
+        # because that's where "agent finds bugs already fixed last
+        # commit" hallucinations come from.
+        is_selfish = (
+            _is_self_question(task)
+            or _looks_like_self_analysis_request(task)
+        )
         caps = _capabilities_block(compact=not is_selfish)
         ctx = self._shared_context(
             task, core,
             n_conv=6 if is_selfish else 3,
             n_memory=10 if is_selfish else 4,
+            # Skip stale memory recall on planning step too — same
+            # reason _solve does it later. Replaces the recall block
+            # with a fresh git log via _git_log_block.
+            for_self_analysis=is_selfish,
         )
         marker = self._attachment_marker() + self._arithmetic_marker(task)
         user = (
@@ -1757,8 +1804,12 @@ class Agent:
                     thinking.required_topics, project, allow_learning=True,
                 )
 
-            # Load project-specific notes if in project mode
-            if project:
+            # Load project-specific notes if in project mode. Skipped
+            # on self-analysis because the solver gets a SOURCE OF
+            # TRUTH directive there and must read live source — pulling
+            # in stale project snapshots that the solver won't even
+            # consult would just inflate the verifier prompt later.
+            if project and not is_self_analysis:
                 for entry in KM.list_topics():
                     if entry.project == project and all(
                         entry.topic != n.frontmatter.topic for n in notes

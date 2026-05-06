@@ -344,6 +344,58 @@ def _resolve_attachments(refs: list[str] | None) -> list[tuple]:
     return out
 
 
+# Caps applied to tool results BEFORE they re-enter `messages` for the
+# next iteration of a tool-use loop. Without this, a 60k `read_file`
+# of agent.py travels with every subsequent turn — the cumulative
+# growth dominates the input-token bill on review tasks. The agent's
+# verifier-side `tool_outputs` cap is separate; that one feeds the
+# verifier prompt, not the next solver iteration.
+_TOOL_LLM_RESULT_CAPS: dict[str, int] = {
+    "calc": 1000,
+    "web_search": 4000,
+    "fetch_url": 8000,
+    "read_file": 16000,
+    "view_file": 16000,
+    "read_note": 8000,
+    "run_python": 12000,
+    "list_files": 4000,
+    "glob": 4000,
+    "grep": 4000,
+    "search": 4000,
+}
+_TOOL_LLM_DEFAULT_CAP = 6000
+_TOOL_LLM_ERROR_CAP = 2000
+
+
+def _compact_tool_result_for_llm(
+    name: str, result: str, *, is_error: bool = False
+) -> str:
+    """Truncate a tool result before re-feeding it to the LLM in the
+    next tool-loop iteration. Errors get a tighter cap because they
+    rarely contain new information past the first message + a stack
+    snippet. Successful results use a per-tool cap (read_file gets
+    16k, calc 1k, etc.).
+
+    The truncation marker tells the model the body was cut so it
+    doesn't try to "read the rest" by re-calling the same tool with
+    different arguments — that was a real failure mode before
+    `read_file` got start_line/end_line in Round 3.
+    """
+    if not result:
+        return result
+    cap = _TOOL_LLM_ERROR_CAP if is_error else _TOOL_LLM_RESULT_CAPS.get(
+        name, _TOOL_LLM_DEFAULT_CAP
+    )
+    if len(result) <= cap:
+        return result
+    return (
+        result[:cap]
+        + f"\n…[+{len(result) - cap} chars truncated before re-feeding "
+        f"to the LLM. Use `read_file(start_line=…, end_line=…)` for "
+        f"specific regions.]"
+    )
+
+
 class BaseLLM:
     def complete(
         self,
@@ -596,10 +648,18 @@ class AnthropicLLM(BaseLLM):
                         on_tool_call(name, args, result_text, is_error)
                     except Exception:
                         pass
+                # Truncate before sending back to LLM (see
+                # `_compact_tool_result_for_llm` for the per-tool caps).
+                # The on_tool_call callback above gets the FULL body so
+                # the agent's verifier-side / dev capture buffers stay
+                # accurate — only the next-iteration LLM input is cut.
+                llm_result = _compact_tool_result_for_llm(
+                    name, result_text, is_error=is_error,
+                )
                 result_block: dict = {
                     "type": "tool_result",
                     "tool_use_id": tool_use_id,
-                    "content": result_text,
+                    "content": llm_result,
                 }
                 if is_error:
                     result_block["is_error"] = True
@@ -612,7 +672,10 @@ class AnthropicLLM(BaseLLM):
         # is generous — review-style tasks (`analyze your code`) ran into
         # the regular default and ended mid-sentence. 6000 fits the
         # longest reviews we've seen and stays well under model caps.
-        synth_max = max(max_tokens or self.default_max, 6000)
+        synth_max = max(
+            max_tokens or self.default_max,
+            int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
+        )
         synth_payload = {
             "model": self.model,
             "max_tokens": synth_max,
@@ -858,15 +921,24 @@ class OpenAICompatibleLLM(BaseLLM):
                         on_tool_call(name, args, result_text, is_error)
                     except Exception:
                         pass
+                # See _compact_tool_result_for_llm — full body still
+                # reaches the agent's callback above for verifier and
+                # dev capture; only next-iteration LLM input is cut.
+                llm_result = _compact_tool_result_for_llm(
+                    name, result_text, is_error=is_error,
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc["id"],
-                    "content": result_text,
+                    "content": llm_result,
                 })
 
         # Forced tool-less synthesis at the cap. Generous budget so
         # review-style answers don't truncate (see Anthropic synth note).
-        synth_max = max(max_tokens or self.default_max, 6000)
+        synth_max = max(
+            max_tokens or self.default_max,
+            int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
+        )
         synth_payload = {
             "model": self.model,
             "max_tokens": synth_max,
@@ -1175,15 +1247,23 @@ class CodexLLM(BaseLLM):
                         on_tool_call(name, args, result_text, is_error)
                     except Exception:
                         pass
+                # See _compact_tool_result_for_llm — caps the body
+                # before re-feeding to next Responses-API turn.
+                llm_result = _compact_tool_result_for_llm(
+                    name, result_text, is_error=is_error,
+                )
                 input_items.append({
                     "type": "function_call_output",
                     "call_id": call_id,
-                    "output": result_text,
+                    "output": llm_result,
                 })
 
         # Forced tool-less synthesis at the cap — call again with no tools.
         # Generous budget for review-style answers (see Anthropic synth note).
-        synth_max = max(max_tokens or self.default_max, 6000)
+        synth_max = max(
+            max_tokens or self.default_max,
+            int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
+        )
         synth_payload = self._build_payload(
             system, input_items, None, synth_max, temperature,
         )
@@ -1386,16 +1466,24 @@ class BedrockLLM(BaseLLM):
                         on_tool_call(name, args, result_text, is_error)
                     except Exception:
                         pass
+                # See _compact_tool_result_for_llm — caps the body
+                # before re-feeding to next Bedrock turn.
+                llm_result = _compact_tool_result_for_llm(
+                    name, result_text, is_error=is_error,
+                )
                 tool_results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_id,
-                    "content": result_text,
+                    "content": llm_result,
                     **({"is_error": True} if is_error else {}),
                 })
             messages.append({"role": "user", "content": tool_results})
 
         # Forced tool-less synthesis at the cap (see Anthropic synth note).
-        synth_max = max(max_tokens or self.default_max, 6000)
+        synth_max = max(
+            max_tokens or self.default_max,
+            int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
+        )
         synth_payload = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": synth_max,
@@ -1648,13 +1736,21 @@ class CohereLLM(BaseLLM):
                         on_tool_call(name, args, result_text, is_error)
                     except Exception:
                         pass
+                # See _compact_tool_result_for_llm — caps body
+                # before re-feeding to next Cohere turn.
+                llm_result = _compact_tool_result_for_llm(
+                    name, result_text, is_error=is_error,
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.get("id", ""),
-                    "content": [{"type": "text", "text": result_text}],
+                    "content": [{"type": "text", "text": llm_result}],
                 })
         # Forced tool-less synthesis at the cap (see Anthropic synth note).
-        synth_max = max(max_tokens or self.default_max, 6000)
+        synth_max = max(
+            max_tokens or self.default_max,
+            int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
+        )
         synth_payload = {
             "model": self.model,
             "messages": messages,

@@ -210,6 +210,16 @@ _COMMON_OTHER = {
         # short tasks retry up to max_retries without tripping.
         "critic_retry_token_budget": 60000,
     },
+    "router": {
+        # max_tokens granted to the forced tool-less synthesis call
+        # that fires when complete_with_tools hits max_iterations.
+        # Tool result re-feeding now has per-tool caps (see
+        # _compact_tool_result_for_llm), so the synthesis call doesn't
+        # need to be as generous as before — but we still want enough
+        # room for a real review-style answer. 4000 covers the longest
+        # answers we've shipped without truncating.
+        "tool_synth_max_tokens": 4000,
+    },
     "knowledge": {
         "base_dir": "./knowledge",
         "core_memory_max_tokens": 4000,

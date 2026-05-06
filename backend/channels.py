@@ -541,13 +541,51 @@ class TelegramBot:
                     # not here.
                     await stream.finalize("✅ Done")
 
-                    # Send chunked answer with stats at the bottom of
-                    # the LAST chunk.
-                    if len(answer_with_stats) > 4000:
-                        for i in range(0, len(answer_with_stats), 4000):
-                            await update.message.reply_text(answer_with_stats[i:i + 4000])
+                    # Smart chunking: keep the trace_footer + stats
+                    # block whole in the LAST message. Naive 4000-char
+                    # slicing would split the stats block at byte 4000
+                    # of the answer body, which looks broken on
+                    # Telegram. Strategy:
+                    #   - separate the answer body from the tail
+                    #     (tail = trace + stats)
+                    #   - chunk only the body
+                    #   - append the tail to whichever chunk has room,
+                    #     otherwise send it as a fresh final message
+                    tail_parts: list[str] = []
+                    if trace_footer:
+                        tail_parts.append(trace_footer)
+                    if stats_block:
+                        tail_parts.append(stats_block)
+                    tail = "\n\n".join(tail_parts)
+
+                    LIMIT = 4000
+                    if not tail or len(answer) + len(tail) + 2 <= LIMIT:
+                        # Body + tail fit in one message.
+                        await update.message.reply_text(
+                            answer if not tail else f"{answer}\n\n{tail}"
+                        )
                     else:
-                        await update.message.reply_text(answer_with_stats)
+                        # Chunk the body. Leave room in the LAST body
+                        # chunk for the tail when possible.
+                        body_chunks: list[str] = []
+                        i = 0
+                        while i < len(answer):
+                            chunk = answer[i:i + LIMIT]
+                            body_chunks.append(chunk)
+                            i += LIMIT
+                        # Try to merge tail into last body chunk.
+                        if (
+                            body_chunks
+                            and len(body_chunks[-1]) + len(tail) + 2 <= LIMIT
+                        ):
+                            body_chunks[-1] = f"{body_chunks[-1]}\n\n{tail}"
+                            tail_msg = None
+                        else:
+                            tail_msg = tail
+                        for c in body_chunks:
+                            await update.message.reply_text(c)
+                        if tail_msg:
+                            await update.message.reply_text(tail_msg)
 
                     _log_channel_message(self.channel_id, username, text, answer)
 
