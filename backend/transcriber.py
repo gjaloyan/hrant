@@ -6,14 +6,19 @@ graceful `None` (with `last_error`) when nothing is reachable so the
 voice path degrades to text-only without breaking chat.
 
 Backend chain (highest first when forced=auto):
-  1. whisper_cpp     POST <base>/inference  (whisper.cpp's REST server)
-  2. openai_whisper  POST <base>/audio/transcriptions  (OpenAI-compat)
-  3. disabled        explicit off
+  1. local_whisper   POST <base>/v1/audio/transcriptions  (no-auth FastAPI
+                     wrapper around faster-whisper, e.g. the user's home
+                     server). Probed via GET <base>/health.
+  2. whisper_cpp     POST <base>/inference  (whisper.cpp's REST server)
+  3. openai_whisper  POST <base>/audio/transcriptions  (OpenAI-compat,
+                     needs api key through providers.py)
+  4. disabled        explicit off
 
 Configuration precedence:
   knowledge/transcriber_config.json  (managed by Settings UI)
   AGI_TRANSCRIBER_BACKEND env var    ("auto" by default)
-  WHISPER_CPP_URL env var             (back-compat)
+  LOCAL_WHISPER_URL env var          (override for local_whisper backend)
+  WHISPER_CPP_URL env var            (back-compat for whisper_cpp backend)
 
 Reset() drops the cached backend so a downed server can be replaced
 without restarting the agent.
@@ -33,6 +38,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_OPENAI_WHISPER_MODEL = "whisper-1"
 DEFAULT_WHISPER_CPP_MODEL = "whisper"
+DEFAULT_LOCAL_WHISPER_MODEL = "whisper-medium"
 
 
 def _config_path() -> Path:
@@ -66,6 +72,7 @@ class Transcriber:
         self._model: Optional[str] = None
         self._provider: Optional[dict] = None
         self._whisper_cpp_base: Optional[str] = None
+        self._local_whisper_base: Optional[str] = None
         self._last_error: Optional[str] = None
 
     def reset(self) -> None:
@@ -74,6 +81,7 @@ class Transcriber:
             self._model = None
             self._provider = None
             self._whisper_cpp_base = None
+            self._local_whisper_base = None
             self._last_error = None
 
     def status(self) -> dict:
@@ -102,6 +110,8 @@ class Transcriber:
         if self._backend in (None, "disabled"):
             return None
         try:
+            if self._backend == "local_whisper":
+                return self._tx_local_whisper(audio_bytes, mime_type=mime_type, filename=filename, language=language)
             if self._backend == "whisper_cpp":
                 return self._tx_whisper_cpp(audio_bytes, filename=filename, language=language)
             if self._backend == "openai_whisper":
@@ -120,13 +130,44 @@ class Transcriber:
         if forced == "disabled":
             self._backend = "disabled"
             return
-        candidates = ["whisper_cpp", "openai_whisper"] if forced == "auto" else [forced]
+        if forced == "auto":
+            candidates = ["local_whisper", "whisper_cpp", "openai_whisper"]
+        else:
+            candidates = [forced]
         for cand in candidates:
+            if cand == "local_whisper" and self._try_local_whisper(cfg):
+                return
             if cand == "whisper_cpp" and self._try_whisper_cpp(cfg):
                 return
             if cand == "openai_whisper" and self._try_openai_whisper(cfg):
                 return
         self._backend = "disabled"
+
+    def _try_local_whisper(self, cfg: dict) -> bool:
+        """No-auth FastAPI Whisper wrapper (e.g. user's home server).
+        Probed via GET /health which the server exposes for liveness;
+        a 200 with `status:ok` (or anything 2xx, since some wrappers
+        return a different shape) means we can use POST
+        /v1/audio/transcriptions for inference."""
+        cfg_l = (cfg.get("local_whisper") or {}) if cfg else {}
+        base = (cfg_l.get("url") or os.getenv("LOCAL_WHISPER_URL", "")).rstrip("/")
+        if not base:
+            return False
+        try:
+            r = httpx.get(base + "/health", timeout=2.0)
+            if r.status_code != 200:
+                self._last_error = (
+                    f"local_whisper /health returned {r.status_code}"
+                )
+                return False
+        except Exception as e:
+            self._last_error = f"local_whisper probe failed: {e}"
+            return False
+        self._backend = "local_whisper"
+        self._model = cfg_l.get("model") or DEFAULT_LOCAL_WHISPER_MODEL
+        self._local_whisper_base = base
+        self._last_error = None
+        return True
 
     def _try_whisper_cpp(self, cfg: dict) -> bool:
         cfg_w = (cfg.get("whisper_cpp") or {}) if cfg else {}
@@ -169,6 +210,35 @@ class Transcriber:
         return True
 
     # ---- backend impls ----
+
+    def _tx_local_whisper(
+        self,
+        audio_bytes: bytes,
+        *,
+        mime_type: str,
+        filename: str,
+        language: Optional[str],
+    ) -> Optional[str]:
+        """POST audio to a no-auth OpenAI-compatible Whisper wrapper.
+        Endpoint shape matches the user's local-whisper-api server:
+        `POST /v1/audio/transcriptions` with a `file` upload + a `model`
+        form field, returning JSON `{"text": "..."}`. No bearer token —
+        these servers run on a private network."""
+        if not self._local_whisper_base:
+            return None
+        files = {"file": (filename, audio_bytes, mime_type)}
+        data = {"model": self._model or DEFAULT_LOCAL_WHISPER_MODEL}
+        if language:
+            data["language"] = language
+        r = httpx.post(
+            f"{self._local_whisper_base}/v1/audio/transcriptions",
+            files=files,
+            data=data,
+            timeout=300.0,
+        )
+        r.raise_for_status()
+        body = r.json()
+        return (body.get("text") or "").strip() or None
 
     def _tx_whisper_cpp(
         self, audio_bytes: bytes, *, filename: str, language: Optional[str]
