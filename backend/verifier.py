@@ -7,6 +7,121 @@ from .llm import TaskType, router
 from .models import VerificationResult
 
 
+# Per-claim section caps. Tool result quotes are already truncated
+# upstream (Round 8: 4k preview), but we re-clip here to keep the
+# verifier prompt bounded even when the LLM cites multiple long
+# tool results. 1500 per evidence quote is enough to ground a
+# specific claim and short enough that 8-claim turns stay under 12k
+# total in the structured section.
+_VERIFIER_QUOTE_CAP = 1500
+_VERIFIER_MAX_CLAIMS_RENDERED = 15
+
+
+def _format_structured_claims_section(
+    solver_claims: list[dict],
+    tool_call_order: list[dict],
+) -> str:
+    """Render the SOLVER CLAIMS block for the verifier prompt.
+
+    `solver_claims` is the parsed list from the solver's
+    `---CLAIMS---` tail: `[{"text": str, "evidence": ["tool_1", ...]}, ...]`.
+    `tool_call_order` is `[{"name": str, "args": dict, "result": str}, ...]`
+    in the order the tools were called this turn — `tool_1` maps to
+    index 0, `tool_2` to index 1, and so on.
+
+    Output is a markdown-ish block the verifier reads alongside the
+    answer. For each claim we name the cited tools and quote what
+    they returned, so the LLM rules per-claim against the evidence
+    the solver itself committed to.
+    """
+    if not solver_claims:
+        return ""
+    lines: list[str] = [
+        "",
+        "",
+        "STRUCTURED CLAIMS (the assistant grouped its answer into atomic claims, each tagged with the tool calls it relied on — rule each one independently against the cited evidence):",
+    ]
+    for idx, item in enumerate(solver_claims[:_VERIFIER_MAX_CLAIMS_RENDERED], 1):
+        text = (item.get("text") or "").strip()
+        if not text:
+            continue
+        ev_refs = item.get("evidence") or []
+        lines.append(f"\nCLAIM {idx}: {text}")
+        if not ev_refs:
+            lines.append("  Evidence: (none — solver marks this as inference, not a quoted fact)")
+            continue
+        for ref in ev_refs:
+            tool = _resolve_tool_ref(ref, tool_call_order)
+            if tool is None:
+                lines.append(f"  Evidence {ref}: (UNRESOLVED — solver cited this ref but no such tool call exists this turn)")
+                continue
+            label = _format_tool_label(tool)
+            quote = (tool.get("result") or "").strip()
+            if len(quote) > _VERIFIER_QUOTE_CAP:
+                quote = quote[:_VERIFIER_QUOTE_CAP] + "…"
+            err_marker = " [TOOL ERROR]" if tool.get("is_error") else ""
+            lines.append(f"  Evidence {ref} = {label}{err_marker}:")
+            lines.append(f"    {quote}")
+    if len(solver_claims) > _VERIFIER_MAX_CLAIMS_RENDERED:
+        skipped = len(solver_claims) - _VERIFIER_MAX_CLAIMS_RENDERED
+        lines.append(f"\n[+{skipped} more claims omitted — render cap is {_VERIFIER_MAX_CLAIMS_RENDERED}]")
+
+    lines.append(
+        "\nWHEN A STRUCTURED CLAIMS SECTION IS PRESENT, your verified_claims / "
+        "unverified_claims / contradictions arrays MUST quote the CLAIM TEXT "
+        "exactly (so the agent can map your ruling back). Decide each:\n"
+        "- VERIFIED: the cited evidence supports the claim AND the claim is "
+        "consistent with notes/tool outputs.\n"
+        "- UNVERIFIED: the claim has no evidence (solver marked it inference) "
+        "OR the cited evidence is insufficient / off-topic.\n"
+        "- CONTRADICTION: cited evidence directly contradicts the claim, OR "
+        "the claim asserts the absence of a feature whose name is in "
+        "EXTRACTED IDENTIFIERS, OR cited evidence shows tool error.\n"
+    )
+    return "\n".join(lines)
+
+
+def _resolve_tool_ref(ref: str, tool_call_order: list[dict]) -> dict | None:
+    """`tool_3` → tool_call_order[2]. Returns None for malformed refs
+    or out-of-range indices."""
+    if not ref or not ref.startswith("tool_"):
+        return None
+    try:
+        idx = int(ref.split("_", 1)[1]) - 1
+    except (ValueError, IndexError):
+        return None
+    if idx < 0 or idx >= len(tool_call_order):
+        return None
+    return tool_call_order[idx]
+
+
+def _format_tool_label(tool: dict) -> str:
+    """Compact label like `read_file(backend/llm.py:1026-1180)` so the
+    verifier's prompt shows what was called, not just the index."""
+    name = tool.get("name", "?")
+    args = tool.get("args") or {}
+    if name in {"read_file", "view_file"}:
+        path = str(args.get("path", ""))
+        s = args.get("start_line")
+        e = args.get("end_line")
+        if path and s and e:
+            return f"{name}({path}:{s}-{e})"
+        if path:
+            return f"{name}({path})"
+    if name == "locate_symbol":
+        sym = str(args.get("name", ""))
+        path = str(args.get("path", ""))
+        if sym and path:
+            return f"{name}({sym}@{path})"
+    if name == "calc":
+        expr = str(args.get("expression") or args.get("expr") or "")[:60]
+        return f"{name}({expr})"
+    if name in {"web_search", "fetch_url"}:
+        target = str(args.get("query") or args.get("url") or "")[:80]
+        return f"{name}({target})"
+    return name
+
+
 # Pulls names of classes / functions / module-level vars / dotted attrs
 # out of a Python-ish tool output. We're not parsing the AST — that
 # would be overkill for fuzzy verification — just enough patterns that
@@ -328,6 +443,9 @@ def verify(
     used_topics: list[str],
     tool_context: str = "",
     on_llm_call=None,
+    *,
+    solver_claims: list[dict] | None = None,
+    tool_call_order: list[dict] | None = None,
 ) -> VerificationResult:
     """Verify the answer against notes + tool output.
 
@@ -335,6 +453,16 @@ def verify(
     callback fired after the verifier's LLM call returns. Used by the
     agent's dev-mode capture to record the verifier's actual prompts
     without re-constructing them. Best-effort — exceptions swallowed.
+
+    P0 Phase C: when `solver_claims` is provided (the structured
+    `[{"text", "evidence": ["tool_N"]}]` list parsed from the
+    solver's `---CLAIMS---` tail) AND `tool_call_order` lists the
+    tools called this turn (in order, with name+args+result), the
+    verifier prompt gains a STRUCTURED CLAIMS section binding each
+    claim to its cited evidence. The LLM rules per-claim instead of
+    extracting claims from prose. Output schema unchanged — the
+    rulings still land in verified_claims / unverified_claims /
+    contradictions, just with sharper attribution.
     """
     if not notes_text.strip() and not tool_context.strip():
         return VerificationResult(
@@ -373,11 +501,17 @@ def verify(
             f"{compressed}{idents_section}"
         )
 
+    structured_section = ""
+    if solver_claims:
+        structured_section = _format_structured_claims_section(
+            solver_claims, tool_call_order or [],
+        )
+
     user = f"""QUESTION:
 {question}
 
 ASSISTANT'S ANSWER:
-{answer}
+{answer}{structured_section}
 
 SOURCE NOTES:
 {notes_text}{tool_section}

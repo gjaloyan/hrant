@@ -244,10 +244,13 @@ _COMMON_OTHER = {
         # Retention sweep, in days. 0 = never auto-delete that subtree.
         # Inbox defaults to 90 days because user uploads accumulate
         # quickly; outbox/notes default to 0 so the agent's own work
-        # doesn't vanish on a timer.
+        # doesn't vanish on a timer. Turn records (P1 TurnWorkspace
+        # persistence — one JSON per Agent.run) accumulate fastest of
+        # all, so default 30 days; bump for longer post-mortems.
         "inbox_retention_days": 90,
         "outbox_retention_days": 0,
         "notes_retention_days": 0,
+        "turns_retention_days": 30,
     },
     "search": {
         "method": "keyword",

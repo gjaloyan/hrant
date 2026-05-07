@@ -47,7 +47,8 @@ log = logging.getLogger(__name__)
 INBOX = "inbox"
 OUTBOX = "outbox"
 NOTES = "notes"
-_SUBTREES = (INBOX, OUTBOX, NOTES)
+TURNS = "turns"
+_SUBTREES = (INBOX, OUTBOX, NOTES, TURNS)
 
 # Filename hygiene caps. 120 leaves headroom for collision suffixes
 # without hitting the typical 255-byte filename limit on most
@@ -209,6 +210,46 @@ class WorkspaceManager:
         except Exception as e:
             log.warning("workspace: meta sidecar write failed for %s: %s", target, e)
 
+    # ---------- per-turn persistence ----------
+
+    def save_turn(self, turn_id: str, data: dict) -> Path:
+        """Persist a turn's structured record under `workspace/turns/<id>.json`.
+
+        P1: every Agent.run successful turn writes a TurnWorkspace
+        artifact here — original task, claims, evidence, tool-call
+        order, verification result, token usage by stage. The runtime
+        tool-loop is unchanged (no in-flight artifact references — the
+        risk profile of touching all 5 provider loops outweighed the
+        token saving over Round 11's curated synthesis). What this
+        gives us is a stable on-disk record per turn that the WebUI
+        can query, a future evaluator can replay, and a debugger can
+        inspect days later when the user asks 'what did the agent
+        actually see when it answered X?'.
+
+        Caller-supplied `turn_id` should be a stable, sortable string
+        (typically a UTC timestamp + short hash). We don't generate
+        one here so multiple call sites that want to refer to the
+        same record from different angles can.
+
+        Returns the absolute path written.
+        """
+        with self._lock:
+            self._sweep_if_due()
+            target_dir = self.root / TURNS
+            target_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = self.safe_filename(turn_id, default="turn")
+            if not safe_id.endswith(".json"):
+                safe_id = safe_id + ".json"
+            target = target_dir / safe_id
+            try:
+                target.write_text(
+                    json.dumps(data, ensure_ascii=False, indent=2, default=str),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                log.warning("workspace.save_turn: write failed for %s: %s", target, e)
+            return target
+
     # ---------- agent-driven writes ----------
 
     def save_outbox(
@@ -297,6 +338,7 @@ class WorkspaceManager:
         inbox_retention_days: int,
         outbox_retention_days: int,
         notes_retention_days: int,
+        turns_retention_days: int = 0,
     ) -> dict[str, int]:
         """Delete files older than the retention cutoff per subtree.
 
@@ -309,8 +351,9 @@ class WorkspaceManager:
             INBOX: self._cutoff(inbox_retention_days),
             OUTBOX: self._cutoff(outbox_retention_days),
             NOTES: self._cutoff(notes_retention_days),
+            TURNS: self._cutoff(turns_retention_days),
         }
-        deleted = {INBOX: 0, OUTBOX: 0, NOTES: 0}
+        deleted = {INBOX: 0, OUTBOX: 0, NOTES: 0, TURNS: 0}
         for subtree, cutoff in cutoffs.items():
             if cutoff is None:
                 continue
@@ -369,6 +412,7 @@ class WorkspaceManager:
                 inbox_retention_days=int(ws.get("inbox_retention_days", 90) or 0),
                 outbox_retention_days=int(ws.get("outbox_retention_days", 0) or 0),
                 notes_retention_days=int(ws.get("notes_retention_days", 0) or 0),
+                turns_retention_days=int(ws.get("turns_retention_days", 30) or 0),
             )
         except Exception as e:
             log.warning("workspace: opportunistic sweep failed: %s", e)

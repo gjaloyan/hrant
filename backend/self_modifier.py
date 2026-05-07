@@ -48,12 +48,50 @@ Return strictly JSON:
       "new_code": "replacement code",
       "impact": "performance" | "reliability" | "clarity" | "feature",
       "risk": "low" | "medium" | "high",
-      "reasoning": "why this improves the code"
+      "reasoning": "why this improves the code",
+      "test_commands": ["python -m pytest tests/test_X.py -q"],
+      "success_criteria": "all listed tests pass; no new failures elsewhere",
+      "rollback_plan": "git checkout HEAD -- <file>"
     }
   ]
 }
 
+CLOSED-LOOP REQUIREMENTS:
+- `test_commands` is REQUIRED for any non-trivial patch. Each command runs
+  as a subprocess (shell=False, shlex-split) BEFORE the patch is committed
+  to disk; a non-zero exit code triggers automatic rollback.
+- Pick the narrowest test path that exercises the change. Prefer
+  `tests/test_<module>.py` over running the whole suite.
+- For pure-clarity patches with no behavioural impact, you may pass
+  `["python -m py_compile <file>"]` — just enough to confirm the file
+  still parses. The applier does py_compile anyway, so this is a no-op
+  test, but specifying it keeps the contract uniform.
+- Allowed command prefixes: `python`, `pytest`, `python -m`. Anything else
+  is rejected by the applier and the patch is treated as untestable.
+- `success_criteria` is a one-line human-readable assertion of what
+  "passing" looks like. Used in audit logs and review notes.
+- `rollback_plan` is a one-line shell snippet the user can run if the
+  applier's automatic rollback doesn't catch a regression that surfaces
+  hours later.
+
 Max 3 improvements per analysis. Only include changes you're confident about."""
+
+# Allowed command prefixes for the test-gated apply path. We're not a
+# sandbox — full shell access would let a runaway proposal `rm -rf` the
+# repo. Restricting to python-based test runners is enough to validate
+# patches without opening that door. shlex-split + checking the FIRST
+# token (or first two for `python -m`) keeps the check robust against
+# whitespace tricks.
+_ALLOWED_TEST_PREFIXES = (
+    ("pytest",),
+    ("python", "-m"),
+    ("python", "-c"),  # tiny smoke checks
+    ("python",),       # `python script.py` for verification scripts
+)
+# Per-test-command timeout. If a single test takes longer than this,
+# something is wrong (infinite loop, network call) and we'd rather
+# fail fast than block the apply for minutes.
+_TEST_COMMAND_TIMEOUT_SECONDS = 120
 
 
 class Proposal:
@@ -74,6 +112,12 @@ class Proposal:
         created: str | None = None,
         reviewed: str | None = None,
         review_note: str = "",
+        # P3 closed-loop fields. All optional / default-empty so older
+        # serialized proposals load without migration.
+        test_commands: list[str] | None = None,
+        success_criteria: str = "",
+        rollback_plan: str = "",
+        test_output: str = "",
     ):
         self.id = id or uuid.uuid4().hex[:10]
         self.module = module
@@ -84,10 +128,14 @@ class Proposal:
         self.impact = impact
         self.risk = risk
         self.reasoning = reasoning
-        self.status = status  # pending, approved, rejected, applied, failed
+        self.status = status  # pending, approved, rejected, applied, failed, tests_failed
         self.created = created or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.reviewed = reviewed
         self.review_note = review_note
+        self.test_commands = list(test_commands or [])
+        self.success_criteria = success_criteria
+        self.rollback_plan = rollback_plan
+        self.test_output = test_output
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +152,10 @@ class Proposal:
             "created": self.created,
             "reviewed": self.reviewed,
             "review_note": self.review_note,
+            "test_commands": list(self.test_commands),
+            "success_criteria": self.success_criteria,
+            "rollback_plan": self.rollback_plan,
+            "test_output": self.test_output,
         }
 
     @classmethod
@@ -185,6 +237,9 @@ class SelfModifier:
 
             proposals = []
             for imp in data.get("improvements", []):
+                raw_tests = imp.get("test_commands") or []
+                if isinstance(raw_tests, str):
+                    raw_tests = [raw_tests]
                 proposal = Proposal(
                     module=f"backend/{module_name}",
                     title=imp.get("title", ""),
@@ -194,6 +249,9 @@ class SelfModifier:
                     impact=imp.get("impact", ""),
                     risk=imp.get("risk", "low"),
                     reasoning=imp.get("reasoning", ""),
+                    test_commands=[str(t) for t in raw_tests if str(t).strip()],
+                    success_criteria=imp.get("success_criteria", ""),
+                    rollback_plan=imp.get("rollback_plan", ""),
                 )
                 self._proposals.append(proposal)
                 proposals.append(proposal)
@@ -298,6 +356,33 @@ class SelfModifier:
                     "message": f"Patch rolled back — py_compile failed: {e}",
                 }
 
+            # P3 closed-loop: if the proposal carried test_commands,
+            # run them now AGAINST THE PATCHED FILE. Any non-zero
+            # exit, timeout, or rejected command (not on the allow
+            # list) triggers a rollback and a `tests_failed` status.
+            # This is the only way an autonomous self-modification
+            # round can land on master without a regression — the
+            # patch validates itself before staying on disk.
+            if proposal.test_commands:
+                self._save()  # checkpoint before running tests
+                ok, output = _run_test_commands(
+                    proposal.test_commands, cwd=ROOT,
+                )
+                proposal.test_output = output[:8000]
+                if not ok:
+                    file_path.write_text(content, encoding="utf-8")
+                    proposal.status = "tests_failed"
+                    proposal.review_note += " | tests rejected the patch — rolled back"
+                    self._save()
+                    return {
+                        "ok": False,
+                        "message": (
+                            "Patch rolled back — test_commands failed. "
+                            f"See proposal.test_output (first lines: "
+                            f"{output[:300]}…)"
+                        ),
+                    }
+
             proposal.status = "applied"
             self._save()
             return {"ok": True, "message": f"Applied to {proposal.module}"}
@@ -347,6 +432,74 @@ class SelfModifier:
             f.name for f in self._backend_dir.glob("*.py")
             if not f.name.startswith("_")
         )
+
+
+def _validate_test_command(cmd: str) -> tuple[bool, str, list[str]]:
+    """Parse and whitelist-check a test command.
+
+    Returns `(ok, reason, argv)`. `argv` is the shlex-split list ready
+    to pass to subprocess.run with shell=False. `ok=False` means the
+    command isn't on the allowed prefix list and must NOT be executed.
+
+    Why this is strict: an LLM-proposed `rm -rf /` or `git push --force`
+    masquerading as a 'test' would be catastrophic. Limiting to
+    `python` / `python -m` / `pytest` covers every legit test scenario
+    in this codebase and rejects everything else by default.
+    """
+    import shlex
+    try:
+        argv = shlex.split(cmd)
+    except ValueError as e:
+        return False, f"unparseable command: {e}", []
+    if not argv:
+        return False, "empty command", []
+    for prefix in _ALLOWED_TEST_PREFIXES:
+        if tuple(argv[: len(prefix)]) == prefix:
+            return True, "", argv
+    return False, (
+        f"prefix not in allow-list (got {argv[:2]}, allowed: "
+        f"{_ALLOWED_TEST_PREFIXES})"
+    ), argv
+
+
+def _run_test_commands(
+    commands: list[str], *, cwd: Path,
+) -> tuple[bool, str]:
+    """Run each command in sequence; return (all_passed, combined_output).
+
+    First non-zero exit short-circuits — if any test fails, the patch
+    must roll back. Output of all tests run so far is included so the
+    proposal log records what actually happened.
+    """
+    import subprocess
+    out_lines: list[str] = []
+    for cmd in commands:
+        ok, reason, argv = _validate_test_command(cmd)
+        if not ok:
+            out_lines.append(f"[{cmd}] REJECTED: {reason}")
+            return False, "\n".join(out_lines)
+        try:
+            result = subprocess.run(
+                argv,
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=_TEST_COMMAND_TIMEOUT_SECONDS,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired:
+            out_lines.append(f"[{cmd}] TIMEOUT after {_TEST_COMMAND_TIMEOUT_SECONDS}s")
+            return False, "\n".join(out_lines)
+        except Exception as e:
+            out_lines.append(f"[{cmd}] EXCEPTION: {e}")
+            return False, "\n".join(out_lines)
+        tail = (result.stdout + "\n" + result.stderr).strip()[-2000:]
+        out_lines.append(
+            f"[{cmd}] exit={result.returncode}\n{tail}"
+        )
+        if result.returncode != 0:
+            return False, "\n".join(out_lines)
+    return True, "\n".join(out_lines)
 
 
 SELF_MODIFIER = SelfModifier()

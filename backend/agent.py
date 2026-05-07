@@ -1614,6 +1614,26 @@ class Agent:
                 usage_before=usage_before,
             )
 
+        # P0 Phase C: hand the verifier the solver's structured claims
+        # plus the tool-call order so it can rule per-claim against the
+        # exact evidence the solver cited. Both args are best-effort —
+        # missing solver tail or empty trace falls back to Phase A
+        # (legacy regex-based extraction). `tool_call_order` is built
+        # from the live thinking_trace this turn so tool_N indexing
+        # matches what the solver wrote in its tail.
+        solver_claims = getattr(self, "_last_solver_claims", None)
+        tool_call_order: list[dict] = []
+        for step in self._trace:
+            tc = step.tool_call
+            if tc is None:
+                continue
+            tool_call_order.append({
+                "name": tc.name,
+                "args": tc.args or {},
+                "result": tc.result or "",
+                "is_error": bool(tc.is_error),
+            })
+
         return verify(
             question=task,
             answer=answer,
@@ -1621,6 +1641,8 @@ class Agent:
             used_topics=[n.frontmatter.topic for n in notes],
             tool_context=tool_context,
             on_llm_call=_capture,
+            solver_claims=solver_claims,
+            tool_call_order=tool_call_order,
         )
 
     # Шаг 6
@@ -2207,6 +2229,47 @@ class Agent:
                 user_message=task,
                 solver_claims=getattr(self, "_last_solver_claims", None),
             )
+            # P1 TurnWorkspace: persist a structured record per turn so
+            # the WebUI / future evaluator / debugger can replay the
+            # full turn (tool calls, claims, evidence, verification,
+            # token usage) without bloating the live response payload.
+            # Best-effort — failures here don't block the answer.
+            turn_id = ""
+            try:
+                from datetime import datetime as _dt
+                from uuid import uuid4 as _uuid4
+                from .workspace import get_workspace
+                turn_id = (
+                    f"{_dt.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                    f"_{_uuid4().hex[:8]}"
+                )
+                tool_call_order_dump = []
+                for step in self._trace:
+                    tc = step.tool_call
+                    if tc is None:
+                        continue
+                    tool_call_order_dump.append({
+                        "name": tc.name,
+                        "args": tc.args or {},
+                        "result_preview": tc.result or "",
+                        "result_truncated": bool(tc.result_truncated),
+                        "result_full_len": int(tc.result_full_len),
+                        "is_error": bool(tc.is_error),
+                    })
+                get_workspace().save_turn(turn_id, {
+                    "turn_id": turn_id,
+                    "task": task,
+                    "answer": answer,
+                    "project": project,
+                    "verification": vr.model_dump(),
+                    "claims": [c.model_dump() for c in claims],
+                    "evidence": [e.model_dump() for e in evidence],
+                    "tool_call_order": tool_call_order_dump,
+                    "token_usage": self._get_token_usage().model_dump(),
+                    "solver_claims_raw": getattr(self, "_last_solver_claims", None),
+                })
+            except Exception as _e:
+                turn_id = ""
             return AgentAnswer(
                 answer=answer,
                 verification=vr,
@@ -2218,6 +2281,7 @@ class Agent:
                 llm_calls=self._llm_calls,
                 claims=claims,
                 evidence=evidence,
+                turn_id=turn_id,
             )
         except LLMError as e:
             err_text = _format_llm_error_short(e)

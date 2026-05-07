@@ -251,6 +251,12 @@ class AgentAnswer(BaseModel):
     # parsing the answer text themselves. Empty on chat fast-path.
     claims: list[Claim] = []
     evidence: list[EvidenceItem] = []
+    # P1 TurnWorkspace persistence: stable id of the on-disk turn
+    # record (`workspace/turns/<turn_id>.json`). Empty on chat
+    # fast-path. Lets the WebUI / future evaluator pull the full
+    # turn artifact (including tool_call_order with raw results)
+    # without bloating this response payload.
+    turn_id: str = ""
 
 
 class ChatRequest(BaseModel):
