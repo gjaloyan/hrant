@@ -507,6 +507,12 @@ class TelegramBot:
                 # Pull text from message OR caption (photos arrive with caption)
                 text = (update.message.text or update.message.caption or "").strip()
 
+                # Remember this in handle_message scope too. _gather_attachments()
+                # also computes it internally, but that local variable is not
+                # visible down in the TTS reply block. Without this, voice
+                # replies fail with: NameError: user_sent_voice is not defined.
+                user_sent_voice = bool(getattr(update.message, "voice", None))
+
                 # Pick up any media (photos / voice / audio / docs)
                 attachment_shas = await _gather_attachments(update)
 

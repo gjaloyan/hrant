@@ -74,3 +74,31 @@ def test_voice_reply_only_when_user_sent_voice_or_always():
     assert "user_sent_voice" in src
     assert "enabled_on_voice_input" in src
     assert "enabled_always" in src
+
+
+def test_user_sent_voice_defined_in_handle_message_outer_scope():
+    """Concrete regression: voice replies once failed with
+    `NameError: user_sent_voice is not defined` because the
+    variable was set INSIDE `_gather_attachments` (an inner async
+    function) but READ in the outer `handle_message` body where
+    the TTS reply block lives. The fix must keep an outer-scope
+    binding so the inner one stays optional.
+
+    We sniff the source for both:
+      - one assignment of user_sent_voice from `update.message`
+        (the outer-scope one)
+      - the inner `_gather_attachments` use against `msg.voice`
+
+    The outer assignment is what catches the NameError; if a
+    future refactor drops it, this test fails before the bot
+    silently falls over again.
+    """
+    src = inspect.getsource(ch_mod)
+    # Outer scope: binds against `update.message.voice` (handle_message
+    # uses `update.message` directly, not the local `msg` rebinding
+    # used inside _gather_attachments).
+    assert "user_sent_voice = bool(getattr(update.message" in src, (
+        "user_sent_voice must be set in handle_message's outer "
+        "scope (not just inside _gather_attachments) so the TTS "
+        "reply block at the end can read it without NameError"
+    )
