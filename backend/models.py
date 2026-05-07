@@ -115,6 +115,46 @@ class VerificationResult(BaseModel):
     notes_used: list[str] = []
 
 
+class EvidenceItem(BaseModel):
+    """A single piece of grounding for a claim.
+
+    Phase A of the claim/evidence layer: the structure is populated from
+    things that already exist (tool calls in the thinking trace, notes
+    used by the verifier, the user's own message). Phase B will have the
+    solver emit evidence directly, with quote+source bound at production
+    time. This shape is the contract between the two.
+
+    `source_type` values are deliberately small and stable so consumers
+    (WebUI, eventual claim-by-claim verifier) can branch on them
+    confidently:
+      - "tool":   came from a tool call (read_file, locate_symbol, calc, …)
+      - "memory": came from KG / notes / core memory
+      - "user":   the user said it on the current turn
+      - "model":  the model asserted it without external grounding
+    """
+    id: str
+    source_type: str = "model"
+    source_ref: str = ""        # e.g. "read_file:backend/llm.py:1026-1180"
+    quote: str = ""             # supporting snippet, optional
+    confidence: float = 1.0     # 0.0–1.0
+
+
+class Claim(BaseModel):
+    """One assertion the agent's answer makes.
+
+    Phase A populates `status` from the verifier's existing
+    {verified, unverified, contradicted} buckets and leaves
+    `evidence_ids` empty by default (no automatic mapping yet).
+    Phase B will carry evidence_ids end-to-end so the verifier can
+    rule on each claim against the snippet that supports it.
+    """
+    id: str
+    text: str
+    status: str = "unverified"  # "verified" | "unverified" | "contradicted"
+    evidence_ids: list[str] = []
+    risk: str = "low"           # "low" | "medium" | "high"
+
+
 class TokenUsage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
@@ -205,6 +245,12 @@ class AgentAnswer(BaseModel):
     # Dev-mode payload: per-LLM-call captures with file blobs redacted.
     # Empty list when nothing was recorded (chat fast-path or skipped).
     llm_calls: list[LLMCallDetail] = []
+    # Claim/evidence layer (P0). Populated from VerificationResult and
+    # the thinking_trace by `claims.build_claims_and_evidence` so
+    # consumers can render answers as "claim → its evidence" without
+    # parsing the answer text themselves. Empty on chat fast-path.
+    claims: list[Claim] = []
+    evidence: list[EvidenceItem] = []
 
 
 class ChatRequest(BaseModel):

@@ -2185,6 +2185,10 @@ class Agent:
             self._tick_goals()
             self._persist_dev_capture(task, answer, vr.confidence)
 
+            from .claims import build_claims_and_evidence
+            claims, evidence = build_claims_and_evidence(
+                vr, self._trace, user_message=task,
+            )
             return AgentAnswer(
                 answer=answer,
                 verification=vr,
@@ -2194,6 +2198,8 @@ class Agent:
                 token_usage=self._get_token_usage(),
                 thinking_trace=self._trace,
                 llm_calls=self._llm_calls,
+                claims=claims,
+                evidence=evidence,
             )
         except LLMError as e:
             err_text = _format_llm_error_short(e)
