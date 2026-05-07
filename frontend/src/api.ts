@@ -219,7 +219,11 @@ export type GapEntry = {
 };
 
 export type StreamEvent =
-  | { type: "progress"; event: string; message: string }
+  // Round B: progress events optionally carry a structured tool_call
+  // payload (every `tool`/`tool_error` step has one). When present,
+  // the WebUI can append a live ToolCallCard before the final answer
+  // arrives. Text-only events (think, solve, verify, …) omit it.
+  | { type: "progress"; event: string; message: string; tool_call?: ToolCallDetail | null }
   | { type: "answer"; data: AgentAnswer }
   | { type: "error"; message: string };
 
@@ -306,8 +310,14 @@ export async function chatStream(
   project: string | null,
   onEvent: (e: StreamEvent) => void,
   attachments: string[] = [],
+  channel: string | null = null,
 ): Promise<void> {
-  return readSSE("/api/chat", { message, project, attachments }, onEvent);
+  // Round C: channel picks which conversation bucket the turn lands
+  // in. Null = backend default ("webui"). "telegram" means the user
+  // is composing from WebUI to participate in the TG thread.
+  const body: Record<string, unknown> = { message, project, attachments };
+  if (channel) body.channel = channel;
+  return readSSE("/api/chat", body, onEvent);
 }
 
 // ---- Knowledge ----

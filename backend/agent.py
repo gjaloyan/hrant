@@ -619,10 +619,10 @@ def _looks_like_self_analysis_request(text: str) -> bool:
 
 
 # ---------- тип колбэка для прогресса ----------
-ProgressCB = Callable[[str, str], None]  # (event, message)
+ProgressCB = Callable[..., None]  # (event, message, tool_call: ToolCallDetail|None=None)
 
 
-def _noop(_evt: str, _msg: str) -> None:
+def _noop(_evt: str, _msg: str, _tc: "ToolCallDetail | None" = None) -> None:
     pass
 
 
@@ -751,7 +751,16 @@ class Agent:
             tokens_so_far=usage["total_tokens"],
             tool_call=tool_call,
         ))
-        self._user_progress(event, message)
+        # Round B: pass tool_call to the consumer callback when
+        # available so the WebUI can render OpenClaw-style pills as
+        # the agent works (vs. only after agent.run() finishes). The
+        # try/except handles legacy callbacks that only accept (event,
+        # message) — Telegram's progress streamer uses the 2-arg form
+        # for the placeholder text, never the 3-arg form.
+        try:
+            self._user_progress(event, message, tool_call)
+        except TypeError:
+            self._user_progress(event, message)
 
     # Шаг 1
     def _load_core(self) -> str:

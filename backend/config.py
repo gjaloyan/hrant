@@ -234,6 +234,20 @@ _COMMON_OTHER = {
         "finetune_min_examples": 50,
         "note_max_tokens": 1500,
     },
+    "tts": {
+        # Voice output policy. By default the agent replies with a
+        # synthesized voice ONLY when the incoming message was a
+        # voice message (mirrors human conversational habit — voice
+        # in, voice out). Set `enabled_always` to true to make every
+        # answer go out as both text + voice.
+        "enabled_on_voice_input": True,
+        "enabled_always": False,
+        # Cap on synthesised text length per turn — protect against
+        # 8000-char review-style answers being rendered as 4-minute
+        # audio. The voice reply gets the first N chars; user reads
+        # the rest in the text bubble.
+        "max_chars": 1000,
+    },
     "workspace": {
         # Real on-disk tree the agent reads from / writes to. Uploaded
         # files are mirrored from the sha-keyed attachment store into
@@ -346,6 +360,10 @@ class Config:
     @property
     def workspace(self) -> dict:
         return self._data.get("workspace") or {}
+
+    @property
+    def tts(self) -> dict:
+        return self._data.get("tts") or {}
 
     @property
     def verification(self) -> dict:

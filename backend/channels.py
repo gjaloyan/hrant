@@ -383,6 +383,7 @@ class TelegramBot:
                         log.warning("Telegram photo download failed: %s", e)
 
                 # Voice → store + try to transcribe
+                user_sent_voice = bool(getattr(msg, "voice", None))
                 if getattr(msg, "voice", None):
                     try:
                         f = await msg.voice.get_file()
@@ -606,6 +607,42 @@ class TelegramBot:
                             await update.message.reply_text(c)
                         if tail_msg:
                             await update.message.reply_text(tail_msg)
+
+                    # Round D: voice reply. When the user sent a voice
+                    # message AND TTS is configured + enabled, also
+                    # send the answer as audio. Best-effort — failure
+                    # falls back to text-only without raising.
+                    try:
+                        from .config import CONFIG as _C
+                        from .tts import SYNTHESIZER as _TTS
+                        tts_cfg = _C.tts
+                        speak = (
+                            tts_cfg.get("enabled_always", False)
+                            or (
+                                user_sent_voice
+                                and tts_cfg.get("enabled_on_voice_input", True)
+                            )
+                        )
+                        if speak and answer.strip():
+                            cap = int(tts_cfg.get("max_chars", 1000) or 1000)
+                            spoken = (answer or "").strip()
+                            if len(spoken) > cap:
+                                spoken = spoken[:cap]
+                            audio = await running_loop.run_in_executor(
+                                None,
+                                lambda: _TTS.synthesize(spoken),
+                            )
+                            if audio:
+                                # Telegram's voice bubble prefers OGG/Opus; WAV
+                                # from Piper may render as a generic audio file.
+                                # That's still useful for the user — TG plays
+                                # both inline. send_audio is the safer path.
+                                await update.message.reply_audio(
+                                    audio=audio,
+                                    title="agent voice reply",
+                                )
+                    except Exception as _tts_err:
+                        log.warning("TTS reply failed: %s", _tts_err)
 
                     _log_channel_message(self.channel_id, username, text, answer)
 

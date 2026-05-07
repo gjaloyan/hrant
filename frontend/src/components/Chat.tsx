@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import {
   AgentAnswer, chatStream, StreamEvent, addFromChat, addCorrection, fetchCurrentSession,
   fetchActiveModel, setActiveModel, clearActiveModel,
-  fetchTurn,
+  fetchTurn, fetchConversation,
   type ActiveModelSelection, type AvailableModel,
   type AttachmentMeta, uploadAttachment, transcribeAudio, attachmentUrl,
   type ThinkingStep, type TurnArtifact,
@@ -282,6 +282,31 @@ const Chat = forwardRef<ChatHandle, {
       return false;
     }
   });
+  // Round C: which channel's conversation history is currently
+  // displayed. "webui" (default) shows the WebUI bucket; "telegram"
+  // shows the Telegram bucket. Sending a message while on
+  // channel=telegram tags it under the TG bucket so the agent's
+  // memory of the TG thread stays continuous when the next real TG
+  // message arrives. Persists in localStorage so the user's last
+  // selection survives reload.
+  const [channel, setChannelState] = useState<string>(() => {
+    try {
+      return localStorage.getItem("agi.channel") || "webui";
+    } catch {
+      return "webui";
+    }
+  });
+  const setChannel = (c: string) => {
+    try {
+      localStorage.setItem("agi.channel", c);
+    } catch {
+      /* ignore */
+    }
+    setChannelState(c);
+    // Force a re-load so history matches the new filter.
+    setLoaded(false);
+    setMsgs([]);
+  };
   const endRef = useRef<HTMLDivElement>(null);
 
   // Multimodal: pending attachments + voice recording
@@ -453,25 +478,52 @@ const Chat = forwardRef<ChatHandle, {
     }
   };
 
-  // Load current session's turns on mount (survives server restart)
+  // Load current channel's turns on mount or when channel changes.
+  // - "webui" → fetchCurrentSession (rich session view)
+  // - other channels → fetchConversation(channel) which returns
+  //   ConversationTurnRow rows from CONVERSATION (channel-tagged)
   useEffect(() => {
     if (loaded) return;
     loadModels();
     (async () => {
       try {
-        const data = await fetchCurrentSession();
-        if (data.session && data.session.turns && data.session.turns.length > 0) {
-          const restored: Msg[] = [];
-          for (const t of data.session.turns) {
+        let restored: Msg[] = [];
+        if (channel === "webui") {
+          const data = await fetchCurrentSession();
+          if (data.session && data.session.turns && data.session.turns.length > 0) {
+            for (const t of data.session.turns) {
+              restored.push({ role: "user", text: t.user });
+              restored.push({
+                role: "agent",
+                text: t.answer,
+                turn_id: t.turn_id || "",
+                meta: {
+                  answer: t.answer,
+                  verification: {
+                    confidence: t.confidence ?? 0,
+                    verified_claims: [],
+                    unverified_claims: [],
+                    contradictions: [],
+                    notes_used: [],
+                  },
+                  learned_topics: [],
+                  used_topics: t.topics ?? [],
+                  is_chat: t.is_chat,
+                },
+              });
+            }
+          }
+        } else {
+          // Round C: cross-channel view (e.g. "telegram"). Use the
+          // channel-aware conversation endpoint. Returns lighter
+          // rows (no thinking_trace inline); turn_id powers lazy
+          // load on expand exactly like the webui path.
+          const data = await fetchConversation(channel, 50);
+          for (const t of data.turns) {
             restored.push({ role: "user", text: t.user });
             restored.push({
               role: "agent",
               text: t.answer,
-              // Round A: thread the on-disk turn pointer through so
-              // expanding the "🔧 tools" section lazy-loads the full
-              // thinking_trace via /api/turns/<turn_id>. session
-              // turn rows now include `turn_id` (chat.py SSE adds
-              // it to SESSIONS.add_turn).
               turn_id: t.turn_id || "",
               meta: {
                 answer: t.answer,
@@ -488,13 +540,15 @@ const Chat = forwardRef<ChatHandle, {
               },
             });
           }
+        }
+        if (restored.length > 0) {
           setMsgs(restored);
           setTimeout(() => endRef.current?.scrollIntoView({ behavior: "auto" }), 100);
         }
       } catch { /* ignore — first load with empty session */ }
       setLoaded(true);
     })();
-  }, [loaded]);
+  }, [loaded, channel]);
 
   const send = async () => {
     if ((!input.trim() && pending.length === 0) || busy) return;
@@ -515,7 +569,46 @@ const Chat = forwardRef<ChatHandle, {
         setMsgs((m) => {
           const copy = [...m];
           const last = copy[copy.length - 1];
-          if (last.role === "agent") last.progress = [...progress];
+          if (last.role === "agent") {
+            last.progress = [...progress];
+            // Round B: live tool cards. When the SSE progress event
+            // carries a structured tool_call (every tool/tool_error
+            // step has one), append a synthetic ThinkingStep to
+            // meta.thinking_trace so the existing ToolCallCard
+            // renderer picks it up immediately. The final "answer"
+            // event later overwrites meta with the canonical full
+            // trace from AgentAnswer — this is just to keep the UI
+            // responsive while the agent is still working.
+            if (ev.tool_call) {
+              const synthetic: ThinkingStep = {
+                ts: 0, // exact ts comes with the final answer payload
+                event: ev.event || "tool",
+                message: ev.message,
+                tokens_so_far: 0,
+                tool_call: ev.tool_call,
+              };
+              const meta = last.meta || {
+                answer: "",
+                verification: {
+                  confidence: 0,
+                  verified_claims: [],
+                  unverified_claims: [],
+                  contradictions: [],
+                  notes_used: [],
+                },
+                learned_topics: [],
+                used_topics: [],
+                thinking_trace: [],
+              };
+              last.meta = {
+                ...meta,
+                thinking_trace: [
+                  ...(meta.thinking_trace || []),
+                  synthetic,
+                ],
+              };
+            }
+          }
           return copy;
         });
         scroll();
@@ -541,7 +634,7 @@ const Chat = forwardRef<ChatHandle, {
           return copy;
         });
       }
-    }, attached.map((a) => a.sha256));
+    }, attached.map((a) => a.sha256), channel);
 
     setBusy(false);
     onRefreshStatus();
@@ -870,6 +963,20 @@ const Chat = forwardRef<ChatHandle, {
           >
             🔬 dev
           </button>
+
+          {/* Round C: channel selector. Switching reloads history
+              from the channel's bucket; sending tags the new turn
+              with this channel so cross-channel composition keeps
+              context continuous. */}
+          <select
+            value={channel}
+            onChange={(e) => setChannel(e.target.value)}
+            title="Which channel's conversation are you working with"
+            className="bg-slate-800 hover:bg-slate-700 rounded px-2 py-1 text-xs text-slate-300 border-0 focus:ring-1 focus:ring-slate-600"
+          >
+            <option value="webui">💻 webui</option>
+            <option value="telegram">📱 telegram</option>
+          </select>
 
           {showModelPicker && (
             <div className="absolute bottom-full left-0 mb-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 min-w-[300px] max-h-[400px] overflow-y-auto">

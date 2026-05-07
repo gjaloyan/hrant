@@ -22,19 +22,41 @@ router = APIRouter()
 async def chat(req: ChatRequest):
     queue: asyncio.Queue = asyncio.Queue()
 
-    def progress(event: str, msg: str) -> None:
-        queue.put_nowait({"type": "progress", "event": event, "message": msg})
+    def progress(event: str, msg: str, tool_call=None) -> None:
+        # Round B: live tool-call streaming. When the agent's
+        # progress() carries a structured ToolCallDetail (every
+        # `event == "tool"` / `"tool_error"` step has one), serialize
+        # it into the SSE payload so the WebUI can append a
+        # ToolCallCard to the in-progress message in real time. For
+        # text-only events (think, solve, verify, micro_ack, …) the
+        # tool field is omitted, keeping the payload tiny.
+        evt: dict = {"type": "progress", "event": event, "message": msg}
+        if tool_call is not None:
+            try:
+                evt["tool_call"] = tool_call.model_dump()
+            except Exception:
+                evt["tool_call"] = None
+        queue.put_nowait(evt)
 
     agent = Agent(progress=progress)
 
     async def runner():
         try:
+            # Round C: caller can pick which channel context the
+            # message belongs to. Default "webui" preserves prior
+            # behaviour. "telegram" means the user is composing in
+            # the WebUI to participate in the TG conversation
+            # context; conversation memory + turn record are tagged
+            # accordingly so a later TG turn picks up the thread.
+            target_channel = (req.channel or "webui").strip().lower()
+            if target_channel not in ("webui", "telegram"):
+                target_channel = "webui"
             res = await asyncio.to_thread(
                 lambda: agent.run(
                     req.message,
                     req.project or PROJECTS.current,
                     req.attachments or None,
-                    channel="webui",
+                    channel=target_channel,
                 ),
             )
             turn = {
@@ -51,7 +73,7 @@ async def chat(req: ChatRequest):
                 # tool cards on history restore + channel for the
                 # upcoming WebUI dropdown filter.
                 "turn_id": getattr(res, "turn_id", "") or "",
-                "channel": "webui",
+                "channel": target_channel,
             }
             SESSIONS.add_turn(turn)
             if res.thinking_trace:
