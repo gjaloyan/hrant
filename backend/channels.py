@@ -300,6 +300,11 @@ class TelegramBot:
         self._running = False
         self._app = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Track the most recent chat_id we've received a message from
+        # on this bot. Used by send_text() so the WebUI's
+        # "compose-as-telegram" mode can deliver the agent's reply
+        # back to the user's TG without us having to enumerate chats.
+        self._last_chat_id: int | None = None
 
     def start(self) -> None:
         if self._running:
@@ -321,6 +326,50 @@ class TelegramBot:
             self._thread.join(timeout=5)
             self._thread = None
         log.info("Telegram bot %s stopped", self.channel_id)
+
+    def send_text(self, text: str, *, chat_id: int | None = None) -> bool:
+        """Round E: deliver `text` to a Telegram chat without going
+        through agent.run. Used by the WebUI's "compose-as-telegram"
+        mode — the agent processes the message in WebUI but the
+        finished answer also lands in the user's Telegram bubble so
+        the conversation thread stays continuous in TG.
+
+        `chat_id` defaults to the most-recent chat we've received a
+        message from (`_last_chat_id`); pass an explicit id when
+        you want to target a specific user. Returns True on
+        successful schedule (delivery is async — failures surface
+        as warnings in the bot log).
+
+        Splits long bodies at Telegram's 4096-char limit so the call
+        doesn't 400 on a long agent answer.
+        """
+        target = chat_id if chat_id is not None else self._last_chat_id
+        if target is None or not self._running or not self._app or not self._loop:
+            return False
+        body = (text or "").strip()
+        if not body:
+            return False
+        LIMIT = 4000
+        chunks: list[str] = []
+        i = 0
+        while i < len(body):
+            chunks.append(body[i : i + LIMIT])
+            i += LIMIT
+
+        async def _send_all() -> None:
+            for chunk in chunks:
+                try:
+                    await self._app.bot.send_message(chat_id=target, text=chunk)
+                except Exception as e:
+                    log.warning("TG send_text failed on bot %s chat %s: %s",
+                                self.channel_id, target, e)
+                    return
+        try:
+            asyncio.run_coroutine_threadsafe(_send_all(), self._loop)
+            return True
+        except Exception as e:
+            log.warning("TG send_text scheduling failed on %s: %s", self.channel_id, e)
+            return False
 
     @property
     def is_running(self) -> bool:
@@ -445,6 +494,15 @@ class TelegramBot:
                 if allowed and username not in allowed and str(user.id) not in allowed:
                     await update.message.reply_text("Access denied.")
                     return
+
+                # Round E (TG forward): remember this chat_id so the
+                # WebUI's "compose-as-telegram" mode can deliver the
+                # agent's reply back here. Last writer wins — the most
+                # recent TG conversation is the one a WebUI compose
+                # targets. Multi-user TG bots would need a fancier
+                # routing layer; for a personal assistant this is
+                # exactly the desired behaviour.
+                self._last_chat_id = update.message.chat.id
 
                 # Pull text from message OR caption (photos arrive with caption)
                 text = (update.message.text or update.message.caption or "").strip()
@@ -783,6 +841,24 @@ class ChannelManager:
     def stop_all(self) -> None:
         for cid in list(self._bots.keys()):
             self.stop_channel(cid)
+
+    def send_to_first_telegram(self, text: str) -> bool:
+        """Round E: forward arbitrary text to the first running
+        Telegram bot's most-recent chat. Used by the WebUI's
+        compose-as-telegram mode after agent.run completes — the
+        answer renders in the WebUI AND lands in the user's TG so
+        the conversation thread stays continuous.
+
+        Returns True on successful schedule, False when no bot is
+        running or it has never received a message (no chat_id to
+        reply to). Multi-bot or multi-user routing would need a
+        richer addressing scheme; for a personal assistant the
+        first-running-bot heuristic is exactly right.
+        """
+        for bot in self._bots.values():
+            if bot.is_running:
+                return bot.send_text(text)
+        return False
 
 
 CHANNELS = ChannelManager()

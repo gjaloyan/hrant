@@ -84,82 +84,95 @@ function LLMCallItem({ call }: { call: import("../api").LLMCallDetail }) {
   );
 }
 
-// OpenClaw-style tool card: compact pill in collapsed state, expands
-// to a body with TOOL INPUT (JSON args) and the tool result. The
-// `kind` prop decides the header label — "Tool call" for the request
-// row, "Tool output" for the response row. We don't try to pair them
-// into a single card here (the trace gives us calls + outputs as
-// separate steps in order); each renders as its own card.
-function ToolCallCard({
-  step,
-  kind = "auto",
-}: {
-  step: ThinkingStep;
-  kind?: "call" | "output" | "auto";
-}) {
+// OpenClaw-style tool card. Each step in our thinking trace already
+// pairs a tool's args + its result on a single ToolCallDetail (the
+// `_on_tool_call` callback fires once when the tool returns). So one
+// card = one tool invocation = one Tool call + Tool output pair.
+// Collapsed pill matches OpenClaw's neutral-grey aesthetic; expanded
+// body shows TOOL INPUT (JSON args) over Tool output (auto-formatted
+// JSON or plain text) with a thin separator between sections.
+function ToolCallCard({ step }: { step: ThinkingStep }) {
   const tc = step.tool_call;
   const [open, setOpen] = useState(false);
   if (!tc) return null;
-  // Auto-pick label: "Tool output" when there's a result body to show,
-  // "Tool call" otherwise. Errors always render as Tool output (they
-  // ARE the result of the call, just a failed one).
-  const label =
-    kind !== "auto"
-      ? kind === "call"
-        ? "Tool call"
-        : "Tool output"
-      : tc.result || tc.is_error
-        ? "Tool output"
-        : "Tool call";
-  const tone = tc.is_error
-    ? "text-rose-400"
-    : label === "Tool call"
-      ? "text-sky-300"
-      : "text-emerald-300";
+  // Status icon. Done + result → ✓, error → ✗, no result yet → spinner.
+  // Used both as the icon at the right edge of the pill and as a
+  // visual cue on the tag.
+  const hasResult = Boolean((tc.result || "").trim());
+  const status = tc.is_error ? "error" : hasResult ? "ok" : "pending";
   const argsKeys = Object.keys(tc.args || {});
   const hasArgs = argsKeys.length > 0;
-  const hasResult = Boolean((tc.result || "").trim());
-
-  // Compact one-line summary that wraps below the header on hover —
-  // OpenClaw shows it as italic gray text under the label.
-  const summary = buildToolSummary(tc, label);
+  const summary = buildToolSummary(tc);
 
   return (
-    <div className="rounded-md bg-slate-900/40 border border-slate-800/60 overflow-hidden">
+    <div
+      className={`rounded-md overflow-hidden border ${
+        status === "error"
+          ? "bg-rose-950/30 border-rose-900/40"
+          : "bg-neutral-900/60 border-white/[0.06]"
+      }`}
+    >
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] hover:bg-slate-800/40 transition-colors"
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] text-left hover:bg-white/[0.03] transition-colors"
       >
-        <span className="text-slate-600 select-none">·</span>
-        <span className="text-amber-300 select-none" aria-hidden>⚡</span>
-        <span className={`font-medium ${tone}`}>{label}</span>
-        <span className="font-mono text-[10px] text-slate-500">{tc.name}</span>
-        <span className="ml-auto text-[10px] text-slate-600 select-none">
+        <span className="text-neutral-600 select-none leading-none">·</span>
+        <span
+          className={`select-none leading-none ${
+            status === "error" ? "text-rose-400" : "text-amber-400/90"
+          }`}
+          aria-hidden
+        >
+          ⚡
+        </span>
+        <span className="font-medium text-neutral-200 lowercase">
+          {status === "error" ? "tool error" : "tool call"}
+        </span>
+        <span className="font-mono text-[10px] text-amber-400/70 px-1.5 py-0.5 rounded bg-white/[0.04]">
+          {tc.name}
+        </span>
+        {summary && !open && (
+          <span className="hidden sm:inline truncate text-[10px] text-neutral-500 italic">
+            {summary}
+          </span>
+        )}
+        <span
+          className={`ml-auto text-[10px] select-none ${
+            status === "error"
+              ? "text-rose-400"
+              : status === "ok"
+                ? "text-emerald-500/70"
+                : "text-neutral-600"
+          }`}
+        >
+          {status === "error" ? "✗" : status === "ok" ? "✓" : "…"}
+        </span>
+        <span className="text-[10px] text-neutral-600 select-none ml-1">
           {open ? "▾" : "▸"}
         </span>
       </button>
       {open && (
-        <div className="px-3 pb-2 pt-1 border-t border-slate-800/60 space-y-2 text-[11px]">
+        <div className="px-3 pb-2 pt-1 border-t border-white/[0.05] space-y-2 text-[11px]">
           {summary && (
-            <div className="text-slate-400 italic leading-snug">{summary}</div>
+            <div className="text-neutral-400 italic leading-snug">{summary}</div>
           )}
           {hasArgs && (
             <div>
-              <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">
+              <div className="text-[9px] uppercase tracking-[0.08em] text-neutral-500 mb-1">
                 Tool input
               </div>
-              <pre className="bg-slate-950/80 rounded p-2 overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-snug max-h-64">
+              <pre className="bg-black/40 rounded p-2 overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-snug max-h-64 text-neutral-200">
                 {JSON.stringify(tc.args, null, 2)}
               </pre>
             </div>
           )}
           {hasResult && (
             <div>
-              <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1 flex items-center gap-2">
-                <span>Tool output{tc.is_error ? " · ERROR" : ""}</span>
+              <div className="text-[9px] uppercase tracking-[0.08em] text-neutral-500 mb-1 flex items-center gap-2">
+                <span>Tool output{tc.is_error ? " · error" : ""}</span>
                 {tc.result_truncated && tc.result_full_len ? (
-                  <span className="text-amber-400 normal-case tracking-normal text-[9px]">
+                  <span className="text-amber-400/80 normal-case tracking-normal text-[9px]">
                     preview, {tc.result.length.toLocaleString()} of{" "}
                     {tc.result_full_len.toLocaleString()} chars
                   </span>
@@ -168,7 +181,7 @@ function ToolCallCard({
               <ToolResultBody text={tc.result || ""} />
             </div>
           )}
-          <div className="flex items-center gap-3 text-[9px] text-slate-600 pt-1 border-t border-slate-800/40">
+          <div className="flex items-center gap-3 text-[9px] text-neutral-600 pt-1 border-t border-white/[0.04]">
             <span>{step.ts.toFixed(1)}s</span>
             {tc.duration_ms ? (
               <span>{(tc.duration_ms / 1000).toFixed(1)}s exec</span>
@@ -181,21 +194,19 @@ function ToolCallCard({
 }
 
 // One-line italic detail under the header, OpenClaw-style. Picks the
-// most identifying argument(s) for the tool. Falls back to a short
-// preview of the first non-blank result line for output-style cards.
+// most identifying argument(s) for the tool. The pill is one
+// tool-pair (call + output) per ThinkingStep, so the summary always
+// describes the call's intent — `read_file:backend/llm.py:1026-1180`,
+// `calc:2+2`, etc. Falls back to a comma-joined args list for tools
+// we don't have a custom format for.
 function buildToolSummary(
   tc: NonNullable<ThinkingStep["tool_call"]>,
-  label: string,
 ): string {
   const args = tc.args || {};
   const a = (k: string): string => {
     const v = (args as Record<string, unknown>)[k];
     return typeof v === "string" ? v : v == null ? "" : JSON.stringify(v);
   };
-  if (label === "Tool output") {
-    const firstLine = (tc.result || "").split("\n").find((l) => l.trim()) || "";
-    return firstLine.length > 200 ? firstLine.slice(0, 200) + "…" : firstLine;
-  }
   if (tc.name === "read_file" || tc.name === "view_file") {
     const path = a("path");
     const s = a("start_line");

@@ -82,6 +82,37 @@ async def chat(req: ChatRequest):
                     trace=[s.model_dump() for s in res.thinking_trace],
                     usage=res.token_usage.model_dump() if res.token_usage else {},
                 )
+            # Round E: TG forward. When the WebUI composed this turn
+            # AS-IF it came from Telegram (channel=telegram), drop
+            # the answer into the TG bot's most-recent chat too so
+            # the user's TG thread doesn't go silent. Best-effort —
+            # forwarding failure leaves the WebUI answer intact.
+            if target_channel == "telegram":
+                try:
+                    from ..channels import CHANNELS
+                    forwarded = CHANNELS.send_to_first_telegram(res.answer or "")
+                    if not forwarded:
+                        # Surface the no-bot-running case so the user
+                        # in WebUI knows why TG stayed quiet. It
+                        # rides on the SSE stream as a synthetic
+                        # progress message; the answer event still
+                        # arrives normally below.
+                        queue.put_nowait({
+                            "type": "progress",
+                            "event": "tg_forward",
+                            "message": (
+                                "TG forward skipped: no Telegram bot is "
+                                "currently running or it has no chat to "
+                                "reply to yet. Send a message to the bot "
+                                "from Telegram first."
+                            ),
+                        })
+                except Exception as _e:
+                    queue.put_nowait({
+                        "type": "progress",
+                        "event": "tg_forward",
+                        "message": f"TG forward error: {_e}",
+                    })
             queue.put_nowait({"type": "answer", "data": res.model_dump()})
         except Exception as e:
             queue.put_nowait({"type": "error", "message": str(e)})
