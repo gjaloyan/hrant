@@ -68,6 +68,9 @@ class ConversationMemory:
         *,
         channel: str = "webui",
         turn_id: str = "",
+        token_usage: Optional[dict] = None,
+        n_tool_calls: int = 0,
+        n_llm_calls: int = 0,
     ) -> None:
         """Record one conversation turn (user question + agent response).
 
@@ -102,6 +105,16 @@ class ConversationMemory:
             turn["topics"] = topics_used
         if turn_id:
             turn["turn_id"] = turn_id
+        # Round F-pre: stamp summary fields so WebUI badges (token
+        # bar + tool / LLM call counts) survive page refresh without
+        # the lazy /api/turns/<id> fetch. Heavy data (full
+        # thinking_trace) is still fetched on expand.
+        if token_usage:
+            turn["token_usage"] = token_usage
+        if n_tool_calls:
+            turn["n_tool_calls"] = int(n_tool_calls)
+        if n_llm_calls:
+            turn["n_llm_calls"] = int(n_llm_calls)
 
         self._turns.append(turn)
         # Trim to max

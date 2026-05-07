@@ -209,6 +209,13 @@ export type ConversationTurn = {
   // branch never write a turn artefact).
   turn_id?: string;
   channel?: string;
+  // Round F-pre: cheap summary fields persisted alongside the row
+  // so WebUI badges (token bar + tool / LLM call counts) restore
+  // immediately on page refresh, without waiting for the lazy
+  // /api/turns/<id> fetch.
+  token_usage?: TokenUsage | null;
+  n_tool_calls?: number;
+  n_llm_calls?: number;
 };
 
 export type GapEntry = {

@@ -59,6 +59,19 @@ async def chat(req: ChatRequest):
                     channel=target_channel,
                 ),
             )
+            # Round F-pre: include cheap summary fields directly in
+            # the session row so the WebUI badges (token usage, tool
+            # count, LLM count) survive a page refresh without
+            # waiting for the lazy /api/turns/<id> fetch. Heavy data
+            # (full thinking_trace, claims, evidence) still comes
+            # via lazy load — these are just the ~5 small numbers a
+            # restored chat needs to show counts and a token bar.
+            tu = res.token_usage
+            n_tools = sum(
+                1 for s in (res.thinking_trace or [])
+                if s.tool_call and (s.event == "tool" or s.event == "tool_error")
+            )
+            n_llm = len(res.llm_calls or [])
             turn = {
                 "ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "user": req.message,
@@ -67,13 +80,11 @@ async def chat(req: ChatRequest):
                 "is_chat": bool(res.is_chat),
                 "confidence": res.verification.confidence if res.verification else 0,
                 "topics": res.used_topics or [],
-                # Round A: stamp the session entry with the on-disk
-                # turn artefact id (P1) + the channel that produced
-                # it. The frontend uses turn_id for lazy-loading
-                # tool cards on history restore + channel for the
-                # upcoming WebUI dropdown filter.
                 "turn_id": getattr(res, "turn_id", "") or "",
                 "channel": target_channel,
+                "token_usage": tu.model_dump() if tu else None,
+                "n_tool_calls": n_tools,
+                "n_llm_calls": n_llm,
             }
             SESSIONS.add_turn(turn)
             if res.thinking_trace:

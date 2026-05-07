@@ -5,7 +5,7 @@ import {
   fetchTurn, fetchConversation,
   type ActiveModelSelection, type AvailableModel,
   type AttachmentMeta, uploadAttachment, transcribeAudio, attachmentUrl,
-  type ThinkingStep, type TurnArtifact,
+  type ThinkingStep, type TurnArtifact, type TokenUsage,
 } from "../api";
 
 type Msg =
@@ -25,6 +25,12 @@ type Msg =
       turn_id?: string;
       lazy_loading?: boolean;
       lazy_error?: string;
+      // Round F-pre: counts surfaced from the persisted session/conv
+      // row so we can render "🔧 tools: N calls" + "🔬 LLM calls: N"
+      // on restored messages WITHOUT lazy-fetching the full trace.
+      // Live messages set these via the answer event.
+      n_tool_calls?: number;
+      n_llm_calls?: number;
     };
 
 export type ChatHandle = {
@@ -84,25 +90,30 @@ function LLMCallItem({ call }: { call: import("../api").LLMCallDetail }) {
   );
 }
 
-// OpenClaw-style tool card. Each step in our thinking trace already
-// pairs a tool's args + its result on a single ToolCallDetail (the
-// `_on_tool_call` callback fires once when the tool returns). So one
-// card = one tool invocation = one Tool call + Tool output pair.
-// Collapsed pill matches OpenClaw's neutral-grey aesthetic; expanded
-// body shows TOOL INPUT (JSON args) over Tool output (auto-formatted
-// JSON or plain text) with a thin separator between sections.
+// OpenClaw-style tool card. Round F: progressive reveal — the
+// agent emits two events per tool, "tool_starting" (just args,
+// before execution) and "tool" / "tool_error" (with result, after
+// execution). Each shows as its own card in the trace order:
+//   ▸ ⚡ Tool call · read_file        (pending …)
+//   ▸ ⚡ Tool output · read_file      (got 4 KB ✓)
+// matching OpenClaw screenshots. The `kind` is auto-derived from
+// the step's event so the same component renders both.
 function ToolCallCard({ step }: { step: ThinkingStep }) {
   const tc = step.tool_call;
   const [open, setOpen] = useState(false);
   if (!tc) return null;
-  // Status icon. Done + result → ✓, error → ✗, no result yet → spinner.
-  // Used both as the icon at the right edge of the pill and as a
-  // visual cue on the tag.
+  const isStarting = step.event === "tool_starting";
+  const isError = tc.is_error || step.event === "tool_error";
   const hasResult = Boolean((tc.result || "").trim());
-  const status = tc.is_error ? "error" : hasResult ? "ok" : "pending";
+  const status = isError ? "error" : isStarting ? "pending" : hasResult ? "ok" : "pending";
   const argsKeys = Object.keys(tc.args || {});
   const hasArgs = argsKeys.length > 0;
   const summary = buildToolSummary(tc);
+  const headerLabel = isError
+    ? "tool error"
+    : isStarting
+      ? "tool call"
+      : "tool output";
 
   return (
     <div
@@ -127,7 +138,7 @@ function ToolCallCard({ step }: { step: ThinkingStep }) {
           ⚡
         </span>
         <span className="font-medium text-neutral-200 lowercase">
-          {status === "error" ? "tool error" : "tool call"}
+          {headerLabel}
         </span>
         <span className="font-mono text-[10px] text-amber-400/70 px-1.5 py-0.5 rounded bg-white/[0.04]">
           {tc.name}
@@ -508,6 +519,8 @@ const Chat = forwardRef<ChatHandle, {
                 role: "agent",
                 text: t.answer,
                 turn_id: t.turn_id || "",
+                n_tool_calls: t.n_tool_calls ?? 0,
+                n_llm_calls: t.n_llm_calls ?? 0,
                 meta: {
                   answer: t.answer,
                   verification: {
@@ -520,6 +533,12 @@ const Chat = forwardRef<ChatHandle, {
                   learned_topics: [],
                   used_topics: t.topics ?? [],
                   is_chat: t.is_chat,
+                  // Round F-pre: token bar comes from persisted row
+                  // so a refresh keeps showing it without a lazy
+                  // fetch. Cast through unknown because the
+                  // ConversationTurn / SessionTurn types differ
+                  // slightly but both carry this same shape.
+                  token_usage: (t as { token_usage?: TokenUsage | null }).token_usage ?? undefined,
                 },
               });
             }
@@ -766,25 +785,35 @@ const Chat = forwardRef<ChatHandle, {
               {/* Tool calls — OpenClaw-style cards. Renders BOTH while
                   the agent is still working (live pills via SSE) and
                   on restored history (lazy load via /api/turns/<id>).
-                  The signal "trace already loaded" is `thinking_trace
-                  !== undefined`, NOT `length > 0` — a turn that made
-                  no tool calls still has an empty array, and we don't
-                  want to show "click to load" on it. */}
+                  Round F-pre: a restored row can also carry a
+                  persisted `n_tool_calls` summary number, so we show
+                  the count immediately and the user clicks to expand
+                  for the full trace. */}
               {m.role === "agent" && (() => {
                 const turnId = m.role === "agent" ? m.turn_id : "";
                 const lazyLoading = m.role === "agent" ? m.lazy_loading : false;
                 const lazyError = m.role === "agent" ? m.lazy_error : "";
+                const persistedCount = m.role === "agent" ? (m.n_tool_calls || 0) : 0;
                 const traceLoaded = m.meta?.thinking_trace !== undefined;
                 const toolSteps = (m.meta?.thinking_trace || []).filter(
-                  (s) => s.tool_call && (s.event === "tool" || s.event === "tool_error")
+                  (s) =>
+                    s.tool_call &&
+                    (s.event === "tool" ||
+                      s.event === "tool_error" ||
+                      s.event === "tool_starting")
                 );
                 const hasTools = toolSteps.length > 0;
+                // Lazy-load is "available" when we know there's a turn
+                // artefact AND we haven't loaded the trace yet. The
+                // persisted count tells us whether it's worth offering.
                 const lazyAvailable = Boolean(turnId) && !traceLoaded;
-                // Hide entirely when: trace is loaded AND it had zero
-                // tool calls (chat fast-path, plain text answer with
-                // no tool use). Show otherwise: live pills as they
-                // arrive, or a "click to load" hint for stale rows.
-                if (!hasTools && !lazyAvailable && !lazyLoading) return null;
+                // Show count from whichever source we have:
+                //   live trace (preferred) → persisted summary → 0
+                const displayCount = hasTools ? toolSteps.length : persistedCount;
+                // Hide entirely only when: trace is loaded, persisted
+                // count is also 0, no lazy fetch in flight. Otherwise
+                // we have at least one number to show.
+                if (!hasTools && !displayCount && !lazyLoading) return null;
                 const onToggle = (e: React.SyntheticEvent<HTMLDetailsElement>) => {
                   if (e.currentTarget.open && lazyAvailable && !lazyLoading) {
                     void hydrateTurn(i);
@@ -800,10 +829,12 @@ const Chat = forwardRef<ChatHandle, {
                       🔧 tools:{" "}
                       {hasTools
                         ? `${toolSteps.length} call${toolSteps.length === 1 ? "" : "s"}`
-                        : lazyLoading
-                          ? "loading…"
-                          : lazyAvailable
-                            ? "click to load"
+                        : displayCount
+                          ? `${displayCount} call${displayCount === 1 ? "" : "s"}${
+                              lazyAvailable ? " · click to load" : ""
+                            }`
+                          : lazyLoading
+                            ? "loading…"
                             : "none"}
                       {lazyError && (
                         <span className="text-rose-400 ml-2">· {lazyError}</span>
@@ -818,18 +849,30 @@ const Chat = forwardRef<ChatHandle, {
                 );
               })()}
               {/* Dev mode: redacted system+user prompts per LLM call */}
-              {devMode && m.role === "agent" && m.meta?.llm_calls && m.meta.llm_calls.length > 0 && (
-                <details className="mb-2">
-                  <summary className="text-[11px] opacity-70 cursor-pointer hover:opacity-100 mb-1 text-amber-300">
-                    🔬 LLM calls: {m.meta.llm_calls.length} (dev mode)
-                  </summary>
-                  <div className="space-y-1 mt-1">
-                    {m.meta.llm_calls.map((c, j) => (
-                      <LLMCallItem key={j} call={c} />
-                    ))}
-                  </div>
-                </details>
-              )}
+              {devMode && m.role === "agent" && (() => {
+                const liveCalls = m.meta?.llm_calls || [];
+                const persistedCount = m.n_llm_calls || 0;
+                const totalCount = liveCalls.length || persistedCount;
+                if (totalCount === 0) return null;
+                return (
+                  <details className="mb-2">
+                    <summary className="text-[11px] opacity-70 cursor-pointer hover:opacity-100 mb-1 text-amber-300">
+                      🔬 LLM calls: {totalCount}
+                      {liveCalls.length === 0 && persistedCount > 0
+                        ? " · click to load"
+                        : ""}{" "}
+                      (dev mode)
+                    </summary>
+                    {liveCalls.length > 0 && (
+                      <div className="space-y-1 mt-1">
+                        {liveCalls.map((c, j) => (
+                          <LLMCallItem key={j} call={c} />
+                        ))}
+                      </div>
+                    )}
+                  </details>
+                );
+              })()}
               {/* Compact thinking trace — also visible mid-stream
                   so live progress is observable. Auto-opens while
                   the answer is still streaming (text empty) so the

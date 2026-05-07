@@ -1546,6 +1546,32 @@ class Agent:
                         snippet += f"\n…[+{len(result) - cap} more chars truncated]"
                     tool_outputs.append(f"[{name}] {snippet}")
 
+        # Round F: progressive reveal. Wrap registry.execute so we
+        # emit a `tool_starting` event BEFORE the tool runs (just
+        # name + args, no result yet). The existing `_on_tool_call`
+        # still fires AFTER completion as the Tool output event. The
+        # frontend renders them as two separate OpenClaw-style pills:
+        # the "Tool call" card appears immediately when the LLM
+        # decides to invoke the tool, then the matching "Tool output"
+        # card appears when the result returns. Big UX win on slow
+        # tools (read_file of huge files, run_python with long
+        # execution) where the gap is many seconds.
+        def _execute_with_progress(name: str, args: dict):
+            preview = ", ".join(str(k) for k in (args or {}).keys())
+            self.progress(
+                "tool_starting",
+                f"{name}({preview})",
+                tool_call=ToolCallDetail(
+                    name=name,
+                    args=args or {},
+                    result="",
+                    result_truncated=False,
+                    result_full_len=0,
+                    is_error=False,
+                ),
+            )
+            return registry.execute(name, args)
+
         import time as _t
         _t0 = _t.monotonic()
         usage_before = TOKENS.request_usage()
@@ -1554,7 +1580,7 @@ class Agent:
             system,
             user,
             tools=tools,
-            execute_tool=registry.execute,
+            execute_tool=_execute_with_progress,
             max_tokens=4000,
             temperature=0.3,
             on_tool_call=_on_tool_call,
@@ -2289,6 +2315,14 @@ class Agent:
             except Exception:
                 turn_id = ""
 
+            # Compact summary fields stamped on the conversation row
+            # so the WebUI restores token bar + tool / LLM counts on
+            # page refresh without a lazy /api/turns/<id> roundtrip.
+            _tu = self._get_token_usage()
+            _n_tools = sum(
+                1 for s in self._trace
+                if s.tool_call and (s.event == "tool" or s.event == "tool_error")
+            )
             CONVERSATION.add_turn(
                 task, answer,
                 intent=thinking.question_type if thinking else "task",
@@ -2296,6 +2330,9 @@ class Agent:
                 topics_used=used,
                 channel=getattr(self, "_channel", "webui"),
                 turn_id=turn_id,
+                token_usage=_tu.model_dump() if _tu else None,
+                n_tool_calls=_n_tools,
+                n_llm_calls=len(self._llm_calls or []),
             )
             self._extract_memories(
                 task, answer,
