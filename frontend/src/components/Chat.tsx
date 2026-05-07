@@ -2,13 +2,30 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "re
 import {
   AgentAnswer, chatStream, StreamEvent, addFromChat, addCorrection, fetchCurrentSession,
   fetchActiveModel, setActiveModel, clearActiveModel,
+  fetchTurn,
   type ActiveModelSelection, type AvailableModel,
   type AttachmentMeta, uploadAttachment, transcribeAudio, attachmentUrl,
+  type ThinkingStep, type TurnArtifact,
 } from "../api";
 
 type Msg =
   | { role: "user"; text: string; attachments?: AttachmentMeta[] }
-  | { role: "agent"; text: string; meta?: AgentAnswer; progress?: string[] };
+  | {
+      role: "agent";
+      text: string;
+      meta?: AgentAnswer;
+      progress?: string[];
+      // Round A: when the message was restored from session/conversation
+      // history without its full thinking_trace, turn_id points at the
+      // on-disk TurnWorkspace artefact. The first time the user expands
+      // a tool card on this message, we lazy-fetch via /api/turns/<id>
+      // and populate `meta.thinking_trace` so subsequent expands are
+      // instant. `lazy_loading` flips to true while the fetch is
+      // in-flight so the card can render a "loading…" hint.
+      turn_id?: string;
+      lazy_loading?: boolean;
+      lazy_error?: string;
+    };
 
 export type ChatHandle = {
   clearMessages: () => void;
@@ -67,58 +84,176 @@ function LLMCallItem({ call }: { call: import("../api").LLMCallDetail }) {
   );
 }
 
-function ToolCallItem({ step }: { step: import("../api").ThinkingStep }) {
+// OpenClaw-style tool card: compact pill in collapsed state, expands
+// to a body with TOOL INPUT (JSON args) and the tool result. The
+// `kind` prop decides the header label — "Tool call" for the request
+// row, "Tool output" for the response row. We don't try to pair them
+// into a single card here (the trace gives us calls + outputs as
+// separate steps in order); each renders as its own card.
+function ToolCallCard({
+  step,
+  kind = "auto",
+}: {
+  step: ThinkingStep;
+  kind?: "call" | "output" | "auto";
+}) {
   const tc = step.tool_call;
+  const [open, setOpen] = useState(false);
   if (!tc) return null;
-  // Compact summary line: tool name + truncated args + first line of result.
+  // Auto-pick label: "Tool output" when there's a result body to show,
+  // "Tool call" otherwise. Errors always render as Tool output (they
+  // ARE the result of the call, just a failed one).
+  const label =
+    kind !== "auto"
+      ? kind === "call"
+        ? "Tool call"
+        : "Tool output"
+      : tc.result || tc.is_error
+        ? "Tool output"
+        : "Tool call";
+  const tone = tc.is_error
+    ? "text-rose-400"
+    : label === "Tool call"
+      ? "text-sky-300"
+      : "text-emerald-300";
   const argsKeys = Object.keys(tc.args || {});
-  const argsPreview =
-    argsKeys.length === 0
-      ? ""
-      : argsKeys.map((k) => {
-          const v = (tc.args as Record<string, unknown>)[k];
-          const s = typeof v === "string" ? v : JSON.stringify(v);
-          return `${k}=${s.length > 40 ? s.slice(0, 40) + "…" : s}`;
-        }).join(", ");
-  const firstResultLine = (tc.result || "").split("\n").find((l) => l.trim()) || "";
-  const resultPreview =
-    firstResultLine.length > 120 ? firstResultLine.slice(0, 120) + "…" : firstResultLine;
-  const tone = tc.is_error ? "text-rose-400" : "text-sky-300";
+  const hasArgs = argsKeys.length > 0;
+  const hasResult = Boolean((tc.result || "").trim());
+
+  // Compact one-line summary that wraps below the header on hover —
+  // OpenClaw shows it as italic gray text under the label.
+  const summary = buildToolSummary(tc, label);
+
   return (
-    <details className="bg-slate-950/40 rounded px-2 py-1 text-[11px]">
-      <summary className="cursor-pointer flex items-center gap-2 flex-wrap">
-        <span className="text-slate-500">{step.ts.toFixed(1)}s</span>
-        <span className={`font-mono ${tone}`}>{tc.name}</span>
-        {argsPreview && <span className="text-slate-400 truncate">({argsPreview})</span>}
-        {resultPreview && <span className="text-slate-500 truncate">→ {resultPreview}</span>}
-      </summary>
-      <div className="mt-2 space-y-2 text-[10px]">
-        {argsKeys.length > 0 && (
-          <div>
-            <div className="text-slate-500 mb-0.5">args:</div>
-            <pre className="bg-slate-900 rounded p-2 overflow-x-auto whitespace-pre-wrap break-words">
-              {JSON.stringify(tc.args, null, 2)}
-            </pre>
-          </div>
-        )}
-        {tc.result && (
-          <div>
-            <div className="text-slate-500 mb-0.5">
-              result{tc.is_error ? " (error)" : ""}
-              {tc.result_truncated && tc.result_full_len ? (
-                <span className="text-amber-400 ml-1">
-                  (preview, {tc.result.length.toLocaleString()} of{" "}
-                  {tc.result_full_len.toLocaleString()} chars)
-                </span>
-              ) : null}:
+    <div className="rounded-md bg-slate-900/40 border border-slate-800/60 overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 text-[11px] hover:bg-slate-800/40 transition-colors"
+      >
+        <span className="text-slate-600 select-none">·</span>
+        <span className="text-amber-300 select-none" aria-hidden>⚡</span>
+        <span className={`font-medium ${tone}`}>{label}</span>
+        <span className="font-mono text-[10px] text-slate-500">{tc.name}</span>
+        <span className="ml-auto text-[10px] text-slate-600 select-none">
+          {open ? "▾" : "▸"}
+        </span>
+      </button>
+      {open && (
+        <div className="px-3 pb-2 pt-1 border-t border-slate-800/60 space-y-2 text-[11px]">
+          {summary && (
+            <div className="text-slate-400 italic leading-snug">{summary}</div>
+          )}
+          {hasArgs && (
+            <div>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1">
+                Tool input
+              </div>
+              <pre className="bg-slate-950/80 rounded p-2 overflow-x-auto whitespace-pre-wrap break-words text-[10px] leading-snug max-h-64">
+                {JSON.stringify(tc.args, null, 2)}
+              </pre>
             </div>
-            <pre className="bg-slate-900 rounded p-2 max-h-64 overflow-auto whitespace-pre-wrap break-words">
-              {tc.result}
-            </pre>
+          )}
+          {hasResult && (
+            <div>
+              <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-1 flex items-center gap-2">
+                <span>Tool output{tc.is_error ? " · ERROR" : ""}</span>
+                {tc.result_truncated && tc.result_full_len ? (
+                  <span className="text-amber-400 normal-case tracking-normal text-[9px]">
+                    preview, {tc.result.length.toLocaleString()} of{" "}
+                    {tc.result_full_len.toLocaleString()} chars
+                  </span>
+                ) : null}
+              </div>
+              <ToolResultBody text={tc.result || ""} />
+            </div>
+          )}
+          <div className="flex items-center gap-3 text-[9px] text-slate-600 pt-1 border-t border-slate-800/40">
+            <span>{step.ts.toFixed(1)}s</span>
+            {tc.duration_ms ? (
+              <span>{(tc.duration_ms / 1000).toFixed(1)}s exec</span>
+            ) : null}
           </div>
-        )}
-      </div>
-    </details>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One-line italic detail under the header, OpenClaw-style. Picks the
+// most identifying argument(s) for the tool. Falls back to a short
+// preview of the first non-blank result line for output-style cards.
+function buildToolSummary(
+  tc: NonNullable<ThinkingStep["tool_call"]>,
+  label: string,
+): string {
+  const args = tc.args || {};
+  const a = (k: string): string => {
+    const v = (args as Record<string, unknown>)[k];
+    return typeof v === "string" ? v : v == null ? "" : JSON.stringify(v);
+  };
+  if (label === "Tool output") {
+    const firstLine = (tc.result || "").split("\n").find((l) => l.trim()) || "";
+    return firstLine.length > 200 ? firstLine.slice(0, 200) + "…" : firstLine;
+  }
+  if (tc.name === "read_file" || tc.name === "view_file") {
+    const path = a("path");
+    const s = a("start_line");
+    const e = a("end_line");
+    if (path && s && e) return `${path}:${s}-${e}`;
+    if (path) return path;
+  }
+  if (tc.name === "locate_symbol") {
+    const sym = a("name");
+    const path = a("path");
+    if (sym && path) return `${sym} in ${path}`;
+  }
+  if (tc.name === "calc") {
+    const expr = a("expression") || a("expr");
+    if (expr) return expr;
+  }
+  if (tc.name === "web_search" || tc.name === "fetch_url") {
+    const target = a("query") || a("url");
+    if (target) return target;
+  }
+  if (tc.name === "save_to_workspace") {
+    const fn = a("filename");
+    const sd = a("subdir") || "outbox";
+    if (fn) return `${sd}/${fn}`;
+  }
+  // Generic fallback: comma-separated key=value list, truncated.
+  const argsKeys = Object.keys(args);
+  if (argsKeys.length === 0) return "";
+  return argsKeys
+    .map((k) => {
+      const s = a(k);
+      return `${k}=${s.length > 40 ? s.slice(0, 40) + "…" : s}`;
+    })
+    .join(", ");
+}
+
+// Result body. If the text parses as JSON, render with indent;
+// otherwise show as preformatted text. Capped height with overflow.
+function ToolResultBody({ text }: { text: string }) {
+  let formatted = text;
+  let isJson = false;
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      formatted = JSON.stringify(JSON.parse(trimmed), null, 2);
+      isJson = true;
+    } catch {
+      /* leave as plain text */
+    }
+  }
+  return (
+    <pre
+      className={`bg-slate-950/80 rounded p-2 overflow-auto whitespace-pre-wrap break-words text-[10px] leading-snug max-h-64 ${
+        isJson ? "text-slate-300" : "text-slate-300"
+      }`}
+    >
+      {formatted}
+    </pre>
   );
 }
 
@@ -256,6 +391,68 @@ const Chat = forwardRef<ChatHandle, {
     } catch { /* ignore */ }
   };
 
+  // Round A: lazy-fetch the on-disk TurnWorkspace artefact for a
+  // restored history message and merge its thinking_trace + llm_calls
+  // + claims/evidence/token_usage into the message's `meta`. Triggered
+  // the first time the user expands the "🔧 tools" section on a message
+  // that came back from session history without a trace inline.
+  const hydrateTurn = async (idx: number) => {
+    setMsgs((cur) => {
+      const m = cur[idx];
+      if (!m || m.role !== "agent" || !m.turn_id || m.lazy_loading) return cur;
+      const next = cur.slice();
+      next[idx] = { ...m, lazy_loading: true, lazy_error: undefined };
+      return next;
+    });
+    try {
+      const cur = msgs[idx];
+      if (!cur || cur.role !== "agent" || !cur.turn_id) return;
+      const data: TurnArtifact = await fetchTurn(cur.turn_id);
+      setMsgs((latest) => {
+        const m = latest[idx];
+        if (!m || m.role !== "agent") return latest;
+        const next = latest.slice();
+        next[idx] = {
+          ...m,
+          lazy_loading: false,
+          meta: {
+            ...(m.meta || {
+              answer: m.text,
+              verification: data.verification,
+              learned_topics: [],
+              used_topics: [],
+            }),
+            thinking_trace: data.thinking_trace || [],
+            llm_calls: data.llm_calls || [],
+            claims: data.claims || [],
+            evidence: data.evidence || [],
+            token_usage: data.token_usage,
+            verification: data.verification ?? m.meta?.verification ?? {
+              confidence: 0,
+              verified_claims: [],
+              unverified_claims: [],
+              contradictions: [],
+              notes_used: [],
+            },
+          },
+        };
+        return next;
+      });
+    } catch (e: any) {
+      setMsgs((latest) => {
+        const m = latest[idx];
+        if (!m || m.role !== "agent") return latest;
+        const next = latest.slice();
+        next[idx] = {
+          ...m,
+          lazy_loading: false,
+          lazy_error: e?.message || "load failed",
+        };
+        return next;
+      });
+    }
+  };
+
   // Load current session's turns on mount (survives server restart)
   useEffect(() => {
     if (loaded) return;
@@ -270,6 +467,12 @@ const Chat = forwardRef<ChatHandle, {
             restored.push({
               role: "agent",
               text: t.answer,
+              // Round A: thread the on-disk turn pointer through so
+              // expanding the "🔧 tools" section lazy-loads the full
+              // thinking_trace via /api/turns/<turn_id>. session
+              // turn rows now include `turn_id` (chat.py SSE adds
+              // it to SESSIONS.add_turn).
+              turn_id: t.turn_id || "",
               meta: {
                 answer: t.answer,
                 verification: {
@@ -323,6 +526,9 @@ const Chat = forwardRef<ChatHandle, {
           if (last.role === "agent") {
             last.text = ev.data.answer;
             last.meta = ev.data;
+            // Round A: stamp turn_id so refreshing the page later
+            // and re-expanding tool cards lazy-loads via /api/turns.
+            last.turn_id = ev.data.turn_id || "";
           }
           return copy;
         });
@@ -444,20 +650,47 @@ const Chat = forwardRef<ChatHandle, {
                     ))}
                 </div>
               )}
-              {/* Tool calls — compact list; click any item for full args + result */}
-              {m.role === "agent" && m.meta?.thinking_trace && m.text && (() => {
-                const toolSteps = m.meta.thinking_trace.filter(
+              {/* Tool calls — OpenClaw-style cards. When this message
+                  was restored from history without its full
+                  thinking_trace, the wrapper shows a "load" hint and
+                  fetches `/api/turns/<turn_id>` on first expand. */}
+              {m.role === "agent" && m.text && (() => {
+                const turnId = m.role === "agent" ? m.turn_id : "";
+                const lazyLoading = m.role === "agent" ? m.lazy_loading : false;
+                const lazyError = m.role === "agent" ? m.lazy_error : "";
+                const toolSteps = (m.meta?.thinking_trace || []).filter(
                   (s) => s.tool_call && (s.event === "tool" || s.event === "tool_error")
                 );
-                if (toolSteps.length === 0) return null;
+                const hasTrace = toolSteps.length > 0;
+                const lazyAvailable = Boolean(turnId) && !hasTrace;
+                if (!hasTrace && !lazyAvailable && !lazyLoading) return null;
+                const onToggle = (e: React.SyntheticEvent<HTMLDetailsElement>) => {
+                  if (e.currentTarget.open && lazyAvailable && !lazyLoading) {
+                    void hydrateTurn(i);
+                  }
+                };
                 return (
-                  <details className="mb-2" open>
+                  <details
+                    className="mb-2"
+                    open={hasTrace}
+                    onToggle={onToggle}
+                  >
                     <summary className="text-[11px] opacity-60 cursor-pointer hover:opacity-90 mb-1">
-                      🔧 tools: {toolSteps.length} call{toolSteps.length === 1 ? "" : "s"}
+                      🔧 tools:{" "}
+                      {hasTrace
+                        ? `${toolSteps.length} call${toolSteps.length === 1 ? "" : "s"}`
+                        : lazyLoading
+                          ? "loading…"
+                          : lazyAvailable
+                            ? "click to load"
+                            : "none"}
+                      {lazyError && (
+                        <span className="text-rose-400 ml-2">· {lazyError}</span>
+                      )}
                     </summary>
                     <div className="space-y-1 mt-1">
                       {toolSteps.map((s, j) => (
-                        <ToolCallItem key={j} step={s} />
+                        <ToolCallCard key={j} step={s} />
                       ))}
                     </div>
                   </details>

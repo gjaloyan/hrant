@@ -2,12 +2,14 @@
 from __future__ import annotations
 import asyncio
 import json
-from typing import AsyncIterator
+from pathlib import Path
+from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException, Query
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent import Agent
+from ..conversation import CONVERSATION
 from ..llm import TOKENS
 from ..models import ChatRequest
 from ..project_mode import PROJECTS
@@ -28,10 +30,12 @@ async def chat(req: ChatRequest):
     async def runner():
         try:
             res = await asyncio.to_thread(
-                agent.run,
-                req.message,
-                req.project or PROJECTS.current,
-                req.attachments or None,
+                lambda: agent.run(
+                    req.message,
+                    req.project or PROJECTS.current,
+                    req.attachments or None,
+                    channel="webui",
+                ),
             )
             turn = {
                 "ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -41,6 +45,13 @@ async def chat(req: ChatRequest):
                 "is_chat": bool(res.is_chat),
                 "confidence": res.verification.confidence if res.verification else 0,
                 "topics": res.used_topics or [],
+                # Round A: stamp the session entry with the on-disk
+                # turn artefact id (P1) + the channel that produced
+                # it. The frontend uses turn_id for lazy-loading
+                # tool cards on history restore + channel for the
+                # upcoming WebUI dropdown filter.
+                "turn_id": getattr(res, "turn_id", "") or "",
+                "channel": "webui",
             }
             SESSIONS.add_turn(turn)
             if res.thinking_trace:
@@ -67,3 +78,65 @@ async def chat(req: ChatRequest):
             await task
 
     return EventSourceResponse(stream())
+
+
+# --- Round A: lazy-load turn artefacts + per-channel conversation -------
+
+
+def _safe_turn_id(turn_id: str) -> str:
+    """Defend against path traversal when looking up `<turn_id>.json`.
+    Turn ids are timestamp + uuid hex (`20260507_120000_abc12345`); a
+    request for `../../etc/passwd` mustn't escape `workspace/turns/`."""
+    if not turn_id or "/" in turn_id or "\\" in turn_id or ".." in turn_id:
+        raise HTTPException(status_code=400, detail="invalid turn_id")
+    # Strip any `.json` extension the caller appended; we control it.
+    return turn_id.rsplit(".json", 1)[0]
+
+
+@router.get("/api/turns/{turn_id}")
+async def get_turn(turn_id: str):
+    """Return the full TurnWorkspace artefact for a single turn.
+
+    The chat history endpoint returns lightweight rows (user message,
+    short answer, turn_id pointer); the WebUI calls THIS endpoint when
+    the user expands a message to see its tool calls / claims /
+    evidence / verification / token breakdown. Lazy load keeps the
+    chat history payload small while still letting any old turn
+    surface its full record on demand.
+    """
+    safe = _safe_turn_id(turn_id)
+    from ..workspace import get_workspace
+    target = get_workspace().root / "turns" / f"{safe}.json"
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="turn not found")
+    try:
+        body = target.read_text(encoding="utf-8")
+    except OSError as e:
+        raise HTTPException(status_code=500, detail=f"read failed: {e}")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"corrupted turn: {e}")
+    return data
+
+
+@router.get("/api/conversation")
+async def get_conversation(
+    channel: Optional[str] = Query(default=None),
+    n: int = Query(default=50, ge=1, le=500),
+):
+    """Recent conversation turns, optionally filtered by `channel`.
+
+    Round A: WebUI loads its own history on mount via this endpoint
+    so a page refresh restores the chat (including turn_id pointers
+    so per-message tool cards can be expanded). `channel=telegram`
+    surfaces the Telegram conversation in the WebUI dropdown that
+    Round C will add.
+
+    Default channel is unset (returns ALL turns) so older clients
+    that don't pass the param keep working — but those clients see
+    cross-channel history which can be confusing. WebUI v2 always
+    passes `channel=webui`.
+    """
+    turns = CONVERSATION.recent_full(n=n, channel=channel)
+    return {"channel": channel, "turns": turns, "count": len(turns)}

@@ -48,6 +48,22 @@ export type LLMCallDetail = {
   output_tokens: number;
 };
 
+export type Claim = {
+  id: string;
+  text: string;
+  status: "verified" | "unverified" | "contradicted";
+  evidence_ids: string[];
+  risk: "low" | "medium" | "high";
+};
+
+export type EvidenceItem = {
+  id: string;
+  source_type: "tool" | "memory" | "user" | "model";
+  source_ref: string;
+  quote?: string;
+  confidence: number;
+};
+
 export type AgentAnswer = {
   answer: string;
   verification: VerificationResult;
@@ -58,6 +74,45 @@ export type AgentAnswer = {
   token_usage?: TokenUsage | null;
   thinking_trace?: ThinkingStep[];
   llm_calls?: LLMCallDetail[];
+  claims?: Claim[];
+  evidence?: EvidenceItem[];
+  turn_id?: string;
+};
+
+// Round A: full TurnWorkspace JSON returned by GET /api/turns/<id>.
+// Same shape as what backend.workspace.save_turn writes per turn.
+export type TurnArtifact = {
+  turn_id: string;
+  channel?: string;
+  task: string;
+  answer: string;
+  project?: string | null;
+  verification: VerificationResult;
+  claims?: Claim[];
+  evidence?: EvidenceItem[];
+  thinking_trace?: ThinkingStep[];
+  llm_calls?: LLMCallDetail[];
+  tool_call_order?: Array<{
+    name: string;
+    args: Record<string, unknown>;
+    result_preview: string;
+    result_truncated?: boolean;
+    result_full_len?: number;
+    is_error?: boolean;
+  }>;
+  token_usage?: TokenUsage;
+};
+
+export type ConversationTurnRow = {
+  ts: string;
+  user: string;
+  answer: string;
+  intent?: string;
+  is_chat?: boolean;
+  confidence?: number;
+  topics?: string[];
+  channel?: string;
+  turn_id?: string;
 };
 
 export type IndexEntry = {
@@ -148,6 +203,12 @@ export type ConversationTurn = {
   is_chat: boolean;
   confidence?: number;
   topics?: string[];
+  // Round A: pointer to the on-disk TurnWorkspace artefact for lazy
+  // loading the thinking_trace + claims/evidence on demand. Empty
+  // for turns recorded before this round (chat fast-path / preference
+  // branch never write a turn artefact).
+  turn_id?: string;
+  channel?: string;
 };
 
 export type GapEntry = {
@@ -291,9 +352,21 @@ export const fetchCapabilities = () =>
   json_get<{ block: string }>("/api/capabilities");
 
 // ---- Conversation ----
-
-export const fetchConversation = () =>
-  json_get<{ turns: ConversationTurn[]; count: number }>("/api/conversation");
+// Round A: per-channel filter. Channel=null returns all turns
+// (back-compat for callers that pre-date the channel split).
+export const fetchConversation = (
+  channel: string | null = null,
+  n = 50,
+) => {
+  const qs = new URLSearchParams();
+  if (channel) qs.set("channel", channel);
+  qs.set("n", String(n));
+  return json_get<{
+    channel: string | null;
+    turns: ConversationTurn[];
+    count: number;
+  }>(`/api/conversation?${qs.toString()}`);
+};
 
 export const clearConversation = () =>
   json_delete<{ ok: boolean }>("/api/conversation");
@@ -426,6 +499,17 @@ export const fetchSessionStats = () =>
 
 export const fetchCurrentSession = () =>
   json_get<{ session: SessionDetail | null }>("/api/sessions/current");
+
+// Round A: lazy-load full TurnWorkspace artefact for a single turn.
+// Used when the user clicks to expand a tool card on a historical
+// chat message — we don't ship the full thinking_trace in the
+// session list to keep that payload small.
+export const fetchTurn = (turn_id: string) =>
+  json_get<TurnArtifact>(`/api/turns/${encodeURIComponent(turn_id)}`);
+
+// (channel-aware fetchConversation lives in the // ---- Conversation ----
+// section above — exported earlier so the existing memory page +
+// the new WebUI history loader share one definition.)
 
 export const fetchSession = (id: string) =>
   json_get<{ session: SessionDetail }>(`/api/sessions/${id}`);

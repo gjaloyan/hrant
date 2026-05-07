@@ -65,8 +65,25 @@ class ConversationMemory:
         is_chat: bool = False,
         confidence: int = 0,
         topics_used: list[str] | None = None,
+        *,
+        channel: str = "webui",
+        turn_id: str = "",
     ) -> None:
-        """Record one conversation turn (user question + agent response)."""
+        """Record one conversation turn (user question + agent response).
+
+        `channel` tags which surface this turn arrived on
+        ("webui" | "telegram" | future channels). Stored on the turn
+        itself so the WebUI can filter by channel without joining
+        against a separate index. Default "webui" preserves existing
+        behaviour for callers that haven't been updated.
+
+        `turn_id` references the on-disk TurnWorkspace artifact at
+        `workspace/turns/<turn_id>.json` (P1). Empty when the caller
+        ran outside the main `Agent.run` path (chat fast-path,
+        preference branch — these don't write a turn record). The
+        WebUI lazy-loads the full thinking_trace + claims + evidence
+        from that file when the user expands the message.
+        """
         # Truncate answer for storage efficiency
         answer_preview = agent_answer
         if len(answer_preview) > self.max_answer_chars:
@@ -79,9 +96,12 @@ class ConversationMemory:
             "intent": intent,
             "is_chat": is_chat,
             "confidence": confidence,
+            "channel": channel or "webui",
         }
         if topics_used:
             turn["topics"] = topics_used
+        if turn_id:
+            turn["turn_id"] = turn_id
 
         self._turns.append(turn)
         # Trim to max
@@ -89,18 +109,40 @@ class ConversationMemory:
             self._turns = self._turns[-self.max_turns :]
         self._save()
 
-    def recent(self, n: int = 10) -> list[dict]:
-        """Get the last N turns."""
-        return self._turns[-n:]
+    def recent(self, n: int = 10, *, channel: Optional[str] = None) -> list[dict]:
+        """Get the last N turns. When `channel` is set, only turns from
+        that channel are returned — the WebUI uses this to render its
+        own history without Telegram noise (and vice versa). Legacy
+        turns saved before channel-tagging default to "webui" on read.
+        """
+        turns = self._turns
+        if channel is not None:
+            turns = [t for t in turns if (t.get("channel") or "webui") == channel]
+        return turns[-n:]
 
-    def context_block(self, n: int = 6) -> str:
+    def recent_full(self, n: int = 50, *, channel: Optional[str] = None) -> list[dict]:
+        """Like `recent` but bigger default — for the WebUI history
+        list. Returns full turn dicts (ts, user, answer, intent,
+        confidence, topics, turn_id) so the frontend can render
+        without re-querying. Lazy-loaded heavy data
+        (thinking_trace, claims, evidence) is fetched on expand via
+        GET /api/turns/<id>."""
+        return self.recent(n, channel=channel)
+
+    def context_block(self, n: int = 6, *, channel: Optional[str] = None) -> str:
         """Build a conversation context block for injection into prompts.
 
         Returns a formatted string showing recent exchanges. If there's
         no history, returns an empty string (so it doesn't clutter prompts
         for the first message of a session).
+
+        `channel` (when set) restricts context to turns from the same
+        surface — Telegram conversations stay separate from WebUI ones
+        so the agent doesn't bleed context across channels. Memory
+        (KG + notes) stays single-instance; only the recent
+        conversation buffer is per-channel.
         """
-        turns = self.recent(n)
+        turns = self.recent(n, channel=channel)
         if not turns:
             return ""
 

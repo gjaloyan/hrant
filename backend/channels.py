@@ -496,6 +496,7 @@ class TelegramBot:
                         lambda: agent.run(
                             text, project=None,
                             attachments=attachment_shas or None,
+                            channel="telegram",
                         ),
                     )
                     answer = result.answer or "(no answer)"

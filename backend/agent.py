@@ -857,7 +857,10 @@ class Agent:
                 parts.append(memory_block.strip())
 
         try:
-            conv = CONVERSATION.context_block(n=n_conv)
+            conv = CONVERSATION.context_block(
+                n=n_conv,
+                channel=getattr(self, "_channel", None),
+            )
         except Exception:
             conv = ""
         if conv and conv.strip():
@@ -1765,6 +1768,8 @@ class Agent:
         task: str,
         project: str | None = None,
         attachments: list[str] | None = None,
+        *,
+        channel: str = "webui",
     ) -> AgentAnswer:
         import time as _time
         TOKENS.reset_request()
@@ -1778,6 +1783,11 @@ class Agent:
         # Stash attachments so _chat_reply / _solve can pick them up
         # without us threading the kwarg through every helper.
         self._attachments = attachments or None
+        # Channel tag for conversation memory + turn record. Stored
+        # on `self` so chat fast-path / preference branch / task
+        # branch all tag the same way without each call site
+        # passing it explicitly.
+        self._channel = channel or "webui"
         try:
             core = self._load_core()
 
@@ -1789,7 +1799,10 @@ class Agent:
             micro = _micro_ack_reply(task)
             if micro is not None:
                 self.progress("micro_ack", "static reply (no LLM)")
-                CONVERSATION.add_turn(task, micro, intent="chat", is_chat=True)
+                CONVERSATION.add_turn(
+                    task, micro, intent="chat", is_chat=True,
+                    channel=self._channel,
+                )
                 # Memory extraction gate: short acks have nothing to
                 # extract — skipping saves another LLM call. The
                 # lookups in EVALUATOR / GOALS still get the turn
@@ -1814,7 +1827,10 @@ class Agent:
             # Branch 1: chitchat / small-talk. One warm reply, no pipeline.
             if intent == "chat":
                 answer = self._chat_reply(task, core)
-                CONVERSATION.add_turn(task, answer, intent="chat", is_chat=True)
+                CONVERSATION.add_turn(
+                    task, answer, intent="chat", is_chat=True,
+                    channel=self._channel,
+                )
                 # Memory extraction gate: skip on very short chat
                 # turns ("привет", "thanks for the help") — the
                 # extractor LLM call can't pull useful facts from
@@ -1860,7 +1876,10 @@ class Agent:
                     reply = f"{ack}\n\n_(saved to user.md -> {category}: {fact})_"
                 else:
                     reply = ack
-                CONVERSATION.add_turn(task, reply, intent="preference", is_chat=True)
+                CONVERSATION.add_turn(
+                    task, reply, intent="preference", is_chat=True,
+                    channel=self._channel,
+                )
                 self._extract_memories(task, reply, "preference")
                 self._cleanup()
                 self._tick_goals()
@@ -2207,22 +2226,6 @@ class Agent:
             except Exception:
                 pass
 
-            CONVERSATION.add_turn(
-                task, answer,
-                intent=thinking.question_type if thinking else "task",
-                confidence=vr.confidence,
-                topics_used=used,
-            )
-            self._extract_memories(
-                task, answer,
-                thinking.question_type if thinking else "task",
-                confidence=vr.confidence,
-                contradictions=len(vr.contradictions),
-            )
-            self._cleanup()
-            self._tick_goals()
-            self._persist_dev_capture(task, answer, vr.confidence)
-
             from .claims import build_claims_and_evidence
             claims, evidence = build_claims_and_evidence(
                 vr, self._trace,
@@ -2233,7 +2236,10 @@ class Agent:
             # the WebUI / future evaluator / debugger can replay the
             # full turn (tool calls, claims, evidence, verification,
             # token usage) without bloating the live response payload.
-            # Best-effort — failures here don't block the answer.
+            # Generated BEFORE CONVERSATION.add_turn so we can stamp
+            # the conversation entry with its turn_id (Round A: WebUI
+            # uses it for lazy-loading the full thinking_trace via
+            # GET /api/turns/<id>).
             turn_id = ""
             try:
                 from datetime import datetime as _dt
@@ -2258,18 +2264,40 @@ class Agent:
                     })
                 get_workspace().save_turn(turn_id, {
                     "turn_id": turn_id,
+                    "channel": getattr(self, "_channel", "webui"),
                     "task": task,
                     "answer": answer,
                     "project": project,
                     "verification": vr.model_dump(),
                     "claims": [c.model_dump() for c in claims],
                     "evidence": [e.model_dump() for e in evidence],
+                    "thinking_trace": [s.model_dump() for s in self._trace],
+                    "llm_calls": [c.model_dump() for c in self._llm_calls],
                     "tool_call_order": tool_call_order_dump,
                     "token_usage": self._get_token_usage().model_dump(),
                     "solver_claims_raw": getattr(self, "_last_solver_claims", None),
                 })
-            except Exception as _e:
+            except Exception:
                 turn_id = ""
+
+            CONVERSATION.add_turn(
+                task, answer,
+                intent=thinking.question_type if thinking else "task",
+                confidence=vr.confidence,
+                topics_used=used,
+                channel=getattr(self, "_channel", "webui"),
+                turn_id=turn_id,
+            )
+            self._extract_memories(
+                task, answer,
+                thinking.question_type if thinking else "task",
+                confidence=vr.confidence,
+                contradictions=len(vr.contradictions),
+            )
+            self._cleanup()
+            self._tick_goals()
+            self._persist_dev_capture(task, answer, vr.confidence)
+
             return AgentAnswer(
                 answer=answer,
                 verification=vr,
