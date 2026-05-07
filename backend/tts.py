@@ -39,6 +39,114 @@ DEFAULT_OPENAI_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_TTS_VOICE = "alloy"
 
 
+# --- Telegram voice format conversion (WAV -> OGG/Opus) -------------------
+#
+# Telegram's "voice message" bubble (reply_voice) renders correctly only
+# when the file is OGG container + Opus codec at 48 kHz mono. Piper hands
+# us WAV (16-bit PCM at the model's native rate). PTB v20+ accepts WAV
+# bytes for upload but Telegram itself plays them as a generic audio
+# attachment OR as a distorted voice bubble depending on the client
+# build — neither is what the user expects.
+#
+# We use ffmpeg as a local tool: cheap, ubiquitous on Linux, requires a
+# one-time install on Windows. If ffmpeg isn't on PATH we fall back to
+# returning the original WAV bytes with `format="wav"` so the caller can
+# still send something rather than going silent. The first call without
+# ffmpeg also logs a one-time hint with install commands so the user
+# knows what to do.
+
+_FFMPEG_PROBED = False
+_FFMPEG_AVAILABLE = False
+
+
+def _ffmpeg_available() -> bool:
+    """Cached probe — ffmpeg presence doesn't change at runtime, so we
+    test once and remember the result. Call `reset_ffmpeg_probe()` if
+    you install ffmpeg without restarting."""
+    global _FFMPEG_PROBED, _FFMPEG_AVAILABLE
+    if _FFMPEG_PROBED:
+        return _FFMPEG_AVAILABLE
+    import shutil
+    _FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
+    _FFMPEG_PROBED = True
+    if not _FFMPEG_AVAILABLE:
+        log.warning(
+            "ffmpeg not found on PATH — TTS replies in Telegram will go "
+            "out as raw WAV (functional but plays as a generic audio "
+            "attachment, not a native voice bubble). To fix, install "
+            "ffmpeg: Windows `winget install Gyan.FFmpeg` (then restart "
+            "the agent), Linux `apt install ffmpeg`, macOS `brew install "
+            "ffmpeg`."
+        )
+    return _FFMPEG_AVAILABLE
+
+
+def reset_ffmpeg_probe() -> None:
+    """Force re-probe on next call. Call after installing ffmpeg
+    without restarting the process."""
+    global _FFMPEG_PROBED, _FFMPEG_AVAILABLE
+    _FFMPEG_PROBED = False
+    _FFMPEG_AVAILABLE = False
+
+
+def convert_wav_to_telegram_voice(wav_bytes: bytes) -> tuple[bytes, str]:
+    """Convert Piper's WAV output to Telegram's native voice format
+    (OGG container + Opus codec, 48 kHz mono, ~32 kbps).
+
+    Returns `(bytes, format)` where format is either `"ogg"` (success)
+    or `"wav"` (ffmpeg unavailable / conversion failed → caller sends
+    the original WAV as fallback). Conversion happens entirely
+    in-memory through ffmpeg's stdin/stdout — no temp files, so a
+    crash in the bot doesn't leave audio cruft on disk.
+    """
+    if not wav_bytes:
+        return wav_bytes, "wav"
+    if not _ffmpeg_available():
+        return wav_bytes, "wav"
+    import subprocess
+    try:
+        proc = subprocess.run(
+            [
+                "ffmpeg",
+                "-loglevel", "error",
+                "-i", "pipe:0",
+                "-ac", "1",
+                "-ar", "48000",
+                "-c:a", "libopus",
+                "-b:a", "32k",
+                "-f", "ogg",
+                "pipe:1",
+            ],
+            input=wav_bytes,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError:
+        # Race between the cached probe and an uninstall; surface the
+        # WAV so the caller still has something to send.
+        reset_ffmpeg_probe()
+        return wav_bytes, "wav"
+    except subprocess.TimeoutExpired:
+        log.warning("ffmpeg WAV→OGG conversion timed out after 30s")
+        return wav_bytes, "wav"
+    except Exception as e:
+        log.warning("ffmpeg WAV→OGG conversion failed: %s", e)
+        return wav_bytes, "wav"
+    if proc.returncode != 0 or not proc.stdout:
+        # Common cause: libopus not compiled into the user's ffmpeg
+        # build (rare on prebuilt distros, can happen on stripped
+        # builds). Surface the stderr in the warning so it's
+        # diagnosable without re-running the bot.
+        err_tail = (proc.stderr or b"")[-400:].decode("utf-8", "replace")
+        log.warning(
+            "ffmpeg WAV→OGG conversion exit=%s, stdout=%s bytes, stderr=%s",
+            proc.returncode, len(proc.stdout or b""), err_tail,
+        )
+        return wav_bytes, "wav"
+    return proc.stdout, "ogg"
+
+
 def _config_path() -> Path:
     from .config import CONFIG
     return Path(CONFIG.knowledge["base_dir"]) / "tts_config.json"

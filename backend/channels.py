@@ -697,21 +697,35 @@ class TelegramBot:
                             spoken = (answer or "").strip()
                             if len(spoken) > cap:
                                 spoken = spoken[:cap]
-                            audio = await running_loop.run_in_executor(
+                            audio_wav = await running_loop.run_in_executor(
                                 None,
                                 lambda: _TTS.synthesize(spoken),
                             )
-                            if audio:
+                            if audio_wav:
+                                # Telegram's native voice bubble needs OGG
+                                # container + Opus codec, 48 kHz mono.
+                                # WAV plays as a distorted bubble or a
+                                # generic audio attachment depending on
+                                # the client. Convert through ffmpeg
+                                # when available; fall back to raw WAV
+                                # so we ship SOMETHING on machines
+                                # without ffmpeg installed.
+                                from .tts import convert_wav_to_telegram_voice
+                                audio, audio_fmt = await running_loop.run_in_executor(
+                                    None,
+                                    lambda: convert_wav_to_telegram_voice(audio_wav),
+                                )
                                 import io as _io
                                 from telegram import InputFile
+                                fname = "reply.ogg" if audio_fmt == "ogg" else "reply.wav"
                                 voice_blob = _io.BytesIO(audio)
-                                voice_blob.name = "reply.wav"
+                                voice_blob.name = fname
                                 # Try native voice bubble first.
                                 sent = False
                                 try:
                                     voice_blob.seek(0)
                                     await update.message.reply_voice(
-                                        voice=InputFile(voice_blob, filename="reply.wav"),
+                                        voice=InputFile(voice_blob, filename=fname),
                                     )
                                     sent = True
                                 except Exception as e_voice:
@@ -723,7 +737,7 @@ class TelegramBot:
                                 if not sent:
                                     voice_blob.seek(0)
                                     await update.message.reply_audio(
-                                        audio=InputFile(voice_blob, filename="reply.wav"),
+                                        audio=InputFile(voice_blob, filename=fname),
                                         title="agent voice reply",
                                     )
                             else:

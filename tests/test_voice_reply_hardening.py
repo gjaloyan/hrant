@@ -26,11 +26,15 @@ import backend.channels as ch_mod
 
 
 def test_voice_reply_wraps_bytes_in_inputfile():
-    """The WAV bytes from Piper get wrapped via telegram.InputFile —
-    raw bytes alone caused silent uploads to fail."""
+    """The audio bytes get wrapped via telegram.InputFile — raw
+    bytes alone caused silent uploads to fail. The filename hint
+    is now picked dynamically per format (`reply.ogg` after
+    successful ffmpeg conversion, `reply.wav` for the no-ffmpeg
+    fallback) so we just check both possibilities are reachable."""
     src = inspect.getsource(ch_mod)
     assert "InputFile" in src
-    assert "filename=\"reply.wav\"" in src or "name = \"reply.wav\"" in src
+    assert "filename=fname" in src
+    assert "reply.ogg" in src and "reply.wav" in src
 
 
 def test_voice_reply_tries_reply_voice_first():
