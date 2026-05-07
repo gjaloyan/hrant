@@ -567,70 +567,79 @@ const Chat = forwardRef<ChatHandle, {
       if (ev.type === "progress") {
         progress.push(`${ev.event}: ${ev.message}`);
         setMsgs((m) => {
-          const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last.role === "agent") {
-            last.progress = [...progress];
-            // Round B: live tool cards. When the SSE progress event
-            // carries a structured tool_call (every tool/tool_error
-            // step has one), append a synthetic ThinkingStep to
-            // meta.thinking_trace so the existing ToolCallCard
-            // renderer picks it up immediately. The final "answer"
-            // event later overwrites meta with the canonical full
-            // trace from AgentAnswer — this is just to keep the UI
-            // responsive while the agent is still working.
-            if (ev.tool_call) {
-              const synthetic: ThinkingStep = {
-                ts: 0, // exact ts comes with the final answer payload
-                event: ev.event || "tool",
-                message: ev.message,
-                tokens_so_far: 0,
-                tool_call: ev.tool_call,
-              };
-              const meta = last.meta || {
-                answer: "",
-                verification: {
-                  confidence: 0,
-                  verified_claims: [],
-                  unverified_claims: [],
-                  contradictions: [],
-                  notes_used: [],
-                },
-                learned_topics: [],
-                used_topics: [],
-                thinking_trace: [],
-              };
-              last.meta = {
-                ...meta,
-                thinking_trace: [
-                  ...(meta.thinking_trace || []),
-                  synthetic,
-                ],
-              };
-            }
+          if (m.length === 0) return m;
+          const lastIdx = m.length - 1;
+          const last = m[lastIdx];
+          if (last.role !== "agent") return m;
+          // Build a NEW Msg (no mutation) so React always sees a
+          // fresh object reference and re-renders. This was the fix
+          // for live pills not appearing — the previous version
+          // mutated `last.meta = {...}` in place which sometimes
+          // didn't trigger downstream renders.
+          const updates: Partial<typeof last> = {
+            progress: [...progress],
+          };
+          if (ev.tool_call) {
+            const synthetic: ThinkingStep = {
+              ts: 0,
+              event: ev.event || "tool",
+              message: ev.message,
+              tokens_so_far: 0,
+              tool_call: ev.tool_call,
+            };
+            const prevMeta = last.meta;
+            const baseMeta = prevMeta || {
+              answer: "",
+              verification: {
+                confidence: 0,
+                verified_claims: [],
+                unverified_claims: [],
+                contradictions: [],
+                notes_used: [],
+              },
+              learned_topics: [],
+              used_topics: [],
+              thinking_trace: [],
+            };
+            updates.meta = {
+              ...baseMeta,
+              thinking_trace: [
+                ...(baseMeta.thinking_trace || []),
+                synthetic,
+              ],
+            };
           }
+          const copy = [...m];
+          copy[lastIdx] = { ...last, ...updates };
           return copy;
         });
         scroll();
       } else if (ev.type === "answer") {
         setMsgs((m) => {
+          if (m.length === 0) return m;
+          const lastIdx = m.length - 1;
+          const last = m[lastIdx];
+          if (last.role !== "agent") return m;
           const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last.role === "agent") {
-            last.text = ev.data.answer;
-            last.meta = ev.data;
+          copy[lastIdx] = {
+            ...last,
+            text: ev.data.answer,
+            meta: ev.data,
             // Round A: stamp turn_id so refreshing the page later
             // and re-expanding tool cards lazy-loads via /api/turns.
-            last.turn_id = ev.data.turn_id || "";
-          }
+            turn_id: ev.data.turn_id || "",
+          };
           return copy;
         });
         scroll();
       } else if (ev.type === "error") {
         setMsgs((m) => {
+          if (m.length === 0) return m;
+          const lastIdx = m.length - 1;
+          const last = m[lastIdx];
+          if (last.role !== "agent") return m;
           const copy = [...m];
-          const last = copy[copy.length - 1];
-          if (last.role === "agent") last.text = "Error: " + ev.message;
+          copy[lastIdx] = { ...last, text: "Error: " + ev.message };
           return copy;
         });
       }
@@ -743,20 +752,28 @@ const Chat = forwardRef<ChatHandle, {
                     ))}
                 </div>
               )}
-              {/* Tool calls — OpenClaw-style cards. When this message
-                  was restored from history without its full
-                  thinking_trace, the wrapper shows a "load" hint and
-                  fetches `/api/turns/<turn_id>` on first expand. */}
-              {m.role === "agent" && m.text && (() => {
+              {/* Tool calls — OpenClaw-style cards. Renders BOTH while
+                  the agent is still working (live pills via SSE) and
+                  on restored history (lazy load via /api/turns/<id>).
+                  The signal "trace already loaded" is `thinking_trace
+                  !== undefined`, NOT `length > 0` — a turn that made
+                  no tool calls still has an empty array, and we don't
+                  want to show "click to load" on it. */}
+              {m.role === "agent" && (() => {
                 const turnId = m.role === "agent" ? m.turn_id : "";
                 const lazyLoading = m.role === "agent" ? m.lazy_loading : false;
                 const lazyError = m.role === "agent" ? m.lazy_error : "";
+                const traceLoaded = m.meta?.thinking_trace !== undefined;
                 const toolSteps = (m.meta?.thinking_trace || []).filter(
                   (s) => s.tool_call && (s.event === "tool" || s.event === "tool_error")
                 );
-                const hasTrace = toolSteps.length > 0;
-                const lazyAvailable = Boolean(turnId) && !hasTrace;
-                if (!hasTrace && !lazyAvailable && !lazyLoading) return null;
+                const hasTools = toolSteps.length > 0;
+                const lazyAvailable = Boolean(turnId) && !traceLoaded;
+                // Hide entirely when: trace is loaded AND it had zero
+                // tool calls (chat fast-path, plain text answer with
+                // no tool use). Show otherwise: live pills as they
+                // arrive, or a "click to load" hint for stale rows.
+                if (!hasTools && !lazyAvailable && !lazyLoading) return null;
                 const onToggle = (e: React.SyntheticEvent<HTMLDetailsElement>) => {
                   if (e.currentTarget.open && lazyAvailable && !lazyLoading) {
                     void hydrateTurn(i);
@@ -765,12 +782,12 @@ const Chat = forwardRef<ChatHandle, {
                 return (
                   <details
                     className="mb-2"
-                    open={hasTrace}
+                    open={hasTools}
                     onToggle={onToggle}
                   >
                     <summary className="text-[11px] opacity-60 cursor-pointer hover:opacity-90 mb-1">
                       🔧 tools:{" "}
-                      {hasTrace
+                      {hasTools
                         ? `${toolSteps.length} call${toolSteps.length === 1 ? "" : "s"}`
                         : lazyLoading
                           ? "loading…"
@@ -790,7 +807,7 @@ const Chat = forwardRef<ChatHandle, {
                 );
               })()}
               {/* Dev mode: redacted system+user prompts per LLM call */}
-              {devMode && m.role === "agent" && m.meta?.llm_calls && m.meta.llm_calls.length > 0 && m.text && (
+              {devMode && m.role === "agent" && m.meta?.llm_calls && m.meta.llm_calls.length > 0 && (
                 <details className="mb-2">
                   <summary className="text-[11px] opacity-70 cursor-pointer hover:opacity-100 mb-1 text-amber-300">
                     🔬 LLM calls: {m.meta.llm_calls.length} (dev mode)
@@ -802,9 +819,13 @@ const Chat = forwardRef<ChatHandle, {
                   </div>
                 </details>
               )}
-              {/* Compact thinking trace after answer — show key stages */}
-              {m.role === "agent" && m.meta?.thinking_trace && m.meta.thinking_trace.length > 0 && m.text && (
-                <details className="mb-2">
+              {/* Compact thinking trace — also visible mid-stream
+                  so live progress is observable. Auto-opens while
+                  the answer is still streaming (text empty) so the
+                  user sees what the agent is doing in real time;
+                  collapses once the final answer arrives. */}
+              {m.role === "agent" && m.meta?.thinking_trace && m.meta.thinking_trace.length > 0 && (
+                <details className="mb-2" open={!m.text}>
                   <summary className="text-[10px] opacity-40 cursor-pointer hover:opacity-60">
                     thinking: {m.meta.thinking_trace.filter(s => !s.event.startsWith("tool")).length} steps
                     {m.meta.thinking_trace.length > 0 && ` · ${m.meta.thinking_trace[m.meta.thinking_trace.length - 1].ts.toFixed(1)}s`}
