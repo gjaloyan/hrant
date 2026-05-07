@@ -1340,6 +1340,12 @@ class Agent:
                thinking: ThinkingResult | None = None,
                critique: str = "") -> tuple[str, str]:
         self.progress("solve", "composing answer...")
+        # P0 Phase B: every _solve call resets the structured claims
+        # the solver may emit. Last writer wins — the final visible
+        # answer's claims are what the user (and the verifier) see.
+        # If the LLM ignores the directive, this stays empty and
+        # Phase A's verifier-bucket-based path produces claims.
+        self._last_solver_claims: Optional[list[dict]] = None
 
         # Build the THINKING section that the solver will follow as roadmap
         think_block = ""
@@ -1416,6 +1422,7 @@ class Agent:
             )
         else:
             notes_section = f"# NOTES\n{self._notes_block(notes)}"
+        from .claims import SOLVER_CLAIMS_DIRECTIVE
         user = f"""{ctx}
 
 {notes_section}
@@ -1423,7 +1430,7 @@ class Agent:
 {think_block}
 {critique_block}
 # USER REQUEST
-{marker}{task}"""
+{marker}{task}{SOLVER_CLAIMS_DIRECTIVE}"""
         registry = get_registry()
         # Load skills lazily — registers their tools in the registry,
         # so SKILLS.ensure_loaded() MUST run before registry.to_anthropic_list().
@@ -1556,8 +1563,17 @@ class Agent:
             duration_ms=int((_t.monotonic() - _t0) * 1000),
             usage_before=usage_before,
         )
+        # P0 Phase B: pull the structured claims tail off the answer.
+        # `cleaned_answer` is what the user (and verifier, and finetune
+        # dataset, and dev capture) will see — never includes the
+        # marker or JSON. `parsed_claims` rides on `self` for
+        # `Agent.run` to feed into the claim/evidence builder.
+        from .claims import extract_solver_claims_block
+        cleaned_answer, parsed_claims = extract_solver_claims_block(answer)
+        if parsed_claims is not None:
+            self._last_solver_claims = parsed_claims
         tool_context = "\n\n".join(tool_outputs) if tool_outputs else ""
-        return answer, tool_context
+        return cleaned_answer, tool_context
 
     # Step 4b — build critique for self-critic loop
     def _build_critique(self, vr: VerificationResult, prev_answer: str) -> str:
@@ -2187,7 +2203,9 @@ class Agent:
 
             from .claims import build_claims_and_evidence
             claims, evidence = build_claims_and_evidence(
-                vr, self._trace, user_message=task,
+                vr, self._trace,
+                user_message=task,
+                solver_claims=getattr(self, "_last_solver_claims", None),
             )
             return AgentAnswer(
                 answer=answer,
