@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -35,8 +36,32 @@ import httpx
 log = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_PIPER_VOICE = "en_US-lessac-medium"
+DEFAULT_LOCAL_PIPER_VOICE_RU = "ru_RU-irina-medium"
 DEFAULT_OPENAI_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_TTS_VOICE = "alloy"
+
+
+# Cyrillic Unicode block (Russian, Ukrainian, Bulgarian, Serbian…).
+# `[А-яЁё]` covers the full block including the accented letter forms.
+# Detection is text-content based, NOT user-language-preference based —
+# the user could switch language mid-conversation and the agent might
+# answer in whichever language fits the question. Picking voice from
+# the answer's actual content is the only thing that produces correct
+# pronunciation regardless of `user.md` preferences.
+_CYRILLIC_RE = re.compile(r"[А-яЁё]")
+
+
+def _pick_voice(text: str, *, default: str, ru: Optional[str] = None) -> str:
+    """Choose Piper voice name based on the text's script.
+    Currently only Russian needs explicit handling — the agent's
+    English / Armenian / etc. answers all sound fine on the
+    default English voice (mediocre but intelligible). Russian on
+    the English voice is unintelligible garbage, hence the split."""
+    if not text or not ru:
+        return default
+    if _CYRILLIC_RE.search(text):
+        return ru
+    return default
 
 
 # --- Telegram voice format conversion (WAV -> OGG/Opus) -------------------
@@ -176,6 +201,7 @@ class Synthesizer:
         self._lock = threading.Lock()
         self._backend: Optional[str] = None
         self._voice: Optional[str] = None
+        self._voice_ru: Optional[str] = None
         self._provider: Optional[dict] = None
         self._local_piper_base: Optional[str] = None
         self._last_error: Optional[str] = None
@@ -184,6 +210,7 @@ class Synthesizer:
         with self._lock:
             self._backend = None
             self._voice = None
+            self._voice_ru = None
             self._provider = None
             self._local_piper_base = None
             self._last_error = None
@@ -264,6 +291,14 @@ class Synthesizer:
             return False
         self._backend = "local_piper"
         self._voice = cfg_p.get("voice") or DEFAULT_LOCAL_PIPER_VOICE
+        # Russian voice override — used when the synthesised text
+        # contains Cyrillic. Default is irina-medium (free Piper
+        # voice, female, decent quality). User must download the
+        # corresponding .onnx + .onnx.json into the Piper server's
+        # data_dir for it to actually work; until then synth on
+        # Russian text falls back to last_error and the channel
+        # surfaces "Voice reply failed".
+        self._voice_ru = cfg_p.get("voice_ru") or DEFAULT_LOCAL_PIPER_VOICE_RU
         self._local_piper_base = base
         self._last_error = None
         return True
@@ -298,10 +333,22 @@ class Synthesizer:
         """POST text to a no-auth Piper wrapper.
         Endpoint matches the user's local-piper-tts-api server:
         `POST /v1/audio/speech` with JSON `{"input": text, "voice":
-        voice}`, response body is `audio/wav` bytes."""
+        voice}`, response body is `audio/wav` bytes.
+
+        Voice selection: caller-supplied `voice` wins. Otherwise
+        we auto-pick — Russian text routes to `_voice_ru` (e.g.
+        `ru_RU-irina-medium`), everything else to `_voice` (e.g.
+        `en_US-lessac-medium`). Without this, Piper would try to
+        speak Russian Cyrillic with English phonemes and the user
+        would hear distorted noise."""
         if not self._local_piper_base:
             return None
-        body = {"input": text, "voice": voice or self._voice or DEFAULT_LOCAL_PIPER_VOICE}
+        chosen = voice or _pick_voice(
+            text,
+            default=self._voice or DEFAULT_LOCAL_PIPER_VOICE,
+            ru=self._voice_ru,
+        )
+        body = {"input": text, "voice": chosen}
         r = httpx.post(
             f"{self._local_piper_base}/v1/audio/speech",
             json=body,
