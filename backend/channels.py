@@ -666,10 +666,15 @@ class TelegramBot:
                         if tail_msg:
                             await update.message.reply_text(tail_msg)
 
-                    # Round D: voice reply. When the user sent a voice
-                    # message AND TTS is configured + enabled, also
-                    # send the answer as audio. Best-effort — failure
-                    # falls back to text-only without raising.
+                    # Round D + voice-fix: voice reply. When the user
+                    # sent a voice message AND TTS is configured +
+                    # enabled, also send the answer as audio. PTB
+                    # needs the bytes wrapped in InputFile with an
+                    # explicit filename for Telegram to accept WAV
+                    # otherwise the upload silently 400s. We try
+                    # reply_voice first (native TG voice bubble; PTB
+                    # accepts WAV here in v20+), then fall back to
+                    # reply_audio on PTB versions that are stricter.
                     try:
                         from .config import CONFIG as _C
                         from .tts import SYNTHESIZER as _TTS
@@ -691,16 +696,51 @@ class TelegramBot:
                                 lambda: _TTS.synthesize(spoken),
                             )
                             if audio:
-                                # Telegram's voice bubble prefers OGG/Opus; WAV
-                                # from Piper may render as a generic audio file.
-                                # That's still useful for the user — TG plays
-                                # both inline. send_audio is the safer path.
-                                await update.message.reply_audio(
-                                    audio=audio,
-                                    title="agent voice reply",
+                                import io as _io
+                                from telegram import InputFile
+                                voice_blob = _io.BytesIO(audio)
+                                voice_blob.name = "reply.wav"
+                                # Try native voice bubble first.
+                                sent = False
+                                try:
+                                    voice_blob.seek(0)
+                                    await update.message.reply_voice(
+                                        voice=InputFile(voice_blob, filename="reply.wav"),
+                                    )
+                                    sent = True
+                                except Exception as e_voice:
+                                    log.info(
+                                        "TG reply_voice failed (%s) — "
+                                        "falling back to reply_audio",
+                                        e_voice,
+                                    )
+                                if not sent:
+                                    voice_blob.seek(0)
+                                    await update.message.reply_audio(
+                                        audio=InputFile(voice_blob, filename="reply.wav"),
+                                        title="agent voice reply",
+                                    )
+                            else:
+                                # Synth produced no bytes — surface
+                                # the reason so the user sees why
+                                # the bot stayed silent on voice
+                                # rather than puzzling over a missing
+                                # bubble.
+                                err = _TTS.status().get("last_error") or "(no detail)"
+                                await update.message.reply_text(
+                                    f"⚠️ TTS produced no audio: {err}"
                                 )
                     except Exception as _tts_err:
-                        log.warning("TTS reply failed: %s", _tts_err)
+                        # Surface the error visibly — debugging silent
+                        # TTS failures was painful. Cap the trace so
+                        # we don't ship a 5KB stack into TG.
+                        log.warning("TTS reply failed: %s", _tts_err, exc_info=True)
+                        try:
+                            await update.message.reply_text(
+                                f"⚠️ Voice reply failed: {str(_tts_err)[:300]}"
+                            )
+                        except Exception:
+                            pass
 
                     _log_channel_message(self.channel_id, username, text, answer)
 
