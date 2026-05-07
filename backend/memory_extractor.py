@@ -58,6 +58,9 @@ Return strictly JSON:
       "triples": [
         ["entity1", "relation", "entity2"]
       ],
+      "replaces": [
+        ["old_subject", "old_relation", "old_target"]
+      ],
       "tags": ["tag1", "tag2"],
       "category": "price" | "personal" | "technical" | "event" | "location" | "preference" | "relationship" | "rule" | "general",
       "confidence": 0.0-1.0
@@ -70,7 +73,20 @@ Rules:
 - Relations should be short verbs or prepositions: "costs", "lives_in", "has", "is", "prefers", "located_at", "deadline", "uses", etc.
 - Extract ALL facts, even small ones — memory should be comprehensive
 - If nothing is worth remembering, return {"has_facts": false, "facts": []}
-- Max 8 facts per turn"""
+- Max 8 facts per turn
+
+CORRECTIONS — IMPORTANT:
+- When the user CORRECTS a previous fact ("not Tigran, my brother is Arman",
+  "actually I live in Berlin now, not Yerevan", "ignore that, I meant 100 not 10"),
+  fill the `replaces` array with the OLD triple(s) the new fact supersedes.
+- Watch for correction signals in the user message:
+  "not X", "actually", "I meant", "ignore that", "wait", "no, X is Y", "correction"
+- The OLD triple in `replaces` must use the SAME canonical lowercase entity names
+  as the corresponding `triples` entry — only the target changes.
+- If the new fact is purely additive (no correction), leave `replaces` empty or omit it.
+- Multi-valued relations (`brother_of`, `friend_of`, `child_of`) are NOT auto-corrected
+  by the graph — the `replaces` hint is the ONLY way to invalidate the old fact, so
+  emit it whenever the conversation makes the correction explicit."""
 
 
 class MemoryFact:
@@ -203,6 +219,27 @@ class MemoryExtractor:
                     source_turn=user_message[:200],
                 )
                 facts.append(fact)
+
+                # Corrections — close the superseded triples BEFORE adding
+                # the new ones. Without this, a "not Tigran, my brother is
+                # Arman" turn leaves both edges open and recall returns
+                # both names. Multi-valued relations like `has_brother`
+                # aren't in KG.SINGLE_VALUED_RELATIONS, so the graph
+                # itself can't auto-invalidate — the extractor's hint
+                # is the only signal.
+                for old in raw.get("replaces", []):
+                    if (
+                        isinstance(old, (list, tuple))
+                        and len(old) >= 3
+                        and all(str(x).strip() for x in old[:3])
+                    ):
+                        try:
+                            GRAPH.invalidate(str(old[0]), str(old[1]), str(old[2]))
+                        except Exception:
+                            # Invalidation is best-effort — we'd rather
+                            # have a stale-but-additive graph than a
+                            # crashed extraction.
+                            pass
 
                 # Store in knowledge graph
                 graph_triples = list(triples)

@@ -134,13 +134,6 @@ def test_memory_conflict_basic_kg_can_invalidate_explicitly(tmp_path):
     assert "tigran" not in targets
 
 
-@pytest.mark.xfail(
-    reason="P2 work: memory_extractor doesn't currently detect 'correction' "
-           "intent and emit an invalidation hint, so the brother edge stays "
-           "multi-valued and recall returns both names. Will be fixed when "
-           "the extractor learns to mark `replaces=<old>` on corrections.",
-    strict=False,
-)
 def test_memory_conflict_correction_supersedes_via_extractor(tmp_path, monkeypatch):
     """Realistic scenario: user states a fact, then corrects it. After
     the correction, recall must surface only the new fact."""
