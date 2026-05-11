@@ -6,7 +6,7 @@ updated: 2026-04-14 09:59
 keywords: knowledge graph, graph database, RDF, triples, ontology, semantic enrichment, entity relationships, GraphRAG, Neo4j, reasoning and inference
 source: https://en.wikipedia.org/wiki/Knowledge_graph; https://www.geeksforgeeks.org/data-analysis/what-is-a-knowledge-graph/; https://neo4j.com/blog/knowledge-graph/how-to-build-knowledge-graph/
 confidence: partial
-access_count: 37
+access_count: 80
 ---
 
 # knowledge_graph

@@ -1,0 +1,8 @@
+{
+  "backend": "auto",
+  "local_piper": {
+    "url": "http://100.124.210.21:8017",
+    "voice": "en_US-lessac-medium",
+    "voice_ru": "ru_RU-irina-medium"
+  }
+}

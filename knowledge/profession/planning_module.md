@@ -6,7 +6,7 @@ updated: 2026-04-08 09:53
 keywords: sewage facilities planning, planning module, Act 537, wastewater management, Component 1, Component 3, application mailer, land development, sewage collection, treatment facilities
 source: //duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.pa.gov%2Fagencies%2Fdep%2Fprograms%2Dand%2Dservices%2Fwater%2Fclean%2Dwater%2Fwastewater%2Dmanagement%2Fact%2D537%2Dsewage%2Dfacilities%2Dprogram%2Fsewage%2Dfacilities%2Dplanning&amp;rut=a6345ef08cc7a289b09a009ae42f620645711168a94b5c99815b6292d698f9f3; //duckduckgo.com/l/?uddg=http%3A%2F%2Fwww.depgreenport.state.pa.us%2Felibrary%2FGetFolder%3FFolderID%3D43634&amp;rut=c9f418591595ea90e504f5fe3e37007d3eca6b0173f17c4af62a692fc13f0408; //duckduckgo.com/l/?uddg=https%3A%2F%2Fgreenport.pa.gov%2Felibrary%2FGetFolder%3FFolderID%3D1490378&amp;rut=9c45682278a944d3e0fbaa7a3db423f4174f598464b74cce0785165d5eed6ba6
 confidence: partial
-access_count: 14
+access_count: 40
 ---
 
 # planning module

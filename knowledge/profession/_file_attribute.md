@@ -6,7 +6,7 @@ updated: 2026-04-08 14:26
 keywords: __file__, Python module attribute, pathname, module path, global namespace, extension modules, C modules, dynamic file paths, module location, special variables
 source: //duckduckgo.com/l/?uddg=https%3A%2F%2Fpytutorial.com%2Fpython%2D__file__%2Dattribute%2Dguide%2Dexamples%2F&amp;rut=3831ea69f053d51b270ffac6a5d5fce4de83f00b7bc7793fe2846c21d826244f; //duckduckgo.com/l/?uddg=https%3A%2F%2Fstackoverflow.com%2Fquestions%2F9271464%2Fwhat%2Ddoes%2Dthe%2Dfile%2Dvariable%2Dmean%2Ddo&amp;rut=7ac0f927acbef2f34f46528d33ece8e5daed58a0ed997bd3af088911602715e8; //duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.geeksforgeeks.org%2Fpython%2F__file__%2Da%2Dspecial%2Dvariable%2Din%2Dpython%2F&amp;rut=50b9b4d3f2e2fbe7fe0b205ed7e18da498d563524e1e95a0ee147985cb98dc18
 confidence: partial
-access_count: 13
+access_count: 42
 ---
 
 # __file__ attribute

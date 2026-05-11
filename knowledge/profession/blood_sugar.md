@@ -6,7 +6,7 @@ updated: 2026-04-14 15:42
 keywords: blood sugar, glucose, insulin, diabetes, HbA1c, fasting blood sugar, postprandial glucose, hypoglycemia, hyperglycemia, diabetic ketoacidosis
 source: https://www.medicinenet.com/normal_blood_sugar_levels_in_adults_with_diabetes/article.htm; https://www.medkart.in/blog/normal-blood-sugar-levels-chart; https://drgooddeed.com/blog/diabetes/normal-blood-sugar-levels-chart-by-age/
 confidence: partial
-access_count: 2
+access_count: 23
 ---
 
 # blood sugar

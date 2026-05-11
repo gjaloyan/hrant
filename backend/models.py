@@ -257,6 +257,14 @@ class AgentAnswer(BaseModel):
     # turn artifact (including tool_call_order with raw results)
     # without bloating this response payload.
     turn_id: str = ""
+    # Pipeline mode picked for this turn. Surfaced so the UI can
+    # show the user which tier ran (fast_chat / task_mode /
+    # deep_agent) and the verifier behaviour reads correctly:
+    # fast_chat skips analysis + verifier + retry + learning;
+    # task_mode runs analysis + tools + memory but skips verifier
+    # and retry loop; deep_agent is the full cycle. Empty string
+    # on legacy paths that don't yet stamp it.
+    mode: str = ""
 
 
 class ChatRequest(BaseModel):

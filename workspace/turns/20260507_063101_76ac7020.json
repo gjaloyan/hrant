@@ -1,0 +1,45 @@
+{
+  "turn_id": "20260507_063101_76ac7020",
+  "task": "What is RS-485?",
+  "answer": "⚠️ Низкая уверенность (50%). Ответ может содержать неподтверждённые факты.\n\nfake answer",
+  "project": null,
+  "verification": {
+    "confidence": 50,
+    "verified_claims": [],
+    "unverified_claims": [
+      "verifier error: Anthropic API 400 (model='claude-sonnet-4-5'): invalid_request_error: Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."
+    ],
+    "contradictions": [],
+    "notes_used": []
+  },
+  "claims": [
+    {
+      "id": "c_001",
+      "text": "verifier error: Anthropic API 400 (model='claude-sonnet-4-5'): invalid_request_error: Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits.",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_user_000",
+      "source_type": "user",
+      "source_ref": "user_turn",
+      "quote": "What is RS-485?",
+      "confidence": 1.0
+    }
+  ],
+  "tool_call_order": [],
+  "token_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.0,
+    "llm_calls": 0,
+    "by_stage": {}
+  },
+  "solver_claims_raw": null
+}

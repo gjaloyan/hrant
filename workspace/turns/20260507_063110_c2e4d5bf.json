@@ -1,0 +1,62 @@
+{
+  "turn_id": "20260507_063110_c2e4d5bf",
+  "task": "tell me about X and Z",
+  "answer": "X is Y. Z works.",
+  "project": null,
+  "verification": {
+    "confidence": 100,
+    "verified_claims": [
+      "X is Y",
+      "Z works"
+    ],
+    "unverified_claims": [],
+    "contradictions": [],
+    "notes_used": []
+  },
+  "claims": [
+    {
+      "id": "c_001",
+      "text": "X is Y",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_002",
+      "text": "Z works",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_user_000",
+      "source_type": "user",
+      "source_ref": "user_turn",
+      "quote": "tell me about X and Z",
+      "confidence": 1.0
+    }
+  ],
+  "tool_call_order": [],
+  "token_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.0,
+    "llm_calls": 0,
+    "by_stage": {}
+  },
+  "solver_claims_raw": [
+    {
+      "text": "X is Y",
+      "evidence": []
+    },
+    {
+      "text": "Z works",
+      "evidence": []
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "turn_id": "20260507_063107_7e6800d3",
+  "task": "tell me about RS-485",
+  "answer": "⚠️ Низкая уверенность (50%). Ответ может содержать неподтверждённые факты.\n\nRS-485 is a differential bus.",
+  "project": null,
+  "verification": {
+    "confidence": 50,
+    "verified_claims": [
+      "differential bus"
+    ],
+    "unverified_claims": [
+      "minor"
+    ],
+    "contradictions": [],
+    "notes_used": []
+  },
+  "claims": [
+    {
+      "id": "c_001",
+      "text": "differential bus",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_002",
+      "text": "minor",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_user_000",
+      "source_type": "user",
+      "source_ref": "user_turn",
+      "quote": "tell me about RS-485",
+      "confidence": 1.0
+    }
+  ],
+  "tool_call_order": [],
+  "token_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.0,
+    "llm_calls": 0,
+    "by_stage": {}
+  },
+  "solver_claims_raw": null
+}

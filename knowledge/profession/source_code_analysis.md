@@ -6,7 +6,7 @@ updated: 2026-04-07 19:56
 keywords: SAST, static analysis, code security, vulnerability detection, OWASP, false positives, CI/CD integration, code quality, security testing, automated analysis
 source: //duckduckgo.com/l/?uddg=https%3A%2F%2Fowasp.org%2Fwww%2Dcommunity%2FSource_Code_Analysis_Tools&amp;rut=8090f53fad015d18d4f62ff8cdf63eced83b10ad3c5f581c6c695cd79ba928d3; //duckduckgo.com/l/?uddg=https%3A%2F%2Fgithub.com%2FComeOnOliver%2Fclaude%2Dcode%2Danalysis&amp;rut=1b6530689ef48e5b87739e402f708022c7e44a4799ea88b1013818ac2311bc53; //duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.aikido.dev%2Fblog%2Fcode%2Danalysis%2Dtools&amp;rut=fb47856a7a2da56f780a235372b392bf754f6f18ee0283cd52c8256d883b6994
 confidence: partial
-access_count: 25
+access_count: 78
 ---
 
 # source code analysis

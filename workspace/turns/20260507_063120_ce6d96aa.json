@@ -1,0 +1,80 @@
+{
+  "turn_id": "20260507_063120_ce6d96aa",
+  "task": "tell me about topic",
+  "answer": "⚠️ Низкая уверенность (20%). Ответ может содержать неподтверждённые факты.\n\nbad answer",
+  "project": null,
+  "verification": {
+    "confidence": 20,
+    "verified_claims": [
+      "one ok"
+    ],
+    "unverified_claims": [
+      "u1",
+      "u2",
+      "u3",
+      "u4"
+    ],
+    "contradictions": [],
+    "notes_used": [
+      "Topic"
+    ]
+  },
+  "claims": [
+    {
+      "id": "c_001",
+      "text": "one ok",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_002",
+      "text": "u1",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    },
+    {
+      "id": "c_003",
+      "text": "u2",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    },
+    {
+      "id": "c_004",
+      "text": "u3",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    },
+    {
+      "id": "c_005",
+      "text": "u4",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_user_000",
+      "source_type": "user",
+      "source_ref": "user_turn",
+      "quote": "tell me about topic",
+      "confidence": 1.0
+    }
+  ],
+  "tool_call_order": [],
+  "token_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.0,
+    "llm_calls": 0,
+    "by_stage": {}
+  },
+  "solver_claims_raw": null
+}

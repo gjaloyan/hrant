@@ -1,0 +1,120 @@
+{
+  "turn_id": "20260507_063117_91e1c526",
+  "task": "what is python?",
+  "answer": "Python is an interpreted language with GIL. [Python]",
+  "project": null,
+  "verification": {
+    "confidence": 90,
+    "verified_claims": [
+      "interpreted language",
+      "GIL",
+      "v3",
+      "v4",
+      "v5",
+      "v6",
+      "v7",
+      "v8",
+      "v9"
+    ],
+    "unverified_claims": [
+      "minor"
+    ],
+    "contradictions": [],
+    "notes_used": [
+      "Python"
+    ]
+  },
+  "claims": [
+    {
+      "id": "c_001",
+      "text": "interpreted language",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_002",
+      "text": "GIL",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_003",
+      "text": "v3",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_004",
+      "text": "v4",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_005",
+      "text": "v5",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_006",
+      "text": "v6",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_007",
+      "text": "v7",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_008",
+      "text": "v8",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_009",
+      "text": "v9",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_010",
+      "text": "minor",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_user_000",
+      "source_type": "user",
+      "source_ref": "user_turn",
+      "quote": "what is python?",
+      "confidence": 1.0
+    }
+  ],
+  "tool_call_order": [],
+  "token_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.0,
+    "llm_calls": 0,
+    "by_stage": {}
+  },
+  "solver_claims_raw": null
+}

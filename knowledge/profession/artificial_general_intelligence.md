@@ -6,7 +6,7 @@ updated: 2026-04-12 18:44
 keywords: AGI, искусственный общий интеллект, сильный ИИ, универсальный интеллект, AI alignment, трансферное обучение, тест Тьюринга, superintelligence, когнитивная архитектура, безопасность ИИ
 source: internal
 confidence: unverified
-access_count: 45
+access_count: 94
 ---
 
 # artificial_general_intelligence

@@ -647,6 +647,83 @@ _SELF_ANALYSIS_HINT_RE = re.compile(
 )
 
 
+# Pipeline-mode constants. Three explicit tiers:
+#
+#   fast_chat   — small-talk, status, preference, micro-ack. No
+#                 thinking, no tools, no verifier, no learning.
+#                 The agent's existing chat/preference branches
+#                 already implement this — the constant is here so
+#                 every code path can name the tier consistently.
+#
+#   task_mode   — normal Q&A and lightweight tasks. Full plan +
+#                 tools + memory, but NO verifier, NO self-critic
+#                 retry, NO inline learning. Default tier for
+#                 anything classified as `task` that doesn't trip
+#                 the deep_agent signals below.
+#
+#   deep_agent  — code review, self-analysis, complex investigation.
+#                 Adds verifier, retry, full learning extraction on
+#                 top of task_mode. Triggered when:
+#                   - `_looks_like_self_analysis_request(task)` matches
+#                   - thinking picks question_type=="self_analysis"
+#                   - thinking returns subtasks (decomposition needed)
+#                   - thinking.confidence < 60 (uncertain plan → verify)
+#                   - task contains explicit "review/audit/исследуй"
+#                     keywords (recognised pre-think for early routing)
+PIPELINE_FAST_CHAT = "fast_chat"
+PIPELINE_TASK_MODE = "task_mode"
+PIPELINE_DEEP_AGENT = "deep_agent"
+
+# Pre-think keywords that escalate task → deep_agent regardless of
+# what thinking later decides. Conservative — only matches phrases
+# that almost always mean "you should verify yourself thoroughly".
+_DEEP_AGENT_HINT_RE = re.compile(
+    r"\b(?:review|audit|investigate|deep[\s-]?dive|"
+    r"исследуй|разбер[иё]|"
+    r"провер[ьи]|"
+    r"code\s+review|self[\s-]?(?:analysis|review|audit))\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_deep_agent_request(text: str) -> bool:
+    """Pre-think hint for deep_agent escalation. Used alongside
+    `_looks_like_self_analysis_request` (which is more specific —
+    self-analysis is one TYPE of deep_agent task, but reviews of
+    third-party code or research questions also belong in
+    deep_agent without being self-analysis)."""
+    if not text:
+        return False
+    return bool(_DEEP_AGENT_HINT_RE.search(text))
+
+
+def _pick_pipeline_mode(
+    intent: str,
+    task: str,
+    thinking: "ThinkingResult | None",
+) -> str:
+    """Decide which pipeline tier should handle this turn. Cheap to
+    call — no LLM. The verifier-side cost saving comes from the
+    task_mode path skipping `_verify` (which is normally a 4-8 KB
+    prompt + a separate LLM call); typical Q&A turns are
+    `task_mode` and pay nothing extra for verification.
+    """
+    if intent == "chat" or intent == "preference":
+        return PIPELINE_FAST_CHAT
+    # intent == "task" from here on. Decide between task_mode and
+    # deep_agent.
+    if _looks_like_self_analysis_request(task) or _looks_like_deep_agent_request(task):
+        return PIPELINE_DEEP_AGENT
+    if thinking is not None:
+        if thinking.question_type == "self_analysis":
+            return PIPELINE_DEEP_AGENT
+        if thinking.subtasks:
+            return PIPELINE_DEEP_AGENT
+        if isinstance(thinking.confidence, int) and thinking.confidence < 60:
+            return PIPELINE_DEEP_AGENT
+    return PIPELINE_TASK_MODE
+
+
 def _looks_like_self_analysis_request(text: str) -> bool:
     """Cheap pre-classifier for self-analysis intent. The LLM
     classifier still runs and wins, but `_think`'s prompt-shaping
@@ -1864,6 +1941,10 @@ class Agent:
         # branch all tag the same way without each call site
         # passing it explicitly.
         self._channel = channel or "webui"
+        # Pipeline mode picked for this turn (fast_chat / task_mode /
+        # deep_agent). Set by the branches below so AgentAnswer can
+        # report which tier ran.
+        self._mode: str = ""
         try:
             core = self._load_core()
 
@@ -1886,6 +1967,7 @@ class Agent:
                 self._cleanup()
                 self._tick_goals()
                 self._persist_dev_capture(task, micro, 100)
+                self._mode = PIPELINE_FAST_CHAT
                 return AgentAnswer(
                     answer=micro,
                     verification=VerificationResult(confidence=100),
@@ -1893,6 +1975,7 @@ class Agent:
                     used_topics=[],
                     project=project,
                     is_chat=True,
+                    mode=PIPELINE_FAST_CHAT,
                     token_usage=self._get_token_usage(),
                     thinking_trace=self._trace,
                     llm_calls=self._llm_calls,
@@ -1924,6 +2007,7 @@ class Agent:
                 self._cleanup()
                 self._tick_goals()
                 self._persist_dev_capture(task, answer, 100)
+                self._mode = PIPELINE_FAST_CHAT
                 return AgentAnswer(
                     answer=answer,
                     verification=VerificationResult(confidence=100),
@@ -1931,6 +2015,7 @@ class Agent:
                     used_topics=[],
                     project=project,
                     is_chat=True,
+                    mode=PIPELINE_FAST_CHAT,
                     token_usage=self._get_token_usage(),
                     thinking_trace=self._trace,
                     llm_calls=self._llm_calls,
@@ -1960,6 +2045,7 @@ class Agent:
                 self._cleanup()
                 self._tick_goals()
                 self._persist_dev_capture(task, reply, 100)
+                self._mode = PIPELINE_FAST_CHAT
                 return AgentAnswer(
                     answer=reply,
                     verification=VerificationResult(confidence=100),
@@ -1967,6 +2053,7 @@ class Agent:
                     used_topics=[],
                     project=project,
                     is_chat=True,
+                    mode=PIPELINE_FAST_CHAT,
                     token_usage=self._get_token_usage(),
                     thinking_trace=self._trace,
                     llm_calls=self._llm_calls,
@@ -1980,6 +2067,15 @@ class Agent:
                 f"tools=[{', '.join(thinking.tools_needed)}], "
                 f"confidence={thinking.confidence}%",
             )
+
+            # Pipeline tier decision. task_mode (default) skips
+            # verifier + retry + heavy learning — that's the cost
+            # saving for normal Q&A. deep_agent gets the full cycle
+            # and is reserved for self-analysis, code review, and
+            # complex investigations where the extra rounds pay off.
+            pipeline = _pick_pipeline_mode(intent, task, thinking)
+            self._mode = pipeline
+            self.progress("mode", pipeline)
             # self_analysis answers come from reading the agent's own code,
             # not from external research — disable web-driven auto-learning
             # for those turns to avoid polluting the KB with redundant notes.
@@ -2135,156 +2231,152 @@ class Agent:
                     # means skip_verify would otherwise fire.
                     self._self_analysis_unverified = True
 
-            # Skip verification for creative / meta / pure self_analysis where
-            # there's no factual ground truth — saves 1 LLM call. BUT when
-            # self_analysis came with tool_context (the agent actually
-            # read_file'd its own code) the tool output IS evidence and
-            # must be checked against — otherwise we ship hallucinated
-            # claims about file contents. Same logic for any creative/meta
-            # answer that ended up using tools.
-            qtype = thinking.question_type if thinking else ""
-            no_evidence_types = ("creative", "meta", "self_analysis")
-            skip_verify = (
-                qtype in no_evidence_types
-                and not (tool_context or "").strip()
-                # Don't skip verify when the self-analysis guard flagged
-                # the answer — a low-confidence VerificationResult is
-                # the whole point of flagging it.
-                and not getattr(self, "_self_analysis_unverified", False)
-            )
-            if skip_verify:
+            if pipeline == PIPELINE_TASK_MODE:
+                # task_mode short-circuit: no verifier LLM call, no
+                # self-critic retry, no inline learning. The placeholder
+                # VR uses thinking.confidence (the cheapest honest
+                # number we have) so downstream code that reads
+                # vr.confidence (conversation row, claims builder,
+                # AgentAnswer) keeps working. Anything that genuinely
+                # needs the verifier is routed to deep_agent upstream
+                # by _pick_pipeline_mode.
                 vr = VerificationResult(
-                    confidence=thinking.confidence if thinking else 75,
+                    confidence=int(thinking.confidence) if thinking else 75,
                     notes_used=[n.frontmatter.topic for n in notes],
                 )
-            elif getattr(self, "_self_analysis_unverified", False):
-                # Manual low-confidence verdict for the no-source-read
-                # path (verifier has nothing to check against).
-                vr = VerificationResult(
-                    confidence=15,
-                    unverified_claims=[
-                        "self-analysis answer not grounded in source — "
-                        "no read_file/view_file in trace"
-                    ],
-                    notes_used=[],
-                )
-                self._self_analysis_unverified = False  # reset for next request
             else:
-                vr = self._verify(task, answer, notes, tool_context=tool_context)
+                # === deep_agent path: full verify + retry + learning ===
+                # Skip verification for creative / meta / pure self_analysis where
+                # there's no factual ground truth — saves 1 LLM call. BUT when
+                # self_analysis came with tool_context (the agent actually
+                # read_file'd its own code) the tool output IS evidence and
+                # must be checked against — otherwise we ship hallucinated
+                # claims about file contents.
+                qtype = thinking.question_type if thinking else ""
+                no_evidence_types = ("creative", "meta", "self_analysis")
+                skip_verify = (
+                    qtype in no_evidence_types
+                    and not (tool_context or "").strip()
+                    and not getattr(self, "_self_analysis_unverified", False)
+                )
+                if skip_verify:
+                    vr = VerificationResult(
+                        confidence=thinking.confidence if thinking else 75,
+                        notes_used=[n.frontmatter.topic for n in notes],
+                    )
+                elif getattr(self, "_self_analysis_unverified", False):
+                    # Manual low-confidence verdict for the no-source-read
+                    # path (verifier has nothing to check against).
+                    vr = VerificationResult(
+                        confidence=15,
+                        unverified_claims=[
+                            "self-analysis answer not grounded in source — "
+                            "no read_file/view_file in trace"
+                        ],
+                        notes_used=[],
+                    )
+                    self._self_analysis_unverified = False  # reset for next request
+                else:
+                    vr = self._verify(task, answer, notes, tool_context=tool_context)
 
-            # Self-critic loop: if confidence is low, re-solve with verifier feedback.
-            # Max retries configurable via config (default 2). Each retry injects the
-            # critique (unverified claims + contradictions) so the solver can fix them.
-            #
-            # Guards against wasting tokens:
-            # - Skip retry if confidence=0 with no notes (structural issue, retry won't help)
-            # - Skip retry if verifier reported only "no loaded notes" (no evidence to verify against)
-            # - Break on LLMError during retry (API down / rate limited)
-            # - Break if token budget exceeded during retries
-            critic_threshold = CONFIG.verification.get("critic_threshold", 50)
-            max_retries = CONFIG.verification.get("critic_max_retries", 2)
-            # Hard token budget for retries. Without this, a turn that
-            # already burned ~50k tokens on think/solve/verify could
-            # spend another ~50k per retry × 2 retries = potentially
-            # $0.50+ on a single low-confidence answer. The comment
-            # below the guard list claimed this was already implemented;
-            # it wasn't. 60000 is a reasonable default — covers a
-            # full self-review with one retry but stops a runaway.
-            retry_token_budget = CONFIG.verification.get(
-                "critic_retry_token_budget", 60000
-            )
-            retry = 0
-            no_notes = not notes and not tool_context
-            should_retry = (
-                vr.confidence < critic_threshold
-                and not no_notes  # don't retry if there's no evidence at all
-            )
-            # Accumulate tool_context across retry attempts. The solver
-            # may call read_file on different files each pass; verifying
-            # the FINAL answer needs all evidence the agent has gathered
-            # so far, not just the last attempt's. Without this, evidence
-            # collected on attempt 1 (e.g. agent.py contents) is invisible
-            # to the verifier when attempt 2 only re-read llm.py.
-            accumulated_tool_context = tool_context or ""
-            # Cap so a runaway-retry case doesn't push the verifier
-            # prompt past sensible limits.
-            _MAX_ACCUMULATED_CTX = 80000
-            while should_retry and retry < max_retries:
-                # Pre-flight token check. Cheaper to bail with the
-                # current answer than to spend another solve+verify
-                # cycle with no headroom — the next call would fail
-                # downstream on context-window or budget limits anyway.
-                used_so_far = TOKENS.request_usage().get("total_tokens", 0)
-                if used_so_far >= retry_token_budget:
+            # Self-critic loop + inline learning + meta-learner —
+            # ALL deep_agent only. task_mode skipped the verifier
+            # above and has nothing useful to retry / learn from.
+            if pipeline != PIPELINE_DEEP_AGENT:
+                # task_mode flow stops after answer + placeholder vr.
+                # Light memory extraction still runs below for both
+                # paths (it picks up user-stated facts independently
+                # of verifier confidence).
+                pass
+            else:
+                critic_threshold = CONFIG.verification.get("critic_threshold", 50)
+                max_retries = CONFIG.verification.get("critic_max_retries", 2)
+                # Hard token budget for retries — keeps a low-confidence
+                # answer from burning $0.50 across retry × 2.
+                retry_token_budget = CONFIG.verification.get(
+                    "critic_retry_token_budget", 60000
+                )
+                retry = 0
+                no_notes = not notes and not tool_context
+                should_retry = (
+                    vr.confidence < critic_threshold
+                    and not no_notes  # don't retry if there's no evidence at all
+                )
+                # Accumulate tool_context across retry attempts so the
+                # verifier on attempt N still sees evidence collected
+                # on attempts 1..N-1.
+                accumulated_tool_context = tool_context or ""
+                _MAX_ACCUMULATED_CTX = 80000
+                while should_retry and retry < max_retries:
+                    used_so_far = TOKENS.request_usage().get("total_tokens", 0)
+                    if used_so_far >= retry_token_budget:
+                        self.progress(
+                            "self_critic",
+                            f"token budget exhausted ({used_so_far} ≥ "
+                            f"{retry_token_budget}), stopping retries",
+                        )
+                        break
+                    retry += 1
                     self.progress(
                         "self_critic",
-                        f"token budget exhausted ({used_so_far} ≥ "
-                        f"{retry_token_budget}), stopping retries",
+                        f"confidence {vr.confidence}% < {critic_threshold}%, "
+                        f"retrying ({retry}/{max_retries})...",
                     )
-                    break
-                retry += 1
-                self.progress(
-                    "self_critic",
-                    f"confidence {vr.confidence}% < {critic_threshold}%, "
-                    f"retrying ({retry}/{max_retries})...",
-                )
-                try:
-                    critique = self._build_critique(vr, answer)
-                    answer, tool_context = self._solve(
-                        task, core, notes, thinking=thinking, critique=critique,
-                    )
-                    if tool_context and tool_context.strip():
-                        # Append this attempt's evidence to the running
-                        # collection (skip if we already have the same
-                        # content — solver often re-reads identical
-                        # files between retries).
-                        if tool_context not in accumulated_tool_context:
-                            accumulated_tool_context = (
-                                f"{accumulated_tool_context}\n\n--- retry {retry} ---\n\n{tool_context}"
-                                if accumulated_tool_context
-                                else tool_context
-                            )
-                            if len(accumulated_tool_context) > _MAX_ACCUMULATED_CTX:
+                    try:
+                        critique = self._build_critique(vr, answer)
+                        answer, tool_context = self._solve(
+                            task, core, notes, thinking=thinking, critique=critique,
+                        )
+                        if tool_context and tool_context.strip():
+                            if tool_context not in accumulated_tool_context:
                                 accumulated_tool_context = (
-                                    accumulated_tool_context[-_MAX_ACCUMULATED_CTX:]
+                                    f"{accumulated_tool_context}\n\n--- retry {retry} ---\n\n{tool_context}"
+                                    if accumulated_tool_context
+                                    else tool_context
                                 )
-                    vr = self._verify(
-                        task, answer, notes,
-                        tool_context=accumulated_tool_context,
-                    )
-                    self.progress(
-                        "self_critic",
-                        f"retry {retry} confidence: {vr.confidence}%",
-                    )
-                except LLMError as e:
-                    self.progress("self_critic", f"retry aborted: API error — {e}")
-                    break
-                # If confidence didn't improve at all, stop wasting tokens
-                if vr.confidence < critic_threshold and vr.confidence == 0:
-                    self.progress("self_critic", "confidence stuck at 0%, stopping retries")
-                    break
-                should_retry = vr.confidence < critic_threshold
+                                if len(accumulated_tool_context) > _MAX_ACCUMULATED_CTX:
+                                    accumulated_tool_context = (
+                                        accumulated_tool_context[-_MAX_ACCUMULATED_CTX:]
+                                    )
+                        vr = self._verify(
+                            task, answer, notes,
+                            tool_context=accumulated_tool_context,
+                        )
+                        self.progress(
+                            "self_critic",
+                            f"retry {retry} confidence: {vr.confidence}%",
+                        )
+                    except LLMError as e:
+                        self.progress("self_critic", f"retry aborted: API error — {e}")
+                        break
+                    if vr.confidence < critic_threshold and vr.confidence == 0:
+                        self.progress("self_critic", "confidence stuck at 0%, stopping retries")
+                        break
+                    should_retry = vr.confidence < critic_threshold
 
-            min_conf = CONFIG.verification["min_confidence"]
-            if vr.confidence < min_conf:
-                answer = (
-                    f"⚠️ Низкая уверенность ({vr.confidence}%). "
-                    f"Ответ может содержать неподтверждённые факты.\n\n{answer}"
-                )
-
-            self._learn_from_experience(task, answer, notes, vr, project)
-
-            # Meta-learner: analyze failures and create corrective goals
-            if vr.confidence < 60:
-                try:
-                    analysis = META_LEARNER.analyze_failure(
-                        task, answer, vr,
-                        intent=thinking.question_type if thinking else "task",
+                min_conf = CONFIG.verification["min_confidence"]
+                if vr.confidence < min_conf:
+                    answer = (
+                        f"⚠️ Низкая уверенность ({vr.confidence}%). "
+                        f"Ответ может содержать неподтверждённые факты.\n\n{answer}"
                     )
-                    if analysis:
-                        self.progress("meta_learn", f"failure analyzed: {analysis.get('root_cause', '?')}")
-                except Exception:
-                    pass
+
+                # Inline learning + meta-learner failure analysis only
+                # in deep_agent. task_mode skips both — those flows
+                # spend an LLM call each on top of a turn that's
+                # already happy with its answer.
+                self._learn_from_experience(task, answer, notes, vr, project)
+
+                if vr.confidence < 60:
+                    try:
+                        analysis = META_LEARNER.analyze_failure(
+                            task, answer, vr,
+                            intent=thinking.question_type if thinking else "task",
+                        )
+                        if analysis:
+                            self.progress("meta_learn", f"failure analyzed: {analysis.get('root_cause', '?')}")
+                    except Exception:
+                        pass
 
             used = [n.frontmatter.topic for n in notes]
 
@@ -2391,6 +2483,7 @@ class Agent:
                 learned_topics=learned,
                 used_topics=used,
                 project=project,
+                mode=getattr(self, "_mode", "") or pipeline,
                 token_usage=self._get_token_usage(),
                 thinking_trace=self._trace,
                 llm_calls=self._llm_calls,
@@ -2404,6 +2497,7 @@ class Agent:
             return AgentAnswer(
                 answer=err_text,
                 verification=VerificationResult(confidence=0),
+                mode=getattr(self, "_mode", "") or "",
                 token_usage=self._get_token_usage(),
                 thinking_trace=self._trace,
                 llm_calls=self._llm_calls,

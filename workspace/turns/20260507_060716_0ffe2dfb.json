@@ -1,0 +1,80 @@
+{
+  "turn_id": "20260507_060716_0ffe2dfb",
+  "task": "question about X",
+  "answer": "good",
+  "project": null,
+  "verification": {
+    "confidence": 80,
+    "verified_claims": [
+      "ok",
+      "v2",
+      "v3",
+      "v4"
+    ],
+    "unverified_claims": [
+      "minor"
+    ],
+    "contradictions": [],
+    "notes_used": [
+      "X"
+    ]
+  },
+  "claims": [
+    {
+      "id": "c_001",
+      "text": "ok",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_002",
+      "text": "v2",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_003",
+      "text": "v3",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_004",
+      "text": "v4",
+      "status": "verified",
+      "evidence_ids": [],
+      "risk": "low"
+    },
+    {
+      "id": "c_005",
+      "text": "minor",
+      "status": "unverified",
+      "evidence_ids": [],
+      "risk": "medium"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "ev_user_000",
+      "source_type": "user",
+      "source_ref": "user_turn",
+      "quote": "question about X",
+      "confidence": 1.0
+    }
+  ],
+  "tool_call_order": [],
+  "token_usage": {
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "total_tokens": 0,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "cost_usd": 0.0,
+    "llm_calls": 0,
+    "by_stage": {}
+  },
+  "solver_claims_raw": null
+}

@@ -1,0 +1,22 @@
+[
+  {
+    "pattern": "Assumes or claims unsupported context, actions, or evidence",
+    "frequency": 2,
+    "domains": [
+      "conversational context handling",
+      "software engineering / Telegram bot voice output / TTS pipeline"
+    ],
+    "suggested_fix": "Require the agent to explicitly distinguish known facts from assumptions. Do not invent prior conversation context, repository search results, or implementation details unless they are present in the prompt or verified through tools.",
+    "priority": 9
+  },
+  {
+    "pattern": "Poor handling of Telegram voice message / TTS workflows",
+    "frequency": 2,
+    "domains": [
+      "conversational agent tool use / Telegram voice messaging",
+      "software engineering / Telegram bot voice output / TTS pipeline"
+    ],
+    "suggested_fix": "Add a checklist for voice-message tasks: verify whether audio was generated, whether the correct Telegram voice/audio tool was called, whether delivery succeeded, and whether the user actually received it before claiming success.",
+    "priority": 8
+  }
+]

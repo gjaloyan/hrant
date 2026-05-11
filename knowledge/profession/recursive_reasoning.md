@@ -6,7 +6,7 @@ updated: 2026-04-13 11:44
 keywords: recursive reasoning, tiny networks, TRM, HRM, ARC-AGI, 7M parameters, small models, puzzle solving, hierarchical reasoning, parameter efficiency
 source: https://arxiv.org/abs/2510.04871; https://medium.com/data-science-in-your-pocket/less-is-more-recursive-reasoning-with-tiny-networks-paper-explained-a4573708376d; https://github.com/SamsungSAILMontreal/TinyRecursiveModels
 confidence: partial
-access_count: 36
+access_count: 88
 ---
 
 # recursive_reasoning

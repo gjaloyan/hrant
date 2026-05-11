@@ -1,0 +1,19 @@
+fetch("https://stugum.emis.am/home/check", {
+  "headers": {
+    "accept": "application/json, text/javascript, */*; q=0.01",
+    "accept-language": "ru-RU,ru;q=0.9,en-GB;q=0.8,en;q=0.7,en-US;q=0.6,hy;q=0.5",
+    "content-type": "multipart/form-data; boundary=----WebKitFormBoundaryqKNfJJFNfj1sJcw8",
+    "sec-ch-ua": "\"Google Chrome\";v=\"147\", \"Not.A/Brand\";v=\"8\", \"Chromium\";v=\"147\"",
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": "\"Windows\"",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "x-requested-with": "XMLHttpRequest"
+  },
+  "referrer": "https://stugum.emis.am/",
+  "body": "------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"ci_csrf_token\"\r\n\r\n\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"ssn_checker_g-recaptcha-response\"\r\n\r\n0cAFcWeA4B9jzat6hJNxZumgz12SuSZTJg2v4Tg3hLSMOO1NUb-t2ZoC3S8C-iFzH6Qc6GqeDqT0z2KmS32wKGzoT6Or44MTKVr-_7zGxeIImCA6kw7d-YMHK89SIktmMQ3lkzlc4sigvZK-xFQBSs6uv30CSEBJvh1JMoubk9JKG_-_VLef80BU_jq1QE0sg6Krx1C2FSoBg3buKKfytpGHVHvq6-26x0L0dH0lAgLoBCvfxL6OLYHU3bq1dNLliIEL_xMSIagGuvFgH0YAz95o3Z2144_VMC-JG6Lh_NchZR86m8FgMEhRs5Z4eKk7WL7OEZg-wPxfiMsEN7FqXQt57p67nhwhkgc3Skn3cEfn-VxIZbRJMkC-1hg5ulcHMfrdDTKvv7sW8Dg61fBkcKiG1fy-3OsaBhJofQ3VNYTsCJwbtlSVXgpqJyxK2DxhA8F80eJ6FWGtH-MvoRMgCxZwDAYTRHgLoLvydF98HL-DvnWcYkn8VbGi__FXLl-ia8_l7iGN--iD20Tvuy_YK-X4Iue93gx1qICmWc5BzgpOfx0n6UQwJysDXNlQSLEatXmjKfogMYapiBLTryCfwWVWHCiG7oAH0t8_SAYp4Pxp-MHyefwe6iW1BBl6cdlanlOaEwy40l_x2HwGo9Fo13R-XH0ECsrYIdEV7YOp_y4BaHiHQnS3CV81EuuI5acT1gpfnTKIcr9JZbX00xOehGs0Unu0xnKL5-ruM2Pw8BXnKfaNDZcyD_-L0oF8EwbBP348jJ42edCNbRNqZnA9RBAjMdx97wEA7bs_5T_6FUTeUkLZhVUHyJlV2e4rdWcqxx1723hmnTlnrF-5gmIcSk-YKmcXTb1yzoEQWAEAeTqgYX8ebummc0ElYeTJhmnwAqkxn_VKUrFk_TiCMIbfGrpp2ax7jWsVq8J8uEjYkM-51Mm23v4mdtz2qfh999COoDZhUus-c4zosOIptm9ZzVyupQ4Kecf07fAs7Ff6exuuK6F6vygDMqpFvO8t8tqRKLE2wbumC51vX26QDW8FJlNXNWVq9PmLyPzHGcIc1EBK9S5xrFflrvCISZAqgXCL58PHegGi7cQ-Q5QYA2beidFGOZb1SOI2Ub4gUbVqa9hwElTQnfLymp6e7KvM-ZyuA7LF1Yxt_53vkf11ZLTjb53bjHYTSIwZkrNJCfT87aTtWN2NJxHCDdsvWGHoptGssScXZKvTlt4Synn98sgbmE5g5gIP2sA6XISkZicybSuxjGM2BnVARGsie4mBxsgYc5ajlTPMpgoEit-q9NFGT39iYcctF46WIlWknF4AuxaJCpC_L1mvGzygFiq1MPQJXhyBVaIWLLfIa-LbPJfrwtLSkecqz5PadP50it8OjSmwxE_zQ_RK1Gisdaq6tpniFzlVLbmY4d0OX9Wezm_Yk9Apdp_eVfaUHZ0sBjc-8TVWx0FpJyEKzr3_RnbaniyHAKo2RIdrWx4KwImKu6X-RKPteibwOWm6xqcvI4v5Ny6WWAFWzio8TMTNslB16qCWvGsq-AqHm6Pyvo1I9ZKAcSBBCKIUJ1Qbcc4a5EO-pBAPNgQcdgtAe-k-KIGdIseDRRrsfgPkaSQtnweo4c0bQSwZs3GOU-fWp5O_A7ohm0JIWuAwQk3_quV4cxj_Dr3I3p9-BHWWuazdEDS89DfAiX4HLVjjv68YNlXMEkf6pvBRK6DHqqyoKthmOUnbIrA8NO5vHCLea5oH6TZWDuZUWiPLtAFm7BW8aSqv7Y9Omplt9IMil7J9UW7zFN2jFYCJvNVIJZiTj13MEen3IQwK7NnlnBbn8keX8-gkNVEuiijGhmYvdx7cOMVaT0tBgIrHZOHVPvnMPEixjVZ3jA3xaGrOOsEDKVz16hMVPzG6VNHbmaTWLYtZnZa6c8VPzA2Q42TFmraPDzd-WL2BSqnp_yrtfNnLqzo8ifuluUzGwXbaJi6XQWmecGsMhNeIeoa2OHL3SoLYa1Dm4iYwKaryUWqdfmYEWTJGtkP5SDjYWWY1ISaoEUDKVniueabI3t3kBPqDQHA3cDZGnq\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"p_ssn\"\r\n\r\n2507920602\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"parent_first_name\"\r\n\r\nԳոռ\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"parent_last_name\"\r\n\r\nՋալոյան\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"ch_ssn\"\r\n\r\n6225200363\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8\r\nContent-Disposition: form-data; name=\"school_std_ssn\"\r\n\r\n\r\n------WebKitFormBoundaryqKNfJJFNfj1sJcw8--\r\n",
+  "method": "POST",
+  "mode": "cors",
+  "credentials": "include"
+});

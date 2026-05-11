@@ -6,7 +6,7 @@ updated: 2026-04-14 15:09
 keywords: Cucumis sativus, огурец, антиоксиданты, гидратация, низкокалорийный, клетчатка, витамин K, калий, контроль веса, Cucurbitaceae
 source: https://en.wikipedia.org/wiki/Cucumber; https://www.healthline.com/nutrition/7-health-benefits-of-cucumber; https://www.verywellhealth.com/cucumber-11724099
 confidence: partial
-access_count: 9
+access_count: 37
 ---
 
 # cucumber
