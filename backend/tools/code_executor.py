@@ -154,29 +154,37 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _wrap_with_sandbox_preamble(user_code: str) -> str:
-    """Prepend a sys.path-strip preamble to user code.
+    """Prepend a path-strip preamble to user code.
 
     `python -I` already disables user-site and PYTHON* env vars, but
-    it does NOT disable `.pth` files in the venv's site-packages. If
-    the agent was installed via `pip install -e .` (which pyproject.toml
-    enables), the venv ships an `__editable__.agi_agent-*.pth` that
-    injects the repo root into sys.path at startup. Without this
-    preamble the snippet can `import backend.agent` and reach
-    internals.
+    it does NOT defend against two other reach-back vectors that
+    `pip install -e .` introduces:
 
-    The preamble walks sys.path at the very top of the snippet and
-    drops every entry that equals or starts with the repo root. A
-    determined snippet can re-add the path via `sys.path.append(...)`
-    — defense in depth, not a silver bullet — but the casual
-    "what's on sys.path by default" case is closed.
+      1. A `.pth` file under the venv's site-packages that injects
+         the repo root into `sys.path` at startup.
+      2. A MetaPathFinder finder (modern setuptools editable installs
+         use this — see `__editable___*_finder.py` in site-packages)
+         that resolves `import backend.X` via a hard-coded MAPPING
+         dict, bypassing sys.path entirely.
+
+    The preamble closes both:
+
+      - filters sys.path for entries equal to or under the repo root
+      - filters sys.meta_path for any finder whose class name starts
+        with `_Editable` (the setuptools-emitted convention) OR whose
+        module name starts with `__editable__`
+
+    Defense in depth — a determined snippet can re-add the path or
+    re-install the finder. But cwd is a fresh tempdir, env is
+    stripped of secrets, and the obvious `import backend.agent` path
+    is closed.
     """
     repo = str(_REPO_ROOT)
     return (
-        "# agi-sandbox preamble: strip repo root from sys.path so a\n"
-        "# snippet can't `import backend.agent` via the editable\n"
-        "# install's .pth file. Defense in depth — a hostile snippet\n"
-        "# can still sys.path.append the path back, but the cwd is\n"
-        "# tempdir and env is stripped, so reach is limited.\n"
+        "# agi-sandbox preamble: strip the repo root from sys.path\n"
+        "# AND remove the setuptools editable-install MetaPathFinder.\n"
+        "# Without this, `pip install -e .` lets a snippet do\n"
+        "# `import backend.agent` and reach agent internals.\n"
         "import sys as _agi_sys\n"
         f"_AGI_REPO_ROOT = {repo!r}\n"
         "_agi_sys.path[:] = [\n"
@@ -184,6 +192,11 @@ def _wrap_with_sandbox_preamble(user_code: str) -> str:
         "    if p != _AGI_REPO_ROOT\n"
         "    and not p.startswith(_AGI_REPO_ROOT + '/')\n"
         "    and not p.startswith(_AGI_REPO_ROOT + '\\\\')\n"
+        "]\n"
+        "_agi_sys.meta_path[:] = [\n"
+        "    f for f in _agi_sys.meta_path\n"
+        "    if not (getattr(f, '__name__', '') or type(f).__name__).startswith('_Editable')\n"
+        "    and not (getattr(f, '__module__', '') or '').startswith('__editable__')\n"
         "]\n"
         "del _agi_sys, _AGI_REPO_ROOT\n"
         "\n"

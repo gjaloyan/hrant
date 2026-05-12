@@ -34,8 +34,72 @@ def test_parser_exposes_known_subcommands():
     # argparse stores subparsers under an internal action — peek
     # via parsed help text which is the documented surface.
     help_text = parser.format_help()
-    for cmd in ("init", "run", "status", "chat", "version"):
+    for cmd in ("init", "run", "status", "chat", "version", "service", "discover"):
         assert cmd in help_text, f"subcommand `{cmd}` missing from CLI help"
+
+
+def test_discover_dispatcher_present_and_wires_apply_flag():
+    parser = cli_mod.build_parser()
+    args = parser.parse_args(["discover", "--host", "1.2.3.4", "--apply"])
+    assert args.func is cli_mod.cmd_discover
+    assert args.host == "1.2.3.4"
+    assert args.apply is True
+
+
+def test_discover_returns_error_when_no_host(monkeypatch, capsys):
+    """Without a host AND no TAILSCALE_HOST env var, the command must
+    print the sentinel error from discover_services and exit non-zero
+    rather than scanning blind."""
+    monkeypatch.delenv("TAILSCALE_HOST", raising=False)
+    import argparse as _a
+    rc = cli_mod.cmd_discover(_a.Namespace(host=None, services=None, apply=False))
+    assert rc == 2
+    captured = capsys.readouterr()
+    assert "TAILSCALE_HOST" in (captured.out + captured.err)
+
+
+def test_discover_prints_results_per_service(monkeypatch, capsys):
+    """With --host, dispatch every known service through
+    discover_services and print one line per result."""
+    import argparse as _a
+    fake_found = {
+        "whisper": {"ok": True, "url": "http://1.2.3.4:8016"},
+        "piper":   {"ok": False, "reason": "connection refused"},
+        "ollama":  {"ok": True, "url": "http://1.2.3.4:11434"},
+    }
+    monkeypatch.setattr(
+        "backend.discovery.discover_services",
+        lambda host=None, services=None, **kw: fake_found,
+    )
+    rc = cli_mod.cmd_discover(_a.Namespace(host="1.2.3.4", services=None, apply=False))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "whisper" in out
+    assert "piper" in out
+    assert "ollama" in out
+    assert "http://1.2.3.4:8016" in out
+    assert "connection refused" in out
+
+
+def test_discover_apply_calls_apply_discovery(monkeypatch, capsys):
+    import argparse as _a
+    fake_found = {"whisper": {"ok": True, "url": "http://x:8016"}}
+    monkeypatch.setattr(
+        "backend.discovery.discover_services",
+        lambda host=None, services=None, **kw: fake_found,
+    )
+    called = {}
+
+    def fake_apply(found, **kw):
+        called["found"] = found
+        return {"whisper": "applied", "piper": "skipped: not found", "ollama": "skipped: configure model_b via Settings"}
+
+    monkeypatch.setattr("backend.discovery.apply_discovery", fake_apply)
+    rc = cli_mod.cmd_discover(_a.Namespace(host="x", services=None, apply=True))
+    assert rc == 0
+    assert called["found"] is fake_found
+    out = capsys.readouterr().out
+    assert "applied" in out
 
 
 def test_main_no_args_prints_help_and_returns_zero(capsys):

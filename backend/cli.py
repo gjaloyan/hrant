@@ -418,6 +418,49 @@ def cmd_service_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- discover -----------------------------------------------------------
+
+
+def cmd_discover(args: argparse.Namespace) -> int:
+    """Probe a host (default: $TAILSCALE_HOST) for Whisper / Piper /
+    Ollama. Print a readable table; with --apply, write discovered
+    URLs into the per-service config files.
+
+    Designed for the common setup: the agent runs on the user's
+    laptop, the heavy services (Whisper, Piper, Ollama) run on a home
+    server reachable over Tailscale. Manual URL entry through Settings
+    works but is fiddly — `hrant discover --host 100.124.210.21
+    --apply` is one command.
+    """
+    from .discovery import KNOWN_SERVICES, apply_discovery, discover_services
+
+    host = args.host
+    services = args.services.split(",") if args.services else None
+    found = discover_services(host=host, services=services)
+    if "_error" in found:
+        _print_err(found["_error"])
+        return 2
+    target_host = host or os.environ.get("TAILSCALE_HOST", "")
+    print(f"discovery on host: {target_host}")
+    print()
+    for name in (services or list(KNOWN_SERVICES.keys())):
+        r = found.get(name) or {}
+        if r.get("ok"):
+            _print_ok(f"{name:8s}  {r.get('url')}")
+        else:
+            _print_warn(f"{name:8s}  {r.get('reason', 'not found')}")
+    if args.apply:
+        print()
+        print("applying discovered URLs to config files:")
+        applied = apply_discovery(found)
+        for name, status in applied.items():
+            if status == "applied":
+                _print_ok(f"{name:8s}  {status}")
+            else:
+                _print_warn(f"{name:8s}  {status}")
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Hand off to the REPL implementation in `backend.repl`.
 
@@ -503,6 +546,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_svc_remove.add_argument("--platform", default=None,
                               choices=("linux", "macos", "windows"))
     p_svc_remove.set_defaults(func=cmd_service_uninstall)
+
+    p_discover = sub.add_parser(
+        "discover",
+        help="probe a Tailscale/LAN host for Whisper/Piper/Ollama",
+    )
+    p_discover.add_argument(
+        "--host", default=None,
+        help="host to probe (default: $TAILSCALE_HOST env var)",
+    )
+    p_discover.add_argument(
+        "--services", default=None,
+        help="comma-separated subset (default: all — whisper,piper,ollama)",
+    )
+    p_discover.add_argument(
+        "--apply", action="store_true",
+        help="write discovered URLs into transcriber_config.json / tts_config.json",
+    )
+    p_discover.set_defaults(func=cmd_discover)
 
     p_chat = sub.add_parser("chat", help="interactive REPL (legacy cli.py)")
     p_chat.add_argument("rest", nargs=argparse.REMAINDER)
