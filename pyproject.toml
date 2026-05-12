@@ -45,11 +45,13 @@ telegram = [
 ]
 
 [project.scripts]
-# After `pip install -e .` the `agi` command resolves to
-# `backend.cli:main`. Both forms work:
-#   agi run         (entry point)
+# After `pip install -e .` the `hrant` command resolves to
+# `backend.cli:main`. The agent's own name is Hrant (see
+# knowledge/identity/identity.md — "Меня зовут Hrant"); the CLI
+# matches. Both invocations work:
+#   hrant run        (entry point)
 #   python -m backend.cli run
-agi = "backend.cli:main"
+hrant = "backend.cli:main"
 
 [project.urls]
 Repository = "https://github.com/gjaloyan/AGI"

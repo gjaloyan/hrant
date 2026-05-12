@@ -1,21 +1,21 @@
-"""Unified CLI for the self-learning agent.
+"""Unified CLI for the agent (its name is Hrant).
 
 Subcommands:
-    agi init       — interactive setup: API keys, mode, optional services
-    agi run        — start the FastAPI server (uvicorn)
-    agi status     — diagnostic dump: config, registered models, external
+    hrant init     — interactive setup: API keys, mode, optional services
+    hrant run      — start the FastAPI server (uvicorn)
+    hrant status   — diagnostic dump: config, registered models, external
                      service health (Whisper / Piper / Ollama), running
                      Telegram bots
-    agi chat       — interactive REPL (the historical `python cli.py`
-                     behaviour, kept here so a single binary covers
-                     every use case)
-    agi version    — print the agent version
+    hrant chat     — interactive REPL (the historical `python cli.py`
+                     behaviour — same `backend.repl.main` under the hood)
+    hrant version  — print the agent version
 
 Invocable two ways:
     python -m backend.cli <subcommand>   — works without installation
-    agi <subcommand>                     — after `pip install -e .`
+    hrant <subcommand>                   — after `pip install -e .`
                                            thanks to pyproject.toml's
-                                           [project.scripts] entry.
+                                           [project.scripts] entry
+                                           (`hrant = "backend.cli:main"`).
 
 Design notes:
 - argparse, not Click — no extra dependency.
@@ -136,7 +136,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     print()
     print("setup complete. start the agent with:")
-    print("  agi run")
+    print("  hrant run")
     return 0
 
 
@@ -280,21 +280,20 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_chat(args: argparse.Namespace) -> int:
-    """Hand off to the historical `cli.py` interactive REPL.
+    """Hand off to the REPL implementation in `backend.repl`.
 
-    Keeps the heavy logic in one place — this wrapper just makes the
-    REPL accessible from the unified `agi` entry point.
+    The legacy `python cli.py` invocation still works via the
+    root-level shim that re-exports `backend.repl.main`. Calling
+    through a direct import (vs the previous runpy dance) is
+    cleaner and lets the REPL itself be unit-testable.
     """
-    repl_path = ROOT / "cli.py"
-    if not repl_path.exists():
-        _print_err("legacy cli.py not found")
-        return 1
-    # Re-exec the legacy CLI with any extra args ("agi chat 'question'")
-    # so single-question mode still works.
-    import runpy
-    sys.argv = [str(repl_path)] + (args.rest or [])
+    from .repl import main as _repl_main
+
+    # Re-shape sys.argv so the REPL's own arg parsing sees
+    # `cli.py [extra args]` exactly like the legacy entry point.
+    sys.argv = ["cli.py"] + (args.rest or [])
     try:
-        runpy.run_path(str(repl_path), run_name="__main__")
+        _repl_main()
     except SystemExit as e:
         return int(e.code or 0)
     return 0
@@ -305,7 +304,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="agi",
+        prog="hrant",
         description="Self-learning AI agent CLI",
     )
     parser.add_argument("--version", action="store_true", help="print version and exit")
