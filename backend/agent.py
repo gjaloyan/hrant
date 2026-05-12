@@ -515,10 +515,18 @@ def _bootstrap_mcp() -> None:
 
 
 # ---------- агент ----------
+from .pipeline.critic import SelfCriticMixin  # noqa: E402
 from .pipeline.intent import IntentClassifierMixin  # noqa: E402
+from .pipeline.preferences import PreferenceHandlerMixin  # noqa: E402
+from .pipeline.thinking import ThinkingMixin  # noqa: E402
 
 
-class Agent(IntentClassifierMixin):
+class Agent(
+    IntentClassifierMixin,
+    PreferenceHandlerMixin,
+    ThinkingMixin,
+    SelfCriticMixin,
+):
     def __init__(self, progress: Optional[ProgressCB] = None):
         self._user_progress = progress or _noop
         self._trace: list[ThinkingStep] = []
@@ -907,164 +915,14 @@ class Agent(IntentClassifierMixin):
             return "Я — самообучающийся AI-агент. API сейчас недоступен, но спроси позже — расскажу подробнее."
         return "Сейчас API недоступен. Попробуй повторить через минуту — я буду готов помочь."
 
-    # Preference — извлекаем структурированное предпочтение и сохраняем в нужное место.
-    def _save_preference(self, task: str) -> tuple[str, str, str]:
-        """Возвращает (category, fact, acknowledgment).
-
-        Triage:
-          language / style / about_user / rule → user.md (IDENTITY)
-          reject                                → conversation memory only;
-                                                  the extractor decided this
-                                                  is not a stable profile fact.
-
-        The LLM sees USER PROFILE in the system prompt so it can answer
-        in the user's preferred language regardless of the message
-        language (fix for "user wrote in English but expects Russian
-        replies per user.md").
-        """
-        self.progress("preference", "запоминаю предпочтение")
-        # Surface USER PROFILE so the extractor can pick the right language
-        # for the acknowledgment AND make a confident reject/keep decision.
-        profile_block = ""
-        try:
-            profile_block = (IDENTITY.user_profile() or "").strip()
-        except Exception:
-            profile_block = ""
-
-        system_prompt = PREFERENCE_EXTRACTOR_SYSTEM
-        if profile_block:
-            system_prompt = (
-                f"USER PROFILE:\n{profile_block}\n\n---\n\n{PREFERENCE_EXTRACTOR_SYSTEM}"
-            )
-
-        user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{task.strip()}"
-        try:
-            import time as _t
-            t0 = _t.monotonic()
-            usage_before = TOKENS.request_usage()
-            data = router().call_json(
-                TaskType.CLASSIFICATION,
-                system_prompt,
-                user_prompt,
-                max_tokens=300, temperature=0.1,
-            )
-            self._record_llm_call(
-                label="_save_preference",
-                task_type=TaskType.CLASSIFICATION,
-                system=system_prompt,
-                user=user_prompt,
-                response=str(data),
-                duration_ms=int((_t.monotonic() - t0) * 1000),
-                usage_before=usage_before,
-            )
-        except LLMError:
-            # On extractor failure — DON'T blindly stuff raw input into user.md.
-            # That's the bug that produced "User will fix everything..." rows.
-            # Acknowledge in conversation memory only.
-            return "reject", task.strip(), "Запомнил в контексте разговора."
-
-        category = str(data.get("category", "about_user")).strip().lower()
-        valid_profile = ("language", "style", "about_user", "rule")
-        fact = str(data.get("fact", "")).strip() or task.strip()
-        ack = str(data.get("acknowledgment", "")).strip() or "Запомнил."
-
-        if category == "reject" or category not in valid_profile:
-            # Conversation-scoped memory only. CONVERSATION.add_turn at the
-            # caller already records the exchange — nothing to write here.
-            self.progress("preference_skipped", "не сохраняю в user.md (не профильный факт)")
-            return "reject", fact, ack
-
-        IDENTITY.add_user_fact(fact, category=category)  # type: ignore[arg-type]
-        self.progress("preference_saved", f"записано в user.md → {category}")
-        return category, fact, ack
+    # `_save_preference` is provided by PreferenceHandlerMixin
+    # (backend/pipeline/preferences.py). Extracted from this file
+    # for code organisation — behaviour unchanged.
 
     # Step 2 — universal thinking
-    def _think(self, task: str, core: str) -> ThinkingResult:
-        """Universal thinking protocol: reason about ANY request before acting.
-
-        This is the agent's "brain" — it decides what the question is,
-        what it already knows, what tools to use, and why. The result
-        drives all subsequent steps (knowledge loading, tool selection,
-        solver prompting).
-        """
-        self.progress("think", "thinking...")
-        # _think is the planning step — it picks question_type / tools /
-        # required_topics. The full ~3k-char source map is only useful
-        # for self-analysis (where it suggests where to look). For
-        # everything else the compact view (tools + skills, no map) is
-        # sufficient. Plus narrower convo/memory windows: 3/4 vs 6/10.
-        # The previous defaults were tuned for solving, not classifying.
-        #
-        # Self-analysis also includes implicit code-review requests
-        # ("check your token usage", "review the verifier", "look at
-        # backend/agent.py"). These don't trip _is_self_question (which
-        # is "who are you"-shaped) but DO need the full source map to
-        # plan reads — and crucially, must NOT pull stale memory recall
-        # because that's where "agent finds bugs already fixed last
-        # commit" hallucinations come from.
-        is_selfish = (
-            _is_self_question(task)
-            or _looks_like_self_analysis_request(task)
-        )
-        caps = _capabilities_block(compact=not is_selfish)
-        ctx = self._shared_context(
-            task, core,
-            n_conv=6 if is_selfish else 3,
-            n_memory=10 if is_selfish else 4,
-            # Skip stale memory recall on planning step too — same
-            # reason _solve does it later. Replaces the recall block
-            # with a fresh git log via _git_log_block.
-            for_self_analysis=is_selfish,
-        )
-        marker = self._attachment_marker() + self._arithmetic_marker(task)
-        user = (
-            f"{ctx}\n\n"
-            f"# MY CAPABILITIES\n{caps}\n\n"
-            f"# USER REQUEST\n{marker}{task}"
-        )
-        # Identity is part of who's thinking — without it the analyzer
-        # can't tell that "Hrant?" is the user addressing the agent
-        # by name, or that "ответь по-русски" matches the user's
-        # pinned language preference. _think used to skip identity;
-        # now it goes through _with_identity like chat / solve do.
-        import time as _t
-        _t0 = _t.monotonic()
-        think_system = _with_identity(THINKING_SYSTEM)
-        usage_before = TOKENS.request_usage()
-        data = router().call_json(
-            TaskType.TASK_ANALYSIS,
-            think_system, user,
-            max_tokens=1000, temperature=0.2,
-        )
-        self._record_llm_call(
-            label="_think",
-            task_type=TaskType.TASK_ANALYSIS,
-            system=think_system,
-            user=user,
-            response=str(data),
-            duration_ms=int((_t.monotonic() - _t0) * 1000),
-            usage_before=usage_before,
-        )
-        result = ThinkingResult(
-            question_type=str(data.get("question_type", "factual")).strip(),
-            core_question=str(data.get("core_question", task)).strip(),
-            already_know=list(data.get("already_know") or []),
-            knowledge_gaps=list(data.get("knowledge_gaps") or []),
-            approach=str(data.get("approach", "")).strip(),
-            tools_needed=list(data.get("tools_needed") or []),
-            tools_reasoning=str(data.get("tools_reasoning", "")).strip(),
-            required_topics=list(data.get("required_topics") or []),
-            plan=list(data.get("plan") or []),
-            confidence=int(data.get("confidence", 50)),
-            reasoning=str(data.get("reasoning", "")).strip(),
-            subtasks=list(data.get("subtasks") or []),
-        )
-        if result.subtasks:
-            self.progress(
-                "decompose",
-                f"complex task → {len(result.subtasks)} subtasks",
-            )
-        return result
+    # `_think` is provided by ThinkingMixin
+    # (backend/pipeline/thinking.py). Extracted from this file
+    # for code organisation — behaviour unchanged.
 
     # Backward-compat shim: tests that mock _analyze still work.
     def _analyze(self, task: str, core: str) -> TaskAnalysis:
@@ -1432,74 +1290,9 @@ class Agent(IntentClassifierMixin):
         return cleaned_answer, tool_context
 
     # Step 4b — build critique for self-critic loop
-    def _build_critique(self, vr: VerificationResult, prev_answer: str) -> str:
-        """Build a CRITIQUE block from verifier feedback for the retry solver."""
-        parts = ["# CRITIQUE OF YOUR PREVIOUS ANSWER",
-                 f"Your previous answer scored {vr.confidence}% confidence.",
-                 "The verifier found the following problems:\n"]
-        if vr.unverified_claims:
-            parts.append("## Unverified claims (no evidence found):")
-            for c in vr.unverified_claims:
-                parts.append(f"- {c}")
-        if vr.contradictions:
-            parts.append("\n## Contradictions (conflicts with sources):")
-            for c in vr.contradictions:
-                parts.append(f"- {c}")
-        parts.append(f"\n## Your previous answer (to revise):\n{prev_answer[:2000]}")
-        parts.append("\nFix these issues. Use tools to find evidence. "
-                     "Remove claims you cannot support.")
-        return "\n".join(parts)
-
-    # Step 5
-    def _verify(self, task: str, answer: str, notes: list[Note],
-                tool_context: str = "") -> VerificationResult:
-        if not CONFIG.verification["enabled"]:
-            return VerificationResult(confidence=100, notes_used=[n.frontmatter.topic for n in notes])
-        self.progress("verify", "verifying answer...")
-
-        usage_before = TOKENS.request_usage()
-
-        def _capture(system, user, response, duration_ms):
-            self._record_llm_call(
-                label="_verify",
-                task_type=TaskType.VERIFICATION,
-                system=system,
-                user=user,
-                response=response,
-                duration_ms=duration_ms,
-                usage_before=usage_before,
-            )
-
-        # P0 Phase C: hand the verifier the solver's structured claims
-        # plus the tool-call order so it can rule per-claim against the
-        # exact evidence the solver cited. Both args are best-effort —
-        # missing solver tail or empty trace falls back to Phase A
-        # (legacy regex-based extraction). `tool_call_order` is built
-        # from the live thinking_trace this turn so tool_N indexing
-        # matches what the solver wrote in its tail.
-        solver_claims = getattr(self, "_last_solver_claims", None)
-        tool_call_order: list[dict] = []
-        for step in self._trace:
-            tc = step.tool_call
-            if tc is None:
-                continue
-            tool_call_order.append({
-                "name": tc.name,
-                "args": tc.args or {},
-                "result": tc.result or "",
-                "is_error": bool(tc.is_error),
-            })
-
-        return verify(
-            question=task,
-            answer=answer,
-            notes_text=self._notes_block(notes),
-            used_topics=[n.frontmatter.topic for n in notes],
-            tool_context=tool_context,
-            on_llm_call=_capture,
-            solver_claims=solver_claims,
-            tool_call_order=tool_call_order,
-        )
+    # `_build_critique` + `_verify` are provided by SelfCriticMixin
+    # (backend/pipeline/critic.py). Extracted from this file for
+    # code organisation — behaviour unchanged.
 
     # Шаг 6
     def _learn_from_experience(
