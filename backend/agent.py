@@ -515,7 +515,10 @@ def _bootstrap_mcp() -> None:
 
 
 # ---------- агент ----------
-class Agent:
+from .pipeline.intent import IntentClassifierMixin  # noqa: E402
+
+
+class Agent(IntentClassifierMixin):
     def __init__(self, progress: Optional[ProgressCB] = None):
         self._user_progress = progress or _noop
         self._trace: list[ThinkingStep] = []
@@ -829,56 +832,10 @@ class Agent:
         )
 
     # Шаг 1.5 — классификация намерения (chat | preference | task)
-    def _classify_intent(self, task: str) -> str:
-        """Возвращает одну из строк: 'chat', 'preference', 'task'.
-
-        Приоритеты:
-          1. Длинное сообщение (>300 символов) — почти всегда task;
-             preference обычно пишется коротко.
-          2. Очевидный chitchat по regex — chat без LLM-вызова.
-          3. Иначе — быстрый LLM-классификатор (3 категории).
-             При ошибке — безопасный fallback 'task'.
-        """
-        trimmed = task.strip()
-        if len(trimmed) > 300:
-            return "task"
-        # Arithmetic must take the task path so the solver can call
-        # calc / run_python. Skip chitchat regex AND the LLM classifier
-        # for this — both have been observed routing "2+2" to chat,
-        # where the model answers from training data.
-        if _looks_like_arithmetic(trimmed):
-            return "task"
-        if _CHITCHAT_RE.match(trimmed):
-            return "chat"
-        try:
-            marker = self._attachment_marker()
-            user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{marker}{trimmed}"
-            import time as _t
-            t0 = _t.monotonic()
-            usage_before = TOKENS.request_usage()
-            data = router().call_json(
-                TaskType.CLASSIFICATION,
-                INTENT_CLASSIFIER_SYSTEM,
-                user_prompt,
-                max_tokens=150,
-                temperature=0.0,
-            )
-            self._record_llm_call(
-                label="_classify_intent",
-                task_type=TaskType.CLASSIFICATION,
-                system=INTENT_CLASSIFIER_SYSTEM,
-                user=user_prompt,
-                response=str(data),
-                duration_ms=int((_t.monotonic() - t0) * 1000),
-                usage_before=usage_before,
-            )
-            intent = str(data.get("intent", "task")).strip().lower()
-            if intent in ("chat", "preference", "task"):
-                return intent
-            return "task"
-        except LLMError:
-            # LLM retried and still failed — propagate to stop the pipeline
-            raise
+    # `_classify_intent` is provided by IntentClassifierMixin
+    # (backend/pipeline/intent.py). The mixin reads `self._t0` /
+    # `self._llm_calls` etc. from this Agent instance — extracted
+    # here for code-organisation, no behaviour change.
 
     # Быстрый chat-ответ: один LLM-вызов с identity preamble.
     def _chat_reply(self, task: str, core: str) -> str:
