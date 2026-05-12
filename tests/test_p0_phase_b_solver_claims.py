@@ -292,7 +292,7 @@ def test_solve_appends_directive_to_user_prompt(tmp_kb):
 
         def call_json(self, task_type, system, user, **kw):
             if task_type == TaskType.TASK_ANALYSIS:
-                return {"required_topics": [], "plan": [], "confidence": 70}
+                return {"required_topics": [], "plan": [], "confidence": 50}
             if task_type == TaskType.VERIFICATION:
                 return {
                     "verified_claims": [],
@@ -346,7 +346,7 @@ def test_solve_strips_tail_from_answer_and_stashes_claims(tmp_kb):
 
         def call_json(self, task_type, system, user, **kw):
             if task_type == TaskType.TASK_ANALYSIS:
-                return {"required_topics": [], "plan": [], "confidence": 70}
+                return {"required_topics": [], "plan": [], "confidence": 50}
             if task_type == TaskType.VERIFICATION:
                 return {
                     "verified_claims": ["X is Y", "Z works"],

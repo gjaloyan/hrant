@@ -75,7 +75,7 @@ def test_self_critic_retries_on_low_confidence(tmp_kb):
         analyze_json={
             "required_topics": ["Python"],
             "plan": ["answer"],
-            "confidence": 80,
+            "confidence": 50,
             "question_type": "factual",
             "core_question": "what is python",
         },
@@ -136,7 +136,7 @@ def test_self_critic_no_retry_when_confidence_high(tmp_kb):
         analyze_json={
             "required_topics": ["RS-485"],
             "plan": ["answer"],
-            "confidence": 90,
+            "confidence": 50,
         },
         solve_texts=["RS-485 is a differential serial bus. [RS-485]"],
         verify_jsons=[{
@@ -223,7 +223,7 @@ def test_self_critic_injects_critique_into_solver(tmp_kb):
         analyze_json={
             "required_topics": ["Test"],
             "plan": ["answer"],
-            "confidence": 70,
+            "confidence": 50,
         },
         solve_texts=["wrong claim", "fixed answer"],
         verify_jsons=[
@@ -294,7 +294,7 @@ def test_self_critic_progress_events(tmp_kb):
     events: list[tuple[str, str]] = []
 
     fake = FakeRouterWithRetry(
-        analyze_json={"required_topics": ["X"], "plan": ["go"], "confidence": 60},
+        analyze_json={"required_topics": ["X"], "plan": ["go"], "confidence": 50},
         solve_texts=["bad", "good"],
         verify_jsons=[
             # 100*1/(1+9+0) = 10 → low, triggers retry

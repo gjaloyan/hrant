@@ -11,12 +11,16 @@ from backend.models import ThinkingResult, VerificationResult
 
 
 def _make_thinking() -> ThinkingResult:
+    # confidence < 60 routes this turn to the deep_agent pipeline,
+    # which is the tier that runs verify + retry. task_mode skips
+    # both, so the retry tests would never exercise their target
+    # behaviour at higher confidences.
     return ThinkingResult(
         question_type="factual",
         core_question="some question",
         approach="answer",
         plan=["respond"],
-        confidence=80,
+        confidence=50,
     )
 
 
@@ -118,7 +122,7 @@ def test_retry_does_not_duplicate_identical_context(monkeypatch):
 
 
 class _NoopConv:
-    def context_block(self, n=6):
+    def context_block(self, n=6, *, channel=None):
         return ""
 
     def add_turn(self, *a, **kw):

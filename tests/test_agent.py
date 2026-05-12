@@ -79,7 +79,9 @@ def test_agent_uses_existing_note(tmp_kb):
     )
 
     fake = FakeRouter(
-        analyze_json={"required_topics": ["RS-485"], "plan": ["ответить"], "confidence": 90},
+        # confidence < 60 routes this turn to deep_agent so the
+        # verifier path (which assertions below depend on) runs.
+        analyze_json={"required_topics": ["RS-485"], "plan": ["ответить"], "confidence": 50},
         solve_text="RS-485 — дифференциальная шина. [RS-485]",
         verify_json={
             # 100*19/(19+1+0) = 95 — Python computes confidence from claim counts.

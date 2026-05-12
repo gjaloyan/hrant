@@ -147,7 +147,7 @@ def test_phase_c_verify_passes_solver_claims_through(tmp_kb):
                     "notes_used": [],
                 }
             if task_type == TaskType.TASK_ANALYSIS:
-                return {"required_topics": [], "plan": [], "confidence": 70}
+                return {"required_topics": [], "plan": [], "confidence": 50}
             if task_type == TaskType.CLASSIFICATION:
                 return {"intent": "task", "reason": "test"}
             return {}
@@ -448,7 +448,7 @@ def test_p1_agent_run_writes_turn_record_and_returns_id(tmp_kb, tmp_path, monkey
 
         def call_json(self, task_type, system, user, **kw):
             if task_type == TaskType.TASK_ANALYSIS:
-                return {"required_topics": [], "plan": [], "confidence": 70}
+                return {"required_topics": [], "plan": [], "confidence": 50}
             if task_type == TaskType.VERIFICATION:
                 return {
                     "verified_claims": ["the answer"],

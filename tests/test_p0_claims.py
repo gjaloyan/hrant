@@ -257,7 +257,7 @@ def test_agent_run_populates_claims_and_evidence(tmp_kb):
                 return {
                     "required_topics": ["RS-485"],
                     "plan": ["answer"],
-                    "confidence": 90,
+                    "confidence": 50,
                 }
             if task_type == TaskType.VERIFICATION:
                 return {
