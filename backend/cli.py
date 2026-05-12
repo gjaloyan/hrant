@@ -279,6 +279,145 @@ def cmd_status(args: argparse.Namespace) -> int:
 # --- chat (REPL) ---------------------------------------------------------
 
 
+# --- service (systemd / launchd / Windows scheduled task) ---------------
+
+
+def _detect_platform() -> str:
+    """Map platform.system() → our --platform values."""
+    import platform as _p
+    name = _p.system().lower()
+    if name == "linux":
+        return "linux"
+    if name == "darwin":
+        return "macos"
+    if name == "windows":
+        return "windows"
+    return "linux"  # safe-ish default; user will get a clear error if wrong
+
+
+def _service_template_paths(platform: str) -> tuple[Path, Path]:
+    """Return (template_path, install_target_path) for the platform.
+
+    Template lives in deploy/. install target is the user-mode
+    location systemd / launchd / Windows expect.
+    """
+    if platform == "linux":
+        template = ROOT / "deploy" / "systemd" / "hrant.service"
+        target = Path.home() / ".config" / "systemd" / "user" / "hrant.service"
+    elif platform == "macos":
+        template = ROOT / "deploy" / "launchd" / "ai.hrant.agent.plist"
+        target = Path.home() / "Library" / "LaunchAgents" / "ai.hrant.agent.plist"
+    elif platform == "windows":
+        template = ROOT / "deploy" / "windows" / "install-service.ps1"
+        # Windows: we don't auto-install — we drop the rendered ps1
+        # next to the original so the user can review before running.
+        target = ROOT / "deploy" / "windows" / "install-service.rendered.ps1"
+    else:
+        raise ValueError(f"unsupported platform: {platform}")
+    return template, target
+
+
+def _render_service_template(text: str, host: str, port: int) -> str:
+    """Substitute the __PLACEHOLDERS__ in a unit-file template with
+    real paths + bind args from the current install."""
+    return (
+        text
+        .replace("__WORKDIR__", str(ROOT))
+        .replace("__PYTHON_BIN__", sys.executable)
+        .replace("__HOST__", host)
+        .replace("__PORT__", str(port))
+    )
+
+
+def cmd_service_install(args: argparse.Namespace) -> int:
+    """Render the platform unit file with the current install's
+    paths and place it where the OS service manager expects.
+
+    Does NOT enable / start the service — prints the exact command
+    so the user sees what's about to happen. Transparency over magic.
+    """
+    platform = (args.platform or _detect_platform()).lower()
+    host = args.host or "127.0.0.1"
+    port = int(args.port or 8000)
+    try:
+        template_path, target_path = _service_template_paths(platform)
+    except ValueError as e:
+        _print_err(str(e))
+        return 2
+    if not template_path.exists():
+        _print_err(f"template not found: {template_path}")
+        return 2
+    text = template_path.read_text(encoding="utf-8")
+    rendered = _render_service_template(text, host=host, port=port)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(rendered, encoding="utf-8")
+    _print_ok(f"unit file written: {target_path}")
+    print()
+    print("Next step (copy-paste, review before running):")
+    if platform == "linux":
+        print("  systemctl --user daemon-reload")
+        print("  systemctl --user enable --now hrant.service")
+        print("  journalctl --user -u hrant -f       # live logs")
+    elif platform == "macos":
+        print(f"  launchctl bootstrap gui/$(id -u) {target_path}")
+        print("  launchctl enable    gui/$(id -u)/ai.hrant.agent")
+        print("  launchctl kickstart gui/$(id -u)/ai.hrant.agent")
+    elif platform == "windows":
+        print(f'  pwsh -ExecutionPolicy Bypass -File "{target_path}"')
+        print("  Start-ScheduledTask -TaskName HrantAgent")
+    return 0
+
+
+def cmd_service_status(args: argparse.Namespace) -> int:
+    """Wrap the platform-native status command. No magic — just runs
+    `systemctl --user status hrant` / `launchctl print …` /
+    `Get-ScheduledTask HrantAgent` and pipes the output through."""
+    import subprocess as _sub
+    platform = (args.platform or _detect_platform()).lower()
+    if platform == "linux":
+        cmd = ["systemctl", "--user", "status", "hrant.service", "--no-pager"]
+    elif platform == "macos":
+        cmd = ["launchctl", "print", f"gui/{os.getuid()}/ai.hrant.agent"]
+    elif platform == "windows":
+        cmd = ["powershell", "-Command", "Get-ScheduledTask -TaskName HrantAgent | Format-List"]
+    else:
+        _print_err(f"unsupported platform: {platform}")
+        return 2
+    try:
+        rc = _sub.run(cmd).returncode
+    except FileNotFoundError as e:
+        _print_err(f"missing tool: {e}")
+        return 1
+    return rc
+
+
+def cmd_service_uninstall(args: argparse.Namespace) -> int:
+    """Remove the unit file (and the rendered Windows script). Does
+    NOT disable the service — prints the exact command. Leaves the
+    venv / config / workspace untouched."""
+    platform = (args.platform or _detect_platform()).lower()
+    try:
+        _, target_path = _service_template_paths(platform)
+    except ValueError as e:
+        _print_err(str(e))
+        return 2
+    if not target_path.exists():
+        _print_warn(f"unit file not present at {target_path}; nothing to remove")
+    else:
+        target_path.unlink()
+        _print_ok(f"removed {target_path}")
+    print()
+    print("Next step (disable + remove from service manager):")
+    if platform == "linux":
+        print("  systemctl --user disable --now hrant.service")
+        print("  systemctl --user daemon-reload")
+    elif platform == "macos":
+        print(f"  launchctl bootout gui/$(id -u)/ai.hrant.agent")
+    elif platform == "windows":
+        print('  Unregister-ScheduledTask -TaskName HrantAgent -Confirm:$false')
+    return 0
+
+
 def cmd_chat(args: argparse.Namespace) -> int:
     """Hand off to the REPL implementation in `backend.repl`.
 
@@ -325,6 +464,45 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="diagnostic dump")
     p_status.set_defaults(func=cmd_status)
+
+    # `service` group — install/status/uninstall on Linux (systemd),
+    # macOS (launchd), Windows (Scheduled Task). All three render
+    # platform-specific unit files from deploy/ and print the exact
+    # activation command — never run privileged ops themselves.
+    p_service = sub.add_parser(
+        "service", help="manage Hrant as a background service"
+    )
+    sub_svc = p_service.add_subparsers(dest="svc_cmd", metavar="<action>")
+
+    p_install = sub_svc.add_parser(
+        "install", help="render + place the platform unit file"
+    )
+    p_install.add_argument(
+        "--platform", default=None,
+        choices=("linux", "macos", "windows"),
+        help="override OS detection",
+    )
+    p_install.add_argument(
+        "--host", default=None, help="bind host (default 127.0.0.1)"
+    )
+    p_install.add_argument(
+        "--port", type=int, default=None, help="bind port (default 8000)"
+    )
+    p_install.set_defaults(func=cmd_service_install)
+
+    p_svc_status = sub_svc.add_parser(
+        "status", help="run the platform's native service-status command"
+    )
+    p_svc_status.add_argument("--platform", default=None,
+                              choices=("linux", "macos", "windows"))
+    p_svc_status.set_defaults(func=cmd_service_status)
+
+    p_svc_remove = sub_svc.add_parser(
+        "uninstall", help="remove the unit file (does NOT disable the service)"
+    )
+    p_svc_remove.add_argument("--platform", default=None,
+                              choices=("linux", "macos", "windows"))
+    p_svc_remove.set_defaults(func=cmd_service_uninstall)
 
     p_chat = sub.add_parser("chat", help="interactive REPL (legacy cli.py)")
     p_chat.add_argument("rest", nargs=argparse.REMAINDER)

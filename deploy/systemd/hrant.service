@@ -1,0 +1,42 @@
+[Unit]
+# Self-learning agent (Hrant) — systemd unit for user-mode operation.
+# Install via `hrant service install` which renders this template into
+# ~/.config/systemd/user/hrant.service with __PLACEHOLDERS__ filled in.
+#
+# Why user-mode (not system-mode):
+#  - no sudo to manage
+#  - reads $HOME for .env / config.yaml without needing extra mounts
+#  - survives user logout when lingering is enabled
+#    (loginctl enable-linger $USER)
+#
+# For system-wide service, copy this file to /etc/systemd/system/
+# and remove the User= line.
+Description=Hrant AI agent (FastAPI backend + Telegram bridge)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKDIR__
+EnvironmentFile=-__WORKDIR__/.env
+# `hrant run` wraps uvicorn; --host/--port can be tweaked in this line
+# without touching the rest of the unit.
+ExecStart=__PYTHON_BIN__ -m backend.cli run --host __HOST__ --port __PORT__
+# Restart on failure but not on clean shutdown (avoids the
+# "constantly restarting on a misconfig" trap). Backoff 10s.
+Restart=on-failure
+RestartSec=10
+# Stop the agent gracefully — uvicorn has its own SIGTERM handler.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+# Hardening: agent never needs root, fresh tempfs for /tmp.
+NoNewPrivileges=true
+PrivateTmp=true
+# Log to journal — `journalctl --user -u hrant -f` for live tail.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hrant
+
+[Install]
+WantedBy=default.target

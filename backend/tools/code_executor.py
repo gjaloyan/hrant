@@ -150,6 +150,48 @@ def _clip(text: Optional[str]) -> tuple[str, bool]:
     return text[:_MAX_OUTPUT_BYTES] + "\n…[output truncated]", True
 
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _wrap_with_sandbox_preamble(user_code: str) -> str:
+    """Prepend a sys.path-strip preamble to user code.
+
+    `python -I` already disables user-site and PYTHON* env vars, but
+    it does NOT disable `.pth` files in the venv's site-packages. If
+    the agent was installed via `pip install -e .` (which pyproject.toml
+    enables), the venv ships an `__editable__.agi_agent-*.pth` that
+    injects the repo root into sys.path at startup. Without this
+    preamble the snippet can `import backend.agent` and reach
+    internals.
+
+    The preamble walks sys.path at the very top of the snippet and
+    drops every entry that equals or starts with the repo root. A
+    determined snippet can re-add the path via `sys.path.append(...)`
+    — defense in depth, not a silver bullet — but the casual
+    "what's on sys.path by default" case is closed.
+    """
+    repo = str(_REPO_ROOT)
+    return (
+        "# agi-sandbox preamble: strip repo root from sys.path so a\n"
+        "# snippet can't `import backend.agent` via the editable\n"
+        "# install's .pth file. Defense in depth — a hostile snippet\n"
+        "# can still sys.path.append the path back, but the cwd is\n"
+        "# tempdir and env is stripped, so reach is limited.\n"
+        "import sys as _agi_sys\n"
+        f"_AGI_REPO_ROOT = {repo!r}\n"
+        "_agi_sys.path[:] = [\n"
+        "    p for p in _agi_sys.path\n"
+        "    if p != _AGI_REPO_ROOT\n"
+        "    and not p.startswith(_AGI_REPO_ROOT + '/')\n"
+        "    and not p.startswith(_AGI_REPO_ROOT + '\\\\')\n"
+        "]\n"
+        "del _agi_sys, _AGI_REPO_ROOT\n"
+        "\n"
+        "# --- user code below ---\n"
+        + user_code
+    )
+
+
 def run_python(code: str, timeout: int = 10) -> ExecResult:
     """Execute a Python snippet in a best-effort sandbox.
 
@@ -160,7 +202,7 @@ def run_python(code: str, timeout: int = 10) -> ExecResult:
     is_posix = platform.system() in ("Linux", "Darwin")
     with tempfile.TemporaryDirectory(prefix="agi_runpy_") as workdir:
         script_path = Path(workdir) / "snippet.py"
-        script_path.write_text(code, encoding="utf-8")
+        script_path.write_text(_wrap_with_sandbox_preamble(code), encoding="utf-8")
         kwargs: dict = {
             "capture_output": True,
             "text": True,

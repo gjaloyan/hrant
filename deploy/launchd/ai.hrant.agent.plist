@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Self-learning agent (Hrant) — launchd plist for macOS user agent.
+  Install via `hrant service install` which renders this template into
+  ~/Library/LaunchAgents/ai.hrant.agent.plist with __PLACEHOLDERS__
+  filled in.
+
+  Why a LaunchAgent (vs LaunchDaemon):
+   - runs as the user, not root
+   - reads $HOME for .env / config.yaml without extra plumbing
+   - starts at user login (RunAtLoad=true) and respawns on crash
+
+  Activate after install:
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.hrant.agent.plist
+   launchctl enable gui/$(id -u)/ai.hrant.agent
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ai.hrant.agent</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON_BIN__</string>
+    <string>-m</string>
+    <string>backend.cli</string>
+    <string>run</string>
+    <string>--host</string>
+    <string>__HOST__</string>
+    <string>--port</string>
+    <string>__PORT__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__WORKDIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <!-- Throttle interval guards against restart storms when misconfigured. -->
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>__WORKDIR__/logs/hrant.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__WORKDIR__/logs/hrant.err.log</string>
+</dict>
+</plist>
