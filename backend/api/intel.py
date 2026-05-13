@@ -264,6 +264,52 @@ def self_modifier_apply(proposal_id: str):
     return result
 
 
+# ---- self-modifications (patch overlay; survives `hrant update`) ----
+
+@router.get("/api/self-mods")
+def self_mods_list():
+    """Return all locally-applied patches in order. Each entry:
+    {id, slug, file, title, created, status, patch_filename, last_error}.
+
+    `status` is one of:
+      - "applied"      — currently active on the engine
+      - "needs_review" — was applied before, conflicts with a newer
+                         engine after `hrant update`; engine is at
+                         the official version for this file's
+                         touched lines
+      - "reverted"     — user revert-clicked; kept in manifest for
+                         audit trail (entry pruned on next manifest
+                         rewrite)
+    """
+    from dataclasses import asdict
+    from .. import self_mods
+    return {"patches": [asdict(e) for e in self_mods.list_patches()]}
+
+
+@router.post("/api/self-mods/{patch_id}/revert")
+def self_mods_revert_one(patch_id: str):
+    """Reverse-apply a single patch and remove it from the manifest.
+    Reverting a non-tip patch may surface conflicts because later
+    patches were stacked on top — see the warning in the UI."""
+    from .. import self_mods
+    ok, err = self_mods.revert_one(patch_id)
+    if not ok:
+        raise HTTPException(400, err)
+    return {"ok": True, "reverted": patch_id}
+
+
+@router.post("/api/self-mods/revert-all")
+def self_mods_revert_all():
+    """Nuclear option: `git reset --hard origin/master` + wipe all
+    patch files. Use with confidence — user data is never touched
+    (it lives in data_dir, not the engine repo)."""
+    from .. import self_mods
+    ok, err = self_mods.revert_all_to_official()
+    if not ok:
+        raise HTTPException(400, err)
+    return {"ok": True}
+
+
 @router.delete("/api/self-modifier/proposals/{proposal_id}")
 def self_modifier_delete(proposal_id: str):
     if not SELF_MODIFIER.delete_proposal(proposal_id):

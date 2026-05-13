@@ -79,6 +79,13 @@ class UpdateResult:
     frontend_built: bool
     error: Optional[str] = None
     messages: Optional[list[str]] = None
+    # Self-modification re-apply summary populated after `git pull`.
+    # `reapplied` / `needs_review` carry patch IDs from `self_mods.applied.json`.
+    # `needs_review` ids point at patches that conflicted with the new
+    # engine code — the engine is at the official version for those
+    # files; the user resolves via Settings → Self-Modifications.
+    self_mods_reapplied: Optional[list[str]] = None
+    self_mods_needs_review: Optional[list[str]] = None
 
 
 # --- git helpers --------------------------------------------------------
@@ -363,11 +370,34 @@ def do_update(
                 )
             messages.append("frontend rebuilt ✓")
 
+    # Re-apply self-modifications. `git pull` brought the engine to
+    # origin/master cleanly (no patches were applied at that point —
+    # they live in data_dir/self_mods/). Now walk the manifest and
+    # reapply each, surfacing conflicts in the result for the UI to
+    # highlight.
+    reapplied: list[str] = []
+    needs_review: list[str] = []
+    try:
+        from . import self_mods
+        report = self_mods.reapply_all()
+        reapplied = report.get("reapplied") or []
+        needs_review = report.get("needs_review") or []
+        if reapplied:
+            messages.append(f"self-mods re-applied: {len(reapplied)}")
+        if needs_review:
+            messages.append(
+                f"self-mods needing review: {len(needs_review)} (Settings → Self-Modifications)"
+            )
+    except Exception as e:  # pragma: no cover — defensive
+        messages.append(f"self_mods reapply skipped due to error: {e}")
+
     record(new, br, "success", note=f"updated from {old[:8]}")
     return UpdateResult(
         ok=True, old_sha=old, new_sha=new, branch=br,
         pulled_commits=len(incoming), pip_ran=pip_ran,
         frontend_built=fe_built, messages=messages,
+        self_mods_reapplied=reapplied,
+        self_mods_needs_review=needs_review,
     )
 
 

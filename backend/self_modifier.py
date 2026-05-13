@@ -16,6 +16,7 @@ Persistence: proposals.json in knowledge directory.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,8 @@ from typing import Optional
 
 from .config import CONFIG, ROOT
 from .llm import LLMError, TaskType, router
+
+log = logging.getLogger(__name__)
 
 ANALYZE_SYSTEM = """You are a code improvement analyst for a Python AI agent codebase.
 Given a module's source code, identify concrete improvements.
@@ -382,6 +385,31 @@ class SelfModifier:
                             f"{output[:300]}…)"
                         ),
                     }
+
+            # Capture the change as a rollback-able patch in the user's
+            # data_dir. The file's already been written and tested, so
+            # apply_now=False — we're just recording the diff so
+            # `hrant update` can re-apply it and so Settings →
+            # Self-Modifications can revert it later.
+            try:
+                from . import self_mods
+                entry, mod_err = self_mods.record_and_apply(
+                    file_rel=proposal.module,
+                    old_text=content,
+                    new_text=new_content,
+                    title=proposal.title or f"self-mod: {proposal.module}",
+                    apply_now=False,
+                )
+                if entry is None:
+                    log.warning(
+                        "self_mod patch capture failed for %s: %s — apply succeeded but "
+                        "the change won't survive `hrant update`. Investigate.",
+                        proposal.module, mod_err,
+                    )
+                else:
+                    proposal.review_note += f" | patch={entry.id}"
+            except Exception as e:  # pragma: no cover — defensive
+                log.warning("self_mod recording crashed: %s; engine modification kept", e)
 
             proposal.status = "applied"
             self._save()
