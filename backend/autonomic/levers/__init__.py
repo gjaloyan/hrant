@@ -88,6 +88,7 @@ def register_default_autonomic_levers() -> None:
     from .self_study import FIRE_SELF_STUDY
     from .session_archive import FIRE_SESSION_ARCHIVE
     from .tool_install import FIRE_TOOL_INSTALL
+    from .scheduled_messages import FIRE_SCHEDULED_MESSAGES
     register_lever(FIRE_INTEGRITY_HEARTBEAT)
     register_lever(FIRE_GOAL_PROPOSE)
     register_lever(FIRE_MEMORY_CONSOLIDATION)
@@ -103,3 +104,4 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_FINETUNE_QC)
     register_lever(FIRE_GAP_DETECTION)
     register_lever(FIRE_TOOL_INSTALL)
+    register_lever(FIRE_SCHEDULED_MESSAGES)

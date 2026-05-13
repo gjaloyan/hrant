@@ -291,7 +291,26 @@ class SelfModifier:
         """Apply an approved proposal to the actual source file.
 
         Returns {ok, message} dict. Only applies if status == 'approved'.
+        Owner-gated: if the call happens inside a non-owner request
+        context (a trusted/guest speaker asking the agent to modify
+        itself), refuses immediately without touching disk.
         """
+        # Phase 11: hard role gate. The system prompt already tells
+        # the LLM to refuse self-mod for non-owners; this is the
+        # last line of defence if the model is talked into trying.
+        try:
+            from .roles import current_speaker, is_owner
+            sp = current_speaker()
+            if sp is not None and not is_owner(sp):
+                return {
+                    "ok": False,
+                    "message": (
+                        f"refused: self-modification requires owner role; "
+                        f"speaker '{sp}' is not owner."
+                    ),
+                }
+        except Exception:
+            pass
         proposal = None
         for p in self._proposals:
             if p.id == proposal_id:

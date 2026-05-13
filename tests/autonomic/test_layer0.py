@@ -183,17 +183,23 @@ def test_default_rules_d04_cooldowns():
     assert rules["self_study_tick"].cooldown_seconds == 86400.0
 
 
-def test_default_rules_has_eighteen_rules_after_d07():
+def test_default_rules_count_after_phase11():
+    """D-07 added 18; Phase 11 added scheduled_messages_tick → 19."""
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
-    assert len(rules) == 18
+    assert len(rules) == 19
 
 
-def test_default_rules_d07_scheduled_rules_at_end():
+def test_default_rules_d07_scheduled_rules_present():
+    """D-07 added self_reflection / finetune_qc / gap_detection in
+    that order. Phase 11 appended scheduled_messages_tick at the
+    very end (placed last so fall-through ordering in d-03 tests
+    stays deterministic)."""
     from backend.autonomic.layer0 import default_rules
-    rules = default_rules()
-    names_tail = [r.name for r in rules[-3:]]
-    assert names_tail == ["self_reflection_tick", "finetune_qc_tick", "gap_detection_tick"]
+    names = [r.name for r in default_rules()]
+    # The D-07 triplet appears as a contiguous block at indices -4..-2.
+    assert names[-4:-1] == ["self_reflection_tick", "finetune_qc_tick", "gap_detection_tick"]
+    assert names[-1] == "scheduled_messages_tick"
 
 
 def test_default_rules_d07_cooldowns():

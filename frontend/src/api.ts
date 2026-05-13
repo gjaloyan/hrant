@@ -1438,6 +1438,69 @@ export const resetEngineConfig = () =>
   json_post<EngineConfigEnvelope & { ok: boolean }>("/api/engine/config/reset");
 
 
+// ---------- Roles, relationships, scheduled messages (Phase 11) ----
+
+export type Role = "owner" | "trusted" | "guest";
+
+export type RoleEntry = { role: Role; label?: string };
+
+export type RolesState = {
+  owner_speaker_ids: string[];
+  speakers: Record<string, RoleEntry>;
+  seen_speakers: { speaker_id: string; session_count: number; last_active: string }[];
+  default_speaker: string;
+};
+
+export const fetchRoles = () => json_get<RolesState>("/api/roles");
+
+export const setRole = (speaker_id: string, role: Role, label?: string) =>
+  json_put<{ ok: boolean; speaker_id: string; entry: RoleEntry }>(
+    `/api/roles/${encodeURIComponent(speaker_id)}`,
+    { role, label },
+  );
+
+export const fetchRelationships = () =>
+  json_get<{ relationships: Record<string, string> }>("/api/relationships");
+
+export const setRelationships = (relationships: Record<string, string>) =>
+  json_put<{ ok: boolean; relationships: Record<string, string> }>(
+    "/api/relationships",
+    { relationships },
+  );
+
+export const fetchTelegramContacts = () =>
+  json_get<{
+    contacts: Record<
+      string,
+      { chat_id: number; username?: string; label?: string; last_seen?: string }
+    >;
+  }>("/api/contacts/telegram");
+
+export type ScheduledMessage = {
+  id: string;
+  target_speaker: string;
+  text: string;
+  due_at: string;
+  requested_by: string;
+  requested_at: string;
+  status: "pending" | "sent" | "failed" | "cancelled";
+  delivered_at: string | null;
+  last_error: string;
+};
+
+export const fetchScheduledMessages = (status?: string) => {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+  return json_get<{ messages: ScheduledMessage[] }>(
+    `/api/scheduled-messages${qs}`,
+  );
+};
+
+export const cancelScheduledMessage = (id: string) =>
+  json_delete<{ ok: boolean }>(
+    `/api/scheduled-messages/${encodeURIComponent(id)}`,
+  );
+
+
 // ---------- Self-modifications (patch overlay) ----------
 
 export type SelfModPatch = {

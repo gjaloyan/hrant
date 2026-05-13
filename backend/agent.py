@@ -108,12 +108,19 @@ def _format_llm_error_short(exc: BaseException, *, max_len: int = 200) -> str:
 
 
 def _with_identity(base_system: str, *, speaker_id: str | None = None) -> str:
-    """Склеивает identity preamble с конкретным system-промптом шага.
+    """Склеивает identity preamble + per-speaker permissions с
+    конкретным system-промптом шага.
 
-    `speaker_id` selects which user_profile to inject. Default None
-    falls back to the WebUI speaker (back-compat for callers that
-    haven't been speaker-aware yet)."""
-    return f"{IDENTITY.preamble(speaker_id=speaker_id)}\n\n---\n\n{base_system}"
+    `speaker_id` selects which user_profile and role/permission
+    block to inject. Default None falls back to the WebUI speaker
+    (which is always owner) for back-compat."""
+    from . import roles as _roles
+    perms = _roles.permissions_block(speaker_id)
+    return (
+        f"{IDENTITY.preamble(speaker_id=speaker_id)}\n\n"
+        f"---\n\n{base_system}\n\n"
+        f"---\n\n{perms}"
+    )
 
 
 def _capabilities_block(compact: bool = False) -> str:
@@ -1455,6 +1462,15 @@ class Agent(
         # Stays on `self` so every add_turn / context_block in this
         # run picks up the same speaker without each call passing it.
         self._speaker_id = normalize_speaker(speaker_id)
+        # Phase 11: per-speaker role gating. Read once at run start
+        # so tool checks below don't re-read the roles file per call.
+        # Set the ContextVar so deeply-nested tool handlers
+        # (run_python, schedule_message, …) can see who's asking
+        # without every signature having to thread `speaker_id`
+        # through.
+        from . import roles as _roles
+        self._role: str = _roles.role_of(self._speaker_id)
+        self._role_token = _roles.set_current_speaker(self._speaker_id)
         # Pipeline mode picked for this turn (fast_chat / task_mode /
         # deep_agent). Set by the branches below so AgentAnswer can
         # report which tier ran.
@@ -2020,3 +2036,12 @@ class Agent(
                 thinking_trace=self._trace,
                 llm_calls=self._llm_calls,
             )
+        finally:
+            # Phase 11: always restore the prior speaker ContextVar
+            # even on early return / exception, so a long-lived
+            # process never accidentally serves the next request
+            # with leaked role context.
+            try:
+                _roles.reset_current_speaker(self._role_token)
+            except Exception:
+                pass

@@ -132,7 +132,12 @@ def _read_file_handler(
 
 
 def _run_python_handler(code: str, timeout: int = 10) -> str:
-    res = run_python(code, timeout=timeout)
+    # Owner-gate: read the current speaker from the ContextVar that
+    # Agent.run() sets at the start of every request. Non-owner
+    # callers get an immediate refusal without spawning a subprocess.
+    from .roles import current_speaker
+    speaker_id = current_speaker()
+    res = run_python(code, timeout=timeout, speaker_id=speaker_id)
     return json.dumps(
         {
             "stdout": res.stdout,
@@ -142,6 +147,69 @@ def _run_python_handler(code: str, timeout: int = 10) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _schedule_message_handler(
+    target: str,
+    text: str,
+    due_at: str,
+) -> str:
+    """Owner + trusted gate. Trusted can only schedule TO the owner;
+    owner can schedule to anyone.
+
+    `target` accepts an alias from `relationships.json` ("wife",
+    "mom") or a fully-qualified speaker_id ("telegram:222").
+    `due_at` must be ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ') —
+    the caller (the LLM) parses natural-language times first.
+    """
+    from .contacts import resolve
+    from .roles import current_role, current_speaker, is_owner
+    from .scheduled_messages import schedule
+
+    requester = current_speaker() or ""
+    role = current_role()
+    if role == "guest":
+        return json.dumps({
+            "ok": False,
+            "error": "refused: scheduled messages require trusted or owner role.",
+        }, ensure_ascii=False)
+
+    resolved = resolve(target)
+    if not resolved:
+        return json.dumps({
+            "ok": False,
+            "error": (
+                f"could not resolve target '{target}'. Try a known alias "
+                "from relationships.json or a full speaker_id like "
+                "'telegram:123456789'."
+            ),
+        }, ensure_ascii=False)
+
+    # Trusted gate: trusted users can only schedule TO the owner.
+    if role == "trusted" and not is_owner(resolved):
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "refused: trusted users may only schedule messages to "
+                "the owner. Resolved target is not an owner speaker."
+            ),
+        }, ensure_ascii=False)
+
+    try:
+        row = schedule(
+            target_speaker=resolved,
+            text=text,
+            due_at=due_at,
+            requested_by=requester,
+        )
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "id": row["id"],
+        "target_speaker": row["target_speaker"],
+        "due_at": row["due_at"],
+    }, ensure_ascii=False)
 
 
 def _locate_symbol_handler(
@@ -287,6 +355,46 @@ def register_builtin_tools() -> None:
             "required": ["path"],
         },
         handler=_read_file_handler,
+    )
+
+    reg.register_func(
+        name="schedule_message",
+        description=(
+            "Schedule a message to be delivered to another speaker at "
+            "a specific time. Use this when the user (owner or trusted) "
+            "says things like 'remind my wife to call me at 10am' or "
+            "'tell Mom in an hour that dinner is ready'.\n"
+            "Resolve the target via relationships.json aliases ('wife', "
+            "'mom', etc.) OR pass a full speaker_id like "
+            "'telegram:123456789'. Convert the user's natural-language "
+            "time ('tomorrow 10am', 'in 30 minutes') into UTC ISO 8601 "
+            "('YYYY-MM-DDTHH:MM:SSZ') yourself before calling.\n"
+            "Owner-only and trusted-to-owner permissions are enforced "
+            "server-side; guests cannot use this tool. Returns "
+            "{ok, id, target_speaker, due_at} on success."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "Alias from relationships.json (e.g. 'wife') "
+                                   "OR fully-qualified speaker_id (e.g. "
+                                   "'telegram:123456789').",
+                },
+                "text": {
+                    "type": "string",
+                    "description": "The message body the recipient will see.",
+                },
+                "due_at": {
+                    "type": "string",
+                    "description": "UTC ISO 8601 timestamp 'YYYY-MM-DDTHH:MM:SSZ'. "
+                                   "Convert the user's natural-language time first.",
+                },
+            },
+            "required": ["target", "text", "due_at"],
+        },
+        handler=_schedule_message_handler,
     )
 
     reg.register_func(

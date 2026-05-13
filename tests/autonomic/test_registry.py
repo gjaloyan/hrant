@@ -185,7 +185,9 @@ def test_tool_install_is_auto_registered():
     clear_registry()
 
 
-def test_autonomic_plus_immune_total_is_nineteen():
+def test_autonomic_plus_immune_total_count():
+    """D-09 had 19 (15 autonomic + 4 immune). Phase 11 added
+    FIRE_SCHEDULED_MESSAGES → 20."""
     from backend.autonomic.levers import (
         register_default_autonomic_levers,
         register_default_immune_levers,
@@ -193,5 +195,5 @@ def test_autonomic_plus_immune_total_is_nineteen():
     clear_registry()
     register_default_immune_levers()
     register_default_autonomic_levers()
-    assert len(LeverRegistry.instance().names()) == 19
+    assert len(LeverRegistry.instance().names()) == 20
     clear_registry()

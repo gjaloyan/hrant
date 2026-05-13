@@ -205,13 +205,45 @@ def _wrap_with_sandbox_preamble(user_code: str) -> str:
     )
 
 
-def run_python(code: str, timeout: int = 10) -> ExecResult:
+def run_python(
+    code: str,
+    timeout: int = 10,
+    *,
+    speaker_id: str | None = None,
+) -> ExecResult:
     """Execute a Python snippet in a best-effort sandbox.
+
+    Owner-only. Non-owner speakers (a Telegram trusted/guest user
+    asking the agent to run code on their behalf) get an immediate
+    refusal stamped into stderr — the sandbox layers below never
+    even spawn a subprocess. The agent's system prompt already
+    explains this constraint; the runtime check is the second line
+    of defence in case the model ignores it.
 
     See module docstring for the layers. Returns ExecResult with
     captured stdout/stderr (clipped), return code, and flags for
     timeout / truncation.
     """
+    if speaker_id is not None:
+        try:
+            from ..roles import is_owner
+            if not is_owner(speaker_id):
+                return ExecResult(
+                    stdout="",
+                    stderr=(
+                        f"refused: code execution requires owner role; "
+                        f"speaker '{speaker_id}' is not owner."
+                    ),
+                    returncode=-2,
+                )
+        except Exception:
+            # If the role lookup itself blows up, fail closed (refuse
+            # rather than execute on an indeterminate role state).
+            return ExecResult(
+                stdout="",
+                stderr="refused: could not determine speaker role",
+                returncode=-2,
+            )
     is_posix = platform.system() in ("Linux", "Darwin")
     with tempfile.TemporaryDirectory(prefix="agi_runpy_") as workdir:
         script_path = Path(workdir) / "snippet.py"

@@ -146,7 +146,7 @@ def test_reactive_rule_preempts_d07_scheduled(tmp_path: Path):
     assert fired == ["FIRE_ERROR_TRIAGE"]
 
 
-def test_fourteen_autonomic_levers_registered_via_startup(tmp_path: Path, monkeypatch):
+def test_default_levers_registered_via_startup(tmp_path: Path, monkeypatch):
     ks = tmp_path / "ENABLED"
     ks.write_text("true")
     monkeypatch.setenv("AUTONOMIC_ENABLED_PATH", str(ks))
@@ -161,5 +161,6 @@ def test_fourteen_autonomic_levers_registered_via_startup(tmp_path: Path, monkey
     from backend.autonomic.startup import build_scheduler
     build_scheduler()
     names = LeverRegistry.instance().names()
-    assert len(names) == 19
+    # D-09 (4 immune + 15 autonomic) + Phase 11 (FIRE_SCHEDULED_MESSAGES) = 20
+    assert len(names) == 20
     clear_registry()

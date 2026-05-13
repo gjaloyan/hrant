@@ -505,6 +505,19 @@ class TelegramBot:
                 # totally separate threads even on the same bot.
                 speaker_id = f"telegram:{user.id}"
                 user_label = user.full_name or user.username or str(user.id)
+                # Phase 11B: remember chat_id so we can deliver
+                # scheduled / cross-speaker messages back to this
+                # user later, even without their pinging us first.
+                try:
+                    from .contacts import remember_telegram_user
+                    remember_telegram_user(
+                        user.id,
+                        update.message.chat.id,
+                        username=user.username,
+                        label=user_label,
+                    )
+                except Exception as e:
+                    log.warning("contacts.remember_telegram_user failed: %s", e)
 
                 # Round E (TG forward): remember this chat_id so the
                 # WebUI's "compose-as-telegram" mode can deliver the

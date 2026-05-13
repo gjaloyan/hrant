@@ -193,4 +193,17 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=86400.0,
         ),
+        LayerZeroRule(
+            # Phase 11D: deliver any due cross-speaker scheduled
+            # messages. Placed LAST in the rule list so fall-through
+            # ordering tests (test_d03_integration) keep their
+            # deterministic sequence — this rule fires on its own
+            # 60s schedule once the heavier earlier rules are all
+            # on cooldown.
+            name="scheduled_messages_tick",
+            predicate=lambda s: True,
+            lever="FIRE_SCHEDULED_MESSAGES",
+            params={},
+            cooldown_seconds=60.0,
+        ),
     ]

@@ -47,8 +47,10 @@ def test_status_lists_all_levers(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["enabled"] is True
-    assert len(data["registered_levers"]) == 19
+    # D-09 had 19; Phase 11 added FIRE_SCHEDULED_MESSAGES → 20.
+    assert len(data["registered_levers"]) == 20
     assert "FIRE_TOOL_INSTALL" in data["registered_levers"]
+    assert "FIRE_SCHEDULED_MESSAGES" in data["registered_levers"]
 
 
 def test_ticks_endpoint_returns_recent_entries(client):
