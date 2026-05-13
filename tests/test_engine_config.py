@@ -37,7 +37,7 @@ def isolated_overrides(tmp_path, monkeypatch):
     # Snapshot — copy by value (dict copy) so mutations don't follow.
     snapshots = {
         section: dict(CONFIG._data.get(section) or {})
-        for section in ("router", "verification")
+        for section in ("router", "verification", "workspace", "knowledge")
     }
     yield p
     # Restore by clearing and re-populating IN PLACE so any reference
@@ -205,6 +205,92 @@ def test_apply_from_file_applies_valid_entries(isolated_overrides):
     from backend.config import CONFIG
     assert CONFIG.router.get("daily_api_budget_usd") == 13.5
     # Restore handled by isolated_overrides fixture teardown.
+
+
+# --- Storage / Knowledge sections (Phase 5C) ---------------------------
+
+
+def test_validate_workspace_retention_passes(isolated_overrides):
+    from backend.runtime_config import validate_partial
+    clean, rejected = validate_partial({
+        "workspace": {
+            "inbox_retention_days": 30,
+            "outbox_retention_days": 0,
+            "notes_retention_days": 7,
+            "turns_retention_days": 60,
+        },
+    })
+    assert rejected == []
+    assert clean["workspace"]["inbox_retention_days"] == 30
+    assert clean["workspace"]["outbox_retention_days"] == 0  # 0 = never sweep
+
+
+def test_validate_workspace_retention_rejects_negative(isolated_overrides):
+    from backend.runtime_config import validate_partial
+    _, rejected = validate_partial({"workspace": {"inbox_retention_days": -5}})
+    assert "workspace.inbox_retention_days" in rejected
+
+
+def test_validate_knowledge_caps_pass(isolated_overrides):
+    from backend.runtime_config import validate_partial
+    clean, rejected = validate_partial({
+        "knowledge": {
+            "core_memory_max_tokens": 6000,
+            "auto_promote_threshold": 15,
+            "finetune_min_examples": 100,
+            "note_max_tokens": 2000,
+        },
+    })
+    assert rejected == []
+    assert clean["knowledge"]["core_memory_max_tokens"] == 6000
+
+
+def test_validate_knowledge_rejects_zero_min_examples(isolated_overrides):
+    """finetune_min_examples=0 would mean "trigger training on every
+    note" — that's a pathological setting, so the validator rejects it."""
+    from backend.runtime_config import validate_partial
+    _, rejected = validate_partial({"knowledge": {"finetune_min_examples": 0}})
+    assert "knowledge.finetune_min_examples" in rejected
+
+
+def test_put_workspace_retention_persists_and_mutates(isolated_overrides):
+    from backend.config import CONFIG
+    client = TestClient(_build_app())
+    r = client.put(
+        "/api/engine/config",
+        json={"workspace": {"inbox_retention_days": 14, "turns_retention_days": 7}},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["effective"]["workspace"]["inbox_retention_days"] == 14
+    # Live CONFIG sees it (the autonomic sweep reads CONFIG.workspace
+    # each tick, so the change applies without restart).
+    assert CONFIG.workspace.get("inbox_retention_days") == 14
+    assert CONFIG.workspace.get("turns_retention_days") == 7
+
+
+def test_put_knowledge_caps_persist(isolated_overrides):
+    from backend.config import CONFIG
+    client = TestClient(_build_app())
+    r = client.put(
+        "/api/engine/config",
+        json={"knowledge": {"core_memory_max_tokens": 8000}},
+    )
+    assert r.status_code == 200
+    assert CONFIG.knowledge.get("core_memory_max_tokens") == 8000
+
+
+def test_schema_includes_workspace_and_knowledge(isolated_overrides):
+    """The UI uses /api/engine/config's `schema` field to render
+    forms — make sure the two new sections show up so the front-end
+    doesn't silently hide them on a stale build."""
+    client = TestClient(_build_app())
+    r = client.get("/api/engine/config")
+    schema = r.json()["schema"]
+    assert "workspace" in schema
+    assert "knowledge" in schema
+    assert "inbox_retention_days" in schema["workspace"]
+    assert "core_memory_max_tokens" in schema["knowledge"]
 
 
 def test_apply_from_file_drops_invalid_silently(isolated_overrides, caplog):

@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import {
   EngineConfigEnvelope,
+  EngineKnowledgeCfg,
   EngineRouterCfg,
   EngineVerificationCfg,
+  EngineWorkspaceCfg,
   fetchEngineConfig,
   putEngineConfig,
   resetEngineConfig,
@@ -28,6 +30,8 @@ export default function EngineTab({ flash }: Props) {
   // Form state (mirrors envelope.effective)
   const [router, setRouter] = useState<EngineRouterCfg>({});
   const [verification, setVerification] = useState<EngineVerificationCfg>({});
+  const [workspace, setWorkspace] = useState<EngineWorkspaceCfg>({});
+  const [knowledge, setKnowledge] = useState<EngineKnowledgeCfg>({});
 
   const refresh = async () => {
     try {
@@ -35,6 +39,8 @@ export default function EngineTab({ flash }: Props) {
       setEnvelope(r);
       setRouter(r.effective.router || {});
       setVerification(r.effective.verification || {});
+      setWorkspace(r.effective.workspace || {});
+      setKnowledge(r.effective.knowledge || {});
     } catch (e: any) {
       flash("Engine config load failed: " + e.message);
     }
@@ -47,7 +53,7 @@ export default function EngineTab({ flash }: Props) {
   const handleSave = async () => {
     setBusy(true);
     try {
-      const r = await putEngineConfig({ router, verification });
+      const r = await putEngineConfig({ router, verification, workspace, knowledge });
       setEnvelope(r);
       const rejN = r.rejected?.length || 0;
       if (rejN > 0) {
@@ -72,6 +78,8 @@ export default function EngineTab({ flash }: Props) {
       setEnvelope(r);
       setRouter(r.effective.router || {});
       setVerification(r.effective.verification || {});
+      setWorkspace(r.effective.workspace || {});
+      setKnowledge(r.effective.knowledge || {});
       flash("Engine config reset to defaults.");
     } catch (e: any) {
       flash("Reset failed: " + e.message);
@@ -87,6 +95,12 @@ export default function EngineTab({ flash }: Props) {
     k: K,
     v: EngineVerificationCfg[K],
   ) => setVerification((prev) => ({ ...prev, [k]: v }));
+
+  const updateWs = <K extends keyof EngineWorkspaceCfg>(k: K, v: EngineWorkspaceCfg[K]) =>
+    setWorkspace((prev) => ({ ...prev, [k]: v }));
+
+  const updateKb = <K extends keyof EngineKnowledgeCfg>(k: K, v: EngineKnowledgeCfg[K]) =>
+    setKnowledge((prev) => ({ ...prev, [k]: v }));
 
   const numInput = (
     value: number | undefined,
@@ -124,7 +138,7 @@ export default function EngineTab({ flash }: Props) {
   }: {
     label: string;
     field: string;
-    section: "router" | "verification";
+    section: "router" | "verification" | "workspace" | "knowledge";
     children: React.ReactNode;
     hint?: string;
   }) => (
@@ -302,6 +316,100 @@ export default function EngineTab({ flash }: Props) {
             1000,
             1000000,
           )}
+        </Row>
+      </div>
+
+      {/* Workspace retention section */}
+      <div className="bg-slate-800 rounded p-3 space-y-1">
+        <div className="text-sm font-semibold mb-2">
+          Workspace retention (auto-sweep, in days)
+        </div>
+        <div className="text-[11px] text-slate-500 mb-2">
+          <b>0</b> means "never auto-delete this subtree". Sweep runs as part
+          of the autonomic loop; changes apply on the next tick.
+        </div>
+
+        <Row
+          label="inbox_retention_days"
+          field="inbox_retention_days"
+          section="workspace"
+          hint="Uploaded files (workspace/inbox/). Default 90 — uploads accumulate fast."
+        >
+          {numInput(workspace.inbox_retention_days, (v) => updateWs("inbox_retention_days", v), 1, 0, 3650)}
+        </Row>
+
+        <Row
+          label="outbox_retention_days"
+          field="outbox_retention_days"
+          section="workspace"
+          hint="Agent outputs (workspace/outbox/). Default 0 — never sweep agent-produced work."
+        >
+          {numInput(workspace.outbox_retention_days, (v) => updateWs("outbox_retention_days", v), 1, 0, 3650)}
+        </Row>
+
+        <Row
+          label="notes_retention_days"
+          field="notes_retention_days"
+          section="workspace"
+          hint="Scratch notes (workspace/notes/). Default 0 — keep indefinitely."
+        >
+          {numInput(workspace.notes_retention_days, (v) => updateWs("notes_retention_days", v), 1, 0, 3650)}
+        </Row>
+
+        <Row
+          label="turns_retention_days"
+          field="turns_retention_days"
+          section="workspace"
+          hint="Per-turn artifact JSONs (workspace/turns/). Default 30 — accumulates fastest of all."
+        >
+          {numInput(workspace.turns_retention_days, (v) => updateWs("turns_retention_days", v), 1, 0, 3650)}
+        </Row>
+      </div>
+
+      {/* Knowledge caps section */}
+      <div className="bg-slate-800 rounded p-3 space-y-1">
+        <div className="text-sm font-semibold mb-2">Knowledge capacity</div>
+
+        <Row
+          label="core_memory_max_tokens"
+          field="core_memory_max_tokens"
+          section="knowledge"
+          hint="Cap on the ambient context bundle (system block) sent on every turn."
+        >
+          {numInput(
+            knowledge.core_memory_max_tokens,
+            (v) => updateKb("core_memory_max_tokens", v),
+            100,
+            256,
+            32000,
+          )}
+        </Row>
+
+        <Row
+          label="auto_promote_threshold"
+          field="auto_promote_threshold"
+          section="knowledge"
+          hint="A topic must be referenced this many times before auto-promotion to core memory."
+        >
+          {numInput(knowledge.auto_promote_threshold, (v) => updateKb("auto_promote_threshold", v), 1, 1, 1000)}
+        </Row>
+
+        <Row
+          label="finetune_min_examples"
+          field="finetune_min_examples"
+          section="knowledge"
+          hint="Minimum Q&A pairs in the finetune queue before training is allowed."
+        >
+          {numInput(knowledge.finetune_min_examples, (v) => updateKb("finetune_min_examples", v), 5, 1, 100000)}
+        </Row>
+
+        <Row
+          label="note_max_tokens"
+          field="note_max_tokens"
+          section="knowledge"
+          hint="Cap on a single note's body before it's split / refused."
+        >
+          {numInput(knowledge.note_max_tokens, (v) => updateKb("note_max_tokens", v), 50, 100, 16000)}
         </Row>
       </div>
     </div>

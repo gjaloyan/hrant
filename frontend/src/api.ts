@@ -1328,14 +1328,48 @@ export type EngineVerificationCfg = {
   critic_retry_token_budget?: number;
 };
 
+export type EngineWorkspaceCfg = {
+  inbox_retention_days?: number;
+  outbox_retention_days?: number;
+  notes_retention_days?: number;
+  turns_retention_days?: number;
+};
+
+export type EngineKnowledgeCfg = {
+  core_memory_max_tokens?: number;
+  auto_promote_threshold?: number;
+  finetune_min_examples?: number;
+  note_max_tokens?: number;
+};
+
 export type EngineConfigEnvelope = {
-  effective: { router: EngineRouterCfg; verification: EngineVerificationCfg };
-  overrides: { router?: EngineRouterCfg; verification?: EngineVerificationCfg };
-  schema: { router: string[]; verification: string[] };
+  effective: {
+    router: EngineRouterCfg;
+    verification: EngineVerificationCfg;
+    workspace: EngineWorkspaceCfg;
+    knowledge: EngineKnowledgeCfg;
+  };
+  overrides: {
+    router?: EngineRouterCfg;
+    verification?: EngineVerificationCfg;
+    workspace?: EngineWorkspaceCfg;
+    knowledge?: EngineKnowledgeCfg;
+  };
+  schema: {
+    router: string[];
+    verification: string[];
+    workspace: string[];
+    knowledge: string[];
+  };
 };
 
 export type EngineConfigUpdateResp = EngineConfigEnvelope & {
-  applied: { router?: EngineRouterCfg; verification?: EngineVerificationCfg };
+  applied: {
+    router?: EngineRouterCfg;
+    verification?: EngineVerificationCfg;
+    workspace?: EngineWorkspaceCfg;
+    knowledge?: EngineKnowledgeCfg;
+  };
   rejected: string[];
   ok: boolean;
 };
@@ -1346,6 +1380,8 @@ export const fetchEngineConfig = () =>
 export const putEngineConfig = (cfg: {
   router?: EngineRouterCfg;
   verification?: EngineVerificationCfg;
+  workspace?: EngineWorkspaceCfg;
+  knowledge?: EngineKnowledgeCfg;
 }) => json_put<EngineConfigUpdateResp>("/api/engine/config", cfg);
 
 export const resetEngineConfig = () =>

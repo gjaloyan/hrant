@@ -33,13 +33,15 @@ class EngineConfigUpdate(BaseModel):
     """Partial — only sections / fields the user actually changed.
 
     Shape mirrors CONFIG: top-level keys are sections (router /
-    verification), nested keys are field names. Unknown sections or
-    fields are silently dropped (and returned in `rejected` so the
-    UI can warn).
+    verification / workspace / knowledge), nested keys are field
+    names. Unknown sections or fields are silently dropped (and
+    returned in `rejected` so the UI can warn).
     """
 
     router: dict | None = None
     verification: dict | None = None
+    workspace: dict | None = None
+    knowledge: dict | None = None
 
 
 @router.get("/api/engine/config")
@@ -107,8 +109,15 @@ def engine_config_reset():
     from ..config import CONFIG
     # Only restore the sections we own — leave others (mode, model_a,
     # etc.) alone in case anyone monkey-patched them in tests.
-    for section in ("router", "verification"):
-        CONFIG._data[section] = fresh._data.get(section) or {}
+    for section in ("router", "verification", "workspace", "knowledge"):
+        target = CONFIG._data.get(section)
+        new_val = fresh._data.get(section) or {}
+        # In-place so long-lived references keep working.
+        if isinstance(target, dict):
+            target.clear()
+            target.update(new_val)
+        else:
+            CONFIG._data[section] = dict(new_val)
     return {
         "ok": True,
         "effective": get_effective_config(),

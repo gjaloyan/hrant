@@ -55,6 +55,24 @@ _ALLOWED: dict[str, dict[str, tuple[type, Any]]] = {
         "critic_max_retries": (int, lambda v: 0 <= v <= 10),
         "critic_retry_token_budget": (int, lambda v: 1000 <= v <= 1000000),
     },
+    # Storage retention — 0 means "never auto-sweep this subtree".
+    # The sweep itself runs in the autonomic loop; values are read
+    # live so a slider change applies on the next tick.
+    "workspace": {
+        "inbox_retention_days": (int, lambda v: 0 <= v <= 3650),
+        "outbox_retention_days": (int, lambda v: 0 <= v <= 3650),
+        "notes_retention_days": (int, lambda v: 0 <= v <= 3650),
+        "turns_retention_days": (int, lambda v: 0 <= v <= 3650),
+    },
+    # Knowledge capacity / promotion knobs. note_max_tokens caps the
+    # size of a single saved note; core_memory_max_tokens caps the
+    # ambient context bundle.
+    "knowledge": {
+        "core_memory_max_tokens": (int, lambda v: 256 <= v <= 32000),
+        "auto_promote_threshold": (int, lambda v: 1 <= v <= 1000),
+        "finetune_min_examples": (int, lambda v: 1 <= v <= 100000),
+        "note_max_tokens": (int, lambda v: 100 <= v <= 16000),
+    },
 }
 
 
