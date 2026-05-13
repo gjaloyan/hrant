@@ -174,6 +174,7 @@ def test_health_endpoint_shape(monkeypatch):
     monkeypatch.setattr(health_mod, "_check_ffmpeg", lambda: {"status": "ok", "detail": ""})
     monkeypatch.setattr(health_mod, "_check_telegram", lambda: {"status": "not_configured", "detail": ""})
     monkeypatch.setattr(health_mod, "_check_workspace", lambda: {"status": "ok", "detail": ""})
+    monkeypatch.setattr(health_mod, "_check_autonomic", lambda: {"status": "ok", "detail": "last tick 5s ago"})
 
     client = TestClient(_build_app())
     r = client.get("/api/health")
@@ -184,7 +185,8 @@ def test_health_endpoint_shape(monkeypatch):
     assert "uptime_seconds" in body
     assert "components" in body
     assert set(body["components"].keys()) == {
-        "agent_core", "model", "stt", "tts", "ffmpeg", "telegram", "workspace",
+        "agent_core", "model", "stt", "tts", "ffmpeg",
+        "telegram", "workspace", "autonomic",
     }
 
 
@@ -196,7 +198,43 @@ def test_health_endpoint_aggregate_down_when_model_down(monkeypatch):
     monkeypatch.setattr(health_mod, "_check_ffmpeg", lambda: {"status": "ok"})
     monkeypatch.setattr(health_mod, "_check_telegram", lambda: {"status": "not_configured"})
     monkeypatch.setattr(health_mod, "_check_workspace", lambda: {"status": "ok"})
+    monkeypatch.setattr(health_mod, "_check_autonomic", lambda: {"status": "ok"})
 
     client = TestClient(_build_app())
     r = client.get("/api/health")
     assert r.json()["status"] == "down"
+
+
+def test_check_autonomic_ok_when_recent_tick(tmp_path, monkeypatch):
+    """Recent tick within 2x interval → ok."""
+    from datetime import datetime, timezone, timedelta
+    tl = tmp_path / "tick_log.jsonl"
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+    )
+    tl.write_text(f'{{"ts":"{recent}","fired":1}}\n', encoding="utf-8")
+    monkeypatch.setenv("AUTONOMIC_TICK_LOG_PATH", str(tl))
+    monkeypatch.setattr("backend.autonomic.settings.resolve_tick_interval", lambda: 30.0)
+    r = health_mod._check_autonomic()
+    assert r["status"] == "ok"
+    assert "last tick" in r["detail"]
+
+
+def test_check_autonomic_down_when_stale(tmp_path, monkeypatch):
+    """Tick older than 10x interval → down."""
+    from datetime import datetime, timezone, timedelta
+    tl = tmp_path / "tick_log.jsonl"
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=30)).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ",
+    )
+    tl.write_text(f'{{"ts":"{stale}","fired":1}}\n', encoding="utf-8")
+    monkeypatch.setenv("AUTONOMIC_TICK_LOG_PATH", str(tl))
+    monkeypatch.setattr("backend.autonomic.settings.resolve_tick_interval", lambda: 30.0)
+    r = health_mod._check_autonomic()
+    assert r["status"] == "down"
+
+
+def test_check_autonomic_down_when_no_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTONOMIC_TICK_LOG_PATH", str(tmp_path / "missing.jsonl"))
+    r = health_mod._check_autonomic()
+    assert r["status"] == "down"

@@ -1501,6 +1501,61 @@ export const cancelScheduledMessage = (id: string) =>
   );
 
 
+// ---------- Skills (Phase 12B/C) ----------
+
+export type SkillMeta = {
+  name: string;
+  description: string;
+  triggers: string[];
+  when_to_use: string;
+  body: string;
+  source: "builtin" | "user";
+  enabled: boolean;
+  path: string;
+};
+
+export type SkillFull = SkillMeta & { raw_md: string };
+
+export const fetchSkills = () =>
+  json_get<{ skills: SkillMeta[]; user_dir: string }>("/api/skills");
+
+export const fetchSkill = (name: string) =>
+  json_get<SkillFull>(`/api/skills/${encodeURIComponent(name)}`);
+
+export const upsertSkill = (name: string, raw_md: string) =>
+  json_put<{ ok: boolean } & SkillMeta>(
+    `/api/skills/${encodeURIComponent(name)}`,
+    { raw_md },
+  );
+
+export const deleteSkill = (name: string) =>
+  json_delete<{ ok: boolean; deleted: string }>(
+    `/api/skills/${encodeURIComponent(name)}`,
+  );
+
+export const setSkillEnabled = (name: string, enabled: boolean) =>
+  json_post<{ ok: boolean } & SkillMeta>(
+    `/api/skills/${encodeURIComponent(name)}/enabled`,
+    { enabled },
+  );
+
+export const reloadSkills = () =>
+  json_post<{ ok: boolean; count: number }>("/api/skills/reload");
+
+export type SkillInstallRequest = {
+  source_type: "git" | "zip" | "local";
+  source: string;
+  name?: string;
+  subdir?: string;
+};
+
+export const installSkill = (body: SkillInstallRequest) =>
+  json_post<{ ok: boolean; name: string; skill: SkillMeta }>(
+    "/api/skills/install",
+    body,
+  );
+
+
 // ---------- Self-modifications (patch overlay) ----------
 
 export type SelfModPatch = {

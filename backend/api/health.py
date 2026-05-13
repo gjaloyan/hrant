@@ -134,6 +134,106 @@ def _check_tts() -> dict:
         return _down(f"tts check failed: {e}")
 
 
+def _check_autonomic() -> dict:
+    """Liveness of the background scheduler.
+
+    Reads the tail of `tick_log.jsonl` and compares the most recent
+    tick's timestamp to wall-clock now. Buckets:
+      - ok        — last tick < 2x tick_interval ago
+      - degraded  — last tick < 10x tick_interval ago
+      - down      — older than 10x, OR no ticks ever
+      - not_configured — kill-switch off / scheduler intentionally
+                          disabled (still emit ok=false-ish so the
+                          UI shows the user why it's quiet)
+
+    The tick_interval comes from `autonomic_settings.json` (Phase 5D)
+    so a slower hand-tuned loop doesn't trigger false 'degraded'.
+    """
+    try:
+        import json as _json
+        import os as _os
+        from datetime import datetime, timezone
+
+        from ..autonomic.settings import resolve_tick_interval
+        from ..autonomic.kill_switch import DEFAULT_PATH as _KS_PATH
+
+        interval = resolve_tick_interval()
+        # Kill-switch check.
+        try:
+            content = _KS_PATH.read_text(encoding="utf-8").strip().lower()
+            if content in ("false", "0", "off", "no"):
+                return _not_configured(
+                    f"autonomic kill-switch is OFF (interval would be {interval}s)"
+                )
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+        tick_log = _os.environ.get(
+            "AUTONOMIC_TICK_LOG_PATH",
+            "knowledge/autonomic/tick_log.jsonl",
+        )
+        from .. import paths as _paths
+        tl_path = _paths.data_dir(require=False) / "knowledge" / "autonomic" / "tick_log.jsonl"
+        # Honour AUTONOMIC_TICK_LOG_PATH if it's an absolute override.
+        env_override = _os.environ.get("AUTONOMIC_TICK_LOG_PATH")
+        if env_override:
+            from pathlib import Path as _P
+            tl_path = _P(env_override)
+
+        if not tl_path.exists():
+            return _down(
+                f"no tick log at {tl_path} — scheduler may have never started"
+            )
+
+        # Read the LAST line cheaply (no full file load).
+        last_ts: str | None = None
+        try:
+            with tl_path.open("rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                tail = b""
+                read = min(size, 4096)
+                f.seek(size - read)
+                tail = f.read()
+            for line in reversed(tail.splitlines()):
+                if not line.strip():
+                    continue
+                try:
+                    row = _json.loads(line)
+                except Exception:
+                    continue
+                last_ts = row.get("ts") or row.get("timestamp")
+                if last_ts:
+                    break
+        except OSError as e:
+            return _down(f"tick log unreadable: {e}")
+
+        if not last_ts:
+            return _down("tick log has no parseable entries")
+
+        # Parse — accept ISO 8601 with or without trailing Z.
+        try:
+            ts_clean = last_ts.replace("Z", "+00:00")
+            last_dt = datetime.fromisoformat(ts_clean)
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            return _down(f"tick log timestamp unparseable: {last_ts!r}")
+
+        now = datetime.now(timezone.utc)
+        delta = (now - last_dt).total_seconds()
+        detail = f"last tick {int(delta)}s ago (interval={int(interval)}s)"
+        if delta < interval * 2:
+            return _ok(detail)
+        if delta < interval * 10:
+            return _degraded(detail)
+        return _down(detail)
+    except Exception as e:  # pragma: no cover — defensive
+        return _down(f"autonomic check failed: {e}")
+
+
 def _check_ffmpeg() -> dict:
     """ffmpeg is only used to make Telegram voice replies into native
     voice bubbles. Missing → degraded (WAV fallback works) not down."""
@@ -243,6 +343,7 @@ def health() -> dict[str, Any]:
         "ffmpeg": _check_ffmpeg(),
         "telegram": _check_telegram(),
         "workspace": _check_workspace(),
+        "autonomic": _check_autonomic(),
     }
     return {
         "status": _aggregate(components),
