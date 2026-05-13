@@ -43,8 +43,10 @@ def generate_pkce() -> tuple[str, str]:
 # In-memory store for pending PKCE verifiers (state -> verifier)
 _pkce_store: dict[str, str] = {}
 
-ROOT = Path(__file__).resolve().parent.parent
-PROVIDERS_PATH = ROOT / "knowledge" / "providers.json"
+from . import paths
+
+ROOT = paths.repo_root()
+PROVIDERS_PATH = paths.knowledge_dir() / "providers.json"
 
 
 # ---------- Known model pricing (per 1M tokens) ----------
@@ -685,7 +687,7 @@ def get_model_pricing(model: str) -> dict[str, float]:
 
 # ---------- OAuth Token Manager ----------
 
-OAUTH_TOKENS_PATH = ROOT / "knowledge" / "oauth_tokens.json"
+OAUTH_TOKENS_PATH = paths.knowledge_dir() / "oauth_tokens.json"
 
 
 class OAuthTokenManager:
@@ -1316,7 +1318,7 @@ COPILOT_AUTH = CopilotAuthManager()
 
 # ---------- Active Model Selection ----------
 
-ACTIVE_MODEL_PATH = ROOT / "knowledge" / "active_model.json"
+ACTIVE_MODEL_PATH = paths.knowledge_dir() / "active_model.json"
 
 
 class ActiveModelManager:

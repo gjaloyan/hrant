@@ -14,12 +14,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from . import paths
 from .config import CONFIG
 
 log = logging.getLogger(__name__)
 
-ROOT = Path(__file__).resolve().parent.parent
-CHANNELS_PATH = ROOT / "knowledge" / "channels.json"
+# Engine-relative ROOT kept for legacy imports; channel state lives
+# with the user's other knowledge data, never inside the engine repo.
+ROOT = paths.repo_root()
+CHANNELS_PATH = paths.knowledge_dir() / "channels.json"
 
 
 class _ConflictNoiseFilter(logging.Filter):

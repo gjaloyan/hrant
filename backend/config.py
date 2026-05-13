@@ -16,10 +16,19 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
-load_dotenv()
+from . import paths
 
-ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = ROOT / "config.yaml"
+# Load .env from the data_dir first (user's), repo root second (dev
+# fallback). load_dotenv is idempotent for variables already in
+# os.environ, so the data-dir .env wins.
+load_dotenv(paths.env_path())
+
+# Backwards-compat exports: legacy code imports `ROOT` and
+# `CONFIG_PATH` directly. ROOT still means the repo root (engine);
+# CONFIG_PATH resolves via paths.config_yaml_path() so it points at
+# the user's config when one exists.
+ROOT = paths.repo_root()
+CONFIG_PATH = paths.config_yaml_path()
 
 
 # -------- пресеты режимов --------
@@ -300,9 +309,20 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
 
 
 class Config:
-    def __init__(self, path: Path = CONFIG_PATH):
-        with open(path, "r", encoding="utf-8") as f:
-            raw: dict[str, Any] = yaml.safe_load(f) or {}
+    def __init__(self, path: Path | None = None):
+        # Allow tests to pass an explicit path; production callers
+        # let paths.config_yaml_path() resolve the right file (data
+        # dir > repo root > sensible default).
+        if path is None:
+            path = paths.config_yaml_path()
+        if not Path(path).exists():
+            # Fresh install — no config.yaml yet anywhere. Boot with
+            # baked-in defaults (claude_only preset + _COMMON_OTHER).
+            # `hrant init` writes a real file later.
+            raw: dict[str, Any] = {"mode": "claude_only"}
+        else:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
 
         mode = raw.get("mode", "local_full")
         if mode not in MODE_PRESETS:
@@ -317,11 +337,29 @@ class Config:
         merged = _deep_merge(merged, {k: v for k, v in raw.items() if k != "mode"})
         self._data = merged
 
-        # Resolve knowledge base dir relative to project root
-        kb = Path(self._data["knowledge"]["base_dir"])
-        if not kb.is_absolute():
-            kb = (ROOT / kb).resolve()
+        # Resolve knowledge base dir. Default points the data_dir's
+        # knowledge/ subdir (so a split install never accidentally
+        # writes to the engine repo). Absolute paths in yaml override.
+        kb_raw = self._data["knowledge"].get("base_dir")
+        if kb_raw and kb_raw not in ("./knowledge", "knowledge"):
+            kb = Path(kb_raw)
+            if not kb.is_absolute():
+                # Honour the user's relative path against data_dir,
+                # which is the user-facing tree, not the engine repo.
+                kb = (paths.data_dir() / kb).resolve()
+        else:
+            kb = paths.knowledge_dir()
         self._data["knowledge"]["base_dir"] = str(kb)
+
+        # Resolve workspace root the same way.
+        ws_raw = (self._data.get("workspace") or {}).get("root")
+        if ws_raw and ws_raw not in ("./workspace", "workspace"):
+            ws = Path(ws_raw)
+            if not ws.is_absolute():
+                ws = (paths.data_dir() / ws).resolve()
+        else:
+            ws = paths.workspace_dir()
+        self._data.setdefault("workspace", {})["root"] = str(ws)
 
     # ---- dict-like ----
     def __getitem__(self, key: str) -> Any:

@@ -79,7 +79,12 @@ def cmd_init(args: argparse.Namespace) -> int:
     """
     print("self-learning agent — interactive setup")
     print()
-    env_path = ROOT / ".env"
+    from . import paths
+    paths.ensure_data_dir()
+    env_path = paths.env_path()
+    if not env_path.exists():
+        # Default-write into data_dir for a clean split install.
+        env_path = paths.data_dir() / ".env"
     existing_env: dict[str, str] = {}
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():
@@ -125,7 +130,7 @@ def cmd_init(args: argparse.Namespace) -> int:
     _print_ok(f".env updated ({len(lines)} keys)")
 
     # Confirm config.yaml exists; don't overwrite, just point at it.
-    cfg_path = ROOT / "config.yaml"
+    cfg_path = paths.config_yaml_path()
     if cfg_path.exists():
         _print_ok(f"config.yaml exists at {cfg_path}")
     else:
