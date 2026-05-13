@@ -72,18 +72,58 @@ def _read_input(prompt: str, default: Optional[str] = None) -> str:
 
 
 def cmd_init(args: argparse.Namespace) -> int:
-    """Interactive setup wizard.
+    """Bootstrap a fresh install OR reconfigure an existing one.
 
-    Writes .env and confirms config.yaml exists. Idempotent: re-runs
-    show current state and only overwrite values the user reconfirms.
+    Two flows in one command (driven by whether `data_dir` looks
+    initialised — see `bootstrap.is_initialised`):
+
+      Fresh install:
+        1. ensure data_dir exists (default: ~/.hrant/data/, or
+           HRANT_DATA_DIR if set)
+        2. copy knowledge_templates/ → data_dir/knowledge/
+        3. copy config.example.yaml → data_dir/config.yaml
+        4. Q&A for API keys + optional service URLs, write .env
+
+      Reconfigure:
+        1. show current data_dir and which files are already there
+        2. same Q&A — values default to current settings, masked for
+           secrets, blanks preserve existing entries
+
+    Either flow ends with `setup complete. start the agent with:
+    hrant run`.
     """
-    print("self-learning agent — interactive setup")
+    from . import bootstrap, paths
+
+    print("Hrant — interactive setup")
     print()
-    from . import paths
-    paths.ensure_data_dir()
+    print(f"  data_dir: {paths.data_dir()}")
+    print(f"  engine:   {paths.repo_root()}")
+    if paths.is_split_install():
+        print("  layout:   split (engine separate from data — production setup)")
+    else:
+        print("  layout:   single-tree (dev mode — data lives in the repo)")
+    print()
+
+    # 1. Bootstrap files (templates + config.yaml). Idempotent —
+    # already-populated files are skipped.
+    result = bootstrap.bootstrap_data_dir(force=bool(getattr(args, "reset", False)))
+    if result.fresh:
+        _print_ok(f"fresh install — copied {len(result.copied_files)} starter files")
+    else:
+        _print_ok(
+            f"reconfigure — copied {len(result.copied_files)} new files, "
+            f"kept {len(result.skipped_files)} existing"
+        )
+    if result.config_action == "copied":
+        _print_ok(f"config.yaml created at {paths.config_yaml_path()}")
+    elif result.config_action == "exists":
+        _print_ok(f"config.yaml already exists at {paths.config_yaml_path()}")
+    else:
+        _print_warn("config.example.yaml not found in the engine repo")
+
+    # 2. .env Q&A — provider keys and service URLs.
     env_path = paths.env_path()
     if not env_path.exists():
-        # Default-write into data_dir for a clean split install.
         env_path = paths.data_dir() / ".env"
     existing_env: dict[str, str] = {}
     if env_path.exists():
@@ -109,9 +149,10 @@ def cmd_init(args: argparse.Namespace) -> int:
     if new_key.strip():
         existing_env["ANTHROPIC_API_KEY"] = new_key.strip()
 
-    # Optional service URLs — auto-probe-able in `status` but the user
-    # can pre-fill them here too.
+    # Optional service URLs — auto-probe-able in `hrant discover` but
+    # we let the user pre-fill them here too.
     for key, prompt, default in (
+        ("TAILSCALE_HOST", "Tailscale host (for `hrant discover`, optional)", ""),
         ("LOCAL_WHISPER_URL", "Whisper STT server URL (optional)", ""),
         ("LOCAL_PIPER_URL", "Piper TTS server URL (optional)", ""),
         ("OPENAI_API_KEY", "OpenAI API key (optional, for OpenAI route)", ""),
@@ -127,21 +168,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     # Write .env back.
     lines = [f"{k}={v}" for k, v in existing_env.items() if v]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _print_ok(f".env updated ({len(lines)} keys)")
-
-    # Confirm config.yaml exists; don't overwrite, just point at it.
-    cfg_path = paths.config_yaml_path()
-    if cfg_path.exists():
-        _print_ok(f"config.yaml exists at {cfg_path}")
-    else:
-        _print_warn(
-            f"config.yaml missing — copy config.example.yaml to "
-            f"config.yaml and pick a mode (claude_only / local_full / …)"
-        )
+    _print_ok(f".env updated ({len(lines)} keys) at {env_path}")
 
     print()
-    print("setup complete. start the agent with:")
-    print("  hrant run")
+    print("setup complete. next steps:")
+    print("  hrant run                              # start the server")
+    print("  open http://127.0.0.1:8000             # WebUI")
+    print("  hrant discover --host <tailscale-ip>   # probe home services")
     return 0
 
 
@@ -497,7 +530,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="store_true", help="print version and exit")
     sub = parser.add_subparsers(dest="cmd", metavar="<command>")
 
-    p_init = sub.add_parser("init", help="interactive setup (writes .env)")
+    p_init = sub.add_parser(
+        "init",
+        help="bootstrap data_dir + interactive setup (.env, keys, service URLs)",
+    )
+    p_init.add_argument(
+        "--reset", action="store_true",
+        help="re-copy templates over existing files (overwrites soul.md, "
+             "identity.md, config.yaml — keep a backup if you've customised them)",
+    )
     p_init.set_defaults(func=cmd_init)
 
     p_run = sub.add_parser("run", help="start the FastAPI server")
