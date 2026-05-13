@@ -15,8 +15,18 @@ def _approx_tokens(text: str) -> int:
 class CoreMemory:
     def __init__(self):
         self.path: Path = KM.core_path
-        self.max_tokens: int = CONFIG.knowledge["core_memory_max_tokens"]
-        self.promote_threshold: int = CONFIG.knowledge["auto_promote_threshold"]
+
+    # Read CONFIG.knowledge live each call so the Engine tab's
+    # "applies live" claim actually holds — Phase 5C exposes these
+    # as runtime overrides, and a snapshot here would silently
+    # require a restart to pick up the new value.
+    @property
+    def max_tokens(self) -> int:
+        return int(CONFIG.knowledge["core_memory_max_tokens"])
+
+    @property
+    def promote_threshold(self) -> int:
+        return int(CONFIG.knowledge["auto_promote_threshold"])
 
     def read(self) -> str:
         return self.path.read_text(encoding="utf-8")

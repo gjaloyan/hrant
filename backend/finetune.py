@@ -88,8 +88,14 @@ class FinetuneStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.touch()
-        self.min_required: int = CONFIG.knowledge["finetune_min_examples"]
         self.confidence_threshold: int = 85  # см. FINETUNE_PIPELINE.md
+
+    # Read CONFIG.knowledge live so a Settings/Engine PUT for
+    # `finetune_min_examples` actually applies without restart.
+    # See Phase 5C audit.
+    @property
+    def min_required(self) -> int:
+        return int(CONFIG.knowledge["finetune_min_examples"])
 
     # ---------- low-level I/O ----------
     def _read_all(self) -> list[FinetunePair]:

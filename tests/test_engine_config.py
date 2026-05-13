@@ -293,6 +293,43 @@ def test_schema_includes_workspace_and_knowledge(isolated_overrides):
     assert "core_memory_max_tokens" in schema["knowledge"]
 
 
+def test_knowledge_slider_actually_applies_live_to_core_memory(isolated_overrides):
+    """Regression: an earlier version snapshotted CONFIG.knowledge
+    values onto CoreMemory at construction. That meant the Engine
+    tab's "applies live" promise was a lie for these specific
+    fields. Now they're properties that re-read CONFIG every call;
+    the test pins that contract so a future refactor can't silently
+    bring back the snapshot."""
+    from backend.config import CONFIG
+    from backend.core_memory import CORE
+    from backend.finetune import store as finetune_store
+    from backend.runtime_config import apply_overrides
+
+    original_core = CONFIG.knowledge["core_memory_max_tokens"]
+    original_promote = CONFIG.knowledge["auto_promote_threshold"]
+    original_min = CONFIG.knowledge["finetune_min_examples"]
+
+    apply_overrides({"knowledge": {
+        "core_memory_max_tokens": 9000,
+        "auto_promote_threshold": 42,
+        "finetune_min_examples": 7,
+    }})
+    try:
+        # CORE / finetune_store are the long-lived singletons that
+        # used to cache these. They must reflect the new values
+        # without a restart.
+        assert CORE.max_tokens == 9000
+        assert CORE.promote_threshold == 42
+        assert finetune_store().min_required == 7
+    finally:
+        # Restore so other tests aren't affected.
+        apply_overrides({"knowledge": {
+            "core_memory_max_tokens": original_core,
+            "auto_promote_threshold": original_promote,
+            "finetune_min_examples": original_min,
+        }})
+
+
 def test_apply_from_file_drops_invalid_silently(isolated_overrides, caplog):
     """A hand-edited file with an out-of-range value must not crash
     boot — it gets logged and dropped."""
