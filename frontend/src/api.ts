@@ -1236,6 +1236,78 @@ export async function transcribeAudio(
 export const attachmentUrl = (sha: string) => `/api/attachments/${sha}`;
 
 
+// ---------- Voice config (STT / TTS) + Tailscale discovery ----------
+
+export type TranscriberConfig = {
+  backend?: "auto" | "local_whisper" | "whisper_cpp" | "openai_whisper" | "disabled";
+  local_whisper?: { url?: string; model?: string };
+  whisper_cpp?: { url?: string; model?: string };
+  openai_whisper?: { model?: string };
+};
+
+export type TranscriberStatus = {
+  backend: string | null;
+  model?: string | null;
+  last_error?: string | null;
+  config?: TranscriberConfig;
+};
+
+export type TtsConfig = {
+  backend?: "auto" | "local_piper" | "openai_tts" | "disabled";
+  local_piper?: { url?: string; voice?: string; voice_ru?: string };
+  openai_tts?: { model?: string; voice?: string };
+};
+
+export type TtsStatus = {
+  backend: string | null;
+  voice?: string | null;
+  last_error?: string | null;
+  config?: TtsConfig;
+};
+
+export const fetchTranscribeConfig = () =>
+  json_get<TranscriberConfig>("/api/transcribe/config");
+
+export const fetchTranscribeStatus = () =>
+  json_get<TranscriberStatus>("/api/transcribe/status");
+
+export const putTranscribeConfig = (cfg: Partial<TranscriberConfig>) =>
+  json_put<{ ok: boolean; config: TranscriberConfig; transcriber: TranscriberStatus }>(
+    "/api/transcribe/config",
+    cfg,
+  );
+
+export const resetTranscriber = () =>
+  json_post<{ ok: boolean; transcriber: TranscriberStatus }>("/api/transcribe/reset");
+
+export const fetchTtsConfig = () => json_get<TtsConfig>("/api/tts/config");
+export const fetchTtsStatus = () => json_get<TtsStatus>("/api/tts/status");
+
+export const putTtsConfig = (cfg: Partial<TtsConfig>) =>
+  json_put<{ ok: boolean; config: TtsConfig; tts: TtsStatus }>("/api/tts/config", cfg);
+
+export const resetTts = () =>
+  json_post<{ ok: boolean; tts: TtsStatus }>("/api/tts/reset");
+
+// Tailscale / LAN service discovery — probes the host for
+// whisper / piper / ollama and (optionally) writes URLs back into
+// the per-service configs.
+export type DiscoverResult = {
+  host: string;
+  error?: string;
+  found?: Record<string, { ok: boolean; url?: string; reason?: string }>;
+  applied?: Record<string, string>;
+};
+
+export const runDiscover = (host?: string, apply = false) => {
+  const params = new URLSearchParams();
+  if (host) params.set("host", host);
+  if (apply) params.set("apply", "true");
+  const qs = params.toString();
+  return json_get<DiscoverResult>(`/api/discover${qs ? `?${qs}` : ""}`);
+};
+
+
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {
   provider_id: string;

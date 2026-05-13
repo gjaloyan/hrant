@@ -143,14 +143,35 @@ def transcribe_status():
 
 
 class TranscriberConfigUpdate(BaseModel):
-    backend: str | None = None  # "auto" | "whisper_cpp" | "openai_whisper" | "disabled"
-    whisper_cpp: dict | None = None     # {url, model}
-    openai_whisper: dict | None = None  # {model}
+    """Partial update — unset fields preserve their current values.
+    Nested dicts (local_whisper, whisper_cpp, openai_whisper) are
+    shallow-merged so the UI can update one field at a time without
+    blanking the others."""
+
+    backend: str | None = None  # "auto" | "local_whisper" | "whisper_cpp" | "openai_whisper" | "disabled"
+    local_whisper: dict | None = None    # {url, model} — FastAPI Whisper wrapper
+    whisper_cpp: dict | None = None      # {url, model} — whisper.cpp REST server
+    openai_whisper: dict | None = None   # {model}
+
+
+@router.get("/api/transcribe/config")
+def transcribe_config_get():
+    """Raw transcriber_config.json — the source the UI form binds to."""
+    return load_transcriber_config()
 
 
 @router.put("/api/transcribe/config")
 def transcribe_config_put(body: TranscriberConfigUpdate):
-    cfg = body.model_dump(exclude_none=True)
+    cfg = load_transcriber_config() or {}
+    if body.backend is not None:
+        cfg["backend"] = body.backend
+    for nested in ("local_whisper", "whisper_cpp", "openai_whisper"):
+        v = getattr(body, nested)
+        if v is None:
+            continue
+        merged = dict(cfg.get(nested) or {})
+        merged.update({k: vv for k, vv in v.items() if vv is not None})
+        cfg[nested] = merged
     save_transcriber_config(cfg)
     TRANSCRIBER.reset()
     return {"ok": True, "config": load_transcriber_config(), "transcriber": TRANSCRIBER.status()}

@@ -86,13 +86,14 @@ from .api import (  # noqa: E402
     channels as channels_api,
     attachments as attachments_api,
     health as health_api,
+    voice as voice_api,
 )
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
 for mod in (
     chat, knowledge, projects, finetune, status_api, identity,
     intel, goals, sessions, providers_api, channels_api, attachments_api,
-    health_api,
+    health_api, voice_api,
 ):
     app.include_router(mod.router)
 app.include_router(autonomic_router)
