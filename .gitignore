@@ -39,38 +39,22 @@ yarn-error.log*
 .env
 .env.local
 .env.*.local
-knowledge/oauth_tokens.json
-knowledge/access_log.json
 
-# ---------- Volatile runtime state ----------
-# These files change every conversation / every tick.
-# Keep their parent directories, but ignore the contents generated at runtime.
-knowledge/_history/
-knowledge/conversation.json
-knowledge/sessions.json
-knowledge/router_state.json
-knowledge/active_model.json
-knowledge/model_versions.json
-knowledge/providers.json
-knowledge/proposals.json
-knowledge/channels.json
-knowledge/gaps.json
-knowledge/patterns.json
-knowledge/index.json
-knowledge/graph.json
-knowledge/error_log.jsonl
-knowledge/eval_log.jsonl
-knowledge/embedder_config.json
-knowledge/transcriber_config.json
-knowledge/embeddings.json
-knowledge/attachments/
-knowledge/finetune_queue.jsonl
-knowledge/memory_facts.jsonl
+# ---------- User data — NEVER committed to the engine repo ----------
+# Engine ships only starter content in knowledge_templates/ and
+# config.example.yaml. A fresh install creates ~/.hrant/data/ (or
+# whatever HRANT_DATA_DIR points at) and copies templates over.
+# In dev mode (single-tree), the repo root doubles as data_dir, so
+# these directories exist locally but stay outside git.
+knowledge/
+workspace/
+config.yaml
 
-# Autonomic runtime state (D project)
-knowledge/autonomic/events.jsonl
-knowledge/autonomic/telemetry.jsonl
-knowledge/autonomic/state/
+# Runtime overrides from the Engine + Voice + Autonomic settings tabs
+# (live in data_dir; only visible at the repo root in dev mode).
+runtime_overrides.json
+autonomic_settings.json
+update_history.json
 
 # ---------- IDE / OS ----------
 .vscode/

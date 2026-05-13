@@ -1,0 +1,49 @@
+# ════════════════════════════════════════════════════════════════════
+# Hrant — example configuration
+#
+# `hrant init` copies this file to <data_dir>/config.yaml the first
+# time it runs against a fresh data directory. The user edits the
+# *copy*, never this file — `hrant update` ships newer versions of
+# this template alongside the engine.
+#
+# Main knob: `mode`. Picking a mode applies sensible defaults across
+# every subsystem. Any specific key can still be overridden below.
+#
+# Modes:
+#   1. local_full     — you have a GPU with ≥12GB VRAM.
+#                       Qwen 7B runs locally via Ollama, fine-tune
+#                       happens locally via Unsloth LoRA.
+#   2. cloud_finetune — no GPU (or weak one), but Ollama is reachable
+#                       for inference. Collect Q&A locally →
+#                       export-cloud → run on a rented GPU (RunPod /
+#                       Vast.ai / Colab Pro) → import-gguf back →
+#                       Ollama picks up the new model.
+#   3. local_cpu      — no GPU, CPU only. A tiny Qwen 1.5B that fits
+#                       in RAM. Training is experimental and very
+#                       slow — prefer cloud_finetune.
+#   4. claude_only    — no local model at all. Everything goes through
+#                       the Claude API. Notes and finetune_queue are
+#                       still collected (so a later mode switch isn't
+#                       a clean-start).
+# ════════════════════════════════════════════════════════════════════
+
+mode: "claude_only"
+
+# ─── Optional explicit overrides (live without restart for the keys
+#     exposed in the Engine tab — see runtime_config.py whitelist). ───
+#
+# model_a:
+#   model: "claude-sonnet-4-5"         # or claude-opus-4-6 for heavy tasks
+#
+# model_b:
+#   model: "qwen2.5:14b-instruct"      # if VRAM permits 14B
+#
+# router:
+#   daily_api_budget_usd: 10.0         # raise the daily cap
+#   fallback_to_local: false           # disable Model B fallback
+#
+# verification:
+#   min_confidence: 80                 # stricter shipping threshold
+#
+# finetune:
+#   confidence_threshold: 90           # only collect top-quality pairs
