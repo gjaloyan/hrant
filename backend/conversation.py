@@ -67,6 +67,7 @@ class ConversationMemory:
         topics_used: list[str] | None = None,
         *,
         channel: str = "webui",
+        speaker_id: str = "webui:default",
         turn_id: str = "",
         token_usage: Optional[dict] = None,
         n_tool_calls: int = 0,
@@ -74,11 +75,15 @@ class ConversationMemory:
     ) -> None:
         """Record one conversation turn (user question + agent response).
 
-        `channel` tags which surface this turn arrived on
-        ("webui" | "telegram" | future channels). Stored on the turn
-        itself so the WebUI can filter by channel without joining
-        against a separate index. Default "webui" preserves existing
-        behaviour for callers that haven't been updated.
+        `speaker_id` ('<channel>:<user_id>') uniquely identifies WHO
+        the agent talked to. Each speaker has their own conversation
+        thread — turns from `telegram:123` (a real person) never
+        appear in the context window of a `telegram:456` chat
+        (a different person), even on the same Telegram bot.
+
+        `channel` is retained as a coarse label (webui / telegram /
+        ...) for UI grouping and back-compat; the primary scoping
+        key is `speaker_id`.
 
         `turn_id` references the on-disk TurnWorkspace artifact at
         `workspace/turns/<turn_id>.json` (P1). Empty when the caller
@@ -92,6 +97,7 @@ class ConversationMemory:
         if len(answer_preview) > self.max_answer_chars:
             answer_preview = answer_preview[: self.max_answer_chars] + "..."
 
+        from .sessions import normalize_speaker
         turn = {
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user": user_message.strip(),
@@ -100,6 +106,7 @@ class ConversationMemory:
             "is_chat": is_chat,
             "confidence": confidence,
             "channel": channel or "webui",
+            "speaker_id": normalize_speaker(speaker_id),
         }
         if topics_used:
             turn["topics"] = topics_used
@@ -122,40 +129,73 @@ class ConversationMemory:
             self._turns = self._turns[-self.max_turns :]
         self._save()
 
-    def recent(self, n: int = 10, *, channel: Optional[str] = None) -> list[dict]:
-        """Get the last N turns. When `channel` is set, only turns from
-        that channel are returned — the WebUI uses this to render its
-        own history without Telegram noise (and vice versa). Legacy
-        turns saved before channel-tagging default to "webui" on read.
+    def recent(
+        self,
+        n: int = 10,
+        *,
+        channel: Optional[str] = None,
+        speaker_id: Optional[str] = None,
+    ) -> list[dict]:
+        """Get the last N turns. When `speaker_id` is set, ONLY turns
+        from that speaker are returned — this is the primary filter
+        and what `agent.py` uses when assembling per-speaker context.
+        `channel` is a coarser legacy filter kept for callers that
+        haven't been speaker_id-aware yet (the WebUI default chat
+        endpoint).
+
+        Legacy turns saved without `speaker_id` are tagged with
+        '<channel>:legacy' on read so they never bleed across new
+        speakers but still surface in the cross-channel timeline.
         """
+        from .sessions import normalize_speaker
         turns = self._turns
-        if channel is not None:
+        if speaker_id is not None:
+            wanted = normalize_speaker(speaker_id)
+            turns = [
+                t for t in turns
+                if normalize_speaker(
+                    t.get("speaker_id") or f"{t.get('channel') or 'webui'}:legacy"
+                ) == wanted
+            ]
+        elif channel is not None:
             turns = [t for t in turns if (t.get("channel") or "webui") == channel]
         return turns[-n:]
 
-    def recent_full(self, n: int = 50, *, channel: Optional[str] = None) -> list[dict]:
+    def recent_full(
+        self,
+        n: int = 50,
+        *,
+        channel: Optional[str] = None,
+        speaker_id: Optional[str] = None,
+    ) -> list[dict]:
         """Like `recent` but bigger default — for the WebUI history
-        list. Returns full turn dicts (ts, user, answer, intent,
-        confidence, topics, turn_id) so the frontend can render
-        without re-querying. Lazy-loaded heavy data
-        (thinking_trace, claims, evidence) is fetched on expand via
+        list. Returns full turn dicts so the frontend can render
+        without re-querying. Heavy data lazy-loaded via
         GET /api/turns/<id>."""
-        return self.recent(n, channel=channel)
+        return self.recent(n, channel=channel, speaker_id=speaker_id)
 
-    def context_block(self, n: int = 6, *, channel: Optional[str] = None) -> str:
+    def context_block(
+        self,
+        n: int = 6,
+        *,
+        channel: Optional[str] = None,
+        speaker_id: Optional[str] = None,
+    ) -> str:
         """Build a conversation context block for injection into prompts.
 
-        Returns a formatted string showing recent exchanges. If there's
-        no history, returns an empty string (so it doesn't clutter prompts
-        for the first message of a session).
+        Returns a formatted string showing recent exchanges. If
+        there's no history, returns an empty string.
 
-        `channel` (when set) restricts context to turns from the same
-        surface — Telegram conversations stay separate from WebUI ones
-        so the agent doesn't bleed context across channels. Memory
-        (KG + notes) stays single-instance; only the recent
-        conversation buffer is per-channel.
+        `speaker_id` is the primary filter — when set, only turns
+        from that specific speaker are included. This is how the
+        agent avoids bleeding "wife's Telegram conversation" into
+        "Gor's WebUI conversation" even on the same agent instance.
+        Knowledge (KG + notes) stays SHARED; only the recent
+        conversation buffer is per-speaker.
+
+        `channel` is the legacy coarse filter, kept for back-compat.
         """
-        turns = self.recent(n, channel=channel)
+        turns = self.recent(n, channel=channel, speaker_id=speaker_id)
         if not turns:
             return ""
 

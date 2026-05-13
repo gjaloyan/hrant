@@ -1,19 +1,41 @@
-"""Session list/get/new/archive."""
+"""Session list/get/new/archive — partitioned by speaker_id."""
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from ..sessions import SESSIONS
+from ..sessions import DEFAULT_SPEAKER, SESSIONS
 
 router = APIRouter()
 
 
 @router.get("/api/sessions")
-def list_sessions(include_archived: bool = False):
+def list_sessions(
+    include_archived: bool = False,
+    speaker_id: Optional[str] = Query(default=None),
+):
+    """List sessions. With `speaker_id` set, only that speaker's
+    sessions; otherwise all sessions across every speaker."""
     return {
-        "sessions": SESSIONS.list_sessions(include_archived=include_archived),
-        "current_id": SESSIONS._current_id,
+        "sessions": SESSIONS.list_sessions(
+            include_archived=include_archived,
+            speaker_id=speaker_id,
+        ),
+        "current_by_speaker": dict(SESSIONS._current_by_speaker),
+        "default_speaker": DEFAULT_SPEAKER,
+    }
+
+
+@router.get("/api/sessions/speakers")
+def list_speakers():
+    """Every speaker the system has seen, with session counts +
+    last_active timestamp. WebUI Sessions panel uses this to render
+    a per-speaker grouping."""
+    return {
+        "speakers": SESSIONS.list_speakers(),
+        "default_speaker": DEFAULT_SPEAKER,
     }
 
 
@@ -23,16 +45,19 @@ def session_stats():
 
 
 @router.get("/api/sessions/current")
-def current_session():
-    session = SESSIONS.current
+def current_session(speaker_id: Optional[str] = Query(default=None)):
+    """Current active session for a speaker. Defaults to the WebUI
+    speaker (`webui:default`)."""
+    session = SESSIONS.current_for(speaker_id or DEFAULT_SPEAKER)
     if not session:
-        return {"session": None}
+        return {"session": None, "speaker_id": speaker_id or DEFAULT_SPEAKER}
     return {"session": session.to_dict()}
 
 
 @router.post("/api/sessions/new")
-def new_session():
-    session = SESSIONS.new_session()
+def new_session(speaker_id: Optional[str] = Query(default=None)):
+    """End the speaker's current session and start a fresh one."""
+    session = SESSIONS.new_session(speaker_id=speaker_id or DEFAULT_SPEAKER)
     return {"session": session.to_dict()}
 
 

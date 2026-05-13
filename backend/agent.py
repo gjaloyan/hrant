@@ -1,4 +1,4 @@
-"""Главный цикл агента.
+﻿"""Главный цикл агента.
 
 Агент сначала классифицирует входящее сообщение на три категории:
 
@@ -107,9 +107,13 @@ def _format_llm_error_short(exc: BaseException, *, max_len: int = 200) -> str:
     return f"⚠ {short}"
 
 
-def _with_identity(base_system: str) -> str:
-    """Склеивает identity preamble с конкретным system-промптом шага."""
-    return f"{IDENTITY.preamble()}\n\n---\n\n{base_system}"
+def _with_identity(base_system: str, *, speaker_id: str | None = None) -> str:
+    """Склеивает identity preamble с конкретным system-промптом шага.
+
+    `speaker_id` selects which user_profile to inject. Default None
+    falls back to the WebUI speaker (back-compat for callers that
+    haven't been speaker-aware yet)."""
+    return f"{IDENTITY.preamble(speaker_id=speaker_id)}\n\n---\n\n{base_system}"
 
 
 def _capabilities_block(compact: bool = False) -> str:
@@ -745,6 +749,7 @@ class Agent(
             conv = CONVERSATION.context_block(
                 n=n_conv,
                 channel=getattr(self, "_channel", None),
+                speaker_id=getattr(self, "_speaker_id", None),
             )
         except Exception:
             conv = ""
@@ -852,7 +857,9 @@ class Agent(
     # Быстрый chat-ответ: один LLM-вызов с identity preamble.
     def _chat_reply(self, task: str, core: str) -> str:
         self.progress("chat", "chatting...")
-        system = _with_identity(CHAT_SYSTEM_BASE)
+        system = _with_identity(
+            CHAT_SYSTEM_BASE, speaker_id=getattr(self, "_speaker_id", None),
+        )
         if _is_self_question(task):
             system = f"{system}\n\n---\n\n{_capabilities_block()}"
         # Full per-turn context (core + project + goals + memory recall
@@ -1138,7 +1145,9 @@ class Agent(
             )
 
         # System prompt: identity + solver base + capabilities + catalog + active skills
-        system = _with_identity(SOLVER_SYSTEM_BASE)
+        system = _with_identity(
+            SOLVER_SYSTEM_BASE, speaker_id=getattr(self, "_speaker_id", None),
+        )
         system = f"{system}\n\n---\n\n{_capabilities_block()}"
         catalog = SKILLS.catalog_block()
         if catalog:
@@ -1357,6 +1366,7 @@ class Agent(
             facts = MEMORY.extract_and_store(
                 user_msg, answer, intent=intent,
                 confidence=confidence, contradictions=contradictions,
+                speaker_id=getattr(self, "_speaker_id", None),
             )
             if facts:
                 summaries = "; ".join(f.summary for f in facts[:3])
@@ -1420,8 +1430,10 @@ class Agent(
         attachments: list[str] | None = None,
         *,
         channel: str = "webui",
+        speaker_id: str = "webui:default",
     ) -> AgentAnswer:
         import time as _time
+        from .sessions import normalize_speaker
         TOKENS.reset_request()
         self._trace = []
         self._llm_calls = []
@@ -1438,6 +1450,11 @@ class Agent(
         # branch all tag the same way without each call site
         # passing it explicitly.
         self._channel = channel or "webui"
+        # Speaker — '<channel>:<user_id>'. Primary routing key for
+        # sessions + conversation memory + per-speaker user profile.
+        # Stays on `self` so every add_turn / context_block in this
+        # run picks up the same speaker without each call passing it.
+        self._speaker_id = normalize_speaker(speaker_id)
         # Pipeline mode picked for this turn (fast_chat / task_mode /
         # deep_agent). Set by the branches below so AgentAnswer can
         # report which tier ran.
@@ -1456,6 +1473,7 @@ class Agent(
                 CONVERSATION.add_turn(
                     task, micro, intent="chat", is_chat=True,
                     channel=self._channel,
+                    speaker_id=getattr(self, "_speaker_id", None),
                 )
                 # Memory extraction gate: short acks have nothing to
                 # extract — skipping saves another LLM call. The
@@ -1486,6 +1504,7 @@ class Agent(
                 CONVERSATION.add_turn(
                     task, answer, intent="chat", is_chat=True,
                     channel=self._channel,
+                    speaker_id=getattr(self, "_speaker_id", None),
                 )
                 # Memory extraction gate: skip on very short chat
                 # turns ("привет", "thanks for the help") — the
@@ -1537,6 +1556,7 @@ class Agent(
                 CONVERSATION.add_turn(
                     task, reply, intent="preference", is_chat=True,
                     channel=self._channel,
+                    speaker_id=getattr(self, "_speaker_id", None),
                 )
                 self._extract_memories(task, reply, "preference")
                 self._cleanup()
@@ -1959,6 +1979,7 @@ class Agent(
                 confidence=vr.confidence,
                 topics_used=used,
                 channel=getattr(self, "_channel", "webui"),
+                speaker_id=getattr(self, "_speaker_id", None),
                 turn_id=turn_id,
                 token_usage=_tu.model_dump() if _tu else None,
                 n_tool_calls=_n_tools,

@@ -95,6 +95,7 @@ hrant service uninstall            # удалить unit, оставить venv
 - [docs/cli.md](docs/cli.md) — полная справка по командам `hrant`
 - [docs/autonomic.md](docs/autonomic.md) — Model X: 19 levers + immune system + safety gates
 - [docs/finetune.md](docs/finetune.md) — fine-tune pipeline (autocollect → curate → train)
+- [docs/sessions.md](docs/sessions.md) — sessions, conversations, и per-speaker user profiles (Telegram users vs WebUI)
 - [docs/self-modification.md](docs/self-modification.md) — как работает локальная самомодификация (Phase 7+)
 - [deploy/README.md](deploy/README.md) — установка как фоновый сервис
 - [docs/superpowers/specs/](docs/superpowers/specs/) — design docs (autonomic Model X и др.)

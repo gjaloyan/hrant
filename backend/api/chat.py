@@ -42,21 +42,27 @@ async def chat(req: ChatRequest):
 
     async def runner():
         try:
-            # Round C: caller can pick which channel context the
-            # message belongs to. Default "webui" preserves prior
-            # behaviour. "telegram" means the user is composing in
-            # the WebUI to participate in the TG conversation
-            # context; conversation memory + turn record are tagged
-            # accordingly so a later TG turn picks up the thread.
+            # Caller picks which channel context the message belongs
+            # to (default "webui"). "telegram" means the user is
+            # composing in the WebUI to participate in a TG
+            # conversation; the answer is also forwarded out the bot.
             target_channel = (req.channel or "webui").strip().lower()
             if target_channel not in ("webui", "telegram"):
                 target_channel = "webui"
+            # Phase 10: speaker_id is the primary partition key for
+            # sessions + conversation memory + per-speaker user
+            # profile. Default for WebUI: 'webui:default'. The UI
+            # may pass a richer id (e.g. 'webui:gor') if a future
+            # multi-user mode lands.
+            from ..sessions import normalize_speaker
+            target_speaker = normalize_speaker(req.speaker_id or f"{target_channel}:default")
             res = await asyncio.to_thread(
                 lambda: agent.run(
                     req.message,
                     req.project or PROJECTS.current,
                     req.attachments or None,
                     channel=target_channel,
+                    speaker_id=target_speaker,
                 ),
             )
             # Round F-pre: include cheap summary fields directly in
@@ -82,11 +88,12 @@ async def chat(req: ChatRequest):
                 "topics": res.used_topics or [],
                 "turn_id": getattr(res, "turn_id", "") or "",
                 "channel": target_channel,
+                "speaker_id": target_speaker,
                 "token_usage": tu.model_dump() if tu else None,
                 "n_tool_calls": n_tools,
                 "n_llm_calls": n_llm,
             }
-            SESSIONS.add_turn(turn)
+            SESSIONS.add_turn(turn, speaker_id=target_speaker)
             if res.thinking_trace:
                 TOKENS.save_request_trace(
                     question=req.message,
@@ -187,6 +194,7 @@ async def get_turn(turn_id: str):
 @router.get("/api/conversation")
 async def get_conversation(
     channel: Optional[str] = Query(default=None),
+    speaker_id: Optional[str] = Query(default=None),
     n: int = Query(default=50, ge=1, le=500),
 ):
     """Recent conversation turns, optionally filtered by `channel`.
@@ -202,5 +210,10 @@ async def get_conversation(
     cross-channel history which can be confusing. WebUI v2 always
     passes `channel=webui`.
     """
-    turns = CONVERSATION.recent_full(n=n, channel=channel)
-    return {"channel": channel, "turns": turns, "count": len(turns)}
+    turns = CONVERSATION.recent_full(n=n, channel=channel, speaker_id=speaker_id)
+    return {
+        "channel": channel,
+        "speaker_id": speaker_id,
+        "turns": turns,
+        "count": len(turns),
+    }

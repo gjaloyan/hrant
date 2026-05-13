@@ -498,6 +498,14 @@ class TelegramBot:
                     await update.message.reply_text("Access denied.")
                     return
 
+                # Phase 10: speaker_id partitions per-Telegram-user
+                # sessions + conversation memory + user profile. Each
+                # Telegram user is a distinct speaker — Gor talking
+                # to the bot and his wife talking to the bot get
+                # totally separate threads even on the same bot.
+                speaker_id = f"telegram:{user.id}"
+                user_label = user.full_name or user.username or str(user.id)
+
                 # Round E (TG forward): remember this chat_id so the
                 # WebUI's "compose-as-telegram" mode can deliver the
                 # agent's reply back here. Last writer wins — the most
@@ -565,6 +573,7 @@ class TelegramBot:
                             text, project=None,
                             attachments=attachment_shas or None,
                             channel="telegram",
+                            speaker_id=speaker_id,
                         ),
                     )
                     answer = result.answer or "(no answer)"
@@ -765,7 +774,10 @@ class TelegramBot:
                         except Exception:
                             pass
 
-                    _log_channel_message(self.channel_id, username, text, answer)
+                    _log_channel_message(
+                        self.channel_id, username, text, answer,
+                        speaker_id=speaker_id,
+                    )
 
                 except Exception as e:
                     log.error("Telegram bot error processing message: %s", e)
@@ -812,10 +824,20 @@ class TelegramBot:
             self._running = False
 
 
-def _log_channel_message(channel_id: str, user: str, question: str, answer: str) -> None:
-    """Append channel interaction to sessions for tracking."""
+def _log_channel_message(
+    channel_id: str,
+    user: str,
+    question: str,
+    answer: str,
+    *,
+    speaker_id: str | None = None,
+) -> None:
+    """Append a channel interaction to the per-speaker session.
+    Each Telegram user has their own session because each gets a
+    distinct `speaker_id`."""
     try:
-        from .sessions import SESSIONS
+        from .sessions import DEFAULT_SPEAKER, SESSIONS
+        sp = speaker_id or f"{channel_id}:{user}"
         turn = {
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user": f"[{channel_id}:{user}] {question}",
@@ -824,8 +846,10 @@ def _log_channel_message(channel_id: str, user: str, question: str, answer: str)
             "is_chat": False,
             "confidence": 0,
             "topics": [],
+            "channel": channel_id,
+            "speaker_id": sp,
         }
-        SESSIONS.add_turn(turn)
+        SESSIONS.add_turn(turn, speaker_id=sp)
     except Exception:
         pass
 

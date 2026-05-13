@@ -118,32 +118,69 @@ _SECTION_BY_CATEGORY: dict[str, str] = {
 }
 
 
+_DEFAULT_SPEAKER_FOR_LEGACY_USER_MD = "webui:default"
+
+
+def _sanitize_speaker_for_path(speaker_id: str) -> str:
+    """Convert a speaker_id ('telegram:123', 'webui:default', …) into
+    a filesystem-safe filename stem. Colons forbidden on Windows;
+    only `[a-z0-9_-]` survives, everything else becomes `_`."""
+    import re as _re
+    return _re.sub(r"[^a-z0-9_-]+", "_", speaker_id.lower()).strip("_") or "default"
+
+
 class IdentityManager:
     def __init__(self, base_dir: Path | None = None):
         self.dir = Path(base_dir or CONFIG.knowledge["base_dir"]) / "identity"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.soul_path = self.dir / "soul.md"
         self.identity_path = self.dir / "identity.md"
+        # Legacy single-user_profile path. From Phase 10 onwards the
+        # WebUI default speaker (`webui:default`) lives here, every
+        # other speaker gets its own file under `profiles/`.
         self.user_path = self.dir / "user.md"
-        # История user.md: каждое изменение профиля сохраняется снапшотом,
-        # чтобы можно было посмотреть, как менялись предпочтения со временем.
+        self.profiles_dir = self.dir / "profiles"
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
+        # История каждого user-profile файла: per-file timestamped
+        # snapshots. The original layout used `_history/user_*.md` for
+        # the single user.md; we keep that path for `webui:default` and
+        # add `_history/<sanitized>_*.md` for other speakers.
         self.history_dir = self.dir / "_history"
         self.history_dir.mkdir(parents=True, exist_ok=True)
         self._ensure_defaults()
 
-    def _snapshot_user_profile(self) -> Path | None:
-        """Сохраняет текущий user.md в _history/user_<ts>.md до перезаписи."""
-        if not self.user_path.exists():
+    def _user_path_for(self, speaker_id: str | None) -> Path:
+        """Return the per-speaker user_profile file path. The WebUI
+        default keeps the legacy `user.md` location; other speakers
+        (each Telegram user, future channels) get their own file
+        under `profiles/<sanitized>.md`."""
+        sp = speaker_id or _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD
+        if sp == _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD:
+            return self.user_path
+        return self.profiles_dir / f"{_sanitize_speaker_for_path(sp)}.md"
+
+    def _snapshot_user_profile(self, speaker_id: str | None = None) -> Path | None:
+        """Snapshot the current per-speaker user_profile into _history/.
+
+        Filename: `user_<ts>.md` for the WebUI default (back-compat);
+        `<sanitized_speaker>_<ts>.md` for everyone else."""
+        path = self._user_path_for(speaker_id)
+        if not path.exists():
             return None
         try:
-            text = self.user_path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8")
         except Exception:
             return None
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        snap = self.history_dir / f"user_{ts}.md"
+        sp = speaker_id or _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD
+        if sp == _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD:
+            prefix = "user"
+        else:
+            prefix = _sanitize_speaker_for_path(sp)
+        snap = self.history_dir / f"{prefix}_{ts}.md"
         i = 1
         while snap.exists():
-            snap = self.history_dir / f"user_{ts}_{i}.md"
+            snap = self.history_dir / f"{prefix}_{ts}_{i}.md"
             i += 1
         try:
             snap.write_text(text, encoding="utf-8")
@@ -182,8 +219,62 @@ class IdentityManager:
     def identity(self) -> str:
         return self.identity_path.read_text(encoding="utf-8")
 
-    def user_profile(self) -> str:
-        return self.user_path.read_text(encoding="utf-8")
+    def user_profile(self, speaker_id: str | None = None) -> str:
+        """Read the per-speaker user_profile.md. On first read for a
+        non-default speaker, the file is auto-created from the
+        _DEFAULT_USER template so the profile is editable from the
+        moment a new speaker arrives."""
+        path = self._user_path_for(speaker_id)
+        if not path.exists():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(_DEFAULT_USER, encoding="utf-8")
+            except Exception:
+                return _DEFAULT_USER
+        return path.read_text(encoding="utf-8")
+
+    def list_speaker_profiles(self) -> list[dict]:
+        """Every user_profile file present on disk. Returns
+        [{speaker_id, path, size, modified}, …] sorted by modified
+        newest-first. Used by the WebUI to list profiles in the
+        User Profile tab so the user can switch between them."""
+        out: list[dict] = []
+        # Legacy webui:default.
+        if self.user_path.exists():
+            try:
+                st = self.user_path.stat()
+                out.append({
+                    "speaker_id": _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD,
+                    "path": str(self.user_path),
+                    "size": st.st_size,
+                    "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                })
+            except OSError:
+                pass
+        # Per-speaker files under profiles/.
+        if self.profiles_dir.exists():
+            for f in self.profiles_dir.glob("*.md"):
+                # Re-derive a "best guess" speaker_id from the sanitized
+                # filename (e.g. telegram_123 -> telegram:123). Best-effort:
+                # the agent stores the canonical speaker_id at write time
+                # but the legacy on-disk shape only carries the stem.
+                stem = f.stem
+                if "_" in stem:
+                    head, _, tail = stem.partition("_")
+                    speaker_id = f"{head}:{tail}"
+                else:
+                    speaker_id = f"unknown:{stem}"
+                try:
+                    st = f.stat()
+                    out.append({
+                        "speaker_id": speaker_id,
+                        "path": str(f),
+                        "size": st.st_size,
+                        "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+                    })
+                except OSError:
+                    continue
+        return sorted(out, key=lambda r: r["modified"], reverse=True)
 
     @staticmethod
     def _extract_section(text: str, headers: tuple[str, ...]) -> str:
@@ -225,21 +316,21 @@ class IdentityManager:
             identity_text, ("## Имя", "## Name"),
         )
 
-    def preamble(self) -> str:
+    def preamble(self, *, speaker_id: str | None = None) -> str:
         """Блок, который подмешивается в system prompt всех диалоговых вызовов.
 
         Order: character first, then self-definition, then user profile.
         Core memory is appended separately by the agent (CoreMemory owns it).
 
+        `speaker_id` picks the per-speaker user_profile file. Default
+        (None) → WebUI default (legacy `user.md`).
+
         If the user profile pins a response language, append a
         LANGUAGE OVERRIDE block at the END so it carries the most weight
-        in the model's context. Without this, soul.md's "mirror the user's
-        language" rule wins over user.md's "respond in Russian", and the
-        agent flips to whatever language the user's latest message
-        happened to be in.
+        in the model's context.
         """
         identity_text = self.identity().strip()
-        profile_text = self.user_profile().strip()
+        profile_text = self.user_profile(speaker_id=speaker_id).strip()
         out = (
             "# SOUL\n"
             f"{self.soul().strip()}\n\n"
@@ -305,17 +396,19 @@ class IdentityManager:
         self,
         fact: str,
         category: UserFactCategory = "about_user",
+        *,
+        speaker_id: str | None = None,
     ) -> str:
-        """Добавляет факт о пользователе в нужный раздел user.md.
+        """Add a fact to the per-speaker user_profile file.
 
-        Дедупликация: если такой же факт (после канонизации) уже есть в
-        этой секции — повторно не пишем, возвращаем существующую строку.
-        Снимок-снапшот тоже не делаем — нечего снимать.
+        Default (speaker_id=None) targets the WebUI legacy `user.md`.
+        Pass `speaker_id="telegram:123"` to write into THAT user's
+        profile so facts about your wife don't leak into your own
+        profile (and vice versa).
 
-        Если раздел есть и содержит плейсхолдер «(пока не указано)» —
-        плейсхолдер удаляется. Факт добавляется bullet-строкой с датой.
-        Возвращает добавленную строку (для подтверждения пользователю).
-        """
+        Dedup: same fact (after canonicalisation) won't be re-added.
+        Empty `(пока не указано)` placeholders are removed when the
+        first real fact lands."""
         fact = fact.strip()
         if not fact:
             return ""
@@ -324,53 +417,56 @@ class IdentityManager:
         section = _SECTION_BY_CATEGORY.get(category, _SECTION_BY_CATEGORY["about_user"])
         new_key = self._normalize_fact(fact)
 
-        text = self.user_profile()
+        target_path = self._user_path_for(speaker_id)
+        text = self.user_profile(speaker_id=speaker_id)
         lines = text.splitlines()
-        # ищем секцию
+        # find section
         try:
             sec_idx = next(
                 i for i, line in enumerate(lines) if line.strip() == section
             )
         except StopIteration:
-            # секции нет — добавим в конец как новую
-            self._snapshot_user_profile()
+            # missing section — append at file end
+            self._snapshot_user_profile(speaker_id=speaker_id)
             lines += ["", section, bullet]
-            self.user_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            target_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return bullet
 
-        # Находим конец секции
         end_idx = len(lines)
         for j in range(sec_idx + 1, len(lines)):
             if lines[j].startswith("## "):
                 end_idx = j
                 break
 
-        # Dedup: scan existing bullets in this section.
         for existing in lines[sec_idx + 1 : end_idx]:
             stripped = existing.strip()
             if not stripped or stripped == "(пока не указано)":
                 continue
             if self._normalize_fact(stripped) == new_key:
-                # Same fact already present — don't append, don't snapshot.
                 return existing
 
-        # Снимок только если действительно меняем файл.
-        self._snapshot_user_profile()
-
-        # Убираем плейсхолдер «(пока не указано)» внутри секции
+        self._snapshot_user_profile(speaker_id=speaker_id)
         body = [
             ln for ln in lines[sec_idx + 1 : end_idx]
             if ln.strip() != "(пока не указано)"
         ]
-        # Убираем завершающие пустые строки внутри секции
         while body and not body[-1].strip():
             body.pop()
         body.append(bullet)
-        body.append("")  # пустая строка перед следующей секцией
+        body.append("")
 
         new_lines = lines[: sec_idx + 1] + body + lines[end_idx:]
-        self.user_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+        target_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
         return bullet
+
+    def set_user_profile(self, content: str, *, speaker_id: str | None = None) -> Path:
+        """Replace the entire per-speaker user_profile file. Snapshots
+        the previous content into _history/ first."""
+        self._snapshot_user_profile(speaker_id=speaker_id)
+        path = self._user_path_for(speaker_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
 
 
 IDENTITY = IdentityManager()

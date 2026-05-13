@@ -318,12 +318,14 @@ export async function chatStream(
   onEvent: (e: StreamEvent) => void,
   attachments: string[] = [],
   channel: string | null = null,
+  speaker_id: string | null = null,
 ): Promise<void> {
-  // Round C: channel picks which conversation bucket the turn lands
-  // in. Null = backend default ("webui"). "telegram" means the user
-  // is composing from WebUI to participate in the TG thread.
+  // `channel` picks which conversation bucket the turn lands in
+  // (null = backend default "webui"). `speaker_id` is the primary
+  // per-user partition — null = backend default "webui:default".
   const body: Record<string, unknown> = { message, project, attachments };
   if (channel) body.channel = channel;
+  if (speaker_id) body.speaker_id = speaker_id;
   return readSSE("/api/chat", body, onEvent);
 }
 
@@ -390,11 +392,32 @@ export const clearConversation = () =>
 
 // ---- Identity ----
 
-export const fetchIdentity = () =>
-  json_get<{ soul: string; identity: string; user_profile: string }>("/api/identity");
+export type IdentityProfileMeta = {
+  speaker_id: string;
+  path: string;
+  size: number;
+  modified: string;
+};
 
-export const updateIdentity = (file: string, content: string) =>
-  json_put<{ ok: boolean }>("/api/identity", { file, content });
+export const fetchIdentity = (speaker_id?: string) => {
+  const qs = speaker_id ? `?speaker_id=${encodeURIComponent(speaker_id)}` : "";
+  return json_get<{
+    soul: string;
+    identity: string;
+    user_profile: string;
+    speaker_id: string | null;
+  }>(`/api/identity${qs}`);
+};
+
+export const fetchIdentityProfiles = () =>
+  json_get<{ profiles: IdentityProfileMeta[] }>("/api/identity/profiles");
+
+export const updateIdentity = (
+  file: string,
+  content: string,
+  speaker_id?: string,
+) =>
+  json_put<{ ok: boolean }>("/api/identity", { file, content, speaker_id });
 
 export const fetchIdentityHistory = () =>
   json_get<{ versions: { timestamp: string; path: string; size: number }[] }>("/api/identity/history");
@@ -482,6 +505,7 @@ export const updateGoalPriority = (id: string, priority: number) =>
 
 export type SessionSummary = {
   id: string;
+  speaker_id: string;
   started: string;
   ended: string | null;
   title: string;
@@ -497,6 +521,12 @@ export type SessionDetail = SessionSummary & {
   turns: ConversationTurn[];
 };
 
+export type SpeakerSummary = {
+  speaker_id: string;
+  session_count: number;
+  last_active: string;
+};
+
 export type SessionStats = {
   total_sessions: number;
   total_turns: number;
@@ -506,16 +536,34 @@ export type SessionStats = {
   archived_count: number;
 };
 
-export const fetchSessions = (includeArchived = false) =>
-  json_get<{ sessions: SessionSummary[]; current_id: string | null }>(
-    `/api/sessions?include_archived=${includeArchived}`
+export const fetchSessions = (
+  includeArchived = false,
+  speaker_id?: string,
+) => {
+  const params = new URLSearchParams();
+  params.set("include_archived", String(includeArchived));
+  if (speaker_id) params.set("speaker_id", speaker_id);
+  return json_get<{
+    sessions: SessionSummary[];
+    current_by_speaker: Record<string, string>;
+    default_speaker: string;
+  }>(`/api/sessions?${params}`);
+};
+
+export const fetchSpeakers = () =>
+  json_get<{ speakers: SpeakerSummary[]; default_speaker: string }>(
+    "/api/sessions/speakers",
   );
 
 export const fetchSessionStats = () =>
   json_get<SessionStats>("/api/sessions/stats");
 
-export const fetchCurrentSession = () =>
-  json_get<{ session: SessionDetail | null }>("/api/sessions/current");
+export const fetchCurrentSession = (speaker_id?: string) => {
+  const qs = speaker_id ? `?speaker_id=${encodeURIComponent(speaker_id)}` : "";
+  return json_get<{ session: SessionDetail | null; speaker_id?: string }>(
+    `/api/sessions/current${qs}`,
+  );
+};
 
 // Round A: lazy-load full TurnWorkspace artefact for a single turn.
 // Used when the user clicks to expand a tool card on a historical
@@ -531,8 +579,10 @@ export const fetchTurn = (turn_id: string) =>
 export const fetchSession = (id: string) =>
   json_get<{ session: SessionDetail }>(`/api/sessions/${id}`);
 
-export const newSession = () =>
-  json_post<{ session: SessionDetail }>("/api/sessions/new");
+export const newSession = (speaker_id?: string) => {
+  const qs = speaker_id ? `?speaker_id=${encodeURIComponent(speaker_id)}` : "";
+  return json_post<{ session: SessionDetail }>(`/api/sessions/new${qs}`);
+};
 
 export const deleteSession = (id: string) =>
   json_delete<{ ok: boolean }>(`/api/sessions/${id}`);

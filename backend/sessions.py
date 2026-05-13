@@ -18,12 +18,35 @@ from typing import Optional
 from .config import CONFIG
 
 
+DEFAULT_SPEAKER = "webui:default"
+
+
+def normalize_speaker(speaker_id: str | None) -> str:
+    """Coerce a speaker_id to canonical form ('<channel>:<user_id>').
+
+    None / empty → DEFAULT_SPEAKER. Strings without a colon are
+    assumed to be channels with no user (e.g. legacy 'webui') and
+    get ':default' appended."""
+    if not speaker_id:
+        return DEFAULT_SPEAKER
+    s = speaker_id.strip()
+    if not s:
+        return DEFAULT_SPEAKER
+    if ":" not in s:
+        return f"{s}:default"
+    return s
+
+
 class Session:
-    """A single conversation session."""
+    """A single conversation session. Each session belongs to one
+    `speaker_id` — the channel-qualified identity of who is talking
+    to the agent. Different speakers (WebUI user vs each Telegram
+    user) get their own independent sessions."""
 
     def __init__(
         self,
         id: str | None = None,
+        speaker_id: str = DEFAULT_SPEAKER,
         started: str | None = None,
         ended: str | None = None,
         turns: list[dict] | None = None,
@@ -31,6 +54,7 @@ class Session:
         archived: bool = False,
     ):
         self.id = id or uuid.uuid4().hex[:12]
+        self.speaker_id = normalize_speaker(speaker_id)
         self.started = started or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.ended = ended
         self.turns = turns or []
@@ -77,6 +101,7 @@ class Session:
     def to_dict(self) -> dict:
         return {
             "id": self.id,
+            "speaker_id": self.speaker_id,
             "started": self.started,
             "ended": self.ended,
             "title": self.title,
@@ -93,6 +118,7 @@ class Session:
         """Lightweight summary without full turns (for list view)."""
         return {
             "id": self.id,
+            "speaker_id": self.speaker_id,
             "started": self.started,
             "ended": self.ended,
             "title": self.title,
@@ -108,6 +134,7 @@ class Session:
     def from_dict(cls, data: dict) -> "Session":
         return cls(
             id=data.get("id"),
+            speaker_id=data.get("speaker_id") or DEFAULT_SPEAKER,
             started=data.get("started"),
             ended=data.get("ended"),
             turns=data.get("turns", []),
@@ -117,14 +144,27 @@ class Session:
 
 
 class SessionManager:
-    """Manages multiple sessions with disk persistence."""
+    """Manages multiple sessions with disk persistence.
+
+    Sessions are partitioned by `speaker_id` ('<channel>:<user_id>'):
+    each speaker (WebUI user, each Telegram user, future channels)
+    has its OWN current session. The agent's run() picks the right
+    one via `get_or_create_current(speaker_id=...)`.
+
+    The on-disk format stores `current_by_speaker: {speaker_id: session_id}`
+    so independent conversations don't trample each other on every
+    save. The legacy top-level `current_id` field is also written
+    for back-compat with consumers that look at "the" current
+    session — it holds the WebUI default's current id.
+    """
 
     def __init__(self, path: Optional[Path] = None, archive_path: Optional[Path] = None):
         kb_dir = Path(CONFIG.knowledge["base_dir"])
         self.path = path or (kb_dir / "sessions.json")
         self.archive_path = archive_path or (kb_dir / "sessions_archive.json")
         self._sessions: list[Session] = []
-        self._current_id: str | None = None
+        # speaker_id -> session_id mapping. One entry per active speaker.
+        self._current_by_speaker: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -132,16 +172,25 @@ class SessionManager:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 self._sessions = [Session.from_dict(s) for s in data.get("sessions", [])]
-                self._current_id = data.get("current_id")
+                self._current_by_speaker = dict(data.get("current_by_speaker") or {})
+                # Back-compat: an older single `current_id` becomes the
+                # WebUI default's current.
+                legacy_current = data.get("current_id")
+                if legacy_current and DEFAULT_SPEAKER not in self._current_by_speaker:
+                    self._current_by_speaker[DEFAULT_SPEAKER] = legacy_current
             except Exception:
                 self._sessions = []
-                self._current_id = None
+                self._current_by_speaker = {}
 
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             data = {
-                "current_id": self._current_id,
+                "current_by_speaker": dict(self._current_by_speaker),
+                # Back-compat surface for old readers: surface the
+                # WebUI default's current as `current_id`. Always None
+                # when no WebUI session exists yet.
+                "current_id": self._current_by_speaker.get(DEFAULT_SPEAKER),
                 "sessions": [s.to_dict() for s in self._sessions],
             }
             self.path.write_text(
@@ -151,70 +200,111 @@ class SessionManager:
         except Exception:
             pass
 
-    @property
-    def current(self) -> Session | None:
-        if self._current_id:
-            for s in self._sessions:
-                if s.id == self._current_id:
-                    return s
+    def current_for(self, speaker_id: str = DEFAULT_SPEAKER) -> Session | None:
+        """Active session for this speaker. None if they haven't
+        started a session yet."""
+        speaker_id = normalize_speaker(speaker_id)
+        sid = self._current_by_speaker.get(speaker_id)
+        if not sid:
+            return None
+        for s in self._sessions:
+            if s.id == sid:
+                return s
+        # Stale pointer (session was deleted) — clear it.
+        self._current_by_speaker.pop(speaker_id, None)
         return None
 
-    def get_or_create_current(self) -> Session:
-        """Get the current active session, or create a new one."""
-        session = self.current
+    @property
+    def current(self) -> Session | None:
+        """Back-compat: 'the' current session is the WebUI default's."""
+        return self.current_for(DEFAULT_SPEAKER)
+
+    def get_or_create_current(self, speaker_id: str = DEFAULT_SPEAKER) -> Session:
+        """Active session for this speaker, creating one if missing.
+        Each speaker gets independent sessions — switching speakers
+        does NOT carry context across."""
+        speaker_id = normalize_speaker(speaker_id)
+        session = self.current_for(speaker_id)
         if session is None:
-            session = Session()
+            session = Session(speaker_id=speaker_id)
             self._sessions.append(session)
-            self._current_id = session.id
+            self._current_by_speaker[speaker_id] = session.id
             self._save()
         return session
 
-    def add_turn(self, turn: dict) -> None:
-        """Add a turn to the current session."""
-        session = self.get_or_create_current()
+    def add_turn(self, turn: dict, *, speaker_id: str = DEFAULT_SPEAKER) -> None:
+        """Append a turn to the speaker's current session."""
+        session = self.get_or_create_current(speaker_id)
         session.turns.append(turn)
-        # Auto-title from first user message
         if not session.title and turn.get("user"):
             text = turn["user"]
             session.title = text[:60] + ("..." if len(text) > 60 else "")
         self._save()
 
-    def new_session(self) -> Session:
-        """End the current session and start a new one."""
-        old = self.current
+    def new_session(self, *, speaker_id: str = DEFAULT_SPEAKER) -> Session:
+        """End this speaker's current session and start a new one."""
+        speaker_id = normalize_speaker(speaker_id)
+        old = self.current_for(speaker_id)
         if old and not old.ended:
             old.ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        session = Session()
+        session = Session(speaker_id=speaker_id)
         self._sessions.append(session)
-        self._current_id = session.id
+        self._current_by_speaker[speaker_id] = session.id
         self._save()
         return session
 
-    def end_current(self) -> None:
-        """End the current session without starting a new one."""
-        session = self.current
+    def end_current(self, *, speaker_id: str = DEFAULT_SPEAKER) -> None:
+        """End this speaker's session without starting a new one."""
+        speaker_id = normalize_speaker(speaker_id)
+        session = self.current_for(speaker_id)
         if session and not session.ended:
             session.ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self._current_id = None
+            self._current_by_speaker.pop(speaker_id, None)
             self._save()
 
     def get_session(self, session_id: str) -> Session | None:
         for s in self._sessions:
             if s.id == session_id:
                 return s
-        # Check archive
         for s in self._load_archive():
             if s.id == session_id:
                 return s
         return None
 
-    def list_sessions(self, include_archived: bool = False) -> list[dict]:
-        """List all sessions (summaries only)."""
-        result = [s.summary() for s in reversed(self._sessions)]
+    def list_sessions(
+        self,
+        include_archived: bool = False,
+        *,
+        speaker_id: Optional[str] = None,
+    ) -> list[dict]:
+        """List sessions (summaries only). When `speaker_id` is set,
+        only sessions belonging to that speaker."""
+        if speaker_id is not None:
+            speaker_id = normalize_speaker(speaker_id)
+        def _match(s: Session) -> bool:
+            return speaker_id is None or s.speaker_id == speaker_id
+        result = [s.summary() for s in reversed(self._sessions) if _match(s)]
         if include_archived:
             archived = self._load_archive()
-            result.extend(s.summary() for s in reversed(archived))
+            result.extend(s.summary() for s in reversed(archived) if _match(s))
         return result
+
+    def list_speakers(self) -> list[dict]:
+        """Speakers known to the system with their summary stats —
+        used by the WebUI Sessions panel to group sessions per
+        speaker. Returns:
+          [{speaker_id, session_count, last_active}, ...]
+        sorted newest-first by last_active.
+        """
+        agg: dict[str, dict] = {}
+        for s in self._sessions:
+            sp = s.speaker_id or DEFAULT_SPEAKER
+            slot = agg.setdefault(sp, {"speaker_id": sp, "session_count": 0, "last_active": ""})
+            slot["session_count"] += 1
+            last = s.ended or s.started
+            if last and last > slot["last_active"]:
+                slot["last_active"] = last
+        return sorted(agg.values(), key=lambda r: r["last_active"], reverse=True)
 
     def archive_old(self, days: int = 90) -> int:
         """Move sessions older than `days` to the archive file."""

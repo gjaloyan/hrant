@@ -48,9 +48,10 @@ class PreferenceHandlerMixin:
         # Surface USER PROFILE so the extractor can pick the right
         # language for the acknowledgment AND make a confident
         # reject/keep decision.
+        speaker_id = getattr(self, "_speaker_id", None)
         profile_block = ""
         try:
-            profile_block = (IDENTITY.user_profile() or "").strip()
+            profile_block = (IDENTITY.user_profile(speaker_id=speaker_id) or "").strip()
         except Exception:
             profile_block = ""
 
@@ -99,6 +100,6 @@ class PreferenceHandlerMixin:
             )
             return "reject", fact, ack
 
-        IDENTITY.add_user_fact(fact, category=category)  # type: ignore[arg-type]
+        IDENTITY.add_user_fact(fact, category=category, speaker_id=speaker_id)  # type: ignore[arg-type]
         self.progress("preference_saved", f"записано в user.md → {category}")
         return category, fact, ack

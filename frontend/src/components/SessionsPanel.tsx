@@ -3,12 +3,14 @@ import {
   fetchSessions,
   fetchSession,
   fetchSessionStats,
+  fetchSpeakers,
   archiveSessions,
   deleteSession,
   newSession,
   SessionSummary,
   SessionDetail,
   SessionStats,
+  SpeakerSummary,
 } from "../api";
 
 /** Simple bar chart drawn with CSS — no external chart library needed. */
@@ -87,7 +89,9 @@ function formatDuration(seconds: number | null): string {
 
 export default function SessionsPanel() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [currentId, setCurrentId] = useState<string | null>(null);
+  const [currentBySpeaker, setCurrentBySpeaker] = useState<Record<string, string>>({});
+  const [speakers, setSpeakers] = useState<SpeakerSummary[]>([]);
+  const [filterSpeaker, setFilterSpeaker] = useState<string>("");  // "" = all
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [selected, setSelected] = useState<SessionDetail | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -102,17 +106,19 @@ export default function SessionsPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [sessData, statsData] = await Promise.all([
-        fetchSessions(showArchived),
+      const [sessData, statsData, speakersData] = await Promise.all([
+        fetchSessions(showArchived, filterSpeaker || undefined),
         fetchSessionStats(),
+        fetchSpeakers(),
       ]);
       setSessions(sessData.sessions);
-      setCurrentId(sessData.current_id);
+      setCurrentBySpeaker(sessData.current_by_speaker);
       setStats(statsData);
+      setSpeakers(speakersData.speakers);
     } catch (e: any) {
       flash("Error: " + e.message);
     }
-  }, [showArchived]);
+  }, [showArchived, filterSpeaker]);
 
   useEffect(() => {
     load();
@@ -286,8 +292,28 @@ export default function SessionsPanel() {
             </div>
           ) : (
             <div className="p-2 space-y-1">
+              {/* Phase 10: speaker filter — pick which user's sessions to view */}
+              <div className="flex items-center gap-2 bg-slate-900/60 rounded p-2 text-[11px]">
+                <span className="opacity-60">Speaker:</span>
+                <select
+                  value={filterSpeaker}
+                  onChange={(e) => setFilterSpeaker(e.target.value)}
+                  className="flex-1 bg-slate-800 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600"
+                >
+                  <option value="">All speakers</option>
+                  {speakers.map((sp) => (
+                    <option key={sp.speaker_id} value={sp.speaker_id}>
+                      {sp.speaker_id} ({sp.session_count})
+                    </option>
+                  ))}
+                </select>
+              </div>
               {sessions.length === 0 && (
-                <div className="text-xs opacity-40 p-2">No sessions yet</div>
+                <div className="text-xs opacity-40 p-2">
+                  {filterSpeaker
+                    ? `No sessions for ${filterSpeaker}`
+                    : "No sessions yet"}
+                </div>
               )}
               {sessions.map((s) => (
                 <button
@@ -296,7 +322,7 @@ export default function SessionsPanel() {
                   className={`w-full text-left rounded p-2 transition-colors text-xs ${
                     selected?.id === s.id
                       ? "bg-sky-800"
-                      : s.id === currentId
+                      : currentBySpeaker[s.speaker_id] === s.id
                       ? "bg-emerald-900/40 hover:bg-emerald-900/60"
                       : s.archived
                       ? "bg-slate-800/40 hover:bg-slate-800/60 opacity-60"
@@ -308,7 +334,7 @@ export default function SessionsPanel() {
                       {s.title || "(untitled)"}
                     </span>
                     <div className="flex items-center gap-1 shrink-0">
-                      {s.id === currentId && (
+                      {currentBySpeaker[s.speaker_id] === s.id && (
                         <span className="text-[9px] bg-emerald-700 rounded px-1">active</span>
                       )}
                       {s.archived && (
@@ -317,6 +343,9 @@ export default function SessionsPanel() {
                     </div>
                   </div>
                   <div className="flex gap-2 mt-0.5 opacity-60 text-[10px]">
+                    <span className="text-violet-300" title="speaker">
+                      {s.speaker_id || "—"}
+                    </span>
                     <span>{s.started.slice(0, 16)}</span>
                     <span>{s.turn_count} turns</span>
                     {s.avg_confidence > 0 && <span>{s.avg_confidence}%</span>}

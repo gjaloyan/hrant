@@ -274,13 +274,16 @@ class ChatRequest(BaseModel):
     # referenced here by content-hash. Keeps the chat payload compact and
     # lets the same image be re-used across turns without re-uploading.
     attachments: list[str] = []
-    # Round C: which channel the WebUI is sending FOR. Default "webui"
-    # — the message is treated as a normal WebUI turn. When the user
-    # selects "telegram" in the channel dropdown, this is set to
-    # "telegram" so the agent's conversation memory tags the turn
-    # under the Telegram bucket and (later) the answer can also be
-    # forwarded out the TG bot.
+    # Coarse channel label kept for back-compat and UI grouping.
+    # Default "webui". "telegram" means the WebUI is composing a turn
+    # for the Telegram conversation context.
     channel: Optional[str] = None
+    # Phase 10: speaker identity ('<channel>:<user_id>'). Primary
+    # routing key for sessions, conversation memory, and per-speaker
+    # user profile. Defaults to "webui:default" when omitted — the
+    # local WebUI user. Telegram channel sets it to "telegram:<tg_user_id>"
+    # so each Telegram user gets their own session+profile.
+    speaker_id: Optional[str] = None
 
 
 class LearnRequest(BaseModel):

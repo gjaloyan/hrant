@@ -90,7 +90,9 @@ CORRECTIONS — IMPORTANT:
 
 
 class MemoryFact:
-    """A single fact extracted from conversation."""
+    """A single fact extracted from conversation. Tagged with the
+    `speaker_id` that produced it so per-speaker filtering is
+    possible at retrieval time."""
 
     def __init__(
         self,
@@ -101,6 +103,7 @@ class MemoryFact:
         confidence: float = 0.8,
         ts: str | None = None,
         source_turn: str = "",
+        speaker_id: str | None = None,
     ):
         self.summary = summary
         self.triples = triples
@@ -109,6 +112,9 @@ class MemoryFact:
         self.confidence = confidence
         self.ts = ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.source_turn = source_turn[:200]
+        # Empty string when extracted before Phase 10 (no speaker
+        # routing yet) or by a non-speaker-aware caller (legacy CLI).
+        self.speaker_id = speaker_id or ""
 
     def to_dict(self) -> dict:
         return {
@@ -119,6 +125,7 @@ class MemoryFact:
             "confidence": self.confidence,
             "ts": self.ts,
             "source_turn": self.source_turn,
+            "speaker_id": self.speaker_id,
         }
 
     @classmethod
@@ -131,6 +138,7 @@ class MemoryFact:
             confidence=d.get("confidence", 0.8),
             ts=d.get("ts"),
             source_turn=d.get("source_turn", ""),
+            speaker_id=d.get("speaker_id", ""),
         )
 
 
@@ -161,6 +169,7 @@ class MemoryExtractor:
         *,
         confidence: int = 100,
         contradictions: int = 0,
+        speaker_id: str | None = None,
     ) -> list[MemoryFact]:
         """Extract facts from a conversation turn and store in graph.
 
@@ -217,6 +226,7 @@ class MemoryExtractor:
                     category=raw.get("category", "general"),
                     confidence=float(raw.get("confidence", 0.8)),
                     source_turn=user_message[:200],
+                    speaker_id=speaker_id,
                 )
                 facts.append(fact)
 
