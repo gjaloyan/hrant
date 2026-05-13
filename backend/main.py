@@ -20,6 +20,7 @@ log = logging.getLogger(__name__)
 
 from .config import CONFIG
 from .channels import CHANNELS, get_channels
+from .runtime_config import apply_overrides_from_file
 from .autonomic.startup import (
     build_scheduler,
     start_autonomic_scheduler,
@@ -30,6 +31,15 @@ from .autonomic.startup import (
 @asynccontextmanager
 async def lifespan(application: FastAPI):
     # --- startup ---
+    # Apply user's runtime overrides (router budget, verification knobs, …)
+    # BEFORE anything else looks at CONFIG. Otherwise the autonomic scheduler
+    # / channels caching CONFIG.router etc. would see pre-override defaults.
+    try:
+        applied = apply_overrides_from_file()
+        if applied:
+            log.info("runtime overrides applied: %s", list(applied.keys()))
+    except Exception as e:
+        log.warning("could not apply runtime overrides: %s", e)
     log.info("Server starting — auto-starting channels...")
     try:
         channels_list = get_channels()
@@ -87,13 +97,14 @@ from .api import (  # noqa: E402
     attachments as attachments_api,
     health as health_api,
     voice as voice_api,
+    engine as engine_api,
 )
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
 for mod in (
     chat, knowledge, projects, finetune, status_api, identity,
     intel, goals, sessions, providers_api, channels_api, attachments_api,
-    health_api, voice_api,
+    health_api, voice_api, engine_api,
 ):
     app.include_router(mod.router)
 app.include_router(autonomic_router)

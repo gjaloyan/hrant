@@ -6,6 +6,7 @@ import CapabilitiesTab from "./settings/CapabilitiesTab";
 import StatusTab from "./settings/StatusTab";
 import MemoryTab from "./settings/MemoryTab";
 import VoiceTab from "./settings/VoiceTab";
+import EngineTab from "./settings/EngineTab";
 import {
   clearConversation,
   compareModels,
@@ -58,7 +59,7 @@ import {
   type AvailableModel,
 } from "../api";
 
-type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "conversation" | "capabilities" | "status";
+type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "conversation" | "capabilities" | "status";
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState<IdentityTab>("soul");
@@ -268,6 +269,7 @@ export default function SettingsPanel() {
     { id: "channels", label: "Channels" },
     { id: "memory", label: "Memory" },
     { id: "voice", label: "Voice" },
+    { id: "engine", label: "Engine" },
     { id: "conversation", label: "Conversation" },
     { id: "capabilities", label: "Capabilities" },
     { id: "status", label: "System Status" },
@@ -330,6 +332,8 @@ export default function SettingsPanel() {
         {tab === "memory" && <MemoryTab flash={flash} />}
 
         {tab === "voice" && <VoiceTab flash={flash} />}
+
+        {tab === "engine" && <EngineTab flash={flash} />}
 
         {tab === "providers" && (
           <div className="space-y-4">

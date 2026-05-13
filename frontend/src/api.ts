@@ -1308,6 +1308,50 @@ export const runDiscover = (host?: string, apply = false) => {
 };
 
 
+// ---------- Engine config (router + verification overrides) ----------
+
+export type EngineRouterCfg = {
+  daily_api_budget_usd?: number;
+  estimated_cost_per_call_usd?: number;
+  api_ping_cache_seconds?: number;
+  fallback_to_local?: boolean;
+  tool_synth_max_tokens?: number;
+  tool_loop_input_budget?: number;
+};
+
+export type EngineVerificationCfg = {
+  enabled?: boolean;
+  min_confidence?: number;
+  require_sources?: boolean;
+  critic_threshold?: number;
+  critic_max_retries?: number;
+  critic_retry_token_budget?: number;
+};
+
+export type EngineConfigEnvelope = {
+  effective: { router: EngineRouterCfg; verification: EngineVerificationCfg };
+  overrides: { router?: EngineRouterCfg; verification?: EngineVerificationCfg };
+  schema: { router: string[]; verification: string[] };
+};
+
+export type EngineConfigUpdateResp = EngineConfigEnvelope & {
+  applied: { router?: EngineRouterCfg; verification?: EngineVerificationCfg };
+  rejected: string[];
+  ok: boolean;
+};
+
+export const fetchEngineConfig = () =>
+  json_get<EngineConfigEnvelope>("/api/engine/config");
+
+export const putEngineConfig = (cfg: {
+  router?: EngineRouterCfg;
+  verification?: EngineVerificationCfg;
+}) => json_put<EngineConfigUpdateResp>("/api/engine/config", cfg);
+
+export const resetEngineConfig = () =>
+  json_post<EngineConfigEnvelope & { ok: boolean }>("/api/engine/config/reset");
+
+
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {
   provider_id: string;
