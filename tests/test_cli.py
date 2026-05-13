@@ -173,26 +173,9 @@ def test_chat_passes_extra_args():
 
 def test_chat_dispatcher_imports_backend_repl():
     """cmd_chat must reach `backend.repl.main` — that's the single
-    REPL implementation. The root cli.py is a thin shim re-exporting
-    the same function. If a refactor accidentally splits them, this
-    test fails immediately."""
+    REPL implementation. If a refactor splits them, this test fails."""
     import backend.repl as repl
     assert callable(repl.main)
-
-
-def test_root_cli_shim_re_exports_repl_main():
-    """Legacy `python cli.py` still works because root cli.py imports
-    main from backend.repl. The shim must remain importable."""
-    import importlib.util
-    from pathlib import Path
-    spec = importlib.util.spec_from_file_location(
-        "agi_root_cli_shim",
-        Path(__file__).resolve().parent.parent / "cli.py",
-    )
-    assert spec is not None and spec.loader is not None
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    assert callable(mod.main)
 
 
 def test_status_helpers_handle_missing_env_safely(monkeypatch):

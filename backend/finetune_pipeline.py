@@ -306,8 +306,8 @@ python train_script.py
 ## Импорт обратно (локально)
 
 ```bash
-# скопируй gguf в локальную папку и запусти:
-python cli.py finetune import-gguf /path/to/unsloth.Q4_K_M.gguf --tag {tag}
+# скопируй gguf в локальную папку и запусти REPL-команду:
+hrant chat 'finetune import-gguf /path/to/unsloth.Q4_K_M.gguf --tag {tag}'
 ```
 
 Это зарегистрирует модель в Ollama как `{prefix}-{tag}`.

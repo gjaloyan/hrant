@@ -1,13 +1,10 @@
 """Interactive REPL for the agent.
 
-Used by both:
-  -  (root-level shim re-exports main from here)
-  -  (backend.cli dispatcher imports backend.repl.main)
+Entered via `hrant chat` (the unified CLI dispatcher routes here
+through `backend/cli.py:cmd_chat`).
 
-The legacy invocation
-    python cli.py                    # interactive chat
-    python cli.py 'твой вопрос'       # one-shot query
-is preserved by the thin shim at the repo root.
+    hrant chat                   # interactive chat
+    hrant chat 'твой вопрос'      # one-shot query
 """
 from __future__ import annotations
 import sys

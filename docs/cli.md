@@ -48,7 +48,7 @@ hrant status
 
 ### `hrant chat [...args]`
 
-Drops into the interactive REPL (legacy `python cli.py` behaviour). Any extra args are forwarded to the REPL as the initial prompt.
+Drops into the interactive REPL. Any extra args are forwarded as the initial prompt.
 
 ```
 hrant chat

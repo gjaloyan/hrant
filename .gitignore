@@ -79,3 +79,11 @@ text.txt
 # ---------- Dev mode captures ----------
 # Per-request redacted LLM-call snapshots; user prunes manually.
 dev/
+
+# ---------- Local backups (Phase 8 migration) ----------
+_backup_pre_*/
+
+# Safety net: self_mods/ should ONLY live under data_dir
+# (~/.hrant/data/self_mods/). If a test accidentally writes one
+# at the repo root, we don't want it tracked.
+self_mods/

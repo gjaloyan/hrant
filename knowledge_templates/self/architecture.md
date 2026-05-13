@@ -28,8 +28,8 @@ backend/
   attachments.py     — sha-keyed upload store with mirroring to workspace/inbox/
   autonomic/         — Model X: scheduler + 19 levers, kill-switch, safety gates
   api/               — HTTP routers, one per concern
-  cli.py             — `hrant` entry point: init / run / status / chat / update /
-                       rollback / rebuild / discover / service
+  cli.py             — unified `hrant` entry point: init / run / status / chat /
+                       update / rollback / rebuild / discover / service
   paths.py           — engine/data path resolution
   bootstrap.py       — knowledge_templates → data_dir on fresh install
   updater.py         — git wrapper + history ledger

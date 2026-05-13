@@ -1,9 +1,20 @@
 # Self-Modification
 
-Hrant can modify its own code when the user asks. These modifications
-**stay on the user's machine** — they never get pushed back to the
-official GitHub repo. The user gets a transparent history of every
-change and one-click rollback to "exactly what GitHub has".
+Hrant is a commercial product. Each user gets their own copy of the
+engine and can modify it on their own machine. **Self-modifications
+are strictly local** — they never touch the official engine
+distribution and there is no way to publish them back from the
+agent. The same machinery acts as the safety net: if a self-mod
+breaks something, **one click resets the engine to the exact official
+version**.
+
+Treat self-modification as a power-tool with a built-in undo, not as
+a way to fork. The expected pattern is:
+
+1. User asks for a tweak.
+2. Agent applies it locally with full audit trail.
+3. If things look broken later → **Revert all → official**.
+4. Done — engine matches what the user originally installed.
 
 ## The flow
 
@@ -136,18 +147,19 @@ automatically captures the resulting diff as a self-mod entry.
   (manual diff drop-in) don't go through that gate.
 
 - **No syncing across machines.** Self-mods live in one specific
-  `data_dir`. If you have two installs, both stay independent. To
-  share, either push the patch files manually or upstream the
-  change to GitHub.
+  `data_dir`. If the user has two installs, they're independent.
+  Self-modifications are personal and stay personal — there's no
+  built-in path to publish them.
 
-## When to upstream instead
+## When to revert instead
 
-If a self-modification proves valuable across machines or for
-other users, the natural next step is to upstream it:
+If a self-modification is causing problems, the safe escape is
+**Revert all → official**:
 
-1. Make sure the patch still applies (`git apply --check`).
-2. Apply it on a feature branch of the engine repo.
-3. Open a PR against github.com/gjaloyan/hrant.
-4. After merge: `hrant update` pulls it as part of the official
-   release; the corresponding self-mod entry now redundantly
-   produces an empty diff and can be removed.
+- Settings → Self-Modifications → "Revert all → official"
+- Behind the scenes: `git reset --hard origin/master` + wipe of
+  every `.patch` file in `~/.hrant/data/self_mods/`.
+- User data (knowledge, workspace, settings) is untouched.
+
+This is the primary reason self-modifications exist in this form
+— so the user always has a known-good fallback to a clean engine.

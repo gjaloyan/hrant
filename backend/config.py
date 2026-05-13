@@ -18,17 +18,25 @@ from dotenv import load_dotenv
 
 from . import paths
 
-# Load .env from the data_dir first (user's), repo root second (dev
-# fallback). load_dotenv is idempotent for variables already in
-# os.environ, so the data-dir .env wins.
-load_dotenv(paths.env_path())
+# Load .env from data_dir if it exists. Pre-init (no data dir yet)
+# `paths.env_path()` still returns a valid path (under the would-be
+# data_dir); load_dotenv is a no-op when the file is missing.
+try:
+    load_dotenv(paths.env_path())
+except paths.DataDirMissing:
+    pass
 
 # Backwards-compat exports: legacy code imports `ROOT` and
 # `CONFIG_PATH` directly. ROOT still means the repo root (engine);
 # CONFIG_PATH resolves via paths.config_yaml_path() so it points at
 # the user's config when one exists.
 ROOT = paths.repo_root()
-CONFIG_PATH = paths.config_yaml_path()
+try:
+    CONFIG_PATH = paths.config_yaml_path()
+except paths.DataDirMissing:
+    # Boot before `hrant init`: callers handle the "no config yet"
+    # case by constructing Config() with default baked-in values.
+    CONFIG_PATH = paths.repo_root() / "config.yaml"  # sentinel; won't exist
 
 
 # -------- пресеты режимов --------

@@ -205,8 +205,12 @@ def _capabilities_block(compact: bool = False) -> str:
         "backend/finetune_pipeline.py": "finetune training pipeline",
         "backend/project_mode.py": "project-scoped knowledge isolation",
         "backend/background.py": "background task runner",
-        "cli.py": "CLI entry point (REPL)",
-        "config.yaml": "mode and parameter configuration",
+        "backend/cli.py": "unified `hrant` CLI entry point (init/run/update/rollback/chat/...)",
+        "backend/repl.py": "interactive REPL (`hrant chat`)",
+        "backend/paths.py": "engine vs user-data path resolution",
+        "backend/bootstrap.py": "first-run wizard helpers (copies knowledge_templates → data_dir)",
+        "backend/updater.py": "git wrapper + history ledger for `hrant update`/`rollback`",
+        "backend/self_mods.py": "local patch overlay (`~/.hrant/data/self_mods/`)",
         "frontend/": "React + TypeScript UI: Chat, Graph, Knowledge, Sessions, Intelligence, Usage panels",
     }
     for path, desc in source_map.items():

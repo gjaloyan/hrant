@@ -52,28 +52,51 @@ def test_data_dir_strips_whitespace_in_env(tmp_path, monkeypatch):
 
 def test_data_dir_uses_user_home_when_present(isolated_home):
     """When ~/.hrant/data/ exists and no env override, that's where
-    user data lives — even though we're running from a repo (the
-    dev fallback gives way to a real install)."""
+    user data lives."""
     (isolated_home / ".hrant" / "data").mkdir(parents=True)
     assert paths.data_dir() == (isolated_home / ".hrant" / "data")
 
 
-def test_data_dir_falls_back_to_repo_root_in_dev(isolated_home):
-    """Dev mode: no env, no ~/.hrant/data/. Everything stays in
-    repo. This is how the current single-tree layout still works."""
+def test_data_dir_raises_when_nothing_available(isolated_home):
+    """Pre-init: no HRANT_DATA_DIR, no ~/.hrant/data/. Must raise
+    DataDirMissing — never silently fall back to the repo root,
+    that would let a stray run pollute the engine tree."""
     # isolated_home explicitly does NOT create ~/.hrant/data
-    assert paths.data_dir() == paths.repo_root()
+    with pytest.raises(paths.DataDirMissing):
+        paths.data_dir()
 
 
-def test_is_split_install_true_when_data_dir_differs(tmp_path, monkeypatch):
-    elsewhere = tmp_path / "real_data"
-    elsewhere.mkdir()
-    monkeypatch.setenv("HRANT_DATA_DIR", str(elsewhere))
+def test_data_dir_require_false_returns_user_default(isolated_home):
+    """Init wizard / tests need the would-be path without an exception.
+    Always points at the user-default location (~/.hrant/data/),
+    never the repo root."""
+    expected = isolated_home / ".hrant" / "data"
+    assert paths.data_dir(require=False) == expected
+
+
+def test_data_dir_honours_env_var_even_when_target_missing(tmp_path, monkeypatch):
+    """The init wizard reads HRANT_DATA_DIR before the target exists
+    (the whole point of init is to CREATE it). The function must
+    honour the env var regardless of existence."""
+    target = tmp_path / "future-install"
+    monkeypatch.setenv("HRANT_DATA_DIR", str(target))
+    assert not target.exists()
+    assert paths.data_dir() == target.resolve()
+
+
+def test_is_split_install_always_true():
+    """After Phase 8 there's no dev-fallback path; engine and data
+    are always separate by construction."""
     assert paths.is_split_install() is True
 
 
-def test_is_split_install_false_in_dev(isolated_home):
-    assert paths.is_split_install() is False
+def test_is_initialised_false_pre_install(isolated_home):
+    assert paths.is_initialised() is False
+
+
+def test_is_initialised_true_when_dir_exists(isolated_home):
+    (isolated_home / ".hrant" / "data").mkdir(parents=True)
+    assert paths.is_initialised() is True
 
 
 def test_knowledge_and_workspace_dirs_derive_from_data_dir(tmp_path, monkeypatch):
@@ -84,29 +107,20 @@ def test_knowledge_and_workspace_dirs_derive_from_data_dir(tmp_path, monkeypatch
     assert paths.workspace_dir() == target.resolve() / "workspace"
 
 
-def test_config_yaml_prefers_data_dir(tmp_path, monkeypatch):
-    """When config.yaml exists in BOTH data_dir and repo root, the
-    user's data-dir copy wins (engine repo is read-only at runtime)."""
+def test_config_yaml_always_under_data_dir(tmp_path, monkeypatch):
+    """config.yaml always lives in data_dir, regardless of whether
+    it currently exists. Never the engine repo — that would mean
+    a fresh clone could accidentally pick up a previous user's
+    settings."""
     data = tmp_path / "data"
-    data.mkdir()
-    (data / "config.yaml").write_text("mode: claude_only", encoding="utf-8")
     monkeypatch.setenv("HRANT_DATA_DIR", str(data))
     assert paths.config_yaml_path() == data.resolve() / "config.yaml"
 
 
-def test_config_yaml_falls_back_to_repo_when_data_empty(tmp_path, monkeypatch):
-    """If data_dir has no config.yaml but repo does (dev mode pre-init),
-    use the repo one. This keeps the current workflow alive."""
+def test_env_path_always_under_data_dir(tmp_path, monkeypatch):
     data = tmp_path / "data"
-    data.mkdir()
     monkeypatch.setenv("HRANT_DATA_DIR", str(data))
-    # The repo root's config.yaml DOES exist (it's the actual file
-    # being edited in this checkout).
-    cfg = paths.config_yaml_path()
-    # Either it's the repo's (file exists) or it would have written
-    # to data_dir as the default-write target — both are valid fallback
-    # destinations. What matters is that we get back A path, no crash.
-    assert isinstance(cfg, Path)
+    assert paths.env_path() == data.resolve() / ".env"
 
 
 def test_history_path_under_data_dir(tmp_path, monkeypatch):
