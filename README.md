@@ -1,8 +1,85 @@
-# Self-Learning Agent
+# Hrant — Self-Learning Agent
 
 Локальный AI-агент, который **не хранит знания в весах модели**. Вместо этого он читает источники, ведёт структурированные заметки (markdown) на диске и подгружает их в контекст только когда нужно. Растёт в компетенции под конкретные задачи, сохраняя маленькое эффективное ядро.
 
 > junior engineer с идеальными конспектами, который никогда ничего не забывает.
+
+## Install (fresh machine)
+
+```bash
+# 1. Get the engine
+git clone https://github.com/gjaloyan/AGI.git
+cd AGI
+
+# 2. Python + Node deps
+python -m venv .venv && source .venv/bin/activate     # or .venv\Scripts\activate on Windows
+pip install -e .
+cd frontend && npm install && npm run build && cd ..
+
+# 3. First-run bootstrap (creates ~/.hrant/data/ + asks for API keys)
+hrant init
+
+# 4. Start the agent
+hrant run
+# Open http://127.0.0.1:8000
+```
+
+**Что произойдёт:**
+- `hrant init` создаст `~/.hrant/data/` (или туда, куда указывает `HRANT_DATA_DIR`), скопирует туда стартовые шаблоны из `knowledge_templates/`, сделает `config.yaml` из `config.example.yaml`, и спросит про API-ключи (Anthropic, OpenAI) + опциональные URL сервисов (Tailscale host, Whisper, Piper).
+- `hrant run` поднимет FastAPI на `127.0.0.1:8000` (WebUI там же) и автоматически запустит сконфигурированные channels.
+
+### Layout: engine vs data
+
+```
+<repo>/                  ← engine: backend/ frontend/ deploy/ knowledge_templates/
+~/.hrant/data/           ← user data (config.yaml, knowledge/, workspace/, .env, …)
+~/.hrant/data/update_history.json  ← ledger for `hrant rollback`
+```
+
+`hrant update` обновляет только engine; пользовательские данные не трогаются. Можно сменить расположение через `HRANT_DATA_DIR=/some/path hrant init`.
+
+**Dev mode (single-tree)**: если запускаешь из репо без `HRANT_DATA_DIR`, агент использует `<repo>/knowledge/` и `<repo>/workspace/` (всё в .gitignore). Удобно для разработки.
+
+## Update / Rollback
+
+```bash
+hrant update --check               # что нового на origin/master, без действий
+hrant update                       # pull → pip install -e . → npm build
+hrant update --skip-frontend       # если фронт не менялся (быстрее)
+hrant rollback                     # шаг назад (к версии до последнего update)
+hrant rollback --list              # история всех обновлений
+hrant rollback --to <sha>          # к конкретному коммиту
+hrant rebuild                      # только пересборка фронта без pull
+```
+
+`hrant update` отказывается работать при dirty working tree (есть закоммиченные изменения); untracked файлы в `knowledge/`/`workspace/` (всё в .gitignore) не считаются. История пишется в `~/.hrant/data/update_history.json` *до* `git pull`, так что rollback доступен даже если update упал на половине пути.
+
+## Run as a background service
+
+```bash
+hrant service install              # systemd / launchd / Scheduled Task — авто
+hrant service status               # что показывает OS service manager
+hrant service uninstall            # удалить unit, оставить venv
+```
+
+Подробнее по платформам — [deploy/README.md](deploy/README.md).
+
+## CLI reference
+
+| Команда | Что делает |
+|---|---|
+| `hrant init` | Bootstrap + интерактивная настройка |
+| `hrant init --reset` | Перезаписать соглашения из шаблонов (overwrites soul.md, identity.md) |
+| `hrant run` | Запустить FastAPI server (uvicorn) |
+| `hrant status` | Read-only диагностика (модель, сервисы, channels, workspace) |
+| `hrant chat [...]` | Интерактивный REPL |
+| `hrant version` | Версия |
+| `hrant rebuild` | Только пересборка фронта |
+| `hrant update` | Pull + reinstall + rebuild |
+| `hrant rollback` | Реверт к предыдущему SHA |
+| `hrant discover --host X` | Probe Tailscale/LAN на Whisper/Piper/Ollama |
+| `hrant discover --host X --apply` | Probe и записать URL в configs |
+| `hrant service install/status/uninstall` | systemd/launchd/Scheduled Task |
 
 ## Deployment Modes
 
