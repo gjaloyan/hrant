@@ -79,13 +79,17 @@ class UpdateResult:
     frontend_built: bool
     error: Optional[str] = None
     messages: Optional[list[str]] = None
-    # Self-modification re-apply summary populated after `git pull`.
-    # `reapplied` / `needs_review` carry patch IDs from `self_mods.applied.json`.
-    # `needs_review` ids point at patches that conflicted with the new
-    # engine code — the engine is at the official version for those
-    # files; the user resolves via Settings → Self-Modifications.
-    self_mods_reapplied: Optional[list[str]] = None
-    self_mods_needs_review: Optional[list[str]] = None
+    # `hrant update` now archives every active self-mod into
+    # data_dir/self_mods/history/<ts>/ instead of trying to re-apply
+    # them. The engine comes out at exactly origin/master; the user
+    # re-applies what they want from Settings → Self-Modifications →
+    # History. These fields surface the archive event:
+    self_mods_archived: int = 0
+    self_mods_archive_id: Optional[str] = None
+    # `cancelled=True` when the user said "no" at the pre-update prompt.
+    # The result is still ok=False but the error indicates user intent
+    # rather than a system failure.
+    cancelled: bool = False
 
 
 # --- git helpers --------------------------------------------------------
@@ -275,16 +279,56 @@ def frontend_changed(commits: list[dict]) -> bool:
 # --- top-level orchestration --------------------------------------------
 
 
+def count_active_self_mods() -> int:
+    """How many self-mods are currently active? Used by the
+    pre-update prompt to decide whether to warn the user."""
+    try:
+        from . import self_mods
+        return sum(
+            1 for e in self_mods.list_patches()
+            if e.status in ("applied", "needs_review")
+        )
+    except Exception:
+        return 0
+
+
 def do_update(
     *,
     branch: str = "master",
     skip_frontend: bool = False,
     skip_pip: bool = False,
+    assume_yes: bool = False,
+    confirm: Optional[callable] = None,  # type: ignore[type-arg]
 ) -> UpdateResult:
-    """One-shot update. Returns UpdateResult; the CLI prints from it."""
+    """One-shot update. Returns UpdateResult; the CLI prints from it.
+
+    When active self-mods exist and `assume_yes` is False, calls
+    `confirm(prompt, default=False)` (provided by the CLI) to ask
+    the user. Returns `cancelled=True` if the user said no.
+    """
     messages: list[str] = []
     old = current_sha()
     br = current_branch() or branch
+
+    # Pre-update consent: warn if active self-mods will be archived.
+    active_count = count_active_self_mods()
+    if active_count > 0 and not assume_yes:
+        prompt = (
+            f"This update will archive {active_count} active self-modification(s) "
+            "into ~/.hrant/data/self_mods/history/ and reset the engine to "
+            "origin/master.\n"
+            "You can re-apply archived patches afterwards from\n"
+            "  Settings → Self-Modifications → History.\n"
+            "Continue?"
+        )
+        proceed = confirm(prompt, default=False) if confirm is not None else False
+        if not proceed:
+            return UpdateResult(
+                ok=False, old_sha=old, new_sha=None, branch=br,
+                pulled_commits=0, pip_ran=False, frontend_built=False,
+                error="cancelled by user (active self-mods would be archived)",
+                cancelled=True,
+            )
 
     if is_dirty():
         return UpdateResult(
@@ -370,34 +414,32 @@ def do_update(
                 )
             messages.append("frontend rebuilt ✓")
 
-    # Re-apply self-modifications. `git pull` brought the engine to
-    # origin/master cleanly (no patches were applied at that point —
-    # they live in data_dir/self_mods/). Now walk the manifest and
-    # reapply each, surfacing conflicts in the result for the UI to
-    # highlight.
-    reapplied: list[str] = []
-    needs_review: list[str] = []
+    # Archive any active self-modifications. The engine is now at
+    # origin/master; user re-applies what they want from the WebUI's
+    # History panel. This trades automation for predictability — a
+    # user-facing update is loud and never silently breaks the engine.
+    archived_count = 0
+    archive_id: Optional[str] = None
     try:
         from . import self_mods
-        report = self_mods.reapply_all()
-        reapplied = report.get("reapplied") or []
-        needs_review = report.get("needs_review") or []
-        if reapplied:
-            messages.append(f"self-mods re-applied: {len(reapplied)}")
-        if needs_review:
+        archive_report = self_mods.archive_all_active()
+        archived_count = archive_report.get("archived_count", 0) or 0
+        archive_id = archive_report.get("archive_id")
+        if archived_count > 0:
             messages.append(
-                f"self-mods needing review: {len(needs_review)} (Settings → Self-Modifications)"
+                f"archived {archived_count} self-mod(s) → "
+                f"~/.hrant/data/self_mods/history/{archive_id}/"
             )
     except Exception as e:  # pragma: no cover — defensive
-        messages.append(f"self_mods reapply skipped due to error: {e}")
+        messages.append(f"self_mods archive skipped due to error: {e}")
 
     record(new, br, "success", note=f"updated from {old[:8]}")
     return UpdateResult(
         ok=True, old_sha=old, new_sha=new, branch=br,
         pulled_commits=len(incoming), pip_ran=pip_ran,
         frontend_built=fe_built, messages=messages,
-        self_mods_reapplied=reapplied,
-        self_mods_needs_review=needs_review,
+        self_mods_archived=archived_count,
+        self_mods_archive_id=archive_id,
     )
 
 

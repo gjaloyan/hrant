@@ -57,51 +57,77 @@ the engine tree.
 ## Three statuses
 
 - **`applied`** — currently active. The engine reflects the patch.
-- **`needs_review`** — the last `hrant update` brought new engine code
-  that the patch can't cleanly apply onto, even with 3-way merge.
-  The engine is at the official version for the affected lines; the
-  user fixes the patch manually or reverts it.
+- **`needs_review`** — a previous attempt to apply a patch failed
+  (e.g. one piece of a restored archive conflicted on top of another).
+  Engine is at the official version for the affected lines; the user
+  reverts or re-applies a different version from the archive.
 - **`reverted`** — user clicked Revert. Kept in manifest for audit
   trail until the next manifest write prunes it.
 
-## `hrant update` integration
+## `hrant update` integration — archive, don't re-apply
+
+This is the deliberate design choice:
+
+> `hrant update` always brings the engine to **exactly** the
+> official `origin/master` head. The user's active self-mods are
+> NOT re-applied automatically. Instead they're **archived** so
+> the user can re-apply them by hand from the WebUI afterwards.
+
+The reason: auto-reapply leads to half-broken states when a patch
+partially conflicts with new engine code. Surfacing the choice to
+the user keeps every install in a predictable, known-good state.
 
 When you run `hrant update`:
 
-1. Working tree dirty check.
-2. `git pull --ff-only origin master`.
-3. `pip install -e .`, `npm run build`.
-4. **`self_mods.reapply_all()`** — walks `applied.json` in order:
-   - `git apply --check` (dry-run)
-   - If clean → apply.
-   - If conflict → `git apply --3way` (attempts a merge).
-   - If both fail → mark `needs_review`, leave engine alone.
-5. UpdateResult carries `self_mods_reapplied` + `self_mods_needs_review`
-   lists. The CLI prints "self-mods needing review: N" so you know
-   to check the Settings tab.
+1. **Pre-flight consent** — if active self-mods exist, the CLI
+   prints how many will be archived and prompts `Continue? [y/N]`.
+   Non-TTY runs (cron, systemd `ExecStartPre`) must pass `--yes`
+   explicitly so an unattended update can't silently archive.
+2. Working tree dirty check.
+3. `git pull --ff-only origin master`.
+4. `pip install -e .`, `npm run build`.
+5. **`self_mods.archive_all_active()`** — moves every active patch
+   into a fresh timestamped directory:
+   ```
+   ~/.hrant/data/self_mods/history/2026-05-13T15-22-08Z/
+     0001-add-sqlite-memory.patch
+     0002-skip-rag.patch
+     manifest.json          (snapshot of the archived bundle)
+   ```
+6. The top-level `applied.json` becomes `{"entries": []}` — engine
+   is clean.
+7. The UpdateResult shows `self_mods_archived: N` and
+   `self_mods_archive_id: <ts>` so the UI can deep-link to that
+   bundle in the History panel.
 
-The conservative choice: **engine stability over preserving the
-user's local mod**. If a patch conflicts, the engine stays at the
-official version — never half-applied broken code. The user
-intervenes via the WebUI.
+## Re-applying from history
+
+Settings → Self-Modifications → **History** shows every archived
+bundle (newest first), each with:
+
+- **Re-apply** on a single patch — applies it as a *new* active
+  entry. The archive is unchanged; the same patch can be re-applied
+  any number of times.
+- **Re-apply all (N)** on a bundle — attempts every archived patch
+  in order. Stops at the first conflict and reports which patch
+  failed; later patches stay archived so the user can fix or skip
+  the broken one.
+
+If the engine has drifted enough that an archived patch no longer
+applies, the user sees `git apply failed: …` and the patch file is
+left in the archive untouched. There's no force-apply path — a
+patch either applies cleanly or not at all.
 
 ## Reverting
 
-### One patch
+### One active patch
 
-In Settings → Self-Modifications, click **Revert** on a row. Under
-the hood:
+Settings → Self-Modifications, click **Revert** on a row. Under
+the hood: `git apply -R <patch>` + remove from manifest. If the
+reverted patch isn't the most recent, the UI warns that later
+patches built on top may now conflict.
 
-```
-git apply -R <patch>
-```
-
-If the patch you're reverting isn't the most recent, the UI warns
-that later patches built on top may now conflict (because they
-diff against state your reverted patch produced). For complex
-stacks, `Revert all → official` is more predictable.
-
-### All
+### All — reset to official
 
 The **Revert all → official** button:
 
@@ -113,14 +139,21 @@ rm ~/.hrant/data/self_mods/applied.json
 
 After this the engine is byte-identical to the GitHub remote at
 HEAD. User data (knowledge, workspace, settings, conversation,
-identity, channels) is untouched.
+identity, channels) is untouched. The **History** is also kept —
+even after revert-all, the archive bundles remain available for
+re-apply.
 
 ## API
 
 ```
-GET    /api/self-mods                  list every patch in manifest order
-POST   /api/self-mods/{id}/revert      reverse-apply one patch
-POST   /api/self-mods/revert-all       hard reset to origin/master
+GET    /api/self-mods                                 — list active patches
+POST   /api/self-mods/{id}/revert                     — revert one
+POST   /api/self-mods/revert-all                      — engine -> official
+
+GET    /api/self-mods/history                         — list archives
+POST   /api/self-mods/history/{archive_id}/restore    — re-apply whole bundle
+POST   /api/self-mods/history/{archive_id}/{patch_filename}/restore
+                                                      — re-apply one patch
 ```
 
 Plus the legacy proposal flow (`/api/self-modifier/*` — see

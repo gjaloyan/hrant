@@ -372,61 +372,245 @@ def revert_all_to_official(*, branch: str = "master") -> tuple[bool, str]:
     return True, ""
 
 
-def reapply_all() -> dict:
-    """Re-apply every non-reverted patch in order. Called by
-    `backend/updater.py` after a successful `git pull` so the user's
-    customisations survive an engine update.
+def _history_dir() -> Path:
+    return _self_mods_dir() / "history"
 
-    Strategy per patch:
-      - `git apply --check` dry-run first.
-      - If clean: apply normally, status stays "applied".
-      - If conflict: `git apply --3way` attempt.
-      - If `--3way` also fails: mark "needs_review", DO NOT apply.
-        Engine stays at whatever the previous patches in the chain
-        produced; the conflict is surfaced in the manifest for the
-        UI to highlight.
 
-    Returns a summary dict that the CLI/UI can print:
-      {
-        "reapplied": [<id>, ...],
-        "needs_review": [<id>, ...],
-        "skipped": [<id>, ...],   # already-reverted entries
-      }
+def archive_all_active() -> dict:
+    """Move every active patch into a timestamped history bundle and
+    clear the active manifest. Called by `backend/updater.py` right
+    after a successful `git pull` so the engine comes out at exactly
+    `origin/master`. The user re-applies what they want via the
+    Settings → Self-Modifications → History panel.
+
+    Side effects on `~/.hrant/data/self_mods/`:
+      - moves every `*.patch` into `history/<timestamp>/`
+      - copies the manifest snapshot into `history/<timestamp>/manifest.json`
+      - rewrites the top-level `applied.json` as `{"entries": []}`
+
+    Returns a summary:
+      {"archive_id": "2026-05-13T15-22-08Z",
+       "archived_count": 3,
+       "archive_path": "<full path>"}
+
+    `archive_id` is the directory name — used by the Restore API
+    to address one specific archive entry. Empty active manifest
+    is a no-op (returns archived_count=0, archive_id=None).
     """
     m = load_manifest()
-    out = {"reapplied": [], "needs_review": [], "skipped": []}
-    for entry in m.entries:
-        if entry.status == "reverted":
-            out["skipped"].append(entry.id)
+    active = [e for e in m.entries if e.status in ("applied", "needs_review")]
+    if not active:
+        return {"archive_id": None, "archived_count": 0, "archive_path": ""}
+
+    # Timestamp safe for filesystem on every OS (no colons).
+    archive_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
+    target = _history_dir() / archive_id
+    target.mkdir(parents=True, exist_ok=True)
+
+    for entry in active:
+        src = _self_mods_dir() / entry.patch_filename
+        if src.exists():
+            try:
+                src.replace(target / entry.patch_filename)
+            except OSError as e:
+                log.warning("could not archive %s: %s", entry.patch_filename, e)
+
+    # Snapshot the active subset of the manifest (we keep `reverted`
+    # entries out of the archive — they were already user-discarded).
+    archived_entries = [asdict(e) for e in active]
+    (target / "manifest.json").write_text(
+        json.dumps(
+            {"archive_id": archive_id, "entries": archived_entries},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    # Clear the top-level manifest. Reverted entries are also flushed
+    # since they no longer correspond to any patch file on disk.
+    save_manifest(Manifest(entries=[]))
+    log.info("archived %d self-mod(s) to %s", len(active), target)
+    return {
+        "archive_id": archive_id,
+        "archived_count": len(active),
+        "archive_path": str(target),
+    }
+
+
+@dataclass
+class HistoryArchive:
+    """One archived bundle. `entries` are the patches it contains
+    (with their original IDs / titles / files so the UI can render
+    them like the active list)."""
+    archive_id: str
+    archived_at: str           # parsed from archive_id (ISO 8601)
+    patch_count: int
+    entries: list[PatchEntry]
+
+
+def list_history() -> list[HistoryArchive]:
+    """Every archive bundle, newest first. Used by the History panel
+    in Settings → Self-Modifications."""
+    hd = _history_dir()
+    if not hd.exists():
+        return []
+    out: list[HistoryArchive] = []
+    for sub in sorted(hd.iterdir(), reverse=True):
+        if not sub.is_dir():
             continue
-        patch_path = _self_mods_dir() / entry.patch_filename
-        if not patch_path.exists():
-            entry.status = "needs_review"
-            entry.last_error = "patch file missing"
-            out["needs_review"].append(entry.id)
+        manifest_path = sub / "manifest.json"
+        if not manifest_path.exists():
             continue
-        patch_text = patch_path.read_text(encoding="utf-8")
-        ok, err = _git_apply_check(patch_text)
-        if ok:
-            applied_ok, apply_err = _git_apply(patch_text)
-            if applied_ok:
-                entry.status = "applied"
-                entry.last_error = ""
-                out["reapplied"].append(entry.id)
+        try:
+            raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning("archive %s manifest unreadable (%s); skipping", sub.name, e)
+            continue
+        entries_raw = raw.get("entries") or []
+        entries: list[PatchEntry] = []
+        for e in entries_raw:
+            try:
+                entries.append(PatchEntry(**e))
+            except TypeError:
                 continue
-            err = apply_err
-        # Conflict on direct apply — try 3-way merge.
-        applied_ok, apply_err = _git_apply(patch_text, three_way=True)
-        if applied_ok:
-            entry.status = "applied"
-            entry.last_error = ""
-            out["reapplied"].append(entry.id)
-        else:
-            entry.status = "needs_review"
-            entry.last_error = apply_err[:400]
-            out["needs_review"].append(entry.id)
-    save_manifest(m)
+        # Reconstruct a readable timestamp — archive_id has hyphens
+        # where the source ISO had colons; restore them.
+        ts = sub.name
+        readable = ts.replace("T", "T", 1)
+        # Convert "2026-05-13T15-22-08Z" → "2026-05-13T15:22:08Z"
+        # (only the time portion's hyphens get swapped back).
+        if "T" in readable and readable.endswith("Z"):
+            date_part, time_part = readable.split("T", 1)
+            time_part = time_part.replace("-", ":", 2)
+            readable = f"{date_part}T{time_part}"
+        out.append(HistoryArchive(
+            archive_id=ts,
+            archived_at=readable,
+            patch_count=len(entries),
+            entries=entries,
+        ))
     return out
+
+
+def _read_archive_patch(archive_id: str, patch_filename: str) -> tuple[Optional[str], str]:
+    """Locate and read a patch file inside a specific archive. Used
+    by the restore endpoints. Returns (patch_text, error_msg)."""
+    if "/" in archive_id or "\\" in archive_id or ".." in archive_id:
+        return None, "invalid archive_id"
+    if "/" in patch_filename or "\\" in patch_filename or ".." in patch_filename:
+        return None, "invalid patch_filename"
+    target = _history_dir() / archive_id / patch_filename
+    if not target.exists():
+        return None, f"patch not found: {archive_id}/{patch_filename}"
+    return target.read_text(encoding="utf-8"), ""
+
+
+def _read_archive_manifest(archive_id: str) -> tuple[Optional[dict], str]:
+    if "/" in archive_id or "\\" in archive_id or ".." in archive_id:
+        return None, "invalid archive_id"
+    target = _history_dir() / archive_id / "manifest.json"
+    if not target.exists():
+        return None, f"archive not found: {archive_id}"
+    try:
+        return json.loads(target.read_text(encoding="utf-8")), ""
+    except Exception as e:
+        return None, f"archive manifest unreadable: {e}"
+
+
+def restore_from_history(
+    archive_id: str, patch_filename: str,
+) -> tuple[Optional[PatchEntry], str]:
+    """Re-apply ONE archived patch as a fresh active modification.
+
+    The original `PatchEntry` is preserved as much as possible (same
+    title, slug, file) but gets a new `id` and a new sequence number
+    in `applied.json` — this is a fresh application, not the same
+    historical event. Same git apply semantics as `record_and_apply`:
+    on conflict the patch file is removed and no manifest entry
+    survives, so the user can try a different historical entry.
+
+    The archived patch file STAYS in history (re-applying doesn't
+    consume the archive entry — the user may want to re-apply the
+    same patch on multiple machines, or after another update).
+    """
+    patch_text, err = _read_archive_patch(archive_id, patch_filename)
+    if patch_text is None:
+        return None, err
+
+    # Use the archived manifest entry to recover a reasonable title.
+    manifest, _ = _read_archive_manifest(archive_id)
+    title = patch_filename
+    file_rel = ""
+    if manifest:
+        for e in manifest.get("entries") or []:
+            if e.get("patch_filename") == patch_filename:
+                title = e.get("title") or title
+                file_rel = e.get("file") or ""
+                break
+
+    _ensure_dir()
+    num = _next_patch_number()
+    slug = _slugify(title)
+    new_filename = f"{num:04d}-{slug}.patch"
+    new_path = _self_mods_dir() / new_filename
+    new_path.write_text(patch_text, encoding="utf-8")
+
+    ok, apply_err = _git_apply(patch_text)
+    if not ok:
+        try:
+            new_path.unlink()
+        except OSError:
+            pass
+        return None, (
+            f"git apply failed: {apply_err}. The engine has changed "
+            "enough that this archived patch no longer applies cleanly."
+        )
+
+    entry = PatchEntry(
+        id=uuid.uuid4().hex[:8],
+        slug=slug,
+        file=file_rel,
+        title=title,
+        created=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        status="applied",
+        patch_filename=new_filename,
+    )
+    m = load_manifest()
+    m.entries.append(entry)
+    save_manifest(m)
+    log.info("restored from history %s/%s as %s", archive_id, patch_filename, new_filename)
+    return entry, ""
+
+
+def restore_archive_batch(archive_id: str) -> dict:
+    """Re-apply ALL patches in one archive, in their original order.
+
+    Stops at the first conflict (mirrors what the user would expect
+    when one piece of a stack breaks). Returns:
+      {
+        "restored": [<new_id>, ...],
+        "failed_at": "<patch_filename>" | None,
+        "error": "<err message>" | None,
+      }
+
+    Restored entries are visible immediately in the active list; the
+    archive is unchanged.
+    """
+    manifest, err = _read_archive_manifest(archive_id)
+    if manifest is None:
+        return {"restored": [], "failed_at": None, "error": err}
+
+    restored: list[str] = []
+    for raw in manifest.get("entries") or []:
+        patch_filename = raw.get("patch_filename")
+        if not patch_filename:
+            continue
+        entry, err = restore_from_history(archive_id, patch_filename)
+        if entry is None:
+            return {"restored": restored, "failed_at": patch_filename, "error": err}
+        restored.append(entry.id)
+    return {"restored": restored, "failed_at": None, "error": None}
 
 
 def list_patches() -> list[PatchEntry]:

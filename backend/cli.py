@@ -493,6 +493,7 @@ def cmd_update(args: argparse.Namespace) -> int:
     from . import updater
 
     branch = args.branch or updater.current_branch() or "master"
+    active_self_mods = updater.count_active_self_mods()
     if args.check:
         # Just fetch and show what's available; never mutate.
         ok, err = updater.fetch_remote(branch)
@@ -502,19 +503,55 @@ def cmd_update(args: argparse.Namespace) -> int:
         incoming = updater.commits_ahead(branch)
         if not incoming:
             _print_ok(f"already up to date on origin/{branch}")
+            if active_self_mods:
+                _print_warn(
+                    f"{active_self_mods} active self-mod(s); they'd be archived "
+                    "on the next `hrant update`."
+                )
             return 0
         print(f"  {len(incoming)} commit(s) on origin/{branch} ahead of HEAD:")
         for c in incoming:
             print(f"    {c['sha']}  {c['subject']}")
+        if active_self_mods:
+            print()
+            _print_warn(
+                f"{active_self_mods} active self-mod(s) will be archived to "
+                "~/.hrant/data/self_mods/history/ on update. "
+                "Re-apply from Settings → Self-Modifications → History."
+            )
         print()
         print("Run `hrant update` to apply.")
         return 0
+
+    def _confirm(prompt: str, default: bool = False) -> bool:
+        """TTY-only consent. Non-TTY runs (cron / systemd ExecStartPre)
+        require --yes so an unattended update can't silently archive
+        self-mods."""
+        if not sys.stdin.isatty():
+            _print_warn(
+                "non-interactive run with active self-mods; "
+                "pass --yes to confirm archival."
+            )
+            return False
+        suffix = " [Y/n]: " if default else " [y/N]: "
+        try:
+            ans = input(prompt + suffix).strip().lower()
+        except EOFError:
+            return default
+        if not ans:
+            return default
+        return ans in ("y", "yes")
 
     result = updater.do_update(
         branch=branch,
         skip_frontend=bool(args.skip_frontend),
         skip_pip=bool(args.skip_pip),
+        assume_yes=bool(getattr(args, "yes", False)),
+        confirm=_confirm,
     )
+    if result.cancelled:
+        _print_warn(result.error or "update cancelled")
+        return 0
     if not result.ok:
         _print_err(result.error or "update failed")
         return 1
@@ -716,6 +753,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.add_argument("--branch", default=None, help="branch to track (default: master)")
     p_update.add_argument("--skip-frontend", action="store_true", help="skip npm install + build")
     p_update.add_argument("--skip-pip", action="store_true", help="skip pip install -e .")
+    p_update.add_argument(
+        "-y", "--yes", action="store_true",
+        help="skip the 'archive N self-mods?' prompt (required for non-TTY runs)",
+    )
     p_update.set_defaults(func=cmd_update)
 
     p_rollback = sub.add_parser(

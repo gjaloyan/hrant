@@ -252,54 +252,206 @@ def test_revert_all_clears_manifest_and_patches(isolated_self_mods):
     assert [p for p in isolated_self_mods.iterdir() if p.suffix == ".patch"] == []
 
 
-# --- reapply_all -------------------------------------------------------
+# --- archive_all_active -------------------------------------------------
 
 
-def test_reapply_all_marks_failing_patches_needs_review(isolated_self_mods):
-    """The whole point of the overlay: a patch that conflicts with
-    the new engine after `hrant update` must NOT be force-applied
-    (that'd break the engine); instead the entry is flagged so the
-    UI can surface it for manual review."""
+def test_archive_moves_active_patches_and_clears_manifest(isolated_self_mods):
+    """`hrant update` calls archive_all_active so the engine can
+    cleanly become origin/master. Active patches must end up under
+    self_mods/history/<ts>/ and the top-level manifest must be empty."""
     from backend import self_mods
-    entry, _ = self_mods.record_and_apply(
+    titles = ["first", "second", "third"]
+    entries = []
+    for i, t in enumerate(titles):
+        e, _ = self_mods.record_and_apply(
+            file_rel="backend/foo.py",
+            old_text=f"v{i}\n",
+            new_text=f"v{i+1}\n",
+            title=t,
+            apply_now=False,
+        )
+        entries.append(e)
+    result = self_mods.archive_all_active()
+    assert result["archived_count"] == 3
+    assert result["archive_id"] is not None
+    # Top-level manifest is empty.
+    assert self_mods.load_manifest().entries == []
+    # No active .patch files at the top.
+    top = [p for p in isolated_self_mods.iterdir() if p.suffix == ".patch"]
+    assert top == []
+    # History bundle contains all three + a manifest.
+    archive_dir = isolated_self_mods / "history" / result["archive_id"]
+    assert archive_dir.is_dir()
+    archived = sorted(p.name for p in archive_dir.iterdir() if p.suffix == ".patch")
+    assert len(archived) == 3
+    assert (archive_dir / "manifest.json").exists()
+
+
+def test_archive_with_no_active_is_noop(isolated_self_mods):
+    """No active patches → no archive directory created, archived_count=0."""
+    from backend import self_mods
+    result = self_mods.archive_all_active()
+    assert result["archived_count"] == 0
+    assert result["archive_id"] is None
+    # No history dir spawned for empty archive.
+    history = isolated_self_mods / "history"
+    if history.exists():
+        assert list(history.iterdir()) == []
+
+
+def test_archive_skips_reverted_entries(isolated_self_mods):
+    """Reverted patches were already user-discarded; they shouldn't
+    bloat the archive bundle."""
+    from backend import self_mods
+    self_mods.record_and_apply(
         file_rel="backend/foo.py", old_text="a\n", new_text="b\n",
-        title="x", apply_now=False,
+        title="active", apply_now=False,
     )
-    # Simulate: --check fails, --3way also fails.
-    with patch.object(self_mods, "_git_apply_check", return_value=(False, "conflict")), \
-         patch.object(self_mods, "_git_apply", return_value=(False, "3way also conflict")):
-        report = self_mods.reapply_all()
-    assert entry.id in report["needs_review"]
-    # Manifest reflects the status change.
+    e2, _ = self_mods.record_and_apply(
+        file_rel="backend/foo.py", old_text="b\n", new_text="c\n",
+        title="reverted", apply_now=False,
+    )
+    # Mark the second as reverted (would happen via revert_one).
     m = self_mods.load_manifest()
-    assert m.entries[0].status == "needs_review"
-    assert "3way also conflict" in m.entries[0].last_error
-
-
-def test_reapply_all_reapplies_clean_patches(isolated_self_mods):
-    from backend import self_mods
-    entry, _ = self_mods.record_and_apply(
-        file_rel="backend/foo.py", old_text="a\n", new_text="b\n",
-        title="x", apply_now=False,
-    )
-    # --check passes, --apply succeeds.
-    with patch.object(self_mods, "_git_apply_check", return_value=(True, "")), \
-         patch.object(self_mods, "_git_apply", return_value=(True, "")):
-        report = self_mods.reapply_all()
-    assert entry.id in report["reapplied"]
-    assert self_mods.load_manifest().entries[0].status == "applied"
-
-
-def test_reapply_all_skips_reverted(isolated_self_mods):
-    from backend import self_mods
-    entry, _ = self_mods.record_and_apply(
-        file_rel="backend/foo.py", old_text="a\n", new_text="b\n",
-        title="x", apply_now=False,
-    )
-    m = self_mods.load_manifest()
-    m.entries[0].status = "reverted"
+    m.entries[1].status = "reverted"
     self_mods.save_manifest(m)
-    with patch.object(self_mods, "_git_apply") as m_apply:
-        report = self_mods.reapply_all()
-    assert entry.id in report["skipped"]
-    m_apply.assert_not_called()
+    result = self_mods.archive_all_active()
+    # Only the first (active) went into the archive.
+    assert result["archived_count"] == 1
+
+
+# --- list_history -------------------------------------------------------
+
+
+def test_list_history_empty_when_no_archives(isolated_self_mods):
+    from backend import self_mods
+    assert self_mods.list_history() == []
+
+
+def test_list_history_returns_newest_first(isolated_self_mods, monkeypatch):
+    """Multiple archive bundles should sort newest → oldest so the
+    History panel shows the most recent at the top."""
+    from backend import self_mods
+    # Force two distinct archive timestamps by patching datetime.
+    timestamps = ["2026-05-01T10-00-00Z", "2026-05-02T10-00-00Z"]
+    for ts in timestamps:
+        self_mods.record_and_apply(
+            file_rel="backend/foo.py", old_text=f"old_{ts}\n",
+            new_text=f"new_{ts}\n", title=f"mod-{ts}", apply_now=False,
+        )
+        # Manually craft the archive bundle.
+        sub = isolated_self_mods / "history" / ts
+        sub.mkdir(parents=True)
+        for p in isolated_self_mods.glob("*.patch"):
+            p.rename(sub / p.name)
+        (sub / "manifest.json").write_text(
+            '{"archive_id":"' + ts + '","entries":[]}', encoding="utf-8",
+        )
+        self_mods.save_manifest(self_mods.Manifest(entries=[]))
+
+    archives = self_mods.list_history()
+    assert [a.archive_id for a in archives] == list(reversed(timestamps))
+
+
+# --- restore_from_history ---------------------------------------------
+
+
+def test_restore_from_history_creates_fresh_active_entry(isolated_self_mods):
+    from backend import self_mods
+    e, _ = self_mods.record_and_apply(
+        file_rel="backend/foo.py", old_text="a\n", new_text="b\n",
+        title="my mod", apply_now=False,
+    )
+    arch = self_mods.archive_all_active()
+    archive_id = arch["archive_id"]
+    archived_filename = e.patch_filename
+    # The archived patch file should be present in the bundle.
+    archive_dir = isolated_self_mods / "history" / archive_id
+    assert (archive_dir / archived_filename).exists()
+    # Restore — git apply succeeds in our mock.
+    with patch.object(self_mods, "_git_apply", return_value=(True, "")):
+        new_entry, err = self_mods.restore_from_history(archive_id, archived_filename)
+    assert new_entry is not None
+    assert err == ""
+    # The restored entry gets a NEW id and a new sequence number.
+    assert new_entry.id != e.id
+    assert new_entry.title == "my mod"  # preserved
+    # The archive bundle is unchanged — restoring doesn't consume it.
+    assert (archive_dir / archived_filename).exists()
+    # The new active entry shows up in the live manifest.
+    m = self_mods.load_manifest()
+    assert any(x.id == new_entry.id for x in m.entries)
+
+
+def test_restore_from_history_handles_conflict(isolated_self_mods):
+    from backend import self_mods
+    e, _ = self_mods.record_and_apply(
+        file_rel="backend/foo.py", old_text="a\n", new_text="b\n",
+        title="my mod", apply_now=False,
+    )
+    arch = self_mods.archive_all_active()
+    # Simulate engine drift — git apply rejects the archived patch.
+    with patch.object(self_mods, "_git_apply", return_value=(False, "conflict")):
+        new_entry, err = self_mods.restore_from_history(
+            arch["archive_id"], e.patch_filename,
+        )
+    assert new_entry is None
+    assert "no longer applies" in err
+    # No leftover .patch file at the top, no orphan manifest entry.
+    assert self_mods.load_manifest().entries == []
+
+
+def test_restore_from_history_validates_archive_id(isolated_self_mods):
+    """Defence against path-traversal via archive_id (the UI passes
+    it raw from the URL)."""
+    from backend import self_mods
+    new_entry, err = self_mods.restore_from_history(
+        "../etc/passwd", "0001-x.patch",
+    )
+    assert new_entry is None
+    assert "invalid" in err
+
+
+def test_restore_archive_batch_restores_all(isolated_self_mods):
+    """Batch restore — apply every patch in an archive bundle in order."""
+    from backend import self_mods
+    for i in range(3):
+        self_mods.record_and_apply(
+            file_rel="backend/foo.py",
+            old_text=f"v{i}\n", new_text=f"v{i+1}\n",
+            title=f"step{i}", apply_now=False,
+        )
+    arch = self_mods.archive_all_active()
+    with patch.object(self_mods, "_git_apply", return_value=(True, "")):
+        result = self_mods.restore_archive_batch(arch["archive_id"])
+    assert len(result["restored"]) == 3
+    assert result["failed_at"] is None
+    assert result["error"] is None
+
+
+def test_restore_archive_batch_stops_at_conflict(isolated_self_mods):
+    """If patch N+1 conflicts, batch restore stops and reports which
+    patch failed — user fixes manually rather than having a partial
+    chain silently corrupt the engine."""
+    from backend import self_mods
+    for i in range(3):
+        self_mods.record_and_apply(
+            file_rel="backend/foo.py",
+            old_text=f"v{i}\n", new_text=f"v{i+1}\n",
+            title=f"step{i}", apply_now=False,
+        )
+    arch = self_mods.archive_all_active()
+    call_count = {"n": 0}
+
+    def fake_apply(text, **kw):
+        call_count["n"] += 1
+        # Succeed for the first patch, fail on the second.
+        if call_count["n"] >= 2:
+            return False, "second patch conflicts"
+        return True, ""
+
+    with patch.object(self_mods, "_git_apply", side_effect=fake_apply):
+        result = self_mods.restore_archive_batch(arch["archive_id"])
+    assert len(result["restored"]) == 1
+    assert result["failed_at"] is not None
+    assert "conflict" in (result["error"] or "")

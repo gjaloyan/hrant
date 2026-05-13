@@ -1410,6 +1410,32 @@ export const revertSelfMod = (patch_id: string) =>
 export const revertAllSelfMods = () =>
   json_post<{ ok: boolean }>("/api/self-mods/revert-all");
 
+export type SelfModArchive = {
+  archive_id: string;
+  archived_at: string;
+  patch_count: number;
+  entries: SelfModPatch[];
+};
+
+export const fetchSelfModHistory = () =>
+  json_get<{ archives: SelfModArchive[] }>("/api/self-mods/history");
+
+export const restoreSelfModFromHistory = (
+  archive_id: string,
+  patch_filename: string,
+) =>
+  json_post<{ ok: boolean; entry: SelfModPatch }>(
+    `/api/self-mods/history/${encodeURIComponent(archive_id)}/${encodeURIComponent(patch_filename)}/restore`,
+  );
+
+export const restoreSelfModArchive = (archive_id: string) =>
+  json_post<{
+    ok: boolean;
+    restored: string[];
+    failed_at: string | null;
+    error: string | null;
+  }>(`/api/self-mods/history/${encodeURIComponent(archive_id)}/restore`);
+
 
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {

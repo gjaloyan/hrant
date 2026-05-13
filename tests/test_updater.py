@@ -1,4 +1,4 @@
-"""Tests for backend.updater — history ledger + git wrapper logic.
+﻿"""Tests for backend.updater — history ledger + git wrapper logic.
 
 The git/pip/npm calls themselves are mocked: real subprocess
 invocations would touch the actual repo (and the actual remote!)
@@ -119,7 +119,7 @@ def test_update_refuses_on_dirty_tree(isolated_history):
     with patch.object(updater, "is_dirty", return_value=True), \
          patch.object(updater, "current_sha", return_value="old"), \
          patch.object(updater, "current_branch", return_value="master"):
-        r = updater.do_update()
+        r = updater.do_update(assume_yes=True)
     assert r.ok is False
     assert "dirty" in (r.error or "").lower() or "uncommitted" in (r.error or "").lower()
     # No history entry written when we refused before doing anything.
@@ -132,7 +132,7 @@ def test_update_returns_up_to_date_when_no_incoming(isolated_history):
          patch.object(updater, "current_branch", return_value="master"), \
          patch.object(updater, "fetch_remote", return_value=(True, "")), \
          patch.object(updater, "commits_ahead", return_value=[]):
-        r = updater.do_update()
+        r = updater.do_update(assume_yes=True)
     assert r.ok is True
     assert r.pulled_commits == 0
     assert "up to date" in " ".join(r.messages or []).lower()
@@ -152,7 +152,7 @@ def test_update_records_pre_update_then_success(isolated_history):
          patch.object(updater, "_git", return_value=fake_pull), \
          patch.object(updater, "run_pip_install", return_value=(True, "ok")), \
          patch.object(updater, "frontend_changed", return_value=False):
-        r = updater.do_update(skip_frontend=False)
+        r = updater.do_update(skip_frontend=False, assume_yes=True)
     assert r.ok is True
     assert r.pulled_commits == 1
     entries = updater.load_history()
@@ -171,7 +171,7 @@ def test_update_handles_pip_failure(isolated_history):
          patch.object(updater, "commits_ahead", return_value=commits), \
          patch.object(updater, "_git", return_value=fake_pull), \
          patch.object(updater, "run_pip_install", return_value=(False, "no module 'xyz'")):
-        r = updater.do_update()
+        r = updater.do_update(assume_yes=True)
     assert r.ok is False
     assert "pip install" in (r.error or "")
     # Failure recorded.
@@ -188,11 +188,79 @@ def test_update_handles_non_fast_forward_pull(isolated_history):
          patch.object(updater, "fetch_remote", return_value=(True, "")), \
          patch.object(updater, "commits_ahead", return_value=commits), \
          patch.object(updater, "_git", return_value=fake_pull):
-        r = updater.do_update()
+        r = updater.do_update(assume_yes=True)
     assert r.ok is False
     assert "fast-forward" in (r.error or "")
     results = [e.result for e in updater.load_history()]
     assert "failed_at_pull" in results
+
+
+def test_update_prompts_when_active_self_mods(isolated_history):
+    """Active self-mods + assume_yes=False → consent callback fires;
+    saying no returns cancelled=True without touching git."""
+    seen_prompts: list[str] = []
+
+    def fake_confirm(prompt: str, default: bool = False) -> bool:
+        seen_prompts.append(prompt)
+        return False
+
+    with patch.object(updater, "count_active_self_mods", return_value=2), \
+         patch.object(updater, "is_dirty", return_value=False), \
+         patch.object(updater, "current_sha", return_value="X"), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "_git") as m_git:
+        r = updater.do_update(confirm=fake_confirm, assume_yes=False)
+    assert r.cancelled is True
+    assert "2" in seen_prompts[0]
+    assert "archive" in seen_prompts[0].lower()
+    m_git.assert_not_called()
+
+
+def test_update_skips_prompt_when_no_active_self_mods(isolated_history):
+    confirm_calls = [0]
+
+    def fake_confirm(prompt, default=False):
+        confirm_calls[0] += 1
+        return True
+
+    with patch.object(updater, "count_active_self_mods", return_value=0), \
+         patch.object(updater, "is_dirty", return_value=False), \
+         patch.object(updater, "current_sha", return_value="X"), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "fetch_remote", return_value=(True, "")), \
+         patch.object(updater, "commits_ahead", return_value=[]):
+        r = updater.do_update(confirm=fake_confirm, assume_yes=False)
+    assert r.cancelled is False
+    assert confirm_calls[0] == 0  # never asked
+
+
+def test_update_archives_active_self_mods_after_pull(isolated_history):
+    """After a successful pull, archive_all_active is called and its
+    summary lands in UpdateResult.self_mods_archived/archive_id."""
+    commits = [{"sha": "abc", "subject": "x"}]
+    fake_pull = MagicMock(returncode=0, stdout="", stderr="")
+    archive_report = {
+        "archive_id": "2026-05-13T12-00-00Z",
+        "archived_count": 3,
+        "archive_path": "/tmp/x",
+    }
+    sha_seq = ["OLD", "OLD", "NEW"]
+    with patch.object(updater, "count_active_self_mods", return_value=3), \
+         patch.object(updater, "is_dirty", return_value=False), \
+         patch.object(updater, "current_sha", side_effect=lambda: sha_seq.pop(0) if sha_seq else "NEW"), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "fetch_remote", return_value=(True, "")), \
+         patch.object(updater, "commits_ahead", return_value=commits), \
+         patch.object(updater, "_git", return_value=fake_pull), \
+         patch.object(updater, "run_pip_install", return_value=(True, "")), \
+         patch.object(updater, "frontend_changed", return_value=False):
+        # Patch the self_mods import inside do_update.
+        from backend import self_mods
+        with patch.object(self_mods, "archive_all_active", return_value=archive_report):
+            r = updater.do_update(assume_yes=True)
+    assert r.ok is True
+    assert r.self_mods_archived == 3
+    assert r.self_mods_archive_id == "2026-05-13T12-00-00Z"
 
 
 # --- do_rollback -------------------------------------------------------

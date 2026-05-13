@@ -300,14 +300,65 @@ def self_mods_revert_one(patch_id: str):
 
 @router.post("/api/self-mods/revert-all")
 def self_mods_revert_all():
-    """Nuclear option: `git reset --hard origin/master` + wipe all
-    patch files. Use with confidence — user data is never touched
-    (it lives in data_dir, not the engine repo)."""
+    """Reset engine to official: `git reset --hard origin/master` +
+    wipe top-level patch files. History (data_dir/self_mods/history/)
+    is preserved — the user can still re-apply archived patches from
+    Settings → Self-Modifications → History.
+
+    User data (knowledge, workspace, settings) is untouched."""
     from .. import self_mods
     ok, err = self_mods.revert_all_to_official()
     if not ok:
         raise HTTPException(400, err)
     return {"ok": True}
+
+
+@router.get("/api/self-mods/history")
+def self_mods_history():
+    """Every archive bundle (newest first). Each entry:
+    {archive_id, archived_at, patch_count, entries: [PatchEntry...]}.
+
+    Archives are created automatically by `hrant update` (it moves
+    active patches into a timestamped bundle before pulling new
+    engine code) so the user can re-apply what they want afterward."""
+    from dataclasses import asdict
+    from .. import self_mods
+    archives = self_mods.list_history()
+    return {
+        "archives": [
+            {
+                "archive_id": a.archive_id,
+                "archived_at": a.archived_at,
+                "patch_count": a.patch_count,
+                "entries": [asdict(e) for e in a.entries],
+            }
+            for a in archives
+        ]
+    }
+
+
+@router.post("/api/self-mods/history/{archive_id}/{patch_filename}/restore")
+def self_mods_restore_one(archive_id: str, patch_filename: str):
+    """Re-apply ONE archived patch as a fresh active modification.
+    The archive bundle is unchanged; restoring is non-destructive."""
+    from dataclasses import asdict
+    from .. import self_mods
+    entry, err = self_mods.restore_from_history(archive_id, patch_filename)
+    if entry is None:
+        raise HTTPException(400, err)
+    return {"ok": True, "entry": asdict(entry)}
+
+
+@router.post("/api/self-mods/history/{archive_id}/restore")
+def self_mods_restore_batch(archive_id: str):
+    """Re-apply EVERY patch in an archive bundle, in order. Stops at
+    the first conflict and reports which patch failed — user can
+    then restore the rest one-by-one if needed."""
+    from .. import self_mods
+    result = self_mods.restore_archive_batch(archive_id)
+    if result.get("error"):
+        raise HTTPException(400, result["error"])
+    return {"ok": True, **result}
 
 
 @router.delete("/api/self-modifier/proposals/{proposal_id}")
