@@ -50,6 +50,17 @@ class AutonomicScheduler:
     def is_running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    @property
+    def interval(self) -> float:
+        return self._interval
+
+    def set_interval(self, seconds: float) -> None:
+        """Live-update the tick interval. The current sleep finishes
+        on the old value (asyncio.wait_for is already pending); the
+        NEXT iteration picks up the new value. Caller validates the
+        range — anything stranger than that is the caller's problem."""
+        self._interval = float(seconds)
+
     async def _loop(self) -> None:
         log.info("Autonomic scheduler loop starting (interval=%ss)", self._interval)
         try:

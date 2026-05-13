@@ -8,7 +8,10 @@ import {
   fetchLeverHistory,
   fetchImmune,
   toggleKillSwitch,
+  fetchAutonomicSettings,
+  putAutonomicSettings,
   AutonomicStatus,
+  AutonomicSettings,
   PendingEntry,
   TickEntry,
   LeverReport,
@@ -46,6 +49,8 @@ export default function AutonomicPanel() {
   const [leverHistory, setLeverHistory] = useState<LeverReport[]>([]);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [immune, setImmune] = useState<ImmuneSignature[]>([]);
+  const [autonomicSettings, setAutonomicSettings] = useState<AutonomicSettings | null>(null);
+  const [intervalDraft, setIntervalDraft] = useState<number>(30);
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -93,6 +98,38 @@ export default function AutonomicPanel() {
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [refresh]);
+
+  const refreshSettings = useCallback(async () => {
+    try {
+      const s = await fetchAutonomicSettings();
+      setAutonomicSettings(s);
+      const cur = s.effective.tick_interval_seconds ?? s.saved.tick_interval_seconds ?? 30;
+      setIntervalDraft(cur);
+    } catch (e: any) {
+      flash("Settings load error: " + e.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshSettings();
+  }, [refreshSettings]);
+
+  const handleSaveInterval = async () => {
+    setBusy(true);
+    try {
+      const r = await putAutonomicSettings(intervalDraft);
+      flash(
+        r.applied_live
+          ? `Tick interval: ${r.effective.tick_interval_seconds}s (live)`
+          : `Tick interval: ${r.effective.tick_interval_seconds}s (saved; restart to apply)`,
+      );
+      refreshSettings();
+    } catch (e: any) {
+      flash("Save failed: " + (e?.message || String(e)));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const refreshSlow = useCallback(async () => {
     try {
@@ -190,6 +227,43 @@ export default function AutonomicPanel() {
 
         {/* Sections */}
         <div className="flex-1 overflow-y-auto p-3 space-y-4 text-xs">
+          {/* Scheduler settings */}
+          <section>
+            <h2 className="font-bold text-sm mb-2">⚙ Scheduler</h2>
+            <div className="p-2 rounded bg-slate-800/60 space-y-2">
+              <div className="flex items-center gap-3 flex-wrap">
+                <label className="opacity-70">Tick interval (s):</label>
+                <input
+                  type="number"
+                  min={autonomicSettings?.range_seconds.min ?? 1}
+                  max={autonomicSettings?.range_seconds.max ?? 3600}
+                  step={1}
+                  value={intervalDraft}
+                  onChange={(e) => setIntervalDraft(Number(e.target.value))}
+                  className="w-24 bg-slate-900 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600 font-mono"
+                />
+                <span className="opacity-50">
+                  live: {autonomicSettings?.effective.tick_interval_seconds ?? "—"}s · saved:{" "}
+                  {autonomicSettings?.saved.tick_interval_seconds ?? "(none)"}
+                </span>
+                <button
+                  onClick={handleSaveInterval}
+                  disabled={busy}
+                  className="ml-auto bg-sky-700 hover:bg-sky-600 disabled:opacity-40 rounded px-2 py-1 text-[10px]"
+                >
+                  Save (applies live)
+                </button>
+              </div>
+              <div className="text-[10px] opacity-50">
+                Lower values run the loop more often (more CPU, faster reactions);
+                higher values reduce overhead. Range{" "}
+                {autonomicSettings?.range_seconds.min ?? 1}–
+                {autonomicSettings?.range_seconds.max ?? 3600}s. Stored in{" "}
+                <span className="font-mono">knowledge/autonomic_settings.json</span>.
+              </div>
+            </div>
+          </section>
+
           {/* Pending Approvals */}
           <section>
             <h2 className="font-bold text-sm mb-2">

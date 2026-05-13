@@ -48,7 +48,11 @@ class SchedulerBundle:
 
 def build_scheduler() -> SchedulerBundle:
     enabled_path = _env_path("AUTONOMIC_ENABLED_PATH", str(DEFAULT_ENABLED_PATH))
-    interval = float(os.environ.get("AUTONOMIC_TICK_SECONDS", "30"))
+    # Effective interval: knowledge/autonomic_settings.json > env > 30s.
+    # Live updates after boot go through scheduler.set_interval() —
+    # see backend.api.autonomic.put_autonomic_settings.
+    from .settings import resolve_tick_interval
+    interval = resolve_tick_interval()
     knowledge_root = _env_path("AUTONOMIC_KNOWLEDGE_ROOT", "knowledge")
     error_log = _env_path("AUTONOMIC_ERROR_LOG_PATH", "knowledge/error_log.jsonl")
     lever_log = _env_path("AUTONOMIC_LEVER_LOG_PATH", "knowledge/autonomic/lever_log.jsonl")

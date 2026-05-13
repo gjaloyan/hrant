@@ -42,6 +42,10 @@ class KillSwitchRequest(BaseModel):
     enabled: bool
 
 
+class AutonomicSettingsRequest(BaseModel):
+    tick_interval_seconds: float
+
+
 def _registry(request: Request) -> LeverRegistry:
     return getattr(request.app.state, "autonomic_registry", None) or LeverRegistry.instance()
 
@@ -208,3 +212,48 @@ def toggle_kill_switch(request: Request, body: KillSwitchRequest) -> dict[str, A
     else:
         ks.disable()
     return {"enabled": ks.is_enabled()}
+
+
+@router.get("/settings")
+def get_autonomic_settings(request: Request) -> dict[str, Any]:
+    """Effective autonomic settings + the saved-on-disk overlay.
+
+    `effective` is what's actually live (scheduler's current interval);
+    `saved` is the contents of knowledge/autonomic_settings.json,
+    which may differ from effective if a future restart would pick
+    up a value that hasn't been applied yet (shouldn't happen, but
+    surfaces it if it does).
+    """
+    from .settings import load_settings
+    scheduler = getattr(request.app.state, "autonomic_scheduler", None)
+    live_interval = scheduler.interval if scheduler is not None else None
+    return {
+        "effective": {"tick_interval_seconds": live_interval},
+        "saved": load_settings(),
+        "range_seconds": {"min": 1, "max": 3600},
+    }
+
+
+@router.put("/settings")
+def put_autonomic_settings(
+    request: Request, body: AutonomicSettingsRequest,
+) -> dict[str, Any]:
+    """Validate, persist to knowledge/autonomic_settings.json, and
+    apply to the live scheduler. The next tick uses the new interval
+    — no restart required.
+    """
+    from .settings import save_settings, validate_interval
+    clean, err = validate_interval(body.tick_interval_seconds)
+    if err is not None or clean is None:
+        raise HTTPException(400, err or "invalid tick_interval_seconds")
+    save_settings({"tick_interval_seconds": clean})
+    scheduler = getattr(request.app.state, "autonomic_scheduler", None)
+    applied_live = False
+    if scheduler is not None:
+        scheduler.set_interval(clean)
+        applied_live = True
+    return {
+        "ok": True,
+        "applied_live": applied_live,
+        "effective": {"tick_interval_seconds": clean},
+    }

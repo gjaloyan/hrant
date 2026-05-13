@@ -1497,3 +1497,22 @@ export const fetchImmune = () =>
 
 export const toggleKillSwitch = (enabled: boolean) =>
   json_post<{ enabled: boolean }>("/api/autonomic/kill-switch", { enabled });
+
+// Autonomic scheduler settings (currently just tick_interval_seconds).
+// Distinct from /api/engine/config because changing the interval is a
+// live side-effect on the scheduler, not a CONFIG mutation.
+export type AutonomicSettings = {
+  effective: { tick_interval_seconds: number | null };
+  saved: { tick_interval_seconds?: number };
+  range_seconds: { min: number; max: number };
+};
+
+export const fetchAutonomicSettings = () =>
+  json_get<AutonomicSettings>("/api/autonomic/settings");
+
+export const putAutonomicSettings = (tick_interval_seconds: number) =>
+  json_put<{
+    ok: boolean;
+    applied_live: boolean;
+    effective: { tick_interval_seconds: number };
+  }>("/api/autonomic/settings", { tick_interval_seconds });
