@@ -456,6 +456,115 @@ def cmd_service_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- rebuild (frontend) -------------------------------------------------
+
+
+def cmd_rebuild(args: argparse.Namespace) -> int:
+    """Run `npm install && npm run build` in frontend/.
+
+    The agent serves frontend/dist/ as static files from FastAPI on
+    port 8000. After editing TSX you need to rebuild for the served
+    bundle to pick up the change — this command saves a `cd frontend`
+    + remembering the two npm steps."""
+    from . import updater
+    ok, out = updater.run_frontend_build()
+    if not ok:
+        _print_err(out)
+        return 1
+    _print_ok("frontend rebuilt")
+    return 0
+
+
+# --- update / rollback --------------------------------------------------
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """Pull engine updates from origin/<branch>, reinstall deps,
+    rebuild frontend. Records the previous SHA in update_history.json
+    so `hrant rollback` is always one command away.
+
+    Flags:
+      --check          show what's available without changing anything
+      --skip-frontend  backend-only update (faster; safe when no FE changes)
+      --skip-pip       skip `pip install -e .` (only safe when pyproject
+                       hasn't changed)
+      --branch <name>  override the default branch (master)
+    """
+    from . import updater
+
+    branch = args.branch or updater.current_branch() or "master"
+    if args.check:
+        # Just fetch and show what's available; never mutate.
+        ok, err = updater.fetch_remote(branch)
+        if not ok:
+            _print_err(f"fetch failed: {err}")
+            return 1
+        incoming = updater.commits_ahead(branch)
+        if not incoming:
+            _print_ok(f"already up to date on origin/{branch}")
+            return 0
+        print(f"  {len(incoming)} commit(s) on origin/{branch} ahead of HEAD:")
+        for c in incoming:
+            print(f"    {c['sha']}  {c['subject']}")
+        print()
+        print("Run `hrant update` to apply.")
+        return 0
+
+    result = updater.do_update(
+        branch=branch,
+        skip_frontend=bool(args.skip_frontend),
+        skip_pip=bool(args.skip_pip),
+    )
+    if not result.ok:
+        _print_err(result.error or "update failed")
+        return 1
+    for m in result.messages or []:
+        _print_ok(m)
+    if result.pulled_commits == 0:
+        return 0
+    print()
+    print("update complete. Restart the agent to pick up engine changes:")
+    print("  hrant run     # or `systemctl --user restart hrant` on a server")
+    return 0
+
+
+def cmd_rollback(args: argparse.Namespace) -> int:
+    """Revert the engine to a previous SHA from update_history.json.
+
+    Without --to: rolls back one step (to the version before the
+    last successful update). With --to <sha>: rolls back to a
+    specific commit.
+
+    --list shows the history without changing anything.
+    """
+    from . import updater
+
+    if args.list:
+        entries = updater.load_history()
+        if not entries:
+            print("no update history yet — run `hrant update` first")
+            return 0
+        print(f"{len(entries)} entries (oldest → newest):")
+        for e in entries:
+            print(f"  {e.timestamp}  {e.sha[:8]}  {e.result:18s}  {e.note}")
+        return 0
+
+    result = updater.do_rollback(
+        to_sha=args.to,
+        skip_frontend=bool(args.skip_frontend),
+        skip_pip=bool(args.skip_pip),
+    )
+    if not result.ok:
+        _print_err(result.error or "rollback failed")
+        return 1
+    for m in result.messages or []:
+        _print_ok(m)
+    print()
+    print("rollback complete. Restart the agent:")
+    print("  hrant run")
+    return 0
+
+
 # --- discover -----------------------------------------------------------
 
 
@@ -592,6 +701,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_svc_remove.add_argument("--platform", default=None,
                               choices=("linux", "macos", "windows"))
     p_svc_remove.set_defaults(func=cmd_service_uninstall)
+
+    p_rebuild = sub.add_parser(
+        "rebuild",
+        help="rebuild the frontend (npm install + build) without pulling",
+    )
+    p_rebuild.set_defaults(func=lambda _a: cmd_rebuild(_a))
+
+    p_update = sub.add_parser(
+        "update",
+        help="pull engine updates from origin, reinstall deps, rebuild frontend",
+    )
+    p_update.add_argument("--check", action="store_true", help="show what's available; don't apply")
+    p_update.add_argument("--branch", default=None, help="branch to track (default: master)")
+    p_update.add_argument("--skip-frontend", action="store_true", help="skip npm install + build")
+    p_update.add_argument("--skip-pip", action="store_true", help="skip pip install -e .")
+    p_update.set_defaults(func=cmd_update)
+
+    p_rollback = sub.add_parser(
+        "rollback",
+        help="revert engine to a previous SHA from update_history.json",
+    )
+    p_rollback.add_argument("--to", default=None, help="rollback target SHA")
+    p_rollback.add_argument("--list", action="store_true", help="print update history; don't change anything")
+    p_rollback.add_argument("--skip-frontend", action="store_true", help="skip npm install + build")
+    p_rollback.add_argument("--skip-pip", action="store_true", help="skip pip install -e .")
+    p_rollback.set_defaults(func=cmd_rollback)
 
     p_discover = sub.add_parser(
         "discover",
