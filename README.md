@@ -8,8 +8,8 @@
 
 ```bash
 # 1. Get the engine
-git clone https://github.com/gjaloyan/AGI.git
-cd AGI
+git clone https://github.com/gjaloyan/hrant.git
+cd hrant
 
 # 2. Python + Node deps
 python -m venv .venv && source .venv/bin/activate     # or .venv\Scripts\activate on Windows

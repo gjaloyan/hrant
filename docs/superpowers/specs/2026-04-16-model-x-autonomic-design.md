@@ -9,7 +9,7 @@
 
 ## 0. Контекст и цель
 
-Проект: self-learning agent в `c:\Users\samsung\AGI` — Python CLI + FastAPI backend + React frontend. Production-deployment планируется на Linux-сервер пользователя (CPU-only: Intel i7-8700 6C/12T @ 3.2GHz, 24GB DDR4 RAM, без GPU).
+Проект: self-learning agent Hrant — Python CLI + FastAPI backend + React frontend. Production-deployment планируется на Linux-сервер пользователя (CPU-only setups supported; GPU optional).
 
 **Цель D:** Задать архитектуру автономного (фонового) слоя агента — «вегетативной нервной системы» Model X, которая работает без команд пользователя, поддерживает гомеостаз агента, диагностирует и чинит сбои, растёт в самосознании. D — это дизайн-документ, а не реализация. Реализация планируется отдельно через writing-plans.
 

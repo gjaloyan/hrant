@@ -1,4 +1,4 @@
-"""Service discovery — probe known ports for upstream services.
+﻿"""Service discovery — probe known ports for upstream services.
 
 The agent's external services (Whisper STT, Piper TTS, Ollama, …)
 typically live on a separate machine the user can reach over
@@ -18,12 +18,12 @@ code actually wires up. Adding a fourth one is a one-liner in
 
 Usage:
   from backend.discovery import discover_services
-  result = discover_services(host="100.124.210.21")
-  # result["whisper"] → {"ok": True, "url": "http://100.124.210.21:8016", ...}
+  result = discover_services(host="100.64.0.1")
+  # result["whisper"] → {"ok": True, "url": "http://100.64.0.1:8016", ...}
 
 Or via CLI:
   hrant discover                      # probes $TAILSCALE_HOST or asks
-  hrant discover --host 100.124.210.21
+  hrant discover --host 100.64.0.1
   hrant discover --apply              # also writes URLs into config files
 """
 from __future__ import annotations
@@ -126,7 +126,7 @@ def discover_services(
             "_error": (
                 "no host provided. Pass `host=` or set the "
                 "TAILSCALE_HOST environment variable to your home "
-                "server's Tailscale IP (e.g. 100.124.210.21)."
+                "server's Tailscale IP (e.g. 100.64.0.1)."
             )
         }
     targets = services or list(KNOWN_SERVICES.keys())

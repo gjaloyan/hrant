@@ -1,4 +1,4 @@
-"""Voice config + service discovery endpoints.
+﻿"""Voice config + service discovery endpoints.
 
 Three small surfaces packaged together because they all live in the
 same UX corner ("Voice tab" in the WebUI):
@@ -123,7 +123,7 @@ def api_discover(
 
     Response:
         {
-          "host": "100.124.210.21",
+          "host": "100.64.0.1",
           "found": {
             "whisper": {"ok": true, "url": "..."},
             "piper":   {"ok": false, "reason": "..."},

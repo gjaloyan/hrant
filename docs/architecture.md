@@ -1,4 +1,4 @@
-# Архитектура self-learning агента
+﻿# Архитектура self-learning агента
 
 Документ описывает, как агент устроен от и до. Все диаграммы —
 [Mermaid](https://mermaid.js.org/), они рендерятся прямо в GitHub
@@ -285,7 +285,7 @@ flowchart TD
 `backend/providers.py`. A может быть Anthropic, Codex (OpenAI ChatGPT
 subscription), Bedrock, Cohere, Copilot, или любой
 OpenAI-совместимый endpoint. B по умолчанию — `llama-server` /
-Ollama на `100.124.210.21:8015`-ish.
+Ollama на `100.64.0.1:8015`-ish.
 
 ---
 

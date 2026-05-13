@@ -291,7 +291,7 @@ _COMMON_OTHER = {
     #   mcp_servers:
     #     - name: filesystem
     #       command: npx
-    #       args: ["-y", "@modelcontextprotocol/server-filesystem", "C:\\Users\\samsung\\AGI"]
+    #       args: ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/expose"]
     #       enabled: true
     "mcp_servers": [],
 }

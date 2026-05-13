@@ -54,7 +54,7 @@ telegram = [
 hrant = "backend.cli:main"
 
 [project.urls]
-Repository = "https://github.com/gjaloyan/AGI"
+Repository = "https://github.com/gjaloyan/hrant"
 
 [tool.setuptools]
 # We ship only the backend package; frontend dist is loaded at runtime

@@ -1,10 +1,9 @@
-# AGI Agent — Roadmap
+# Hrant — Roadmap
 
 > Мастер-документ проекта. Показывает декомпозицию работ, статус каждой части, ссылки на spec и implementation plan'ы.
 
-**Владелец:** Gor (`gjaloyan@glgroup.am`)
-**Production target:** Linux server (Intel i7-8700 6C/12T, 24GB RAM, CPU-only)
-**Dev:** Windows 11, `c:\Users\samsung\AGI`
+**Production target:** Linux server (CPU-only setups supported; GPU optional)
+**Dev:** any OS with Python 3.10+ and Node 18+
 
 ---
 

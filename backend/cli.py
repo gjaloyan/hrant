@@ -1,4 +1,4 @@
-"""Unified CLI for the agent (its name is Hrant).
+﻿"""Unified CLI for the agent (its name is Hrant).
 
 Subcommands:
     hrant init     — interactive setup: API keys, mode, optional services
@@ -576,7 +576,7 @@ def cmd_discover(args: argparse.Namespace) -> int:
     Designed for the common setup: the agent runs on the user's
     laptop, the heavy services (Whisper, Piper, Ollama) run on a home
     server reachable over Tailscale. Manual URL entry through Settings
-    works but is fiddly — `hrant discover --host 100.124.210.21
+    works but is fiddly — `hrant discover --host 100.64.0.1
     --apply` is one command.
     """
     from .discovery import KNOWN_SERVICES, apply_discovery, discover_services
