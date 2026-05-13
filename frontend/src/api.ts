@@ -1388,6 +1388,29 @@ export const resetEngineConfig = () =>
   json_post<EngineConfigEnvelope & { ok: boolean }>("/api/engine/config/reset");
 
 
+// ---------- Self-modifications (patch overlay) ----------
+
+export type SelfModPatch = {
+  id: string;
+  slug: string;
+  file: string;
+  title: string;
+  created: string;
+  status: "applied" | "needs_review" | "reverted";
+  patch_filename: string;
+  last_error: string;
+};
+
+export const fetchSelfMods = () =>
+  json_get<{ patches: SelfModPatch[] }>("/api/self-mods");
+
+export const revertSelfMod = (patch_id: string) =>
+  json_post<{ ok: boolean; reverted: string }>(`/api/self-mods/${patch_id}/revert`);
+
+export const revertAllSelfMods = () =>
+  json_post<{ ok: boolean }>("/api/self-mods/revert-all");
+
+
 // ---------- Active model selection ----------
 export interface ActiveModelSelection {
   provider_id: string;
