@@ -734,7 +734,7 @@ def print_final_summary(result: dict, data_dir, engine_root) -> None:
     print()
     print(_bold("  Next:"))
     print("    hrant run                # start the server")
-    print("    open http://127.0.0.1:8000")
+    print("    open http://127.0.0.1:3333")
     if not result.get("provider_registered"):
         print()
         print(_dim("  Add a provider any time:"))

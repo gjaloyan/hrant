@@ -1,4 +1,4 @@
-# Hrant — Self-Learning Agent
+﻿# Hrant — Self-Learning Agent
 
 Локальный AI-агент, который **не хранит знания в весах модели**. Вместо этого он читает источники, ведёт структурированные заметки (markdown) на диске и подгружает их в контекст только когда нужно. Растёт в компетенции под конкретные задачи, сохраняя маленькое эффективное ядро.
 
@@ -21,12 +21,12 @@ hrant init
 
 # 4. Start the agent
 hrant run
-# Open http://127.0.0.1:8000
+# Open http://127.0.0.1:3333
 ```
 
 **Что произойдёт:**
 - `hrant init` создаст `~/.hrant/data/` (или туда, куда указывает `HRANT_DATA_DIR`), скопирует стартовые шаблоны из `knowledge_templates/`, сделает `config.yaml` из `config.example.yaml`, и спросит про API-ключи (Anthropic, OpenAI) + опциональные URL сервисов.
-- `hrant run` поднимет FastAPI на `127.0.0.1:8000` (WebUI там же) и автоматически запустит сконфигурированные channels.
+- `hrant run` поднимет FastAPI на `127.0.0.1:3333` (WebUI там же) и автоматически запустит сконфигурированные channels.
 
 ## Engine vs Data
 
@@ -66,7 +66,7 @@ hrant service uninstall            # удалить unit, оставить venv
 
 ## Configure via WebUI
 
-После `hrant run` → `http://127.0.0.1:8000` → Settings. Вкладки:
+После `hrant run` → `http://127.0.0.1:3333` → Settings. Вкладки:
 
 - **Identity / Soul / User Profile** — кто такой агент, кто такой пользователь
 - **Providers** — добавлять/переключать LLM-провайдеры (Anthropic, OpenAI, Ollama, …)
@@ -105,8 +105,8 @@ hrant service uninstall            # удалить unit, оставить venv
 ## API surface
 
 FastAPI генерирует интерактивную доку при запуске:
-- `http://127.0.0.1:8000/docs`  — Swagger UI
-- `http://127.0.0.1:8000/redoc` — ReDoc
+- `http://127.0.0.1:3333/docs`  — Swagger UI
+- `http://127.0.0.1:3333/redoc` — ReDoc
 
 Часто используемые endpoints: `/api/chat` (SSE-стрим), `/api/knowledge`, `/api/health`, `/api/discover`, `/api/engine/config`, `/api/autonomic/*`. Полный список — в Swagger UI.
 

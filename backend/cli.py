@@ -247,8 +247,34 @@ def cmd_run(args: argparse.Namespace) -> int:
         _print_err("uvicorn not installed — run `pip install uvicorn[standard]`")
         return 1
     host = args.host or "127.0.0.1"
-    port = args.port or 8000
+    port = args.port or 3333
     reload = bool(args.reload)
+
+    # Auto-build the frontend when it's missing. Fresh installs don't
+    # ship `frontend/dist/` (it's gitignored), so a `git clone +
+    # pip install -e . + hrant run` would 404 on GET / because the
+    # static-mount guard in backend/main.py skips when the directory
+    # doesn't exist.
+    if not bool(getattr(args, "skip_frontend_build", False)):
+        from . import paths
+        dist_index = paths.repo_root() / "frontend" / "dist" / "index.html"
+        if not dist_index.exists():
+            _print_warn("frontend/dist/ missing — building (one-time, ~30s)...")
+            try:
+                from . import updater
+                ok, msg = updater.run_frontend_build()
+            except Exception as e:
+                ok, msg = False, str(e)
+            if ok:
+                _print_ok("frontend built")
+            else:
+                _print_err(
+                    f"frontend build failed: {msg[:300]}\n"
+                    "  → install Node.js + npm and re-run `hrant run`,\n"
+                    "  → or pass --skip-frontend-build (API still works,"
+                    " WebUI will 404)."
+                )
+                return 1
     print(f"starting agent on http://{host}:{port}  (reload={reload})")
     uvicorn.run(
         "backend.main:app",
@@ -429,7 +455,7 @@ def cmd_service_install(args: argparse.Namespace) -> int:
     """
     platform = (args.platform or _detect_platform()).lower()
     host = args.host or "127.0.0.1"
-    port = int(args.port or 8000)
+    port = int(args.port or 3333)
     try:
         template_path, target_path = _service_template_paths(platform)
     except ValueError as e:
@@ -516,9 +542,9 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     """Run `npm install && npm run build` in frontend/.
 
     The agent serves frontend/dist/ as static files from FastAPI on
-    port 8000. After editing TSX you need to rebuild for the served
-    bundle to pick up the change — this command saves a `cd frontend`
-    + remembering the two npm steps."""
+    its bind port (default 3333). After editing TSX you need to
+    rebuild for the served bundle to pick up the change — this
+    command saves a `cd frontend` + remembering the two npm steps."""
     from . import updater
     ok, out = updater.run_frontend_build()
     if not ok:
@@ -1107,7 +1133,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser("run", help="start the FastAPI server")
     p_run.add_argument("--host", default=None, help="bind host (default 127.0.0.1)")
-    p_run.add_argument("--port", type=int, default=None, help="bind port (default 8000)")
+    p_run.add_argument("--port", type=int, default=None, help="bind port (default 3333)")
+    p_run.add_argument(
+        "--skip-frontend-build", action="store_true",
+        help="don't auto-build frontend/dist/ when missing "
+             "(API works, WebUI 404s — fine if you're API-only)",
+    )
     p_run.add_argument("--reload", action="store_true", help="auto-reload on code change")
     p_run.add_argument(
         "--log-level", default=None,
@@ -1139,7 +1170,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--host", default=None, help="bind host (default 127.0.0.1)"
     )
     p_install.add_argument(
-        "--port", type=int, default=None, help="bind port (default 8000)"
+        "--port", type=int, default=None, help="bind port (default 3333)"
     )
     p_install.set_defaults(func=cmd_service_install)
 

@@ -1,4 +1,4 @@
-# `hrant` — full CLI reference
+﻿# `hrant` — full CLI reference
 
 Top-level command structure:
 
@@ -36,7 +36,7 @@ Start the FastAPI server.
 hrant run [--host HOST] [--port PORT] [--reload] [--log-level LEVEL]
 ```
 
-Defaults: `--host 127.0.0.1 --port 8000 --log-level info`. Without `--reload`, runs as a single process suitable for systemd / launchd.
+Defaults: `--host 127.0.0.1 --port 3333 --log-level info`. Without `--reload`, runs as a single process suitable for systemd / launchd.
 
 ### `hrant status`
 
@@ -109,7 +109,7 @@ Without `--host`, uses `$TAILSCALE_HOST`. Without `--services`, probes all three
 
 ### `hrant rebuild`
 
-Run `npm install && npm run build` in `frontend/`. Saves typing during dev when you've edited TSX and need port 8000 to pick it up.
+Run `npm install && npm run build` in `frontend/`. Saves typing during dev when you've edited TSX and need port 3333 to pick it up.
 
 ### `hrant update`
 
