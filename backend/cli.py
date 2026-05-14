@@ -813,6 +813,47 @@ def cmd_gateway_logs(args: argparse.Namespace) -> int:
     return rc
 
 
+# --- config (interactive wizard + get/set/list) -------------------------
+
+
+def cmd_config(args: argparse.Namespace) -> int:
+    """Dispatch for the `config` group. With no subcommand, drops
+    into the interactive wizard. Otherwise routes to one of the
+    helpers in `backend/cli_config.py`."""
+    from . import cli_config as cc
+    action = getattr(args, "config_cmd", None) or ""
+    if action in ("", None):
+        return cc.run_menu()
+    if action == "list":
+        cc.print_list()
+        return 0
+    if action == "files":
+        cc.print_files()
+        return 0
+    if action == "edit":
+        return cc.cmd_edit()
+    if action == "get":
+        if not getattr(args, "key", None):
+            _print_err("usage: hrant config get <key>")
+            return 2
+        return cc.print_get(args.key)
+    if action == "set":
+        if not getattr(args, "key", None):
+            _print_err("usage: hrant config set <key> <value>")
+            return 2
+        if getattr(args, "value", None) is None:
+            _print_err("usage: hrant config set <key> <value>")
+            return 2
+        return cc.cmd_set(args.key, args.value)
+    if action == "unset":
+        if not getattr(args, "key", None):
+            _print_err("usage: hrant config unset <key>")
+            return 2
+        return cc.cmd_unset(args.key)
+    _print_err(f"unknown config action: {action}")
+    return 2
+
+
 # --- rebuild (frontend) -------------------------------------------------
 
 
@@ -1523,6 +1564,43 @@ def build_parser() -> argparse.ArgumentParser:
     pg_uninstall.add_argument("--platform", default=None,
                               choices=("linux", "macos", "windows"))
     pg_uninstall.set_defaults(func=cmd_gateway_uninstall)
+
+    # `config` group — friendly surface over the important .env /
+    # JSON-file settings. No-args drops into an interactive wizard;
+    # subcommands mirror openclaw's `config get/set/unset/list/files`.
+    p_config = sub.add_parser(
+        "config",
+        help="view or change the important settings (interactive wizard with no args)",
+    )
+    sub_cfg = p_config.add_subparsers(dest="config_cmd", metavar="<action>")
+
+    pc_list = sub_cfg.add_parser("list", help="print all known settings (secrets redacted)")
+    pc_list.set_defaults(func=cmd_config)
+
+    pc_get = sub_cfg.add_parser("get", help="print one setting's value")
+    pc_get.add_argument("key", help="dotted key — see `hrant config list`")
+    pc_get.set_defaults(func=cmd_config)
+
+    pc_set = sub_cfg.add_parser("set", help="change one setting's value")
+    pc_set.add_argument("key", help="dotted key — see `hrant config list`")
+    pc_set.add_argument("value", help="new value (string; coerced per key type)")
+    pc_set.set_defaults(func=cmd_config)
+
+    pc_unset = sub_cfg.add_parser("unset", help="remove one setting")
+    pc_unset.add_argument("key")
+    pc_unset.set_defaults(func=cmd_config)
+
+    pc_files = sub_cfg.add_parser(
+        "files", help="show where each backing config file lives",
+    )
+    pc_files.set_defaults(func=cmd_config)
+
+    pc_edit = sub_cfg.add_parser(
+        "edit", help="open .env in $EDITOR (escape hatch)",
+    )
+    pc_edit.set_defaults(func=cmd_config)
+
+    p_config.set_defaults(func=cmd_config)
 
     p_rebuild = sub.add_parser(
         "rebuild",

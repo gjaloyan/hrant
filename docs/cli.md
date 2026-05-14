@@ -61,6 +61,49 @@ REPL commands (Russian, inherited): `запомни …` / `забудь …` / 
 
 Print the version string.
 
+### `hrant config`
+
+Friendly surface over the configs most users actually want to change. Modelled on `openclaw config <get|set|...>` — flat, colored, with redacted secrets and an interactive wizard.
+
+```
+hrant config                    # interactive menu — main entry point for noob users
+hrant config list               # print every known setting, grouped, secrets redacted
+hrant config get  <key>         # print one value (secrets redacted)
+hrant config set  <key> <value> # change a value; coerces to int/float/choice per key
+hrant config unset <key>        # remove a value
+hrant config files              # show the paths to .env / config.yaml / *.json
+hrant config edit               # open .env in $EDITOR (escape hatch)
+```
+
+**Surfaced keys** — only the configs that matter for first-time users. Advanced knobs (engine sliders, autonomic levers, full provider table) stay in the WebUI Settings tabs.
+
+| Key | Backing file |
+|---|---|
+| `anthropic.api_key` | `.env:ANTHROPIC_API_KEY` (redacted) |
+| `openai.api_key` | `.env:OPENAI_API_KEY` (redacted) |
+| `telegram.bot_token` | `.env:TELEGRAM_BOT_TOKEN` (redacted) |
+| `tailscale.host` | `.env:TAILSCALE_HOST` |
+| `whisper.url` | `knowledge/transcriber_config.json:local_whisper.url` |
+| `tts.backend` | `knowledge/tts_config.json:backend` — choice: `auto / edge_tts / local_piper / openai_tts / disabled` |
+| `tts.piper_url` | `knowledge/tts_config.json:local_piper.url` |
+| `tts.edge_voice` | `knowledge/tts_config.json:edge_tts.voice` |
+| `tts.edge_voice_ru` | `knowledge/tts_config.json:edge_tts.voice_ru` |
+| `autonomic.heartbeat_seconds` | `knowledge/autonomic_settings.json:tick_interval_seconds` (1..3600) |
+
+Secrets are redacted on display — `list` and `get` show only the first 4 + last 4 chars. The actual file on disk is the source of truth; `hrant config` is just a friendlier face on it.
+
+**Colors:** warm orange accent (think openclaw's Lobster palette). Disabled automatically when stdout is not a TTY or `NO_COLOR` is set. On legacy Windows code pages, Unicode glyphs fall back to ASCII (`✓` → `[ok]`, `→` → `->`).
+
+**Examples:**
+
+```bash
+hrant config                                  # opens the interactive wizard
+hrant config set tts.backend edge_tts         # change TTS to free Microsoft voices
+hrant config set whisper.url http://100.64.0.5:8016
+hrant config set autonomic.heartbeat_seconds 60
+hrant config get anthropic.api_key            # prints `sk-a…xxxx`
+```
+
 ### `hrant provider`
 
 Manage LLM providers from the command line — same surface as the

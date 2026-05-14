@@ -28,6 +28,17 @@ hrant run
 - `hrant init` создаст `~/.hrant/data/` (или туда, куда указывает `HRANT_DATA_DIR`), скопирует стартовые шаблоны из `knowledge_templates/`, сделает `config.yaml` из `config.example.yaml`, и спросит про API-ключи (Anthropic, OpenAI) + опциональные URL сервисов.
 - `hrant run` поднимет FastAPI на `127.0.0.1:3333` (WebUI там же) и автоматически запустит сконфигурированные channels.
 
+Любую важную настройку потом можно поменять через `hrant config`:
+
+```bash
+hrant config                              # интерактивное меню — главный вход для новичков
+hrant config list                         # увидеть все настройки (секреты замаскированы)
+hrant config set tts.backend edge_tts     # пример: переключить голос на бесплатный Edge TTS
+hrant config set whisper.url http://...   # пример: указать STT-сервер
+```
+
+Подробности — [docs/cli.md](docs/cli.md#hrant-config).
+
 ## Engine vs Data
 
 ```
