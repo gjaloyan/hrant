@@ -152,6 +152,33 @@ hrant discover [--host HOST] [--services CSV] [--apply]
 
 Without `--host`, uses `$TAILSCALE_HOST`. Without `--services`, probes all three known services (whisper, piper, ollama). With `--apply`, writes discovered URLs into the per-service config files.
 
+### `hrant jobs`
+
+Durable per-turn records. Every user message (WebUI, Telegram, voice) gets a Job: an ID, status, prompt, response, timing, tool-call trace. Survives crashes — on `hrant run` startup, any job still in `running` or `queued` state is marked `interrupted` so you can retry it.
+
+```
+hrant jobs list   [--status running|failed|interrupted|...] [--channel webui|telegram|...] [--limit N]
+hrant jobs show   <id>
+hrant jobs retry  <id>      # clone the prompt into a new queued job
+hrant jobs cancel <id>      # mark a non-terminal job cancelled
+hrant jobs delete <id>      # purge the record
+```
+
+**State machine:**
+
+```
+queued → running → completed
+                ↘ failed         (LLM down, tool crash, exception)
+                ↘ interrupted    (server died mid-run — set on next boot)
+                ↘ cancelled      (user clicked Cancel)
+```
+
+**Storage:** one JSON file per job at `~/.hrant/data/jobs/<id>.json`. Flat layout — under ~1k jobs it's fine. WebUI **Settings → Jobs** tab is the primary surface (status filter chips with live counts, details pane with prompt/response/tool trace, retry/cancel buttons).
+
+**Boot recovery:** at `hrant run` startup, before binding the port, the recovery hook scans the jobs directory and flips anything `running` / `queued` to `interrupted`. Those were jobs in flight when the previous process died. The Jobs tab shows them with a yellow `interrupted N×` badge so you can retry.
+
+**Failover trace (Phase B preview):** each Job has an `attempts[]` list. When auto-failover lands, every provider tried for that turn appends one entry — you'll see "Anthropic 429 → OpenAI ok" in the WebUI without needing log files.
+
 ### `hrant rebuild`
 
 Run `npm install && npm run build` in `frontend/`. Saves typing during dev when you've edited TSX and need port 3333 to pick it up.

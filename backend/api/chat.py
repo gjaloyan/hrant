@@ -10,6 +10,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..agent import Agent
 from ..conversation import CONVERSATION
+from ..job_runner import run_tracked
 from ..llm import TOKENS
 from ..models import ChatRequest
 from ..project_mode import PROJECTS
@@ -56,8 +57,13 @@ async def chat(req: ChatRequest):
             # multi-user mode lands.
             from ..sessions import normalize_speaker
             target_speaker = normalize_speaker(req.speaker_id or f"{target_channel}:default")
-            res = await asyncio.to_thread(
-                lambda: agent.run(
+            # Job tracking — every turn gets a durable record. If
+            # this server dies mid-run, the boot recovery hook will
+            # mark the job `interrupted` so the user can retry it
+            # from the WebUI Jobs tab or `hrant jobs retry <id>`.
+            res, job_id = await asyncio.to_thread(
+                lambda: run_tracked(
+                    agent,
                     req.message,
                     req.project or PROJECTS.current,
                     req.attachments or None,
@@ -131,7 +137,12 @@ async def chat(req: ChatRequest):
                         "event": "tg_forward",
                         "message": f"TG forward error: {_e}",
                     })
-            queue.put_nowait({"type": "answer", "data": res.model_dump()})
+            # Attach job_id so the WebUI can deep-link to the Jobs
+            # tab from the answer message (small string, no payload
+            # bloat).
+            answer_payload = res.model_dump()
+            answer_payload["job_id"] = job_id
+            queue.put_nowait({"type": "answer", "data": answer_payload})
         except Exception as e:
             queue.put_nowait({"type": "error", "message": str(e)})
         finally:

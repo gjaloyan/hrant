@@ -10,6 +10,7 @@ import EngineTab from "./settings/EngineTab";
 import SelfModsTab from "./settings/SelfModsTab";
 import RolesTab from "./settings/RolesTab";
 import SkillsTab from "./settings/SkillsTab";
+import JobsTab from "./settings/JobsTab";
 import {
   clearConversation,
   compareModels,
@@ -62,7 +63,7 @@ import {
   type AvailableModel,
 } from "../api";
 
-type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "conversation" | "capabilities" | "status";
+type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "conversation" | "capabilities" | "status";
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState<IdentityTab>("soul");
@@ -276,6 +277,7 @@ export default function SettingsPanel() {
     { id: "selfmods", label: "Self-Modifications" },
     { id: "roles", label: "Roles & Contacts" },
     { id: "skills", label: "Skills" },
+    { id: "jobs", label: "Jobs" },
     { id: "conversation", label: "Conversation" },
     { id: "capabilities", label: "Capabilities" },
     { id: "status", label: "System Status" },
@@ -346,6 +348,8 @@ export default function SettingsPanel() {
         {tab === "roles" && <RolesTab flash={flash} />}
 
         {tab === "skills" && <SkillsTab flash={flash} />}
+
+        {tab === "jobs" && <JobsTab flash={flash} />}
 
         {tab === "providers" && (
           <div className="space-y-4">

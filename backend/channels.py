@@ -601,15 +601,27 @@ class TelegramBot:
                         stream.push(event, message)
 
                     agent = Agent(progress=_progress_cb)
-                    # Don't block the event loop — run the (sync) agent in
-                    # a thread pool so the streamer can keep editing.
-                    result = await running_loop.run_in_executor(
+                    # Job tracking — every Telegram turn gets a
+                    # durable record. reply_to carries the chat_id
+                    # so if we ever want to cross-restart-notify
+                    # ("sorry, I was interrupted, retry?") we have
+                    # the routing info. Don't block the event loop —
+                    # run the (sync) agent in a thread pool so the
+                    # streamer can keep editing.
+                    from .job_runner import run_tracked as _run_tracked
+                    reply_to = {
+                        "telegram_chat_id": update.message.chat.id,
+                        "telegram_user_id": update.effective_user.id if update.effective_user else None,
+                    }
+                    result, job_id = await running_loop.run_in_executor(
                         None,
-                        lambda: agent.run(
+                        lambda: _run_tracked(
+                            agent,
                             text, project=None,
                             attachments=attachment_shas or None,
                             channel="telegram",
                             speaker_id=speaker_id,
+                            reply_to=reply_to,
                         ),
                     )
                     answer = result.answer or "(no answer)"

@@ -1734,3 +1734,92 @@ export const putAutonomicSettings = (tick_interval_seconds: number) =>
     applied_live: boolean;
     effective: { tick_interval_seconds: number };
   }>("/api/autonomic/settings", { tick_interval_seconds });
+
+
+// ---------- Jobs (Phase 15A: durable per-turn records) ----------
+
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "interrupted"
+  | "cancelled";
+
+export type Job = {
+  id: string;
+  status: JobStatus;
+  channel: string;
+  speaker_id: string;
+  session_id: string | null;
+  prompt: string;
+  response: string | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+  started_at: number | null;
+  completed_at: number | null;
+  reply_to: Record<string, any>;
+  tool_calls: Array<{
+    name: string;
+    args_summary?: string;
+    ok: boolean;
+    error?: string | null;
+    elapsed_ms?: number;
+  }>;
+  attempts: Array<{
+    provider_id: string;
+    model: string;
+    ok: boolean;
+    error?: string | null;
+    elapsed_ms?: number;
+    started_at?: number;
+  }>;
+  retry_count: number;
+  interrupted_count: number;
+};
+
+export type JobsListResponse = {
+  total: number;
+  limit: number;
+  offset: number;
+  jobs: Job[];
+};
+
+export const fetchJobs = (params: {
+  status?: JobStatus;
+  channel?: string;
+  speaker_id?: string;
+  limit?: number;
+  offset?: number;
+} = {}) => {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.channel) q.set("channel", params.channel);
+  if (params.speaker_id) q.set("speaker_id", params.speaker_id);
+  if (params.limit !== undefined) q.set("limit", String(params.limit));
+  if (params.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString();
+  return json_get<JobsListResponse>("/api/jobs" + (qs ? `?${qs}` : ""));
+};
+
+export const fetchJob = (id: string) =>
+  json_get<Job>(`/api/jobs/${encodeURIComponent(id)}`);
+
+export const fetchJobStats = () =>
+  json_get<Record<JobStatus, number>>("/api/jobs/_/stats");
+
+export const retryJob = (id: string) =>
+  json_post<{ new_job_id: string; prompt: string; channel: string }>(
+    `/api/jobs/${encodeURIComponent(id)}/retry`,
+    {},
+  );
+
+export const cancelJob = (id: string) =>
+  json_post<{ ok: boolean; status: string; note?: string }>(
+    `/api/jobs/${encodeURIComponent(id)}/cancel`,
+    {},
+  );
+
+export const deleteJob = (id: string) =>
+  json_delete<{ ok: boolean }>(`/api/jobs/${encodeURIComponent(id)}`);

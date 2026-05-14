@@ -40,6 +40,20 @@ async def lifespan(application: FastAPI):
             log.info("runtime overrides applied: %s", list(applied.keys()))
     except Exception as e:
         log.warning("could not apply runtime overrides: %s", e)
+
+    # Job recovery — before we accept any new requests, mark any
+    # jobs left in `running` / `queued` state as `interrupted`.
+    # The previous process crashed (OOM, kill -9, host reboot)
+    # while they were mid-flight; the user can retry them from the
+    # WebUI Jobs tab or `hrant jobs retry <id>`.
+    try:
+        from . import jobs as _jobs
+        recovered = _jobs.JOBS.recover_interrupted()
+        if recovered:
+            log.info("Job recovery: %d turn(s) marked interrupted", len(recovered))
+    except Exception as e:
+        log.warning("Job recovery error: %s", e)
+
     log.info("Server starting — auto-starting channels...")
     try:
         channels_list = get_channels()
@@ -100,13 +114,14 @@ from .api import (  # noqa: E402
     engine as engine_api,
     roles as roles_api,
     skills as skills_api,
+    jobs as jobs_api,
 )
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
 for mod in (
     chat, knowledge, projects, finetune, status_api, identity,
     intel, goals, sessions, providers_api, channels_api, attachments_api,
-    health_api, voice_api, engine_api, roles_api, skills_api,
+    health_api, voice_api, engine_api, roles_api, skills_api, jobs_api,
 ):
     app.include_router(mod.router)
 app.include_router(autonomic_router)
