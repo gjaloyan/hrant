@@ -145,8 +145,31 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"  no .env yet — will create one at {env_path}")
     print()
 
-    # Claude key is the headline secret. Mask the existing value when
-    # showing the prompt so a shoulder-surfing screenshot doesn't leak it.
+    use_wizard = sys.stdin.isatty() and not bool(getattr(args, "skip_wizard", False))
+
+    if use_wizard:
+        # --- Phase 14: full interactive wizard ----------------------
+        from . import init_wizard
+        try:
+            wizard_result = init_wizard.run_wizard(existing_env)
+        except KeyboardInterrupt:
+            print()
+            _print_warn("aborted by user. Re-run `hrant init` to continue.")
+            return 0
+        # Merge wizard-collected env updates into existing_env so the
+        # write below picks them up.
+        existing_env.update(wizard_result.get("env_updates") or {})
+        # Write .env back.
+        lines = [f"{k}={v}" for k, v in existing_env.items() if v]
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        init_wizard.print_final_summary(
+            wizard_result,
+            data_dir=paths.data_dir(require=False),
+            engine_root=paths.repo_root(),
+        )
+        return 0
+
+    # --- Legacy flat-prompt path (--skip-wizard / non-interactive) -----
     cur_key = existing_env.get("ANTHROPIC_API_KEY", "")
     masked = (cur_key[:6] + "…" + cur_key[-4:]) if len(cur_key) > 12 else "(empty)"
     new_key = _read_input(
@@ -155,9 +178,6 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     if new_key.strip():
         existing_env["ANTHROPIC_API_KEY"] = new_key.strip()
-
-    # Optional service URLs — auto-probe-able in `hrant discover` but
-    # we let the user pre-fill them here too.
     for key, prompt, default in (
         ("TAILSCALE_HOST", "Tailscale host (for `hrant discover`, optional)", ""),
         ("LOCAL_WHISPER_URL", "Whisper STT server URL (optional)", ""),
@@ -168,48 +188,31 @@ def cmd_init(args: argparse.Namespace) -> int:
         v = _read_input(f"{prompt} (current: {cur or '(empty)'})", default=cur)
         if v.strip():
             existing_env[key] = v.strip()
-        elif key in existing_env and not cur:
-            # User pressed enter on an empty current — leave unset.
-            pass
-
-    # Write .env back.
     lines = [f"{k}={v}" for k, v in existing_env.items() if v]
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _print_ok(f".env updated ({len(lines)} keys) at {env_path}")
-
-    # Push the freshly-saved env vars into THIS process so the
-    # connection-test + auto-register helpers below see the new
-    # values (otherwise they'd read stale `os.environ`).
+    # Push env vars + run connection tests / auto-register, same as
+    # before the wizard split.
     import os as _os
     for k, v in existing_env.items():
         if v:
             _os.environ[k] = v
-
-    # --- Phase 13A: provider connection tests + auto-register ---------
     from . import init_helpers as _ih
-
     print()
     print("provider checks:")
-
     anthropic_key = existing_env.get("ANTHROPIC_API_KEY", "")
     if anthropic_key:
         ok, msg = _ih.test_anthropic_key(anthropic_key)
         (_print_ok if ok else _print_warn)(f"Anthropic: {msg}")
     else:
         _print_warn("Anthropic: no key — agent won't be able to call Claude")
-
     openai_key = existing_env.get("OPENAI_API_KEY", "")
     if openai_key:
         ok, msg = _ih.test_openai_key(openai_key)
         (_print_ok if ok else _print_warn)(f"OpenAI: {msg}")
-        # Auto-register so the WebUI Providers tab shows OpenAI without
-        # the user having to add it by hand. Anthropic is auto-injected
-        # by `get_providers()` already (uses ANTHROPIC_API_KEY env var).
         entry = _ih.auto_register_openai(openai_key)
         if entry:
             _print_ok(f"OpenAI: registered as '{entry['name']}' (id={entry['id']})")
-
-    # --- Phase 13A: Tailscale discover + apply -----------------------
     tailscale_host = existing_env.get("TAILSCALE_HOST", "")
     if tailscale_host:
         print()
@@ -223,30 +226,8 @@ def cmd_init(args: argparse.Namespace) -> int:
                     _print_ok(f"  {name:8s} {r.get('url')}")
                 else:
                     _print_warn(f"  {name:8s} {r.get('reason', 'not found')}")
-            applied = report.get("applied") or {}
-            if applied:
-                applied_names = [n for n, status in applied.items() if status == "applied"]
-                if applied_names:
-                    _print_ok(f"applied URLs: {', '.join(applied_names)}")
-
-    # --- Phase 13A: final summary ------------------------------------
     print()
-    print("registered providers:")
-    providers = _ih.installed_providers_summary()
-    if not providers:
-        _print_warn("(none — add via WebUI Settings → Providers)")
-    else:
-        for p in providers:
-            tag = " [default]" if p.get("is_default") else ""
-            print(f"  - {p['name']} ({p['type']}, {p.get('default_model','?')}){tag}")
-
-    print()
-    print("setup complete. next steps:")
-    print("  hrant run                              # start the server")
-    print("  open http://127.0.0.1:8000             # WebUI")
-    print("  hrant provider list                    # see all providers")
-    if tailscale_host:
-        print("  open http://127.0.0.1:8000 → Settings → Voice  # verify Whisper/Piper")
+    print("setup complete. start the agent with: hrant run")
     return 0
 
 
@@ -1116,6 +1097,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--reset", action="store_true",
         help="re-copy templates over existing files (overwrites soul.md, "
              "identity.md, config.yaml — keep a backup if you've customised them)",
+    )
+    p_init.add_argument(
+        "--skip-wizard", action="store_true",
+        help="skip the interactive wizard; use the legacy flat Q&A. "
+             "Useful for cron / CI / automated provisioning.",
     )
     p_init.set_defaults(func=cmd_init)
 
