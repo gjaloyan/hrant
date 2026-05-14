@@ -87,6 +87,11 @@ def run_tracked(
         reply_to=reply_to or {},
     )
     jobs.JOBS.mark_running(job.id)
+    # Phase B: make the active job id visible to the failover layer
+    # via ContextVar so every LLM call inside `agent.run` can append
+    # its (provider, model, ok, error) attempt onto the same Job.
+    from . import failover as _fo
+    token = _fo.set_current_job_id(job.id)
     try:
         answer = agent.run(
             task,
@@ -102,6 +107,10 @@ def run_tracked(
         jobs.JOBS.mark_failed(job.id, error=f"{type(e).__name__}: {e}")
         log.exception("job %s failed", job.id)
         raise
+    finally:
+        # Always clear the ContextVar — leaking it would mean the
+        # next request's LLM calls record onto the previous Job.
+        _fo.reset_current_job_id(token)
 
     # Successful run — persist response + tool trace.
     jobs.JOBS.mark_completed(

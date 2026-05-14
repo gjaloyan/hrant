@@ -1823,3 +1823,45 @@ export const cancelJob = (id: string) =>
 
 export const deleteJob = (id: string) =>
   json_delete<{ ok: boolean }>(`/api/jobs/${encodeURIComponent(id)}`);
+
+
+// ---------- Failover (Phase 15B: multi-provider chain) ----------
+
+export type FailoverChainEntry = {
+  provider_id: string;
+  model: string;
+};
+
+export type FailoverConfig = {
+  enabled: boolean;
+  chain: FailoverChainEntry[];
+  retry_on: string[];
+  max_attempts: number;
+};
+
+export type FailoverInfo = {
+  config: FailoverConfig;
+  categories: string[];
+  default_retry_on: string[];
+};
+
+export const fetchFailover = () =>
+  json_get<FailoverInfo>("/api/failover");
+
+export const putFailover = (cfg: FailoverConfig) =>
+  json_put<{ ok: boolean; config: FailoverConfig }>(
+    "/api/failover",
+    cfg,
+  );
+
+export const reorderFailover = (from_index: number, to_index: number) =>
+  json_post<{ ok: boolean; config: FailoverConfig }>(
+    "/api/failover/reorder",
+    { from_index, to_index },
+  );
+
+export const toggleFailover = (enabled: boolean) =>
+  json_post<{ ok: boolean; config: FailoverConfig }>(
+    "/api/failover/toggle",
+    { enabled },
+  );

@@ -179,6 +179,39 @@ queued → running → completed
 
 **Failover trace (Phase B preview):** each Job has an `attempts[]` list. When auto-failover lands, every provider tried for that turn appends one entry — you'll see "Anthropic 429 → OpenAI ok" in the WebUI without needing log files.
 
+### `hrant failover`
+
+Multi-provider failover chain. When the active LLM returns a retryable error (rate limit, 5xx, timeout, auth, connection), the agent tries the next provider in the chain instead of failing the turn.
+
+```
+hrant failover status                          # show chain + flags
+hrant failover enable                          # turn auto-failover on
+hrant failover disable                         # turn off (keeps chain)
+hrant failover add <provider_id> <model>       # append to the chain
+hrant failover remove <1-based-index>          # drop one entry
+hrant failover clear                           # empty the chain
+```
+
+**Storage:** `~/.hrant/data/knowledge/failover_config.json`:
+
+```json
+{
+  "enabled": true,
+  "chain": [
+    {"provider_id": "openai-default", "model": "gpt-4o"},
+    {"provider_id": "ollama-default", "model": "llama3.2:latest"}
+  ],
+  "retry_on": ["rate_limit", "server_error", "timeout", "auth_error", "connection"],
+  "max_attempts": 4
+}
+```
+
+**How it works:** the active pinned model is ALWAYS tried first. If it fails with a retryable error (classified by error message — `429` / `5xx` / timeout / `401`/`403` / connection refused), the agent walks the chain top-to-bottom and tries each entry. Each attempt — success or failure — appends one entry to the active Job's `attempts[]` so you can see the full trace in `Settings → Jobs → PROVIDER ATTEMPTS`.
+
+**What's NOT retried:** `400` (bad request), content-policy violations, context-length errors. Those are the prompt's fault — trying another provider just wastes API quota. The `retry_on` config controls this.
+
+**WebUI:** Settings → Providers → "Failover chain" panel — toggle enabled, drag-up/down to reorder, pick provider+model from dropdowns, toggle which error categories trigger failover, set max attempts.
+
 ### `hrant rebuild`
 
 Run `npm install && npm run build` in `frontend/`. Saves typing during dev when you've edited TSX and need port 3333 to pick it up.

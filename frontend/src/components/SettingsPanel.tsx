@@ -11,6 +11,7 @@ import SelfModsTab from "./settings/SelfModsTab";
 import RolesTab from "./settings/RolesTab";
 import SkillsTab from "./settings/SkillsTab";
 import JobsTab from "./settings/JobsTab";
+import FailoverPanel from "./settings/FailoverPanel";
 import {
   clearConversation,
   compareModels,
@@ -414,6 +415,14 @@ export default function SettingsPanel() {
                 Model changes take effect immediately — no restart needed.
               </div>
             </div>
+
+            {/* Failover chain — what to try when the active model returns
+                a retryable error (rate limit / 5xx / timeout / auth). */}
+            <FailoverPanel
+              flash={flash}
+              providers={providers}
+              availableModels={availModels}
+            />
 
             <div className="flex justify-between items-center">
               <h3 className="font-bold">LLM Providers</h3>

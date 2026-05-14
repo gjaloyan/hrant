@@ -997,6 +997,100 @@ def cmd_jobs_delete(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- failover (Phase B: multi-provider failover chain) ------------------
+
+
+def cmd_failover_status(args: argparse.Namespace) -> int:
+    """`hrant failover status` — show current chain + counts of
+    recent attempts. Inspectable from the CLI without spinning up
+    the WebUI."""
+    from . import failover as _fo
+    from .cli_colors import c
+    cfg = _fo.load_config()
+    print()
+    print(c.heading("  Failover chain"))
+    print(f"  {c.muted('enabled:')}      {c.success('yes') if cfg['enabled'] else c.muted('no')}")
+    print(f"  {c.muted('max_attempts:')} {cfg.get('max_attempts', 4)}")
+    print(f"  {c.muted('retry on:')}     {', '.join(cfg.get('retry_on') or [])}")
+    print()
+    chain = cfg.get("chain") or []
+    if not chain:
+        print(f"  {c.muted('(chain is empty — add providers via WebUI Providers tab')}")
+        print(f"  {c.muted(' or `hrant failover add <provider_id> <model>`)')}")
+        print()
+        return 0
+    print(f"  {c.muted('order:')}")
+    for i, entry in enumerate(chain, start=1):
+        pid = entry.get("provider_id", "?")
+        model = entry.get("model", "?")
+        print(f"    {i}) {c.accent(pid)} / {c.success(model)}")
+    print()
+    return 0
+
+
+def cmd_failover_enable(args: argparse.Namespace) -> int:
+    from . import failover as _fo
+    cfg = _fo.load_config()
+    cfg["enabled"] = True
+    _fo.save_config(cfg)
+    _print_ok("failover enabled")
+    return 0
+
+
+def cmd_failover_disable(args: argparse.Namespace) -> int:
+    from . import failover as _fo
+    cfg = _fo.load_config()
+    cfg["enabled"] = False
+    _fo.save_config(cfg)
+    _print_ok("failover disabled")
+    return 0
+
+
+def cmd_failover_add(args: argparse.Namespace) -> int:
+    """Append a (provider, model) pair to the end of the chain."""
+    from . import failover as _fo
+    from .providers import get_provider
+    if not get_provider(args.provider_id):
+        _print_err(f"no provider with id '{args.provider_id}' "
+                   "(see `hrant provider list`)")
+        return 1
+    cfg = _fo.load_config()
+    chain = list(cfg.get("chain") or [])
+    chain.append({"provider_id": args.provider_id, "model": args.model})
+    cfg["chain"] = chain
+    saved = _fo.save_config(cfg)
+    _print_ok(
+        f"chain now has {len(saved['chain'])} entries: "
+        + " → ".join(f"{e['provider_id']}/{e['model']}" for e in saved['chain'])
+    )
+    return 0
+
+
+def cmd_failover_remove(args: argparse.Namespace) -> int:
+    """Remove chain entry at the given 1-based index."""
+    from . import failover as _fo
+    cfg = _fo.load_config()
+    chain = list(cfg.get("chain") or [])
+    idx = args.index - 1
+    if not (0 <= idx < len(chain)):
+        _print_err(f"index {args.index} out of range (chain has {len(chain)})")
+        return 1
+    removed = chain.pop(idx)
+    cfg["chain"] = chain
+    _fo.save_config(cfg)
+    _print_ok(f"removed {removed['provider_id']}/{removed['model']}")
+    return 0
+
+
+def cmd_failover_clear(args: argparse.Namespace) -> int:
+    from . import failover as _fo
+    cfg = _fo.load_config()
+    cfg["chain"] = []
+    _fo.save_config(cfg)
+    _print_ok("chain cleared")
+    return 0
+
+
 # --- rebuild (frontend) -------------------------------------------------
 
 
@@ -1781,6 +1875,39 @@ def build_parser() -> argparse.ArgumentParser:
     pj_delete = sub_jobs.add_parser("delete", help="remove a job's file")
     pj_delete.add_argument("job_id")
     pj_delete.set_defaults(func=cmd_jobs_delete)
+
+    # `failover` group — multi-provider failover chain. When enabled,
+    # the LLM call tries the active model first; if it fails with a
+    # retryable error (429 / 5xx / timeout / auth / connection), the
+    # chain entries below are tried in order until one succeeds.
+    p_fo = sub.add_parser(
+        "failover",
+        help="manage multi-provider failover chain (status / enable / add / ...)",
+    )
+    sub_fo = p_fo.add_subparsers(dest="failover_cmd", metavar="<action>")
+
+    pf_status = sub_fo.add_parser("status", help="print chain + flags")
+    pf_status.set_defaults(func=cmd_failover_status)
+
+    pf_enable = sub_fo.add_parser("enable", help="turn failover on")
+    pf_enable.set_defaults(func=cmd_failover_enable)
+
+    pf_disable = sub_fo.add_parser("disable", help="turn failover off (keeps chain)")
+    pf_disable.set_defaults(func=cmd_failover_disable)
+
+    pf_add = sub_fo.add_parser("add", help="append a (provider, model) to the chain")
+    pf_add.add_argument("provider_id", help="provider id (see `hrant provider list`)")
+    pf_add.add_argument("model", help="model name (e.g. claude-3-5-sonnet-20241022)")
+    pf_add.set_defaults(func=cmd_failover_add)
+
+    pf_remove = sub_fo.add_parser(
+        "remove", help="remove chain entry at 1-based index",
+    )
+    pf_remove.add_argument("index", type=int)
+    pf_remove.set_defaults(func=cmd_failover_remove)
+
+    pf_clear = sub_fo.add_parser("clear", help="empty the chain")
+    pf_clear.set_defaults(func=cmd_failover_clear)
 
     p_rebuild = sub.add_parser(
         "rebuild",

@@ -2816,10 +2816,50 @@ class DualModelRouter:
         if active is not None:
             tt = task_type.value
             self.state["last_reason"] = f"active model: {self._active_cfg_hash}"
-            out = active.complete(
-                system, user, max_tokens=max_tokens, temperature=temperature,
-                attachments=attachments, _task_type=tt,
-            )
+            # Phase B: multi-provider failover. When the failover
+            # config is enabled, build an `attempts` list — primary
+            # active model first, then each chain entry — and hand
+            # it to failover.try_call. When disabled, just call the
+            # active model directly (same behaviour as before).
+            from . import failover as _fo
+            from .providers import ACTIVE_MODEL as _AM
+            active_cfg = _AM.resolve_llm_config() or {}
+            primary_id = active_cfg.get("provider_id", "?")
+            primary_model = active_cfg.get("model", "?")
+
+            def _primary_call() -> str:
+                return active.complete(
+                    system, user, max_tokens=max_tokens, temperature=temperature,
+                    attachments=attachments, _task_type=tt,
+                )
+
+            cfg = _fo.load_config()
+            if not cfg.get("enabled"):
+                out = _primary_call()
+            else:
+                attempts: list = [(primary_id, primary_model, _primary_call)]
+                for entry in cfg.get("chain", []):
+                    pid = entry.get("provider_id", "")
+                    em = entry.get("model", "")
+                    if (pid, em) == (primary_id, primary_model):
+                        continue  # already tried as primary
+                    entry_cfg = _fo.resolve_entry_cfg(pid, em)
+                    if entry_cfg is None:
+                        continue  # provider gone or disabled
+                    # Bind cfg per-iteration so the closure captures
+                    # the right one, not the last loop value.
+                    def _fallback_call(c=entry_cfg) -> str:
+                        return create_llm(c).complete(
+                            system, user, max_tokens=max_tokens,
+                            temperature=temperature, attachments=attachments,
+                            _task_type=tt,
+                        )
+                    attempts.append((pid, em, _fallback_call))
+                out = _fo.try_call(
+                    attempts,
+                    retry_on=cfg.get("retry_on"),
+                    max_attempts=cfg.get("max_attempts"),
+                )
             self._track_active_model_call()
             self._save_state()
             return out
@@ -2924,8 +2964,18 @@ class DualModelRouter:
                     f"(Anthropic / OpenAI / Codex / Cohere / Bedrock) or "
                     f"clear the pinned model for this task."
                 )
-            try:
-                out = active.complete_with_tools(
+            # Phase B: multi-provider failover for tool-use turns.
+            # Tool-capability is per-LLM; chain entries that don't
+            # support tools are dropped from the attempt list rather
+            # than failing the whole turn.
+            from . import failover as _fo
+            from .providers import ACTIVE_MODEL as _AM
+            active_cfg = _AM.resolve_llm_config() or {}
+            primary_id = active_cfg.get("provider_id", "?")
+            primary_model = active_cfg.get("model", "?")
+
+            def _primary_call() -> str:
+                return active.complete_with_tools(
                     system, user, tools, execute_tool,
                     max_tokens=max_tokens,
                     temperature=temperature,
@@ -2934,11 +2984,48 @@ class DualModelRouter:
                     attachments=attachments,
                     _task_type=tt,
                 )
-                self._track_active_model_call()
-                self._save_state()
-                return out
-            except LLMError:
-                raise
+
+            cfg = _fo.load_config()
+            if not cfg.get("enabled"):
+                out = _primary_call()
+            else:
+                attempts: list = [(primary_id, primary_model, _primary_call)]
+                for entry in cfg.get("chain", []):
+                    pid = entry.get("provider_id", "")
+                    em = entry.get("model", "")
+                    if (pid, em) == (primary_id, primary_model):
+                        continue
+                    entry_cfg = _fo.resolve_entry_cfg(pid, em)
+                    if entry_cfg is None:
+                        continue
+                    # Pre-build a probe LLM to check tool support
+                    # without paying for the full call. If unsupported,
+                    # skip silently — chain is best-effort.
+                    try:
+                        probe = create_llm(entry_cfg)
+                    except Exception:
+                        continue
+                    if not _supports_tools(probe, tools):
+                        continue
+                    def _fallback_call(p=probe) -> str:
+                        return p.complete_with_tools(
+                            system, user, tools, execute_tool,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                            max_iterations=max_iterations,
+                            on_tool_call=on_tool_call,
+                            attachments=attachments,
+                            _task_type=tt,
+                        )
+                    attempts.append((pid, em, _fallback_call))
+                out = _fo.try_call(
+                    attempts,
+                    retry_on=cfg.get("retry_on"),
+                    max_attempts=cfg.get("max_attempts"),
+                )
+            self._track_active_model_call()
+            self._save_state()
+            return out
 
         choice, reason = self._pick(task_type)
         self.state["last_reason"] = reason
