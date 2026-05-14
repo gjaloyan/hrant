@@ -37,38 +37,56 @@ CANCELLED = -1
 
 def _read_key_unix() -> str:
     """Linux/macOS: raw terminal, read one key. Returns one of:
-    'up', 'down', 'enter', 'esc', 'q', 'ctrl_c', or the raw char."""
+    'up', 'down', 'enter', 'esc', 'q', 'ctrl_c', or the raw char.
+
+    Reads via `os.read(fd, ...)` instead of `sys.stdin.read(...)`
+    because Python's stdin is buffered: pressing an arrow key sends
+    `\\x1b[A` as one terminal burst, but `sys.stdin.read(1)` consumes
+    only the ESC byte and leaves `[A` sitting in the Python-level
+    buffer. `select` then checks the kernel FD (empty — bytes are
+    in the Python buffer) and reports "no follow-up", so the menu
+    treats the arrow as a lone-Esc cancel. Going straight to the
+    FD bypasses the buffer entirely."""
+    import os as _os
+    import select
     import termios
     import tty
     fd = sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = sys.stdin.read(1)
-        if ch == "\x1b":
-            # Escape sequence — peek two more chars without blocking
-            # if no follow-up arrives (lone Esc).
-            import select
-            r, _, _ = select.select([sys.stdin], [], [], 0.05)
+        ch = _os.read(fd, 1)
+        if ch == b"\x1b":
+            # Escape sequence — wait briefly for the `[X` follow-up.
+            # 0.1s is enough for local terminals + SSH; lone Esc on
+            # an idle terminal still returns within that window.
+            r, _, _ = select.select([fd], [], [], 0.1)
             if not r:
                 return "esc"
-            seq = sys.stdin.read(2)
-            if seq == "[A":
+            # Read up to 4 bytes — covers ANSI CSI sequences like
+            # `[A`, `[1;5A` (Ctrl+arrow), etc. We only care about
+            # plain arrows, but consuming the full sequence avoids
+            # leaving stray bytes for the next iteration.
+            seq = _os.read(fd, 4)
+            if seq.startswith(b"[A"):
                 return "up"
-            if seq == "[B":
+            if seq.startswith(b"[B"):
                 return "down"
-            if seq == "[C":
+            if seq.startswith(b"[C"):
                 return "right"
-            if seq == "[D":
+            if seq.startswith(b"[D"):
                 return "left"
             return "esc"
-        if ch in ("\r", "\n"):
+        if ch in (b"\r", b"\n"):
             return "enter"
-        if ch == "\x03":
+        if ch == b"\x03":
             return "ctrl_c"
-        if ch in ("q", "Q"):
+        if ch in (b"q", b"Q"):
             return "q"
-        return ch
+        try:
+            return ch.decode("utf-8")
+        except UnicodeDecodeError:
+            return ""
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 

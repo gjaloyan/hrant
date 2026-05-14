@@ -370,3 +370,101 @@ def test_cli_menu_returns_default_on_eof(monkeypatch):
     monkeypatch.setattr("builtins.input", raise_eof)
     idx = cli_menu.select("?", [("A", ""), ("B", "")], default_idx=0)
     assert idx == 0
+
+
+# ─── Arrow-key parsing: regression tests for the read-from-pty path
+#
+# Bug fixed in this commit: pressing arrow keys cancelled the menu
+# instead of moving the selection. The terminal sends `\x1b[A` (up)
+# as one burst, but `sys.stdin.read(1)` consumed only `\x1b` and
+# parked `[A` in Python's stdin buffer. `select.select` then
+# checked the kernel FD (empty — bytes were in the buffer) and
+# reported "no follow-up", so the menu treated the arrow as lone-
+# Esc cancel. Fix: read with `os.read(fd, ...)` directly.
+#
+# These tests pipe a real pty pair so the buffer-vs-FD distinction
+# matters; a `monkeypatch.setattr(os, "read", ...)` style mock
+# would let the bug recur without anyone noticing.
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="pty + termios are Unix-only; the Windows arrow path "
+           "uses msvcrt.getch which we test separately"
+)
+def test_read_key_unix_decodes_arrow_keys_from_real_pty():
+    """Open a pty, write the exact byte sequence that an arrow key
+    sends, call `_read_key_unix`, assert it returns the right
+    direction. Regression for the buffer-vs-FD bug."""
+    import os as _os
+    import pty
+    import sys as _sys
+    from backend import cli_menu
+
+    cases = [
+        (b"\x1b[A", "up"),
+        (b"\x1b[B", "down"),
+        (b"\x1b[C", "right"),
+        (b"\x1b[D", "left"),
+        (b"\r",      "enter"),
+        (b"\n",      "enter"),
+        (b"q",       "q"),
+        (b"\x03",    "ctrl_c"),
+    ]
+    for payload, expected in cases:
+        master, slave = pty.openpty()
+        try:
+            # Push the keystrokes into the master end so they're
+            # readable from the slave (which we'll point stdin at).
+            _os.write(master, payload)
+            # Replace sys.stdin with the slave-side file object for
+            # the duration of the call. `_read_key_unix` reads via
+            # `sys.stdin.fileno()`, then does the actual read with
+            # `os.read(fd, ...)` — so this is the production code
+            # path, not a mock.
+            slave_file = _os.fdopen(slave, "rb", buffering=0)
+            real_stdin = _sys.stdin
+            try:
+                _sys.stdin = slave_file
+                got = cli_menu._read_key_unix()
+            finally:
+                _sys.stdin = real_stdin
+            assert got == expected, (
+                f"payload={payload!r}: expected {expected!r}, got {got!r}"
+            )
+        finally:
+            try:
+                _os.close(master)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(
+    __import__("sys").platform == "win32",
+    reason="pty test is Unix-only"
+)
+def test_read_key_unix_lone_esc_returns_esc():
+    """A solo Esc keypress (no follow-up bytes) must still return
+    'esc' so q/Esc cancel works. The 0.1s select timeout in
+    `_read_key_unix` handles this."""
+    import os as _os
+    import pty
+    import sys as _sys
+    from backend import cli_menu
+
+    master, slave = _os.openpty() if hasattr(_os, "openpty") else pty.openpty()
+    try:
+        _os.write(master, b"\x1b")  # only ESC, no [X follow-up
+        slave_file = _os.fdopen(slave, "rb", buffering=0)
+        real_stdin = _sys.stdin
+        try:
+            _sys.stdin = slave_file
+            got = cli_menu._read_key_unix()
+        finally:
+            _sys.stdin = real_stdin
+        assert got == "esc"
+    finally:
+        try:
+            _os.close(master)
+        except OSError:
+            pass
