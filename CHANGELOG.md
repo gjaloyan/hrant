@@ -10,6 +10,48 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## Phase 16A (2026-05-15)
+
+**Daily memory consolidation — like sleep, but for the agent.**
+
+While the agent is idle, a background scheduler periodically runs through the past ~24h of activity and:
+
+1. Writes a **narrative** of what happened
+2. Extracts **durable facts** worth promoting to long-term memory
+3. Updates the per-speaker **profile** (global `user.md` for WebUI, per-Telegram-user files for Telegram speakers)
+4. Surfaces **open threads** — unresolved questions / abandoned projects
+
+Each run produces a **Digest** stored at `~/.hrant/data/knowledge/memory_digests/<YYYY-MM-DD>.json`. Inspectable from CLI + WebUI.
+
+**Scheduler (adaptive):**
+- Fires when the agent has been idle for ≥15 min AND ≥24h since last run
+- Min activity threshold: 0 — runs even on idle days (empty digest)
+- Cost cap: unlimited (token usage tracked + reported, never blocks)
+- Lives in the FastAPI lifespan, ticks every 60s
+
+**Pipeline runs through:**
+- Main LLM via the failover chain (Phase 15B) — so a 429 doesn't kill a consolidation
+- 4 LLM calls per run (narrative, facts, per-speaker profile updates, open threads)
+- ~30–60s wallclock for a typical day
+
+**Surfaces:**
+- REST: `GET /api/consolidation/status`, `POST /run`, `GET /digests`, `GET /digests/{date}`
+- CLI: `hrant consolidate status / run [--dry-run] / list / show <date>`
+- WebUI: `Settings → Memory Digests` tab — status banner + Run/Dry-run buttons + per-digest detail pane
+
+**Safety:**
+- `--dry-run` mode: pipeline runs but skips memory_facts/profile writes
+- Zero-activity windows short-circuit before any LLM calls
+- Pipeline failures are caught + recorded in the digest's `error` field; never crashes the scheduler
+- Per-speaker isolation: WebUI sessions update global `user.md`, Telegram speakers each get their own `profiles/telegram_<id>.md`
+
+**NOT in 16A** (coming in 16B/16C):
+- Pruning (auto-trash with rollback window)
+- Knowledge graph (cross-link inference + visualization)
+- Adaptive multi-pass scheduling
+
+---
+
 ## Phase 15B-fix2 (2026-05-15)
 
 Two fixes that together solve "I ran `hrant update` but don't see the new WebUI tabs":

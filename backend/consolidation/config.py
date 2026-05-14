@@ -1,0 +1,89 @@
+"""Tunables for daily consolidation.
+
+These live in code rather than a JSON file because they're behaviour-
+shaping defaults — users who want to tweak `IDLE_THRESHOLD_SECONDS`
+or the cooldown should edit code (or override via env), not surprise
+themselves with a knob they forgot they turned.
+
+Per the user's spec for this build:
+  - Unlimited cost budget (no soft/hard cap blocks the run)
+  - Minimum activity = 0 (fires even on idle days, digest just notes
+    "no activity")
+  - Global facts/digests; per-speaker profiles only
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from .. import paths
+
+
+# How long the agent must be quiet (no new jobs) before a daily
+# consolidation is allowed to fire. Keeps the agent from cutting
+# off a late-night session to do bookkeeping.
+IDLE_THRESHOLD_SECONDS: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_IDLE_SECONDS", 15 * 60)
+)
+
+# Minimum time between two daily consolidations. 24h-ish; the
+# adaptive idle check above means actual fire time floats.
+COOLDOWN_SECONDS: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_COOLDOWN_SECONDS", 24 * 60 * 60)
+)
+
+# How often the scheduler wakes up to check the gates. Cheap —
+# just a timestamp comparison + an idle-since lookup.
+SCHEDULER_TICK_SECONDS: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_TICK_SECONDS", 60)
+)
+
+# How far back the gatherer looks. Slightly more than the cooldown
+# so a slow-firing consolidation doesn't miss the gap. 26h covers
+# typical adaptive lag.
+GATHER_WINDOW_SECONDS: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_WINDOW_SECONDS", 26 * 60 * 60)
+)
+
+# Activity gate is OFF per the user's instruction: fire even on
+# zero-job days. Kept as a config in case someone wants to flip
+# it back later.
+MIN_JOBS_FOR_RUN: int = int(
+    os.environ.get("HRANT_CONSOLIDATION_MIN_JOBS", 0)
+)
+
+# Cost cap is OFF per the user's spec — track for reporting only,
+# never block. Set to a positive number to enforce a soft cap.
+DAILY_COST_CAP_USD: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_COST_CAP_USD", 0.0)
+)
+
+
+# ─── Paths ────────────────────────────────────────────────────────────
+
+
+def state_path() -> Path:
+    """Where last-run state is persisted."""
+    return paths.knowledge_dir() / "consolidation_state.json"
+
+
+def digests_dir() -> Path:
+    """One JSON file per day under this directory."""
+    return paths.knowledge_dir() / "memory_digests"
+
+
+def digest_path_for(date_str: str) -> Path:
+    return digests_dir() / f"{date_str}.json"
+
+
+def user_md_path() -> Path:
+    """Global user profile — WebUI-default speaker."""
+    return paths.knowledge_dir() / "identity" / "user.md"
+
+
+def profile_path_for_speaker(speaker_id: str) -> Path:
+    """Per-Telegram-user profile. The global `user.md` is for
+    `webui:default`; Telegram users get isolated profiles under
+    `identity/profiles/`."""
+    sanitized = speaker_id.replace(":", "_").replace("/", "_")
+    return paths.knowledge_dir() / "identity" / "profiles" / f"{sanitized}.md"

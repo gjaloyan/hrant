@@ -129,11 +129,25 @@ async def lifespan(application: FastAPI):
     application.state.autonomic_tick_log = bundle.tick_log_path
     await start_autonomic_scheduler(bundle)
 
+    # Phase 16A: daily memory consolidation scheduler. Adaptive —
+    # fires when idle for 15min AND >=24h since last run.
+    try:
+        from .consolidation import scheduler as _cons_sched
+        await _cons_sched.start_scheduler(application)
+        log.info("Consolidation scheduler started")
+    except Exception as e:
+        log.warning("Consolidation scheduler failed to start: %s", e)
+
     yield
     # --- shutdown ---
     log.info("Server shutting down — stopping channels...")
     CHANNELS.stop_all()
     await stop_autonomic_scheduler(application.state.autonomic_bundle)
+    try:
+        from .consolidation import scheduler as _cons_sched
+        await _cons_sched.stop_scheduler(application)
+    except Exception as e:
+        log.warning("Consolidation scheduler shutdown error: %s", e)
 
 
 app = FastAPI(title="Self-Learning Agent", lifespan=lifespan)
@@ -165,6 +179,7 @@ from .api import (  # noqa: E402
     skills as skills_api,
     jobs as jobs_api,
     failover as failover_api,
+    consolidation as consolidation_api,
 )
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
@@ -172,7 +187,7 @@ for mod in (
     chat, knowledge, projects, finetune, status_api, identity,
     intel, goals, sessions, providers_api, channels_api, attachments_api,
     health_api, voice_api, engine_api, roles_api, skills_api, jobs_api,
-    failover_api,
+    failover_api, consolidation_api,
 ):
     app.include_router(mod.router)
 app.include_router(autonomic_router)

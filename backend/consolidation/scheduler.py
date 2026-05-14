@@ -1,0 +1,198 @@
+"""Background asyncio task that fires daily consolidation.
+
+Gating logic (in order):
+  1. Cooldown: was the LAST run at least COOLDOWN_SECONDS ago?
+  2. Idleness: has the agent been quiet for IDLE_THRESHOLD_SECONDS?
+  3. Activity: MIN_JOBS_FOR_RUN met? (default 0 → always fires)
+  4. (Phase 16B will add) Cost-cap not exceeded.
+
+The task runs SCHEDULER_TICK_SECONDS apart (60s default), checks
+the gates, fires if open. Cheap — just a timestamp comparison
+plus a single `jobs.list(limit=1)` call to find latest activity.
+
+Lifecycle:
+  - `start_scheduler(app)` is called from FastAPI lifespan startup
+  - The asyncio task lives on `app.state.consolidation_task`
+  - `stop_scheduler(app)` is called from lifespan shutdown — it
+    sets a cancel event so the loop exits cleanly before uvicorn
+    tears down
+
+Concurrency:
+  Only one consolidation runs at a time. A second tick that
+  triggers while the first is still in `pipeline.run()` is gated
+  by `_running` so the LLM router isn't hammered twice.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Optional
+
+from . import config, digest as _digest_mod, gather, pipeline, state
+
+log = logging.getLogger(__name__)
+
+
+_running = asyncio.Lock()
+
+
+async def _fire_one(*, force: bool = False, dry_run: bool = False):
+    """Run the pipeline once. Updates persisted state at the end.
+    Honours the lock so two ticks can't overlap."""
+    if _running.locked() and not force:
+        log.info("consolidation: another run is already in progress; skipping tick")
+        return None
+    async with _running:
+        bundle = await asyncio.to_thread(gather.gather)
+        d = await asyncio.to_thread(pipeline.run, bundle=bundle, dry_run=dry_run)
+        path = await asyncio.to_thread(_digest_mod.write, d)
+        # Persist scheduler state for the WebUI banner.
+        st = state.load()
+        st.last_run_at = d.completed_at or time.time()
+        st.last_run_status = d.status
+        st.last_run_digest = str(path)
+        st.last_run_error = d.error
+        st.last_run_duration_seconds = (d.completed_at or 0.0) - (d.started_at or 0.0)
+        st.last_run_tokens_used = d.tokens_used
+        st.last_run_cost_usd_estimate = d.estimated_cost_usd
+        st.last_run_speakers_seen = list(d.speakers_active)
+        st.last_run_jobs_analyzed = d.turns_analyzed
+        st.last_run_facts_added = sum(1 for f in d.new_facts if f.promoted)
+        st.total_runs += 1
+        state.save(st)
+        return d
+
+
+def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
+    """Return (should_fire, reason). `reason` always populated so
+    the WebUI / log can show 'waiting because X'."""
+    if now is None:
+        now = time.time()
+    st = state.load()
+    cooldown_left = state.cooldown_remaining_seconds(st)
+    if cooldown_left > 0:
+        return False, f"cooldown ({int(cooldown_left)}s remaining)"
+    last_active = gather.last_activity_ts()
+    if last_active is not None:
+        idle_for = now - last_active
+        if idle_for < config.IDLE_THRESHOLD_SECONDS:
+            return False, f"not idle (active {int(idle_for)}s ago)"
+    # `MIN_JOBS_FOR_RUN` defaults to 0 → this guard is off by default.
+    if config.MIN_JOBS_FOR_RUN > 0:
+        bundle = gather.gather()
+        if bundle.turn_count < config.MIN_JOBS_FOR_RUN:
+            return False, f"too few turns ({bundle.turn_count} < {config.MIN_JOBS_FOR_RUN})"
+    return True, "ready"
+
+
+async def _scheduler_loop(cancel_event: asyncio.Event) -> None:
+    """The actual asyncio task. Wakes every SCHEDULER_TICK_SECONDS,
+    checks gates, fires if open. Exits when cancel_event is set."""
+    log.info(
+        "consolidation scheduler started "
+        "(tick=%.0fs cooldown=%.0fs idle=%.0fs)",
+        config.SCHEDULER_TICK_SECONDS,
+        config.COOLDOWN_SECONDS,
+        config.IDLE_THRESHOLD_SECONDS,
+    )
+    while not cancel_event.is_set():
+        try:
+            should, reason = _should_fire()
+            if should:
+                log.info("consolidation: gates open (%s), firing", reason)
+                try:
+                    await _fire_one()
+                except Exception as e:
+                    log.exception("consolidation run crashed: %s", e)
+            else:
+                # Debug-level only to avoid spamming the log every 60s
+                # with "cooldown 86399s remaining".
+                log.debug("consolidation: skip (%s)", reason)
+        except Exception as e:
+            log.exception("consolidation scheduler tick crashed: %s", e)
+        try:
+            await asyncio.wait_for(
+                cancel_event.wait(),
+                timeout=config.SCHEDULER_TICK_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            continue  # normal — just the tick interval expired
+    log.info("consolidation scheduler stopping")
+
+
+# ─── Lifespan hooks ──────────────────────────────────────────────────
+
+
+async def start_scheduler(application) -> None:
+    """Called from main.py:lifespan() at startup."""
+    cancel_event = asyncio.Event()
+    application.state.consolidation_cancel = cancel_event
+    application.state.consolidation_task = asyncio.create_task(
+        _scheduler_loop(cancel_event),
+    )
+
+
+async def stop_scheduler(application) -> None:
+    """Called from main.py:lifespan() at shutdown."""
+    ev = getattr(application.state, "consolidation_cancel", None)
+    task = getattr(application.state, "consolidation_task", None)
+    if ev is not None:
+        ev.set()
+    if task is not None:
+        try:
+            await asyncio.wait_for(task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            task.cancel()
+        except Exception as e:
+            log.warning("consolidation scheduler shutdown error: %s", e)
+
+
+# ─── Manual fire (used by REST + CLI) ───────────────────────────────
+
+
+async def fire_now(*, dry_run: bool = False) -> _digest_mod.Digest:
+    """Public entry: run a consolidation right now, regardless of
+    gates. Returns the Digest. Used by `POST /api/consolidation/run?force=true`
+    and `hrant consolidate run --force`."""
+    d = await _fire_one(force=True, dry_run=dry_run)
+    if d is None:
+        # Lock was held — wait briefly, then return whatever the
+        # last run produced.
+        await asyncio.sleep(0.1)
+        st = state.load()
+        if st.last_run_digest:
+            existing = _digest_mod.read(_digest_mod.today_str())
+            if existing is not None:
+                return existing
+        # Fallback: empty failed digest so caller sees something
+        d = _digest_mod.Digest(
+            date=_digest_mod.today_str(),
+            started_at=time.time(),
+            completed_at=time.time(),
+            status="skipped",
+            skip_reason="another_run_in_progress",
+        )
+    return d
+
+
+def status() -> dict:
+    """Snapshot of scheduler state for the WebUI banner."""
+    st = state.load()
+    should, reason = _should_fire()
+    now = time.time()
+    last_active = gather.last_activity_ts()
+    return {
+        "state": st.to_dict(),
+        "would_fire_now": should,
+        "gate_reason": reason,
+        "now": now,
+        "cooldown_remaining_seconds": state.cooldown_remaining_seconds(st),
+        "idle_for_seconds": (now - last_active) if last_active is not None else None,
+        "config": {
+            "idle_threshold_seconds": config.IDLE_THRESHOLD_SECONDS,
+            "cooldown_seconds": config.COOLDOWN_SECONDS,
+            "min_jobs_for_run": config.MIN_JOBS_FOR_RUN,
+            "tick_seconds": config.SCHEDULER_TICK_SECONDS,
+        },
+    }

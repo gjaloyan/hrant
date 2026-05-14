@@ -1878,3 +1878,101 @@ export const toggleFailover = (enabled: boolean) =>
     "/api/failover/toggle",
     { enabled },
   );
+
+
+// ---------- Consolidation (Phase 16A: daily memory digests) ----------
+
+export type DigestFact = {
+  text: string;
+  related_topics: string[];
+  confidence: number;
+  category: string;
+  promoted: boolean;
+  reason_if_skipped?: string | null;
+};
+
+export type ProfileUpdate = {
+  speaker_id: string;
+  profile_path: string;
+  appended_text: string;
+  pre_size_bytes: number;
+};
+
+export type Digest = {
+  date: string;
+  started_at: number;
+  completed_at: number;
+  window_start_ts: number;
+  window_end_ts: number;
+  speakers_active: string[];
+  channels_active: string[];
+  turns_analyzed: number;
+  jobs_failed: number;
+  jobs_interrupted: number;
+  narrative: string;
+  new_facts: DigestFact[];
+  profile_updates: ProfileUpdate[];
+  open_threads: string[];
+  links_added: Array<Record<string, unknown>>;
+  tokens_used: number;
+  estimated_cost_usd: number;
+  status: "in_progress" | "success" | "partial" | "failed" | "skipped";
+  skip_reason?: string | null;
+  error?: string | null;
+};
+
+export type DigestSummary = {
+  date: string;
+  status: string;
+  narrative_preview: string;
+  new_facts_count: number;
+  open_threads_count: number;
+  turns_analyzed: number;
+  speakers_active: string[];
+  completed_at: number;
+  tokens_used: number;
+};
+
+export type ConsolidationStatus = {
+  state: {
+    last_run_at: number;
+    last_run_status: string;
+    last_run_digest: string | null;
+    last_run_error: string | null;
+    last_run_duration_seconds: number;
+    last_run_tokens_used: number;
+    last_run_cost_usd_estimate: number;
+    total_runs: number;
+    last_run_speakers_seen: string[];
+    last_run_jobs_analyzed: number;
+    last_run_facts_added: number;
+  };
+  would_fire_now: boolean;
+  gate_reason: string;
+  now: number;
+  cooldown_remaining_seconds: number;
+  idle_for_seconds: number | null;
+  config: {
+    idle_threshold_seconds: number;
+    cooldown_seconds: number;
+    min_jobs_for_run: number;
+    tick_seconds: number;
+  };
+};
+
+export const fetchConsolidationStatus = () =>
+  json_get<ConsolidationStatus>("/api/consolidation/status");
+
+export const runConsolidation = (dry_run: boolean = false) =>
+  json_post<Digest>(
+    `/api/consolidation/run?force=true&dry_run=${dry_run}`,
+    {},
+  );
+
+export const fetchDigests = (limit: number = 30) =>
+  json_get<{ total: number; digests: DigestSummary[] }>(
+    `/api/consolidation/digests?limit=${encodeURIComponent(String(limit))}`,
+  );
+
+export const fetchDigest = (date_str: string) =>
+  json_get<Digest>(`/api/consolidation/digests/${encodeURIComponent(date_str)}`);
