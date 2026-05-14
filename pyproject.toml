@@ -37,6 +37,10 @@ dependencies = [
     # default, channels.py auto-starts it on boot. Bundling here means
     # `pip install -e .` is enough; no separate extras invocation.
     "python-telegram-bot>=21.0",
+    # Edge TTS — free, online Microsoft TTS used as the default voice
+    # backend. ~400 multilingual neural voices, no API key, no local
+    # model files. Falls through to Piper / OpenAI when unreachable.
+    "edge-tts>=6.1.0",
 ]
 
 [project.optional-dependencies]

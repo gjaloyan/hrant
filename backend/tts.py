@@ -37,6 +37,12 @@ log = logging.getLogger(__name__)
 
 DEFAULT_LOCAL_PIPER_VOICE = "en_US-lessac-medium"
 DEFAULT_LOCAL_PIPER_VOICE_RU = "ru_RU-irina-medium"
+
+# Edge TTS — free Microsoft online TTS, ~400 voices, multilingual.
+# Defaults picked for naturalness on each language. Full voice list:
+#   python -m edge_tts --list-voices
+DEFAULT_EDGE_TTS_VOICE = "en-US-AriaNeural"
+DEFAULT_EDGE_TTS_VOICE_RU = "ru-RU-SvetlanaNeural"
 DEFAULT_OPENAI_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_TTS_VOICE = "alloy"
 
@@ -247,6 +253,8 @@ class Synthesizer:
         if self._backend in (None, "disabled"):
             return None
         try:
+            if self._backend == "edge_tts":
+                return self._tx_edge_tts(text, voice=voice)
             if self._backend == "local_piper":
                 return self._tx_local_piper(text, voice=voice)
             if self._backend == "openai_tts":
@@ -266,15 +274,47 @@ class Synthesizer:
             self._backend = "disabled"
             return
         if forced == "auto":
-            candidates = ["local_piper", "openai_tts"]
+            # Order: prefer truly zero-setup options first.
+            #   edge_tts    — pip-installable, no local model files,
+            #                 ~400 multilingual voices via MS Edge online TTS.
+            #                 The recommended free default.
+            #   local_piper — needs a separate Piper HTTP server + voice
+            #                 .onnx files; better quality offline but
+            #                 more setup.
+            #   openai_tts  — paid.
+            candidates = ["edge_tts", "local_piper", "openai_tts"]
         else:
             candidates = [forced]
         for cand in candidates:
+            if cand == "edge_tts" and self._try_edge_tts(cfg):
+                return
             if cand == "local_piper" and self._try_local_piper(cfg):
                 return
             if cand == "openai_tts" and self._try_openai_tts(cfg):
                 return
         self._backend = "disabled"
+
+    def _try_edge_tts(self, cfg: dict) -> bool:
+        """Microsoft Edge TTS — free, online, ~400 voices. Probe is
+        just an import check: if `edge_tts` is installed we trust
+        the network can reach Microsoft's endpoint. Real failures
+        surface via last_error during synthesize."""
+        try:
+            import edge_tts  # noqa: F401
+        except ImportError:
+            self._last_error = (
+                "edge_tts package not installed — `pip install edge-tts` "
+                "(free, ~400 multilingual voices, no model files needed)"
+            )
+            return False
+        cfg_e = (cfg.get("edge_tts") or {}) if cfg else {}
+        self._backend = "edge_tts"
+        # Sensible neural-voice defaults. Override per config or per
+        # synthesize() call.
+        self._voice = cfg_e.get("voice") or DEFAULT_EDGE_TTS_VOICE
+        self._voice_ru = cfg_e.get("voice_ru") or DEFAULT_EDGE_TTS_VOICE_RU
+        self._last_error = None
+        return True
 
     def _try_local_piper(self, cfg: dict) -> bool:
         cfg_p = (cfg.get("local_piper") or {}) if cfg else {}
@@ -326,6 +366,65 @@ class Synthesizer:
         return True
 
     # ---- backend impls ----
+
+    def _tx_edge_tts(
+        self, text: str, *, voice: Optional[str] = None,
+    ) -> Optional[bytes]:
+        """Synthesize via Microsoft Edge's online TTS (free, no API
+        key). Returns MP3 bytes — the downstream ffmpeg pipeline
+        converts to OGG/Opus for Telegram voice bubbles.
+
+        Voice selection: caller-supplied `voice` wins. Otherwise
+        we auto-pick — Cyrillic text → `_voice_ru` (e.g.
+        `ru-RU-SvetlanaNeural`), everything else → `_voice`
+        (e.g. `en-US-AriaNeural`).
+
+        edge_tts uses asyncio internally. We run it via
+        asyncio.run on a worker thread so we don't have to care
+        about the caller's event-loop state — the TTS module is
+        called from both sync paths (REPL, Telegram thread pool)
+        and async paths (FastAPI handlers). asyncio.run() in a
+        thread is the simplest portable bridge."""
+        import asyncio
+        import edge_tts  # local import to keep top of module light
+
+        chosen = voice or _pick_voice(
+            text,
+            default=self._voice or DEFAULT_EDGE_TTS_VOICE,
+            ru=self._voice_ru,
+        )
+
+        async def _synth() -> bytes:
+            buf = bytearray()
+            communicate = edge_tts.Communicate(text, chosen)
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio":
+                    buf.extend(chunk.get("data") or b"")
+            return bytes(buf)
+
+        # Always run in a fresh event loop on this thread. Avoids
+        # "asyncio.run() cannot be called from a running event loop"
+        # when the caller is already inside one.
+        import threading
+        result: dict = {}
+
+        def _runner() -> None:
+            try:
+                result["audio"] = asyncio.run(_synth())
+            except Exception as e:
+                result["error"] = e
+
+        t = threading.Thread(target=_runner, daemon=True)
+        t.start()
+        # 30s budget — edge-tts is usually <2s for a short sentence,
+        # but allow for slow networks.
+        t.join(timeout=30)
+        if t.is_alive():
+            self._last_error = "edge_tts timed out after 30s"
+            return None
+        if "error" in result:
+            raise result["error"]
+        return result.get("audio") or None
 
     def _tx_local_piper(
         self, text: str, *, voice: Optional[str] = None,

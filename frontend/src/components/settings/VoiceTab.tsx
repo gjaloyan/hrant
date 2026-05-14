@@ -27,7 +27,8 @@ const STT_BACKENDS: { id: NonNullable<TranscriberConfig["backend"]>; label: stri
 ];
 
 const TTS_BACKENDS: { id: NonNullable<TtsConfig["backend"]>; label: string }[] = [
-  { id: "auto", label: "Auto (local_piper → openai)" },
+  { id: "auto", label: "Auto (edge_tts → local_piper → openai) — recommended" },
+  { id: "edge_tts", label: "Edge TTS (Microsoft, free, online, ~400 voices)" },
   { id: "local_piper", label: "Local Piper HTTP server" },
   { id: "openai_tts", label: "OpenAI TTS" },
   { id: "disabled", label: "Disabled (text-only replies)" },
@@ -51,6 +52,8 @@ export default function VoiceTab({ flash }: Props) {
   const [piperUrl, setPiperUrl] = useState("");
   const [piperVoice, setPiperVoice] = useState("en_US-lessac-medium");
   const [piperVoiceRu, setPiperVoiceRu] = useState("ru_RU-irina-medium");
+  const [edgeVoice, setEdgeVoice] = useState("en-US-AriaNeural");
+  const [edgeVoiceRu, setEdgeVoiceRu] = useState("ru-RU-SvetlanaNeural");
   const [openaiTtsModel, setOpenaiTtsModel] = useState("tts-1");
   const [openaiTtsVoice, setOpenaiTtsVoice] = useState("alloy");
 
@@ -79,6 +82,8 @@ export default function VoiceTab({ flash }: Props) {
       if (ttsCfg.local_piper?.url) setPiperUrl(ttsCfg.local_piper.url);
       if (ttsCfg.local_piper?.voice) setPiperVoice(ttsCfg.local_piper.voice);
       if (ttsCfg.local_piper?.voice_ru) setPiperVoiceRu(ttsCfg.local_piper.voice_ru);
+      if (ttsCfg.edge_tts?.voice) setEdgeVoice(ttsCfg.edge_tts.voice);
+      if (ttsCfg.edge_tts?.voice_ru) setEdgeVoiceRu(ttsCfg.edge_tts.voice_ru);
       if (ttsCfg.openai_tts?.model) setOpenaiTtsModel(ttsCfg.openai_tts.model);
       if (ttsCfg.openai_tts?.voice) setOpenaiTtsVoice(ttsCfg.openai_tts.voice);
     } catch (e: any) {
@@ -122,6 +127,12 @@ export default function VoiceTab({ flash }: Props) {
     setBusy(true);
     try {
       const cfg: Partial<TtsConfig> = { backend: ttsBackend };
+      if (ttsBackend === "edge_tts" || ttsBackend === "auto") {
+        cfg.edge_tts = {
+          voice: edgeVoice.trim(),
+          voice_ru: edgeVoiceRu.trim(),
+        };
+      }
       if (ttsBackend === "local_piper" || ttsBackend === "auto") {
         cfg.local_piper = {
           url: piperUrl.trim(),
@@ -368,6 +379,37 @@ export default function VoiceTab({ flash }: Props) {
             ))}
           </select>
         </div>
+        {(ttsBackend === "edge_tts" || ttsBackend === "auto") && (
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">
+                Edge voice (default)
+              </label>
+              <input
+                value={edgeVoice}
+                onChange={(e) => setEdgeVoice(e.target.value)}
+                placeholder="en-US-AriaNeural"
+                className="w-full bg-slate-900 rounded px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-sky-600 font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">
+                Edge voice (Russian)
+              </label>
+              <input
+                value={edgeVoiceRu}
+                onChange={(e) => setEdgeVoiceRu(e.target.value)}
+                placeholder="ru-RU-SvetlanaNeural"
+                className="w-full bg-slate-900 rounded px-2 py-1.5 text-sm outline-none focus:ring-1 focus:ring-sky-600 font-mono"
+              />
+            </div>
+            <div className="col-span-2 text-[11px] text-slate-500">
+              Free Microsoft online TTS. ~400 multilingual voices — full list:{" "}
+              <span className="font-mono">python -m edge_tts --list-voices</span>.
+              Cyrillic text auto-routes to the Russian voice.
+            </div>
+          </div>
+        )}
         {(ttsBackend === "local_piper" || ttsBackend === "auto") && (
           <div className="grid grid-cols-3 gap-2">
             <div>

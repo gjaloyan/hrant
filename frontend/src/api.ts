@@ -1303,7 +1303,8 @@ export type TranscriberStatus = {
 };
 
 export type TtsConfig = {
-  backend?: "auto" | "local_piper" | "openai_tts" | "disabled";
+  backend?: "auto" | "edge_tts" | "local_piper" | "openai_tts" | "disabled";
+  edge_tts?: { voice?: string; voice_ru?: string };
   local_piper?: { url?: string; voice?: string; voice_ru?: string };
   openai_tts?: { model?: string; voice?: string };
 };

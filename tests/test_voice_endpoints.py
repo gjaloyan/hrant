@@ -95,6 +95,49 @@ def test_tts_config_put_replaces_backend_choice(monkeypatch):
     assert state["backend"] == "disabled"
 
 
+def test_tts_edge_tts_probe_passes_with_package(monkeypatch):
+    """When `edge_tts` package is importable, the probe should mark
+    the backend active even with no network call (probe is just an
+    import check + voice defaults)."""
+    import sys
+    # Pretend edge_tts is installed.
+    fake_mod = type(sys)("edge_tts")
+    monkeypatch.setitem(sys.modules, "edge_tts", fake_mod)
+    from backend.tts import Synthesizer
+    s = Synthesizer()
+    monkeypatch.setattr("backend.tts.load_config", lambda: {"backend": "edge_tts"})
+    s._pick_backend()
+    assert s._backend == "edge_tts"
+    assert s._voice  # default present
+    assert s._voice_ru
+
+
+def test_tts_edge_tts_probe_fails_without_package(monkeypatch):
+    """Without the edge_tts package the probe should not pick this
+    backend (sets last_error, falls through). The next backend in
+    the auto chain gets a turn."""
+    import sys
+    monkeypatch.delitem(sys.modules, "edge_tts", raising=False)
+    # Force `import edge_tts` to fail.
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kw):
+        if name == "edge_tts":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    from backend.tts import Synthesizer
+    s = Synthesizer()
+    monkeypatch.setattr(
+        "backend.tts.load_config", lambda: {"backend": "edge_tts"},
+    )
+    s._pick_backend()
+    assert s._backend == "disabled"
+    assert "not installed" in (s._last_error or "")
+
+
 def test_tts_status_endpoint(monkeypatch):
     from backend.tts import SYNTHESIZER
     monkeypatch.setattr(

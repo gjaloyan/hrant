@@ -43,7 +43,8 @@ class TtsConfigUpdate(BaseModel):
     """Partial update — only fields the user actually changed are
     sent, so unspecified keys stay at their current value."""
 
-    backend: Optional[str] = None  # "auto" | "local_piper" | "openai_tts" | "disabled"
+    backend: Optional[str] = None  # "auto" | "edge_tts" | "local_piper" | "openai_tts" | "disabled"
+    edge_tts: Optional[dict] = None      # {voice, voice_ru}
     local_piper: Optional[dict] = None   # {url, voice, voice_ru}
     openai_tts: Optional[dict] = None    # {model, voice}
 
@@ -79,6 +80,10 @@ def tts_config_put(body: TtsConfigUpdate):
     cfg = load_tts_config() or {}
     if body.backend is not None:
         cfg["backend"] = body.backend
+    if body.edge_tts is not None:
+        merged = dict(cfg.get("edge_tts") or {})
+        merged.update({k: v for k, v in body.edge_tts.items() if v is not None})
+        cfg["edge_tts"] = merged
     if body.local_piper is not None:
         merged = dict(cfg.get("local_piper") or {})
         merged.update({k: v for k, v in body.local_piper.items() if v is not None})
