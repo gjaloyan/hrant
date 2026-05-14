@@ -557,6 +557,29 @@ class TelegramBot:
 
                 await update.message.chat.send_action("typing")
 
+                # Telegram's typing indicator decays after ~5s. Long
+                # agent turns (10-30s+) outlive it, so the user sees
+                # "no activity" while we're still working. Spawn a
+                # background task that refreshes the action every 4s
+                # for the duration of agent.run, then cancel it.
+                async def _keep_typing(chat) -> None:
+                    try:
+                        while True:
+                            await asyncio.sleep(4.0)
+                            try:
+                                await chat.send_action("typing")
+                            except Exception:
+                                # Quiet on transient network errors —
+                                # the next iteration retries; the
+                                # missed beat is invisible to the user.
+                                pass
+                    except asyncio.CancelledError:
+                        return
+
+                typing_task = asyncio.create_task(
+                    _keep_typing(update.message.chat),
+                )
+
                 try:
                     from .agent import Agent
 
@@ -795,6 +818,16 @@ class TelegramBot:
                 except Exception as e:
                     log.error("Telegram bot error processing message: %s", e)
                     await update.message.reply_text(f"Error: {str(e)[:500]}")
+                finally:
+                    # Stop the typing-indicator refresher whether the
+                    # turn completed cleanly, crashed, or was cancelled.
+                    # Without this, every long message leaks a coroutine
+                    # that keeps sending typing every 4s forever.
+                    typing_task.cancel()
+                    try:
+                        await typing_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
 
             app.add_handler(CommandHandler("start", handle_start))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
