@@ -81,7 +81,7 @@ hrant config edit               # open .env in $EDITOR (escape hatch)
 |---|---|
 | `anthropic.api_key` | `.env:ANTHROPIC_API_KEY` (redacted) |
 | `openai.api_key` | `.env:OPENAI_API_KEY` (redacted) |
-| `telegram.bot_token` | `.env:TELEGRAM_BOT_TOKEN` (redacted) |
+| `telegram.bot_token` | `knowledge/channels.json` — the first `type=telegram` channel's `config.bot_token` (redacted) |
 | `tailscale.host` | `.env:TAILSCALE_HOST` |
 | `whisper.url` | `knowledge/transcriber_config.json:local_whisper.url` |
 | `tts.backend` | `knowledge/tts_config.json:backend` — choice: `auto / edge_tts / local_piper / openai_tts / disabled` |
@@ -91,6 +91,8 @@ hrant config edit               # open .env in $EDITOR (escape hatch)
 | `autonomic.heartbeat_seconds` | `knowledge/autonomic_settings.json:tick_interval_seconds` (1..3600) |
 
 Secrets are redacted on display — `list` and `get` show only the first 4 + last 4 chars. The actual file on disk is the source of truth; `hrant config` is just a friendlier face on it.
+
+**Navigation:** `hrant config` (no args) opens an arrow-key menu — `↑/↓` move the selection, `Enter` picks, `q` / `Esc` go back. On non-TTY runs (cron, scripts, piped stdin) the menu degrades to a numbered prompt automatically.
 
 **Colors:** warm orange accent (think openclaw's Lobster palette). Disabled automatically when stdout is not a TTY or `NO_COLOR` is set. On legacy Windows code pages, Unicode glyphs fall back to ASCII (`✓` → `[ok]`, `→` → `->`).
 

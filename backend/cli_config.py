@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .cli_colors import c, g
+from . import cli_menu
 
 
 # ─── Registry ─────────────────────────────────────────────────────────
@@ -46,6 +47,11 @@ class Key:
         env:NAME                 → row in .env
         json:<file>:<a.b.c>      → dotted path in a JSON file under
                                     knowledge_dir
+        custom                   → reader/writer/deleter supplied as
+                                    callables (escape hatch for keys
+                                    backed by non-trivial storage like
+                                    channels.json with a list of
+                                    typed entries)
     """
     key: str
     source: str
@@ -60,6 +66,10 @@ class Key:
     # Optional side-effect after write. Used by autonomic heartbeat so
     # the live scheduler picks up the new interval without a restart.
     after_write: Optional[Callable[[Any], None]] = field(default=None, repr=False)
+    # Custom storage hooks — when present, supersede the source DSL.
+    reader: Optional[Callable[[], Any]] = field(default=None, repr=False)
+    writer: Optional[Callable[[Any], None]] = field(default=None, repr=False)
+    deleter: Optional[Callable[[], None]] = field(default=None, repr=False)
 
 
 def _heartbeat_after_write(value: Any) -> None:
@@ -72,6 +82,75 @@ def _heartbeat_after_write(value: Any) -> None:
         set_interval(float(value))
     except Exception:
         pass
+
+
+# ─── Telegram bot token: lives in channels.json ──────────────────────
+# The token is stored under the FIRST channel of type=telegram, at
+# `config.bot_token`. The init wizard + WebUI Channels tab both write
+# there. We read/write the same record so `hrant config set
+# telegram.bot_token X` updates the bot the agent actually uses.
+
+
+def _telegram_channel() -> Optional[dict]:
+    """Find the first telegram channel record, or None when none
+    exist yet. Reads channels.json on every call so a wizard-created
+    channel is visible immediately."""
+    try:
+        from . import channels as _ch
+    except Exception:
+        return None
+    try:
+        for ch in _ch.get_channels():
+            if ch.get("type") == "telegram":
+                return ch
+    except Exception:
+        return None
+    return None
+
+
+def _telegram_token_read() -> Optional[str]:
+    ch = _telegram_channel()
+    if ch is None:
+        return None
+    return (ch.get("config") or {}).get("bot_token") or None
+
+
+def _telegram_token_write(value: Any) -> None:
+    """Update the token on the existing telegram channel, or create
+    a fresh `telegram-default` channel with sane defaults if none
+    exists yet (matches what the init wizard does)."""
+    import time
+    from . import channels as _ch
+    ch = _telegram_channel()
+    if ch is None:
+        ch = {
+            "id": f"telegram-{int(time.time())}",
+            "type": "telegram",
+            "enabled": True,
+            "auto_start": True,
+            "config": {"bot_token": str(value), "allowed_users": []},
+        }
+    else:
+        ch.setdefault("config", {})
+        ch["config"]["bot_token"] = str(value)
+        # If the channel got disabled at some point, re-enable it —
+        # the user just told us they want it on.
+        ch["enabled"] = True
+    _ch.save_channel(ch)
+
+
+def _telegram_token_delete() -> None:
+    from . import channels as _ch
+    ch = _telegram_channel()
+    if ch is None:
+        return
+    cfg = ch.get("config") or {}
+    cfg["bot_token"] = ""
+    ch["config"] = cfg
+    # Disabling rather than removing the whole record — keeps
+    # allowed_users + any other settings the user configured.
+    ch["enabled"] = False
+    _ch.save_channel(ch)
 
 
 REGISTRY: list[Key] = [
@@ -112,11 +191,15 @@ REGISTRY: list[Key] = [
         help="Russian voice override for Edge TTS."),
 
     # Telegram -------------------------------------------------------
-    Key("telegram.bot_token", "env:TELEGRAM_BOT_TOKEN",
+    Key("telegram.bot_token", "custom",
         label="Telegram bot token",
         group="Telegram",
         secret=True,
-        help="Bot token from @BotFather. After setting, restart with "
+        reader=_telegram_token_read,
+        writer=_telegram_token_write,
+        deleter=_telegram_token_delete,
+        help="Bot token from @BotFather. Stored in channels.json — "
+             "set this and the agent picks up the bot on next "
              "`hrant gateway restart`."),
 
     # Discovery ------------------------------------------------------
@@ -237,6 +320,8 @@ def _dotted_delete(obj: dict, path: str) -> None:
 
 
 def read_value(k: Key) -> Any:
+    if k.reader is not None:
+        return k.reader()
     if k.source.startswith("env:"):
         env = _read_env()
         return env.get(k.source[len("env:"):]) or None
@@ -268,7 +353,9 @@ def write_value(k: Key, raw: str) -> Any:
         if k.max is not None and value > k.max:
             raise ValueError(f"{k.key} must be <= {k.max}")
 
-    if k.source.startswith("env:"):
+    if k.writer is not None:
+        k.writer(value)
+    elif k.source.startswith("env:"):
         env = _read_env()
         env[k.source[len("env:"):]] = str(value)
         _write_env(env)
@@ -289,6 +376,9 @@ def write_value(k: Key, raw: str) -> Any:
 
 
 def delete_value(k: Key) -> None:
+    if k.deleter is not None:
+        k.deleter()
+        return
     if k.source.startswith("env:"):
         env = _read_env()
         env.pop(k.source[len("env:"):], None)
@@ -452,36 +542,18 @@ def _ask_str(prompt: str, default: str = "", *, secret: bool = False) -> str:
     return v or default
 
 
-def _ask_choice(prompt: str, options: list[tuple[str, str]], default_idx: int = 0) -> int:
-    """Numbered menu, same shape as init_wizard._ask_choice. Returns
-    the chosen index (0-based). Non-TTY returns default."""
-    print(f"  {prompt}")
-    print()
-    for i, (label, desc) in enumerate(options, start=1):
-        marker = c.accent_bright(g.arrow) if (i - 1) == default_idx else " "
-        line = f"    {marker} {i}) {c.bold(label)}"
-        if desc:
-            line += f"  {c.muted(desc)}"
-        print(line)
-    print()
-    if not sys.stdin.isatty():
-        return default_idx
-    while True:
-        try:
-            raw = input(f"  {c.muted('Choice')} [{c.accent(str(default_idx + 1))}]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return default_idx
-        if not raw:
-            return default_idx
-        try:
-            idx = int(raw) - 1
-        except ValueError:
-            print(c.warn(f"  please enter a number 1..{len(options)}"))
-            continue
-        if 0 <= idx < len(options):
-            return idx
-        print(c.warn("  out of range; try again"))
+def _ask_choice(
+    prompt: str,
+    options: list[tuple[str, str]],
+    default_idx: int = 0,
+    *,
+    allow_cancel: bool = True,
+) -> int:
+    """Arrow-key navigated menu. Returns chosen 0-based index, or
+    `cli_menu.CANCELLED` (-1) when the user pressed q/Esc. Wraps the
+    standalone `cli_menu.select` helper so the wizard can keep its
+    existing call shape."""
+    return cli_menu.select(prompt, options, default_idx, allow_cancel=allow_cancel)
 
 
 def _edit_key(k: Key) -> None:
@@ -506,6 +578,9 @@ def _edit_key(k: Key) -> None:
             k.choices.index(str(cur)) if str(cur) in k.choices else 0
         )
         idx = _ask_choice(f"Pick a value for {c.accent(k.key)}:", opts, default_idx)
+        if idx == cli_menu.CANCELLED:
+            print(f"  {c.muted('cancelled — no change')}")
+            return
         new_raw = k.choices[idx]
     else:
         new_raw = _ask_str(
@@ -528,7 +603,7 @@ def _edit_key(k: Key) -> None:
 
 def _group_menu(group: str) -> None:
     """Submenu: show every key in this group; let user pick one to
-    edit, repeating until they choose 'back'."""
+    edit, repeating until they choose 'Back' (or press q / Esc)."""
     while True:
         keys = [k for k in REGISTRY if k.group == group]
         print()
@@ -545,50 +620,63 @@ def _group_menu(group: str) -> None:
                 shown = c.success(str(cur))
             rows.append((k.label, f"{c.muted(k.key)}  {g.arrow}  {shown}"))
         rows.append(("Back", "return to the main menu"))
-        idx = _ask_choice("Pick a setting to edit:", rows, default_idx=len(rows) - 1)
-        if idx == len(rows) - 1:
+        idx = _ask_choice("Pick a setting to edit:", rows, default_idx=0)
+        if idx == cli_menu.CANCELLED or idx == len(rows) - 1:
             return
         _edit_key(keys[idx])
 
 
 def run_menu() -> int:
     """Top-level interactive menu — what `hrant config` runs when
-    given no subcommand. Designed for someone who's never touched the
-    CLI before: groups are clearly labelled, current state is shown
-    inline, every option says what'll happen."""
+    given no subcommand. Arrow-key navigated. Designed for someone
+    who's never touched the CLI before: groups are clearly labelled,
+    current state is shown inline, every option says what'll happen."""
     if not sys.stdin.isatty():
         # Non-TTY (cron / scripts) — just print the list and exit.
         print_list()
         return 0
 
+    # Collect groups in registry order (preserves the curated layout
+    # rather than alphabetising and burying the most-touched bits).
     groups: list[str] = []
     for k in REGISTRY:
         if k.group not in groups:
             groups.append(k.group)
 
+    last_choice = 0
     while True:
         print()
         print(c.heading("  Hrant configuration"))
-        print(f"  {c.muted('Walk through your settings. Press Ctrl-C any time to exit.')}")
+        print(f"  {c.muted('Use ↑/↓ to move, Enter to pick, q to exit.')}")
         print()
         # Per-group status row in the main menu.
         opts: list[tuple[str, str]] = []
-        for g in groups:
-            keys = [k for k in REGISTRY if k.group == g]
+        for grp in groups:
+            keys = [k for k in REGISTRY if k.group == grp]
             set_count = sum(1 for k in keys if read_value(k))
             total = len(keys)
-            marker = (
-                c.success(f"{set_count}/{total} set")
-                if set_count == total else
-                c.warn(f"{set_count}/{total} set")
-                if set_count > 0 else
-                c.muted(f"0/{total} set")
-            )
-            opts.append((g, marker))
+            if set_count == total:
+                marker = c.success(f"{set_count}/{total} set")
+            elif set_count > 0:
+                marker = c.warn(f"{set_count}/{total} set")
+            else:
+                marker = c.muted(f"0/{total} set")
+            opts.append((grp, marker))
         opts.append(("Show all values", c.muted("`hrant config list` — print every key")))
         opts.append(("Show config files", c.muted("`hrant config files` — where things live on disk")))
         opts.append(("Exit", c.muted("done — leave the wizard")))
-        idx = _ask_choice("Main menu:", opts, default_idx=len(opts) - 1)
+        try:
+            idx = _ask_choice("Main menu:", opts, default_idx=last_choice)
+        except KeyboardInterrupt:
+            print()
+            return 0
+        # Cancel from the top menu = exit. Cancel from inside a group
+        # is handled in _group_menu (returns up).
+        if idx == cli_menu.CANCELLED or idx == len(opts) - 1:
+            print()
+            print(c.muted("  bye."))
+            return 0
+        last_choice = idx
         if idx < len(groups):
             _group_menu(groups[idx])
             continue
@@ -599,7 +687,3 @@ def run_menu() -> int:
         if choice == "Show config files":
             print_files()
             continue
-        # Exit
-        print()
-        print(c.muted("  bye."))
-        return 0

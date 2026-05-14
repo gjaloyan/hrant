@@ -34,11 +34,15 @@ from backend import paths
 def hrant_home(tmp_path, monkeypatch):
     """Redirect HRANT_DATA_DIR so cli_config reads + writes inside
     tmp_path. paths.knowledge_dir() / env_path() re-read the env var
-    on every call, so just setting it is enough — no cache to bust."""
+    on every call. backend.channels caches CHANNELS_PATH at import
+    time, so monkeypatch that too — otherwise the telegram-token tests
+    would write to the dev machine's real channels.json."""
     data_dir = tmp_path / "hrant_data"
     data_dir.mkdir()
     (data_dir / "knowledge").mkdir()
     monkeypatch.setenv("HRANT_DATA_DIR", str(data_dir))
+    from backend import channels as _ch
+    monkeypatch.setattr(_ch, "CHANNELS_PATH", data_dir / "knowledge" / "channels.json")
     return data_dir
 
 
@@ -57,6 +61,12 @@ def test_every_key_has_a_label_and_source():
     for k in cc.REGISTRY:
         assert k.key, f"empty key name in registry"
         assert k.label, f"key {k.key} missing label"
+        # Either the source DSL is the standard env:/json: shape, OR
+        # it's `custom` AND custom reader/writer callables are wired.
+        if k.source == "custom":
+            assert k.reader is not None, f"{k.key}: custom source needs reader"
+            assert k.writer is not None, f"{k.key}: custom source needs writer"
+            continue
         assert k.source.startswith(("env:", "json:")), (
             f"{k.key}: unsupported source DSL `{k.source}`"
         )
@@ -241,3 +251,122 @@ def test_cmd_config_set_persists_via_argparse_path(hrant_home):
     ))
     assert rc == 0
     assert cc.read_value(cc.find_key("tailscale.host")) == "100.64.0.5"
+
+
+# ─── Telegram bot token: channels.json storage ──────────────────────
+
+
+def test_telegram_token_reads_from_existing_channel(hrant_home):
+    """When a telegram channel exists in channels.json, `hrant config
+    get telegram.bot_token` returns that channel's bot_token — NOT
+    whatever's in .env. This was the bug the user reported: the bot
+    was configured but `config list` showed (not set)."""
+    from backend import channels as _ch
+    _ch.save_channel({
+        "id": "telegram-default",
+        "type": "telegram",
+        "enabled": True,
+        "auto_start": True,
+        "config": {"bot_token": "1234567890:AAA-bbb-ccc-secret", "allowed_users": []},
+    })
+    assert cc.read_value(cc.find_key("telegram.bot_token")) == "1234567890:AAA-bbb-ccc-secret"
+
+
+def test_telegram_token_write_updates_existing_channel(hrant_home):
+    from backend import channels as _ch
+    _ch.save_channel({
+        "id": "telegram-default",
+        "type": "telegram",
+        "enabled": True,
+        "config": {"bot_token": "old-token", "allowed_users": ["preserved"]},
+    })
+    cc.write_value(cc.find_key("telegram.bot_token"), "new-token-9999")
+    ch = next(c for c in _ch.get_channels() if c["type"] == "telegram")
+    assert ch["config"]["bot_token"] == "new-token-9999"
+    # Sibling fields stay intact — write must not clobber allowed_users.
+    assert ch["config"]["allowed_users"] == ["preserved"]
+
+
+def test_telegram_token_write_creates_channel_when_missing(hrant_home):
+    """No telegram channel yet → writer creates one with sane defaults
+    so the user can `hrant config set telegram.bot_token X` as their
+    first step without running the init wizard."""
+    from backend import channels as _ch
+    assert [c for c in _ch.get_channels() if c["type"] == "telegram"] == []
+    cc.write_value(cc.find_key("telegram.bot_token"), "first-token")
+    chans = [c for c in _ch.get_channels() if c["type"] == "telegram"]
+    assert len(chans) == 1
+    assert chans[0]["config"]["bot_token"] == "first-token"
+    assert chans[0]["enabled"] is True
+    assert chans[0]["auto_start"] is True
+
+
+def test_telegram_token_delete_disables_channel(hrant_home):
+    """unset must NOT remove the whole channel record (loses
+    allowed_users etc.); it disables it + clears the token."""
+    from backend import channels as _ch
+    _ch.save_channel({
+        "id": "telegram-default",
+        "type": "telegram",
+        "enabled": True,
+        "config": {"bot_token": "secret", "allowed_users": ["user1"]},
+    })
+    cc.delete_value(cc.find_key("telegram.bot_token"))
+    ch = next(c for c in _ch.get_channels() if c["type"] == "telegram")
+    assert ch["enabled"] is False
+    assert ch["config"]["bot_token"] == ""
+    assert ch["config"]["allowed_users"] == ["user1"]
+
+
+def test_telegram_token_redacted_in_list(hrant_home, capsys):
+    from backend import channels as _ch
+    _ch.save_channel({
+        "id": "telegram-default",
+        "type": "telegram",
+        "enabled": True,
+        "config": {"bot_token": "1851234567:AAFverysecretsupersecretWP-U", "allowed_users": []},
+    })
+    cc.print_list()
+    out = capsys.readouterr().out
+    # Last 4 chars are visible; the secret body is NOT.
+    assert "WP-U" in out
+    assert "supersecret" not in out
+
+
+# ─── Arrow-key menu: non-TTY fallback ──────────────────────────────
+
+
+def test_cli_menu_falls_back_to_numbered_on_non_tty(monkeypatch, capsys):
+    """When stdin/stdout aren't TTYs (cron, pipe, captured stdin in
+    tests), the arrow menu must degrade to a numbered prompt that
+    reads one line. Otherwise scripted runs would hang waiting for
+    arrow keys that never come."""
+    from backend import cli_menu
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    idx = cli_menu.select("Pick one", [("A", ""), ("B", ""), ("C", "")], 0)
+    assert idx == 1  # "2" → 0-based index 1
+
+
+def test_cli_menu_returns_default_on_empty_input(monkeypatch):
+    from backend import cli_menu
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    idx = cli_menu.select("?", [("A", ""), ("B", "")], default_idx=1)
+    assert idx == 1
+
+
+def test_cli_menu_returns_default_on_eof(monkeypatch):
+    """EOF on stdin (pipe closed) → default index. Don't crash."""
+    from backend import cli_menu
+
+    def raise_eof(_):
+        raise EOFError
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    monkeypatch.setattr("builtins.input", raise_eof)
+    idx = cli_menu.select("?", [("A", ""), ("B", "")], default_idx=0)
+    assert idx == 0
