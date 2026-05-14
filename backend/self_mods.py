@@ -88,7 +88,9 @@ class Manifest:
 
 
 def _self_mods_dir() -> Path:
-    return paths.data_dir() / "self_mods"
+    # Use require=False so an early read on a fresh box doesn't
+    # raise — self_mods/ is lazily materialised when a patch lands.
+    return paths.data_dir(require=False) / "self_mods"
 
 
 def _manifest_path() -> Path:

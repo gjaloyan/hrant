@@ -95,6 +95,36 @@ def test_bootstrap_does_not_copy_templates_readme(isolated_data_dir):
     assert not (paths.knowledge_dir() / "README.md").exists()
 
 
+def test_cmd_init_runs_on_fresh_box(tmp_path, monkeypatch, capsys):
+    """Regression for the 'hrant init crashes with DataDirMissing'
+    bug on a fresh server. Phase 8B made `paths.data_dir()` raise
+    when the directory doesn't exist, but `cmd_init` was calling
+    that BEFORE running the bootstrap that creates the dir —
+    chicken-and-egg. Fix: ensure_data_dir() at the very top of
+    cmd_init, plus require=False on the subsequent display call.
+    This test asserts cmd_init survives end-to-end against a
+    completely empty HRANT_DATA_DIR target."""
+    import argparse
+    target = tmp_path / "fresh"
+    monkeypatch.setenv("HRANT_DATA_DIR", str(target))
+    # Non-interactive: _read_input returns the default ("") so the
+    # Q&A loop just blasts through without prompting.
+    monkeypatch.setattr("sys.stdin.isatty", lambda: False)
+
+    from backend import cli as cli_mod
+    args = argparse.Namespace(reset=False)
+    rc = cli_mod.cmd_init(args)
+    assert rc == 0
+    assert target.exists()
+    assert (target / "knowledge").is_dir()
+    assert (target / "workspace").is_dir()
+    out = capsys.readouterr().out
+    # No DataDirMissing traceback — must have printed the data_dir
+    # line and the bootstrap result.
+    assert "data_dir" in out
+    assert "engine" in out
+
+
 def test_bootstrap_is_safe_on_missing_templates(isolated_data_dir, monkeypatch):
     """If the engine repo is broken (templates dir vanished), the
     wizard must NOT crash — it warns and continues."""

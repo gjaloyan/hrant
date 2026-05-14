@@ -354,7 +354,7 @@ class Config:
             if not kb.is_absolute():
                 # Honour the user's relative path against data_dir,
                 # which is the user-facing tree, not the engine repo.
-                kb = (paths.data_dir() / kb).resolve()
+                kb = (paths.data_dir(require=False) / kb).resolve()
         else:
             kb = paths.knowledge_dir()
         self._data["knowledge"]["base_dir"] = str(kb)
@@ -364,7 +364,7 @@ class Config:
         if ws_raw and ws_raw not in ("./workspace", "workspace"):
             ws = Path(ws_raw)
             if not ws.is_absolute():
-                ws = (paths.data_dir() / ws).resolve()
+                ws = (paths.data_dir(require=False) / ws).resolve()
         else:
             ws = paths.workspace_dir()
         self._data.setdefault("workspace", {})["root"] = str(ws)

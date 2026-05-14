@@ -96,12 +96,15 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     print("Hrant — interactive setup")
     print()
-    print(f"  data_dir: {paths.data_dir()}")
+    # Create the data dir UP FRONT — bootstrap.bootstrap_data_dir()
+    # would do it too, but several lines above (print + env_path())
+    # call into paths.*  which used to need an existing dir. Doing
+    # it here means the rest of the function sees a real, created
+    # directory regardless of whether this is a fresh install.
+    paths.ensure_data_dir()
+    print(f"  data_dir: {paths.data_dir(require=False)}")
     print(f"  engine:   {paths.repo_root()}")
-    if paths.is_split_install():
-        print("  layout:   split (engine separate from data — production setup)")
-    else:
-        print("  layout:   single-tree (dev mode — data lives in the repo)")
+    print("  layout:   split (engine separate from data — production setup)")
     print()
 
     # 1. Bootstrap files (templates + config.yaml). Idempotent —
@@ -124,7 +127,11 @@ def cmd_init(args: argparse.Namespace) -> int:
     # 2. .env Q&A — provider keys and service URLs.
     env_path = paths.env_path()
     if not env_path.exists():
-        env_path = paths.data_dir() / ".env"
+        # paths.env_path() returns the would-be path under data_dir
+        # even when it doesn't exist yet, so this branch is a no-op
+        # in practice. Kept for back-compat with callers that
+        # patched env_path() to None in the past.
+        env_path = paths.data_dir(require=False) / ".env"
     existing_env: dict[str, str] = {}
     if env_path.exists():
         for line in env_path.read_text(encoding="utf-8").splitlines():

@@ -83,7 +83,7 @@ def bootstrap_data_dir(*, force: bool = False) -> BootstrapResult:
     if not src_root.exists():
         log.warning("templates dir missing at %s — engine repo broken?", src_root)
         return BootstrapResult(
-            data_dir=str(paths.data_dir()),
+            data_dir=str(paths.data_dir(require=False)),
             fresh=fresh,
             copied_files=[],
             skipped_files=[],
@@ -106,7 +106,7 @@ def bootstrap_data_dir(*, force: bool = False) -> BootstrapResult:
     # config.yaml: copied from repo_root/config.example.yaml, NOT
     # from templates_dir (kept at repo root for visibility).
     cfg_src = paths.repo_root() / "config.example.yaml"
-    cfg_dst = paths.data_dir() / "config.yaml"
+    cfg_dst = paths.data_dir(require=False) / "config.yaml"
     if cfg_src.exists():
         if cfg_dst.exists() and not force:
             config_action = "exists"
