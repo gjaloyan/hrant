@@ -263,15 +263,35 @@ def run_frontend_build() -> tuple[bool, str]:
 def frontend_changed(commits: list[dict]) -> bool:
     """Heuristic: did the incoming commits touch anything under
     frontend/? Used to skip the (slow) rebuild when only backend
-    changed. Conservative — when in doubt, returns True."""
+    changed. Conservative — when in doubt, returns True.
+
+    Examines each commit's file list via `git show --name-only`
+    rather than diffing `HEAD..origin/<branch>`. The diff approach
+    looks correct in isolation but `update()` calls this AFTER the
+    pull has happened, at which point HEAD == origin/<branch> and
+    the diff is empty — so the heuristic always reported "no
+    frontend change" and skipped the rebuild. Walking commits
+    directly works regardless of whether the pull has run yet.
+    """
     if not commits:
         return False
     try:
-        sha_range = f"HEAD..origin/{current_branch() or 'master'}"
-        r = _git("diff", "--name-only", sha_range, check=False)
-        if r.returncode != 0:
-            return True
-        return any(line.strip().startswith("frontend/") for line in r.stdout.splitlines())
+        for c in commits:
+            sha = (c.get("sha") or "").strip()
+            if not sha:
+                # Missing SHA from the caller — be conservative and
+                # rebuild rather than silently skipping.
+                return True
+            r = _git(
+                "show", "--name-only", "--pretty=format:", sha,
+                check=False,
+            )
+            if r.returncode != 0:
+                return True
+            for line in r.stdout.splitlines():
+                if line.strip().startswith("frontend/"):
+                    return True
+        return False
     except (FileNotFoundError, subprocess.CalledProcessError):
         return True
 

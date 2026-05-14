@@ -10,6 +10,18 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## Phase 15B-fix2 (2026-05-15)
+
+Two fixes that together solve "I ran `hrant update` but don't see the new WebUI tabs":
+
+**Fixes**
+- **`frontend_changed` heuristic was always returning False after pull.** The previous code ran `git diff HEAD..origin/<branch>` AFTER `git pull` succeeded, at which point HEAD and origin are the same → diff is empty → "frontend unchanged" → rebuild skipped. Phase 15A/B users hit this directly: the JobsTab and FailoverPanel files were in the pulled commits, but the npm build ran zero times. Fixed by walking each commit via `git show --name-only` — works regardless of whether the pull has happened.
+- **`hrant update` now auto-restarts the gateway service.** After a successful update, detects whether `hrant.service` / `ai.hrant.agent` / `HrantAgent` is running and restarts it so the freshly-built frontend bundle is served immediately. Opt out with `hrant update --no-restart`. If you're running in foreground via `hrant run`, you'll get a clear "no service to restart — Ctrl-C and re-run" message instead.
+
+So `hrant update` now actually does the right thing end-to-end: pull → pip → rebuild (when needed, correctly detected) → restart service → WebUI shows new code. No more `hrant rebuild && hrant gateway restart` chase.
+
+---
+
 ## Phase 15B-fix (2026-05-14)
 
 Cleanup pass after the Phase 15A/B audit. Behavior fixes.

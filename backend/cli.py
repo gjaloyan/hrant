@@ -1575,10 +1575,72 @@ def cmd_update(args: argparse.Namespace) -> int:
         _print_ok(m)
     if result.pulled_commits == 0:
         return 0
-    print()
-    print("update complete. Restart the agent to pick up engine changes:")
-    print("  hrant run     # or `systemctl --user restart hrant` on a server")
+
+    # Auto-restart the gateway after a successful update so the
+    # running process picks up new code and the WebUI starts
+    # serving the freshly-built frontend bundle. Skip with
+    # --no-restart (or when explicitly running in foreground via
+    # `hrant run`, where no service exists to restart).
+    if not bool(getattr(args, "no_restart", False)):
+        try:
+            if _gateway_service_running():
+                print()
+                _print_ok("restarting gateway service so new code is loaded...")
+                rc = cmd_gateway_restart(argparse.Namespace(platform=None))
+                if rc == 0:
+                    _print_ok("gateway restarted — WebUI now serves the new bundle")
+                else:
+                    _print_warn(
+                        "gateway restart failed; run `hrant gateway restart` manually"
+                    )
+            else:
+                print()
+                _print_warn(
+                    "no gateway service detected. If you're running `hrant run` "
+                    "in a terminal, stop it (Ctrl-C) and re-run to pick up the "
+                    "changes — or use `hrant gateway start` to install + run it "
+                    "as a background service that auto-restarts on update."
+                )
+        except Exception as e:
+            _print_warn(f"auto-restart check failed: {e}")
     return 0
+
+
+def _gateway_service_running() -> bool:
+    """Best-effort: is `hrant.service` (Linux) / `ai.hrant.agent`
+    (macOS) / `HrantAgent` (Windows) currently active? Used by
+    `hrant update` to decide whether to auto-restart. Returns
+    False on any error so the auto-restart path stays opt-in
+    when detection fails — better to under-restart than to
+    surprise a user running in foreground."""
+    import subprocess as _sub
+    platform = _detect_platform()
+    try:
+        if platform == "linux":
+            r = _sub.run(
+                ["systemctl", "--user", "is-active", "hrant.service"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.returncode == 0 and r.stdout.strip() == "active"
+        if platform == "macos":
+            r = _sub.run(
+                ["launchctl", "list", "ai.hrant.agent"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.returncode == 0
+        if platform == "windows":
+            r = _sub.run(
+                [
+                    "powershell", "-Command",
+                    "(Get-ScheduledTask -TaskName HrantAgent -ErrorAction "
+                    "SilentlyContinue).State",
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.returncode == 0 and "Running" in (r.stdout or "")
+    except Exception:
+        return False
+    return False
 
 
 def cmd_rollback(args: argparse.Namespace) -> int:
@@ -1982,6 +2044,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_update.add_argument("--branch", default=None, help="branch to track (default: master)")
     p_update.add_argument("--skip-frontend", action="store_true", help="skip npm install + build")
     p_update.add_argument("--skip-pip", action="store_true", help="skip pip install -e .")
+    p_update.add_argument(
+        "--no-restart", action="store_true",
+        help="don't auto-restart the gateway service after a successful update "
+             "(default: detect + restart so WebUI shows new code immediately)",
+    )
     p_update.add_argument(
         "-y", "--yes", action="store_true",
         help="skip the 'archive N self-mods?' prompt (required for non-TTY runs)",

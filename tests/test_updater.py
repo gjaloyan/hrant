@@ -312,6 +312,82 @@ def test_rollback_refuses_when_history_empty(isolated_history):
     assert "history" in (r.error or "").lower() or "no rollback" in (r.error or "").lower()
 
 
+# --- frontend_changed regression (Phase 15B+1 bug fix) -----------------
+
+
+def test_frontend_changed_inspects_each_commit_not_post_pull_diff():
+    """Regression: the previous implementation used
+    `git diff HEAD..origin/<branch>` which goes empty AFTER the pull
+    happens. `update()` calls frontend_changed() AFTER pulling, so
+    the old code always reported "frontend unchanged" and skipped
+    the npm build even when frontend files were touched. Phase 15A/B
+    users hit this — Jobs tab and Failover panel weren't visible
+    after `hrant update` because the rebuild was silently skipped.
+
+    The fix walks each commit's file list via `git show --name-only`
+    — that works regardless of whether the pull has run."""
+    fake_commits = [{"sha": "abc1234"}, {"sha": "def5678"}]
+
+    # Pretend commit abc1234 only touched backend/ (no rebuild),
+    # commit def5678 touched frontend/ → must trigger rebuild.
+    def fake_git(*args, check=False, **kw):
+        result = MagicMock()
+        result.returncode = 0
+        if args[0] == "show":
+            sha = args[-1]
+            if sha == "abc1234":
+                result.stdout = "backend/jobs.py\ntests/test_jobs.py\n"
+            elif sha == "def5678":
+                result.stdout = (
+                    "frontend/src/components/settings/JobsTab.tsx\n"
+                    "frontend/src/api.ts\n"
+                )
+            else:
+                result.stdout = ""
+        return result
+
+    with patch.object(updater, "_git", side_effect=fake_git):
+        assert updater.frontend_changed(fake_commits) is True
+
+
+def test_frontend_changed_returns_false_when_no_frontend_files():
+    """The flip side: backend-only update correctly skips rebuild."""
+    fake_commits = [{"sha": "abc1234"}]
+
+    def fake_git(*args, check=False, **kw):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "backend/agent.py\nbackend/llm.py\ntests/test_llm.py\n"
+        return result
+
+    with patch.object(updater, "_git", side_effect=fake_git):
+        assert updater.frontend_changed(fake_commits) is False
+
+
+def test_frontend_changed_returns_false_when_no_commits():
+    assert updater.frontend_changed([]) is False
+
+
+def test_frontend_changed_is_conservative_when_git_fails():
+    """When `git show` errors out, prefer rebuilding (False positive)
+    over silently skipping (False negative). Worst case: 30s of
+    wasted npm install on an irrelevant update."""
+    def fake_git(*args, check=False, **kw):
+        result = MagicMock()
+        result.returncode = 1
+        result.stdout = ""
+        return result
+
+    with patch.object(updater, "_git", side_effect=fake_git):
+        assert updater.frontend_changed([{"sha": "x"}]) is True
+
+
+def test_frontend_changed_conservative_on_missing_sha():
+    """Caller passed a commit dict without an `sha` field. Rebuild
+    rather than silently skipping."""
+    assert updater.frontend_changed([{"subject": "wat", "sha": ""}]) is True
+
+
 def test_rollback_refuses_on_dirty_tree(isolated_history):
     with patch.object(updater, "is_dirty", return_value=True), \
          patch.object(updater, "current_sha", return_value="X"), \
