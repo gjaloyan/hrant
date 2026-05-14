@@ -465,33 +465,89 @@ def _wizard_model_picker(provider: dict) -> Optional[str]:
 # --- Optional services ------------------------------------------------
 
 
+def _validate_telegram_token(token: str) -> tuple[bool, str]:
+    """Call Telegram's getMe API to verify a token before saving.
+    Returns (ok, message). 5s timeout; network failures don't
+    raise into the wizard."""
+    if not token.strip():
+        return False, "(no token)"
+    try:
+        import httpx
+        r = httpx.get(
+            f"https://api.telegram.org/bot{token.strip()}/getMe",
+            timeout=5.0,
+        )
+    except Exception as e:
+        return False, f"network: {e}"
+    if r.status_code != 200:
+        return False, f"HTTP {r.status_code}"
+    try:
+        body = r.json()
+    except Exception:
+        return False, "non-JSON response"
+    if not body.get("ok"):
+        return False, body.get("description", "Telegram rejected the token")
+    info = body.get("result") or {}
+    username = info.get("username") or "(no username)"
+    name = info.get("first_name") or ""
+    return True, f"@{username} ({name})"
+
+
 def _wizard_telegram() -> bool:
     """Walk the user through creating + registering a Telegram bot.
-    Returns True if a bot was registered."""
+    Returns True if a bot was registered. Idempotent — if a
+    Telegram channel already exists, asks before creating another."""
     print()
     print("     A Telegram bot lets you chat with Hrant from your phone.")
     print("     You'll need a bot token from @BotFather (free).")
     print()
-    if not _ask_yes_no("Set up a Telegram bot now?", default=False):
-        return False
+
+    # Detect existing Telegram channels so the wizard doesn't silently
+    # stack duplicates on re-runs.
+    from . import channels as _ch
+    existing_tg = [c for c in _ch.get_channels() if c.get("type") == "telegram"]
+    if existing_tg:
+        labels = ", ".join(c["id"] for c in existing_tg)
+        print(f"     You already have {len(existing_tg)} Telegram channel(s): {labels}")
+        if not _ask_yes_no("Add another Telegram bot?", default=False):
+            return False
+    else:
+        if not _ask_yes_no("Set up a Telegram bot now?", default=False):
+            return False
+
     print()
     print("     1) Open Telegram, search for @BotFather")
     print("     2) Send /newbot, follow the prompts")
     print("     3) Copy the token it gives you (looks like 123456:ABC-DEF...)")
     print()
-    token = _ask_str("Paste your bot token", default="", secret=True)
-    if not token:
-        _warn("no token entered; skipping")
+
+    # Up to 3 retries — typos in long tokens are common.
+    token = ""
+    for attempt in range(3):
+        token = _ask_str("Paste your bot token", default="", secret=True)
+        if not token:
+            _warn("no token entered; skipping")
+            return False
+        print("  validating via Telegram getMe...")
+        ok, msg = _validate_telegram_token(token)
+        if ok:
+            _ok(f"valid bot: {msg}")
+            break
+        _err(msg)
+        if attempt < 2 and _ask_yes_no("Try again?", default=True):
+            continue
         return False
-    # Register the channel.
-    from . import channels as _ch
+
     bot_id = f"telegram-{int(time.time())}"
     _ch.save_channel({
         "id": bot_id,
         "type": "telegram",
         "enabled": True,
         "auto_start": True,
-        "config": {"token": token, "allowed_users": []},
+        # NB: channels.py reads `config.bot_token` (not `token`) — keep
+        # the key in sync with that consumer (see ChannelManager
+        # .start_channel which fetches it under that exact name).
+        "config": {"bot_token": token, "allowed_users": []},
     })
     _ok(f"registered Telegram bot '{bot_id}' (auto-start enabled)")
     print("     Note: anyone with your bot's username can message it by default.")

@@ -152,6 +152,44 @@ def test_cmd_init_legacy_path_when_skip_wizard(isolated, monkeypatch):
     m_wiz.assert_not_called()
 
 
+def test_validate_telegram_token_ok():
+    from backend.init_wizard import _validate_telegram_token
+    fake = MagicMock(status_code=200)
+    fake.json.return_value = {
+        "ok": True,
+        "result": {"username": "hrant_bot", "first_name": "Hrant"},
+    }
+    with patch("httpx.get", return_value=fake):
+        ok, msg = _validate_telegram_token("123:abc")
+    assert ok is True
+    assert "@hrant_bot" in msg
+
+
+def test_validate_telegram_token_rejected():
+    from backend.init_wizard import _validate_telegram_token
+    fake = MagicMock(status_code=200)
+    fake.json.return_value = {"ok": False, "description": "Unauthorized"}
+    with patch("httpx.get", return_value=fake):
+        ok, msg = _validate_telegram_token("bad-token")
+    assert ok is False
+    assert "Unauthorized" in msg
+
+
+def test_validate_telegram_token_empty():
+    from backend.init_wizard import _validate_telegram_token
+    ok, msg = _validate_telegram_token("")
+    assert ok is False
+    assert "no token" in msg
+
+
+def test_validate_telegram_token_network_error():
+    from backend.init_wizard import _validate_telegram_token
+    with patch("httpx.get", side_effect=ConnectionError("dns fail")):
+        ok, msg = _validate_telegram_token("123:abc")
+    assert ok is False
+    assert "network" in msg
+
+
 def test_cmd_init_legacy_path_on_non_tty(isolated, monkeypatch):
     """Non-TTY (cron, CI) → also uses the legacy path so prompts
     silently take defaults without trying to render a wizard."""
