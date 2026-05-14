@@ -177,11 +177,76 @@ def cmd_init(args: argparse.Namespace) -> int:
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     _print_ok(f".env updated ({len(lines)} keys) at {env_path}")
 
+    # Push the freshly-saved env vars into THIS process so the
+    # connection-test + auto-register helpers below see the new
+    # values (otherwise they'd read stale `os.environ`).
+    import os as _os
+    for k, v in existing_env.items():
+        if v:
+            _os.environ[k] = v
+
+    # --- Phase 13A: provider connection tests + auto-register ---------
+    from . import init_helpers as _ih
+
+    print()
+    print("provider checks:")
+
+    anthropic_key = existing_env.get("ANTHROPIC_API_KEY", "")
+    if anthropic_key:
+        ok, msg = _ih.test_anthropic_key(anthropic_key)
+        (_print_ok if ok else _print_warn)(f"Anthropic: {msg}")
+    else:
+        _print_warn("Anthropic: no key — agent won't be able to call Claude")
+
+    openai_key = existing_env.get("OPENAI_API_KEY", "")
+    if openai_key:
+        ok, msg = _ih.test_openai_key(openai_key)
+        (_print_ok if ok else _print_warn)(f"OpenAI: {msg}")
+        # Auto-register so the WebUI Providers tab shows OpenAI without
+        # the user having to add it by hand. Anthropic is auto-injected
+        # by `get_providers()` already (uses ANTHROPIC_API_KEY env var).
+        entry = _ih.auto_register_openai(openai_key)
+        if entry:
+            _print_ok(f"OpenAI: registered as '{entry['name']}' (id={entry['id']})")
+
+    # --- Phase 13A: Tailscale discover + apply -----------------------
+    tailscale_host = existing_env.get("TAILSCALE_HOST", "")
+    if tailscale_host:
+        print()
+        print(f"discovering services on {tailscale_host}:")
+        report = _ih.discover_and_apply(tailscale_host)
+        if report.get("error"):
+            _print_warn(f"discover: {report['error']}")
+        else:
+            for name, r in (report.get("found") or {}).items():
+                if r.get("ok"):
+                    _print_ok(f"  {name:8s} {r.get('url')}")
+                else:
+                    _print_warn(f"  {name:8s} {r.get('reason', 'not found')}")
+            applied = report.get("applied") or {}
+            if applied:
+                applied_names = [n for n, status in applied.items() if status == "applied"]
+                if applied_names:
+                    _print_ok(f"applied URLs: {', '.join(applied_names)}")
+
+    # --- Phase 13A: final summary ------------------------------------
+    print()
+    print("registered providers:")
+    providers = _ih.installed_providers_summary()
+    if not providers:
+        _print_warn("(none — add via WebUI Settings → Providers)")
+    else:
+        for p in providers:
+            tag = " [default]" if p.get("is_default") else ""
+            print(f"  - {p['name']} ({p['type']}, {p.get('default_model','?')}){tag}")
+
     print()
     print("setup complete. next steps:")
     print("  hrant run                              # start the server")
     print("  open http://127.0.0.1:8000             # WebUI")
-    print("  hrant discover --host <tailscale-ip>   # probe home services")
+    print("  hrant provider list                    # see all providers")
+    if tailscale_host:
+        print("  open http://127.0.0.1:8000 → Settings → Voice  # verify Whisper/Piper")
     return 0
 
 
@@ -482,6 +547,366 @@ def cmd_rebuild(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- provider (login / list / test / use / logout) ----------------------
+
+
+def cmd_provider_list(args: argparse.Namespace) -> int:
+    """Show every provider registered in providers.json plus the
+    auto-injected defaults (Anthropic from env, etc.). Highlights
+    the active model selection if one is pinned."""
+    try:
+        from .providers import ACTIVE_MODEL, get_providers
+    except Exception as e:
+        _print_err(f"providers import failed: {e}")
+        return 1
+    providers = get_providers()
+    active = ACTIVE_MODEL.get() or {}
+    if not providers:
+        _print_warn("no providers registered yet — run `hrant provider login <type>`")
+        return 0
+    print(f"{'id':<24}  {'type':<14}  {'default model':<28}  status")
+    print("-" * 80)
+    for p in providers:
+        is_active = (
+            active.get("provider_id") == p["id"]
+            or (not active and p.get("is_default"))
+        )
+        status_bits = []
+        if p.get("enabled", True):
+            status_bits.append("enabled")
+        if p.get("is_default"):
+            status_bits.append("default")
+        if is_active:
+            status_bits.append("ACTIVE")
+        status = " ".join(status_bits) or "—"
+        print(
+            f"{p['id']:<24}  {p['type']:<14}  "
+            f"{(p.get('default_model') or '?'):<28}  {status}"
+        )
+    return 0
+
+
+def cmd_provider_test(args: argparse.Namespace) -> int:
+    """Live connectivity check for one provider. Calls the same
+    `test_provider` logic the WebUI's `POST /api/providers/{id}/test`
+    endpoint uses (a real one-token completion when possible, an
+    auth ping otherwise)."""
+    from . import providers as _p
+    pid = args.provider_id
+    if not pid:
+        _print_err("missing provider id; try `hrant provider list`")
+        return 2
+    provider = _p.get_provider(pid)
+    if not provider:
+        _print_err(f"no provider with id '{pid}'")
+        return 1
+    print(f"testing {pid} ({provider.get('type')})...")
+    try:
+        result = _p.test_provider(provider)
+    except Exception as e:
+        _print_err(f"test crashed: {e}")
+        return 1
+    if result.get("ok"):
+        _print_ok(f"connected ({result.get('latency_ms', '?')}ms)")
+        if result.get("model"):
+            print(f"  model: {result['model']}")
+        return 0
+    _print_err(result.get("error") or "test failed")
+    return 1
+
+
+def cmd_provider_use(args: argparse.Namespace) -> int:
+    """Pin a provider+model as the active selection. Mirrors what
+    `PUT /api/active-model` does, callable without the WebUI."""
+    from .providers import ACTIVE_MODEL, get_provider
+    pid = args.provider_id
+    model = args.model
+    provider = get_provider(pid)
+    if not provider:
+        _print_err(f"no provider with id '{pid}'")
+        return 1
+    if not model:
+        model = provider.get("default_model") or ""
+    if not model:
+        _print_err("provider has no default_model; pass --model X")
+        return 1
+    ACTIVE_MODEL.set(pid, model)
+    _print_ok(f"active model: {provider.get('name')} / {model}")
+    return 0
+
+
+def cmd_provider_logout(args: argparse.Namespace) -> int:
+    """Clear stored auth for one provider. For api_key/aws-style
+    providers: zeroes the credential fields in providers.json
+    (keeps the provider entry so the user can re-login). For
+    codex/copilot: nothing to do here — those read from the
+    upstream CLI's auth file; tell the user to log out THERE."""
+    from . import providers as _p
+    pid = args.provider_id
+    provider = _p.get_provider(pid)
+    if not provider:
+        _print_err(f"no provider with id '{pid}'")
+        return 1
+    auth_type = provider.get("auth_type") or "api_key"
+    if auth_type == "codex_subscription":
+        _print_warn(
+            "Codex token lives in ~/.codex/auth.json — to log out, run "
+            "`codex logout` from the upstream CLI."
+        )
+        return 0
+    if auth_type == "copilot_subscription":
+        _print_warn(
+            "Copilot token comes from your VS Code / gh client — log out there."
+        )
+        return 0
+    # api_key / aws_credentials / oauth — clear the stored secrets.
+    providers = _p._load_providers()
+    for p in providers:
+        if p["id"] == pid:
+            for key in ("api_key", "aws_access_key_id", "aws_secret_access_key"):
+                if key in p:
+                    p[key] = ""
+            # OAuth tokens persisted in oauth_tokens.json — drop them
+            # too via the token manager (best-effort).
+            try:
+                _p.OAUTH_TOKENS.delete(pid)
+            except Exception:
+                pass
+            break
+    _p._save_providers(providers)
+    _print_ok(f"cleared stored credentials for {pid}")
+    return 0
+
+
+def _provider_login_api_key(provider_type: str) -> int:
+    """Interactive: paste API key → register provider in
+    providers.json. Used by Anthropic / OpenAI / Groq / DeepSeek /
+    Mistral / Qwen / xAI / Perplexity / Moonshot / MiniMax / Cohere /
+    HuggingFace / OpenRouter — every plain-API-key provider."""
+    from . import providers as _p
+    info = _p.PROVIDER_CONNECT_INFO.get(provider_type) or {}
+    if info.get("key_instructions"):
+        print(info["key_instructions"])
+    if info.get("key_url"):
+        print(f"  URL: {info['key_url']}")
+    if info.get("docs_url"):
+        print(f"  docs: {info['docs_url']}")
+    print()
+    key = _read_input(f"{provider_type} API key", default="")
+    if not key.strip():
+        _print_warn("no key entered; aborting")
+        return 1
+    extras: dict[str, str] = {}
+    for field in info.get("extra_fields", []) or []:
+        v = _read_input(field, default="")
+        if v.strip():
+            extras[field] = v.strip()
+    # Register. Defaults for models / temperature follow the type.
+    new_id = f"{provider_type}-{int(__import__('time').time())}"
+    entry = {
+        "id": new_id,
+        "name": f"{provider_type.title()} ({new_id})",
+        "type": provider_type,
+        "auth_type": "api_key",
+        "enabled": True,
+        "is_default": False,
+        "api_key": key.strip(),
+        "api_key_env": "",
+        "base_url": extras.get("base_url", ""),
+        "models": [],
+        "default_model": "",
+        "max_tokens": 2000,
+        "temperature": 0.3,
+        "created": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    for ef in ("aws_access_key_id", "aws_secret_access_key", "aws_region"):
+        if ef in extras:
+            entry[ef] = extras[ef]
+    providers = _p._load_providers()
+    providers.append(entry)
+    _p._save_providers(providers)
+    _print_ok(f"registered {new_id}")
+    print(f"  next: hrant provider test {new_id}")
+    print(f"        hrant provider use {new_id} --model <name>")
+    return 0
+
+
+def _provider_login_codex() -> int:
+    """Codex subscription: reuse ChatGPT login via `codex login` CLI.
+    Reads ~/.codex/auth.json once the user completes the browser
+    sign-in. Same flow as the WebUI's Codex card."""
+    from . import providers as _p
+    status = _p.CODEX_AUTH.status()
+    if not status.get("logged_in"):
+        print("Codex auth not found at ~/.codex/auth.json.")
+        print("To sign in:")
+        print("  1. Install Codex CLI: https://github.com/openai/codex")
+        print("  2. Run: codex login   # opens browser, signs you into ChatGPT Plus/Pro")
+        print("  3. Re-run: hrant provider login codex")
+        return 1
+    _print_ok(
+        f"logged in as {status.get('email','(unknown)')} "
+        f"(plan: {status.get('plan_type','?')})"
+    )
+    providers = _p._load_providers()
+    # Idempotent — replace existing codex_subscription entry if one's there.
+    providers = [p for p in providers if p.get("auth_type") != "codex_subscription"]
+    entry = {
+        "id": "openai-codex",
+        "name": "OpenAI Codex (ChatGPT subscription)",
+        "type": "openai_codex",
+        "auth_type": "codex_subscription",
+        "enabled": True,
+        "is_default": False,
+        "api_key": "",
+        "api_key_env": "",
+        "base_url": "",
+        "models": [],
+        "default_model": "",
+        "max_tokens": 2000,
+        "temperature": 0.3,
+        "created": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    providers.append(entry)
+    _p._save_providers(providers)
+    _print_ok(f"registered openai-codex")
+    return 0
+
+
+def _provider_login_copilot() -> int:
+    """GitHub Copilot subscription: reuse VS Code / gh CLI login."""
+    from . import providers as _p
+    status = _p.COPILOT_AUTH.status()
+    if not status.get("logged_in"):
+        print("GitHub Copilot auth not found.")
+        print("To sign in:")
+        print("  1. Use any Copilot client: VS Code extension, JetBrains plugin,")
+        print("     or `gh auth login --scopes copilot`")
+        print("  2. Re-run: hrant provider login copilot")
+        return 1
+    _print_ok(f"logged in (user: {status.get('user','?')})")
+    providers = _p._load_providers()
+    providers = [p for p in providers if p.get("auth_type") != "copilot_subscription"]
+    entry = {
+        "id": "github-copilot",
+        "name": "GitHub Copilot",
+        "type": "github_copilot",
+        "auth_type": "copilot_subscription",
+        "enabled": True,
+        "is_default": False,
+        "api_key": "",
+        "api_key_env": "",
+        "base_url": "",
+        "models": [],
+        "default_model": "",
+        "max_tokens": 2000,
+        "temperature": 0.3,
+        "created": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    providers.append(entry)
+    _p._save_providers(providers)
+    _print_ok(f"registered github-copilot")
+    return 0
+
+
+def _provider_login_ollama() -> int:
+    """Probe localhost:11434 (or user-supplied URL), list models,
+    let user pick a default. Registers if reachable."""
+    from . import providers as _p
+    default_url = "http://localhost:11434"
+    url = _read_input(f"Ollama base URL", default=default_url).strip() or default_url
+    print(f"probing {url}/api/tags ...")
+    try:
+        import httpx
+        r = httpx.get(f"{url}/api/tags", timeout=5.0)
+        if r.status_code != 200:
+            _print_err(f"Ollama not responding (HTTP {r.status_code})")
+            print(f"  start it with: ollama serve")
+            return 1
+        models = [m.get("name", "") for m in (r.json().get("models") or [])]
+    except Exception as e:
+        _print_err(f"probe failed: {e}")
+        print(f"  start it with: ollama serve")
+        return 1
+    if not models:
+        _print_warn(
+            "Ollama is up but no models installed. "
+            "Pull one first: `ollama pull qwen2.5:7b-instruct`"
+        )
+    else:
+        print(f"  found {len(models)} models: {', '.join(models[:5])}"
+              + (" …" if len(models) > 5 else ""))
+    default_model = ""
+    if models:
+        default_model = _read_input("default model", default=models[0])
+    new_id = f"ollama-{int(__import__('time').time())}"
+    entry = {
+        "id": new_id,
+        "name": "Ollama (local)",
+        "type": "ollama",
+        "auth_type": "none",
+        "enabled": True,
+        "is_default": False,
+        "api_key": "",
+        "api_key_env": "",
+        "base_url": url,
+        "models": models,
+        "default_model": default_model,
+        "max_tokens": 2000,
+        "temperature": 0.3,
+        "created": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    providers = _p._load_providers()
+    providers.append(entry)
+    _p._save_providers(providers)
+    _print_ok(f"registered {new_id} (model: {default_model or '(none)'})")
+    return 0
+
+
+# Dispatch table: provider type → CLI login handler.
+_PROVIDER_LOGIN_HANDLERS: dict[str, callable] = {  # type: ignore[valid-type]
+    "codex": _provider_login_codex,
+    "openai_codex": _provider_login_codex,
+    "copilot": _provider_login_copilot,
+    "github_copilot": _provider_login_copilot,
+    "ollama": _provider_login_ollama,
+}
+
+
+def cmd_provider_login(args: argparse.Namespace) -> int:
+    """Interactive provider sign-in. Picks the right flow based on
+    provider type:
+
+      codex / openai_codex   → check ~/.codex/auth.json
+      copilot / github_copilot → check VS Code / gh auth
+      ollama                 → probe localhost, list models
+      anything else          → paste API key
+
+    See `hrant provider --help` for the full list of supported
+    types (any key in backend.providers.PROVIDER_CONNECT_INFO)."""
+    from . import providers as _p
+    ptype = (args.provider_type or "").strip().lower()
+    if not ptype:
+        # List known types if nothing provided.
+        print("supported provider types:")
+        for t in sorted(_p.PROVIDER_CONNECT_INFO.keys()):
+            print(f"  {t}")
+        print("\nspecial flows: codex, copilot, ollama")
+        print("\nexample: hrant provider login anthropic")
+        return 2
+    handler = _PROVIDER_LOGIN_HANDLERS.get(ptype)
+    if handler is not None:
+        return handler()
+    # Generic API key path covers every plain-key provider type.
+    if ptype not in _p.PROVIDER_CONNECT_INFO:
+        _print_warn(
+            f"unknown provider type '{ptype}'. Falling back to a "
+            "generic API-key prompt. Use one of the known types "
+            "(`hrant provider login` without args) for tailored help."
+        )
+    return _provider_login_api_key(ptype)
+
+
 # --- update / rollback --------------------------------------------------
 
 
@@ -751,6 +1176,40 @@ def build_parser() -> argparse.ArgumentParser:
         help="rebuild the frontend (npm install + build) without pulling",
     )
     p_rebuild.set_defaults(func=lambda _a: cmd_rebuild(_a))
+
+    # `provider` subcommand family — CLI-side equivalent of the
+    # WebUI Providers tab. Login flows are interactive.
+    p_prov = sub.add_parser(
+        "provider",
+        help="manage LLM providers (list / login / test / use / logout)",
+    )
+    sub_prov = p_prov.add_subparsers(dest="provider_cmd", metavar="<action>")
+
+    pp_list = sub_prov.add_parser("list", help="show registered providers + active model")
+    pp_list.set_defaults(func=cmd_provider_list)
+
+    pp_login = sub_prov.add_parser(
+        "login",
+        help="sign in to a provider (anthropic / openai / codex / copilot / ollama / …)",
+    )
+    pp_login.add_argument(
+        "provider_type", nargs="?", default="",
+        help="provider type (omit to list supported types)",
+    )
+    pp_login.set_defaults(func=cmd_provider_login)
+
+    pp_test = sub_prov.add_parser("test", help="live connectivity check for one provider")
+    pp_test.add_argument("provider_id", help="provider id (see `hrant provider list`)")
+    pp_test.set_defaults(func=cmd_provider_test)
+
+    pp_use = sub_prov.add_parser("use", help="set active model")
+    pp_use.add_argument("provider_id")
+    pp_use.add_argument("--model", default=None, help="override default_model")
+    pp_use.set_defaults(func=cmd_provider_use)
+
+    pp_logout = sub_prov.add_parser("logout", help="clear stored credentials for a provider")
+    pp_logout.add_argument("provider_id")
+    pp_logout.set_defaults(func=cmd_provider_logout)
 
     p_update = sub.add_parser(
         "update",

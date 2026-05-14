@@ -61,6 +61,42 @@ REPL commands (Russian, inherited): `запомни …` / `забудь …` / 
 
 Print the version string.
 
+### `hrant provider`
+
+Manage LLM providers from the command line — same surface as the
+WebUI Providers tab, with the bonus that Codex / Copilot
+subscription handoffs are easier to drive interactively.
+
+```
+hrant provider list                       # registered providers + active
+hrant provider login <type>               # interactive sign-in
+hrant provider test <provider_id>         # connectivity check
+hrant provider use <provider_id> [--model X]   # set active model
+hrant provider logout <provider_id>       # clear stored credentials
+```
+
+#### `hrant provider login <type>`
+
+Picks the right flow for the provider type:
+
+- **`codex` / `openai_codex`** — reads `~/.codex/auth.json` written
+  by the upstream Codex CLI's `codex login`. If the file's missing,
+  prints install + sign-in steps and exits non-zero so a script
+  can retry.
+- **`copilot` / `github_copilot`** — same idea for VS Code / `gh
+  auth login --scopes copilot`. Reads `~/.config/github-copilot/`
+  (or the Windows equivalent).
+- **`ollama`** — probes `http://localhost:11434` (or a custom URL),
+  lists installed models, lets you pick the default, registers
+  the provider.
+- **Anything else** — generic API-key flow. Prints the official
+  signup URL + the steps from `PROVIDER_CONNECT_INFO`, then asks
+  for the key + any extra fields (`base_url` for Azure /
+  openai_compatible, AWS creds for Bedrock, etc.).
+
+`hrant provider login` without a type prints the full list of
+supported types from `backend.providers.PROVIDER_CONNECT_INFO`.
+
 ### `hrant discover`
 
 Probe a Tailscale or LAN host for the agent's external services.
