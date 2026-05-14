@@ -98,6 +98,9 @@ async def chat(req: ChatRequest):
                 "token_usage": tu.model_dump() if tu else None,
                 "n_tool_calls": n_tools,
                 "n_llm_calls": n_llm,
+                # Link the session entry to its durable job record so the
+                # WebUI can deep-link Conversation → Jobs.
+                "job_id": job_id,
             }
             SESSIONS.add_turn(turn, speaker_id=target_speaker)
             if res.thinking_trace:

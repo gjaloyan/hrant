@@ -987,6 +987,18 @@ class ChannelManager:
         for cid in list(self._bots.keys()):
             self.stop_channel(cid)
 
+    def send_to_telegram_chat(self, chat_id: int, text: str) -> bool:
+        """Send text to a SPECIFIC Telegram chat via whichever bot is
+        running. Used by the boot-time interrupted-job notifier so a
+        Telegram user who asked a question right before the server
+        died sees a "sorry, I got interrupted" message instead of
+        silence. Returns True on successful schedule, False when no
+        bot is running."""
+        for bot in self._bots.values():
+            if bot.is_running:
+                return bot.send_text(text, chat_id=chat_id)
+        return False
+
     def send_to_first_telegram(self, text: str) -> bool:
         """Round E: forward arbitrary text to the first running
         Telegram bot's most-recent chat. Used by the WebUI's

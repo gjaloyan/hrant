@@ -77,6 +77,10 @@ export type AgentAnswer = {
   claims?: Claim[];
   evidence?: EvidenceItem[];
   turn_id?: string;
+  // Phase 15A: durable job record id. Set by the /api/chat handler
+  // so the WebUI can deep-link a streamed answer to its Jobs-tab
+  // entry without cross-referencing by timestamp.
+  job_id?: string;
 };
 
 // Round A: full TurnWorkspace JSON returned by GET /api/turns/<id>.
@@ -1780,7 +1784,8 @@ export type Job = {
 };
 
 export type JobsListResponse = {
-  total: number;
+  total: number;       // count matching the same filter as `jobs[]`
+  total_all?: number;  // count across all jobs (no filter applied)
   limit: number;
   offset: number;
   jobs: Job[];
@@ -1823,6 +1828,14 @@ export const cancelJob = (id: string) =>
 
 export const deleteJob = (id: string) =>
   json_delete<{ ok: boolean }>(`/api/jobs/${encodeURIComponent(id)}`);
+
+export const cleanupJobs = (max_age_days: number, keep_failed: boolean = true) =>
+  json_post<{ ok: boolean; deleted_count: number; deleted: string[] }>(
+    `/api/jobs/_/cleanup?max_age_days=${encodeURIComponent(
+      String(max_age_days),
+    )}&keep_failed=${keep_failed}`,
+    {},
+  );
 
 
 // ---------- Failover (Phase 15B: multi-provider chain) ----------

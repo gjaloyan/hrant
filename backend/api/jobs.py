@@ -43,8 +43,19 @@ def list_jobs(
         limit=limit,
         offset=offset,
     )
+    # `total` reflects the same filter as `jobs[]` — otherwise the
+    # WebUI badge ("Jobs (50 total)") would lie when a status filter
+    # is active. Count once via the same filter, full scan is fine
+    # at the <1k-jobs scale this surface targets.
+    total_filtered = sum(
+        1 for _ in _jobs.JOBS.list(
+            status=status, channel=channel, speaker_id=speaker_id,
+            limit=10_000, offset=0,
+        )
+    )
     return {
-        "total": _jobs.JOBS.count(),
+        "total": total_filtered,
+        "total_all": _jobs.JOBS.count(),
         "limit": limit,
         "offset": offset,
         "jobs": [j.to_dict() for j in rows],
@@ -101,3 +112,25 @@ def delete_job(job_id: str):
     if not ok:
         raise HTTPException(status_code=404, detail="job not found")
     return {"ok": True}
+
+
+@router.post("/api/jobs/_/cleanup")
+def cleanup_jobs(
+    max_age_days: int = Query(default=30, ge=1, le=3650),
+    keep_failed: bool = Query(
+        default=True,
+        description="When true, failed/interrupted jobs survive regardless of age (audit log).",
+    ),
+):
+    """Purge old jobs to bound disk usage. By default keeps everything
+    failed/interrupted so the user can still retry them weeks later;
+    completed/cancelled jobs are pure history and get pruned.
+
+    Manual trigger only — there's no auto-cleanup cron yet. Run from
+    `Settings → Jobs → Cleanup` or `hrant jobs cleanup --older-than 30d`."""
+    keep = {"failed", "interrupted"} if keep_failed else set()
+    deleted = _jobs.JOBS.cleanup_old(
+        max_age_seconds=max_age_days * 86400.0,
+        keep_statuses=keep,
+    )
+    return {"ok": True, "deleted_count": len(deleted), "deleted": deleted}

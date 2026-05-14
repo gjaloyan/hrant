@@ -86,7 +86,12 @@ _PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"\b429\b|rate.?limit|too many requests"), "rate_limit"),
     (re.compile(r"\b5\d\d\b|server error|internal error|service unavailable|bad gateway"), "server_error"),
     (re.compile(r"timeout|timed out|read.?timeout|connect.?timeout"), "timeout"),
-    (re.compile(r"\b401\b|\b403\b|invalid.?api.?key|unauthor|forbidden|authentication"), "auth_error"),
+    # auth: matches HTTP 401/403, expired/invalid keys, "missing/no API
+    # key" raised by our own LLM constructors when create_llm hits a
+    # chain entry whose provider has no credentials. Treating those
+    # as auth_error means failover keeps walking the chain instead
+    # of stopping on the first misconfigured fallback.
+    (re.compile(r"\b401\b|\b403\b|invalid.?api.?key|no.?api.?key|missing.?api.?key|unauthor|forbidden|authentication|не\s*задан"), "auth_error"),
     (re.compile(r"connection|network|name or service not known|getaddrinfo|connect.?refused"), "connection"),
     (re.compile(r"\b400\b|bad request|invalid.?request|malformed"), "bad_request"),
     (re.compile(r"content.?policy|content_policy|safety|moderation"), "content_policy"),
@@ -207,6 +212,29 @@ def get_current_job_id() -> Optional[str]:
     return _current_job_id.get()
 
 
+_SECRET_PATTERNS: tuple[re.Pattern, ...] = (
+    # Bearer / Authorization headers leaked into error messages.
+    re.compile(r"(bearer\s+)[\w\-\.]+", re.IGNORECASE),
+    # `api_key=...` / `?key=...` in URLs the provider's lib echoed back.
+    re.compile(r"(api_?key=)[\w\-]+", re.IGNORECASE),
+    re.compile(r"([?&]key=)[\w\-]+", re.IGNORECASE),
+    # Bare Anthropic / OpenAI key shapes — `sk-ant-...` / `sk-...`.
+    re.compile(r"(sk-(?:ant-)?[\w\-]{4})[\w\-]{8,}"),
+)
+
+
+def scrub_secret(text: str) -> str:
+    """Best-effort scrub of API key shapes from a string before it
+    lands in a Job record. Provider error messages occasionally echo
+    request headers or URLs; we don't want them persisted to disk."""
+    if not text:
+        return text
+    out = text
+    for pattern in _SECRET_PATTERNS:
+        out = pattern.sub(lambda m: m.group(1) + "***", out)
+    return out
+
+
 def record_attempt(
     *,
     provider_id: str,
@@ -218,7 +246,9 @@ def record_attempt(
 ) -> None:
     """Append one entry to the active Job's `attempts[]`. No-op when
     no Job is active (CLI test runs, autonomic ticks). Best-effort:
-    a logging failure must NOT bubble up and kill the LLM call."""
+    a logging failure must NOT bubble up and kill the LLM call.
+    Error strings are scrubbed for common API-key shapes before
+    they hit disk."""
     jid = get_current_job_id()
     if not jid:
         return
@@ -228,7 +258,7 @@ def record_attempt(
             "provider_id": provider_id,
             "model": model,
             "ok": ok,
-            "error": error,
+            "error": scrub_secret(error) if error else error,
             "category": category,
             "elapsed_ms": elapsed_ms,
             "started_at": time.time(),
@@ -250,6 +280,7 @@ def try_call(
     *,
     retry_on: Optional[list[str]] = None,
     max_attempts: Optional[int] = None,
+    on_success: Optional[Callable[[str, str], None]] = None,
 ) -> Any:
     """Walk the attempts list, returning the first successful result.
 
@@ -262,6 +293,10 @@ def try_call(
     `retry_on` defaults to DEFAULT_RETRY_ON when unspecified.
     `max_attempts` caps the walk; further entries are ignored even
     if the chain configures more. Default = len(attempts).
+    `on_success(provider_id, model)` fires exactly once when an
+    attempt succeeds — used by `Router.call` to attribute cost /
+    call-count to the provider that actually answered, not the
+    primary we tried first.
     """
     if not attempts:
         from .llm import LLMError
@@ -280,7 +315,7 @@ def try_call(
             category = classify(e)
             record_attempt(
                 provider_id=provider_id, model=model, ok=False,
-                error=str(e)[:500], category=category, elapsed_ms=elapsed_ms,
+                error=str(e)[:1000], category=category, elapsed_ms=elapsed_ms,
             )
             last_error = e
             if not should_retry(category, retry_on):
@@ -305,6 +340,11 @@ def try_call(
             provider_id=provider_id, model=model, ok=True,
             elapsed_ms=elapsed_ms,
         )
+        if on_success is not None:
+            try:
+                on_success(provider_id, model)
+            except Exception as e:
+                log.warning("on_success(%s/%s) raised: %s", provider_id, model, e)
         if i > 0:
             log.info(
                 "failover: succeeded on attempt %d (%s/%s) after %d "

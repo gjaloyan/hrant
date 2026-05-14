@@ -56,6 +56,20 @@ def _read_key_unix() -> str:
     try:
         tty.setraw(fd)
         ch = _os.read(fd, 1)
+        # Multi-byte UTF-8 keypresses (Cyrillic, accented Latin, etc.)
+        # arrive as 2–4 bytes in a single burst. The high-bit byte
+        # alone isn't a valid menu input and would just loop the
+        # select() reader byte-by-byte — drain the rest of the
+        # sequence so the next read starts fresh, then return "" to
+        # signal "ignore this keystroke".
+        if ch and ch[0] >= 0x80:
+            # Top bit set → continuation expected. UTF-8 leading
+            # bytes encode length in their high bits; we just drain
+            # whatever's queued in a brief window.
+            r, _, _ = select.select([fd], [], [], 0.02)
+            if r:
+                _os.read(fd, 4)
+            return ""
         if ch == b"\x1b":
             # Escape sequence — wait briefly for the `[X` follow-up.
             # 0.1s is enough for local terminals + SSH; lone Esc on
@@ -249,6 +263,10 @@ def select(
             elif key == "enter":
                 # Repaint without the hint line so the chosen row stays
                 # visible in scrollback as a record of what was picked.
+                # Replace the cleared hint line with an empty line so
+                # the cursor lands on a fresh line below the menu —
+                # otherwise the next print() would land in the cleared
+                # gap, leaving a visible "hole" above the new content.
                 _clear_lines(lines_drawn)
                 lines_drawn = 0
                 for i, (label, desc) in enumerate(options):
@@ -263,6 +281,9 @@ def select(
                         line += f"  {c.muted(desc)}"
                     sys.stdout.write(line + "\n")
                     lines_drawn += 1
+                # Pad with a blank line so the cleared hint-line slot
+                # doesn't show through as a gap.
+                sys.stdout.write("\n")
                 sys.stdout.flush()
                 return sel
             elif key in ("q", "esc", "ctrl_c"):

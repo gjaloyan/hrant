@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Job,
   JobStatus,
   cancelJob,
+  cleanupJobs,
   deleteJob,
   fetchJob,
   fetchJobStats,
@@ -85,16 +86,29 @@ export default function JobsTab({ flash }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter]);
 
-  // Auto-refresh every 5s while there are running jobs — keeps the
-  // tab feeling live without polling forever once everything's idle.
+  // Track whether we should be polling — recomputed from `jobs`
+  // without re-creating the interval each render. Previously the
+  // useEffect re-ran on every `jobs` change which restarted the
+  // 5s timer; the effective cadence became "5s after last refresh"
+  // instead of a steady 5s tick.
+  const shouldPollRef = useRef(false);
+  useEffect(() => {
+    shouldPollRef.current =
+      autoRefresh &&
+      (jobs.length === 0 ||
+        jobs.some((j) => j.status === "running" || j.status === "queued"));
+  }, [autoRefresh, jobs]);
+
   useEffect(() => {
     if (!autoRefresh) return;
-    const hasActive = jobs.some((j) => j.status === "running" || j.status === "queued");
-    if (!hasActive && jobs.length > 0) return;
-    const id = setInterval(refresh, 5000);
+    const id = setInterval(() => {
+      if (shouldPollRef.current) refresh();
+    }, 5000);
     return () => clearInterval(id);
+    // refresh is stable across renders; depending on autoRefresh
+    // only keeps the interval alive across the on/off toggle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoRefresh, jobs]);
+  }, [autoRefresh]);
 
   const handleRetry = async (id: string) => {
     try {
@@ -175,6 +189,25 @@ export default function JobsTab({ flash }: Props) {
                 disabled={loading}
               >
                 {loading ? "Loading…" : "Refresh"}
+              </button>
+              <button
+                onClick={async () => {
+                  if (!confirm(
+                    "Delete completed/cancelled jobs older than 30 days?\n" +
+                    "Failed and interrupted jobs are kept (audit log).",
+                  )) return;
+                  try {
+                    const r = await cleanupJobs(30, true);
+                    flash(`Cleanup: removed ${r.deleted_count} old job(s)`);
+                    refresh();
+                  } catch (e: any) {
+                    flash("Cleanup failed: " + e.message);
+                  }
+                }}
+                className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded"
+                title="Delete old completed/cancelled jobs"
+              >
+                Cleanup
               </button>
             </div>
           </div>

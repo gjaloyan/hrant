@@ -46,6 +46,7 @@ async def lifespan(application: FastAPI):
     # The previous process crashed (OOM, kill -9, host reboot)
     # while they were mid-flight; the user can retry them from the
     # WebUI Jobs tab or `hrant jobs retry <id>`.
+    recovered: list[str] = []
     try:
         from . import jobs as _jobs
         recovered = _jobs.JOBS.recover_interrupted()
@@ -67,6 +68,54 @@ async def lifespan(application: FastAPI):
                 log.error("Failed to auto-start channel %s: %s", ch["id"], e)
     except Exception as e:
         log.warning("Channel auto-start error: %s", e)
+
+    # Telegram interrupted-job notification (Phase 15A.1).
+    # If recovery flipped any Telegram-channel jobs, give the user a
+    # heads-up message in their Telegram so they don't experience
+    # silent message loss across a server restart. The Telegram bot
+    # takes a few seconds to finish wiring up, so the actual send is
+    # delayed by 3s — `send_text` returns False until the bot's
+    # event loop is ready, and we don't want to silently drop the
+    # message. Best-effort: any failure logs and moves on.
+    if recovered:
+        try:
+            from . import jobs as _jobs
+            from asyncio import sleep, create_task
+
+            tg_interrupted = [
+                j for j in (_jobs.JOBS.get(jid) for jid in recovered)
+                if j is not None
+                and j.channel == "telegram"
+                and (j.reply_to or {}).get("telegram_chat_id")
+            ]
+            if tg_interrupted:
+                async def _notify_interrupted() -> None:
+                    await sleep(3.0)
+                    for j in tg_interrupted:
+                        try:
+                            chat_id = int(j.reply_to["telegram_chat_id"])
+                        except (TypeError, ValueError):
+                            continue
+                        preview = (j.prompt or "").replace("\n", " ").strip()
+                        if len(preview) > 200:
+                            preview = preview[:200] + "…"
+                        msg = (
+                            "⚠️ I was interrupted earlier when you asked:\n\n"
+                            f"«{preview}»\n\n"
+                            f"Job id: `{j.id}` — open the WebUI Jobs tab "
+                            "to retry, or just resend your message."
+                        )
+                        try:
+                            CHANNELS.send_to_telegram_chat(chat_id, msg)
+                        except Exception as e:
+                            log.warning("TG interrupted notify failed for %s: %s", j.id, e)
+                create_task(_notify_interrupted())
+                log.info(
+                    "Telegram: scheduled %d interrupted-job notification(s)",
+                    len(tg_interrupted),
+                )
+        except Exception as e:
+            log.warning("Telegram interrupted-notify scheduler error: %s", e)
 
     bundle = build_scheduler()
     application.state.autonomic_bundle = bundle

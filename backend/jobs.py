@@ -390,6 +390,50 @@ class JobStore:
             p.unlink()
             return True
 
+    # ─── Retention ──────────────────────────────────────────────
+
+    def cleanup_old(
+        self,
+        *,
+        max_age_seconds: float,
+        keep_statuses: Optional[set[str]] = None,
+    ) -> list[str]:
+        """Delete jobs whose `created_at` is older than `max_age_seconds`.
+
+        `keep_statuses`: statuses that survive cleanup regardless of
+        age. Default keeps `failed` and `interrupted` because those
+        carry actionable info — the user may want to retry them
+        even months later. `completed`/`cancelled` jobs are pure
+        history and get pruned by age.
+
+        Returns the list of job IDs deleted."""
+        keep = keep_statuses if keep_statuses is not None else {
+            "failed", "interrupted",
+        }
+        cutoff = time.time() - max_age_seconds
+        with self._lock:
+            root = self.root
+            if not root.exists():
+                return []
+            deleted: list[str] = []
+            for p in root.glob("*.json"):
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if data.get("status") in keep:
+                    continue
+                if (data.get("created_at") or 0) >= cutoff:
+                    continue
+                try:
+                    p.unlink()
+                    deleted.append(data.get("id") or p.stem)
+                except OSError as e:
+                    log.warning("failed to delete %s: %s", p, e)
+            if deleted:
+                log.info("jobs.cleanup_old: removed %d job(s)", len(deleted))
+            return deleted
+
     # ─── Boot recovery ─────────────────────────────────────────
 
     def recover_interrupted(self) -> list[str]:

@@ -19,7 +19,7 @@ import time
 from datetime import date, datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 
@@ -2629,7 +2629,12 @@ class DualModelRouter:
         except Exception:
             pass
 
-    def _track_active_model_call(self) -> None:
+    def _track_active_model_call(
+        self,
+        *,
+        provider_id: str | None = None,
+        model: str | None = None,
+    ) -> None:
         """Bump counters for a call that went through the user-pinned
         model branch. Kept separate from the A/B totals so dashboards
         and `stats()` consumers can tell pinned usage from auto-routed
@@ -2644,6 +2649,12 @@ class DualModelRouter:
         and a runaway pinned model could spend past the cap silently.
         Real per-token cost is still tracked by TokenTracker; this
         is the router-side budget tally.
+
+        When failover answers via a chain entry (not the pinned
+        primary), `provider_id` / `model` override the cached
+        `_active_cfg_hash` so the breakdown attributes the call to
+        the provider that actually billed, not the one we tried
+        first.
         """
         self.state["api_calls_today"] += 1
         self.state["api_cost_today"] += float(
@@ -2656,8 +2667,87 @@ class DualModelRouter:
             int(self.state.get("total_active_model_calls", 0)) + 1
         )
         breakdown = self.state.setdefault("active_model_breakdown", {})
-        key = self._active_cfg_hash or "unknown"
+        if provider_id and model:
+            key = f"{provider_id}:{model}"
+        else:
+            key = self._active_cfg_hash or "unknown"
         breakdown[key] = int(breakdown.get(key, 0)) + 1
+
+    def _call_with_failover_chain(
+        self,
+        *,
+        primary_fn: Callable[[], str],
+        fallback_factory: Callable[[dict], Callable[[], str]],
+    ) -> tuple[str, str, str, bool]:
+        """Shared failover wrapper for the active-model branches of
+        `call` and `call_with_tools`.
+
+        Builds the `attempts` list (primary first, then any enabled
+        chain entries that don't duplicate the primary or point at a
+        missing/disabled provider) and hands it to `failover.try_call`.
+
+        Returns `(result, used_provider_id, used_model, via_failover)`:
+          - `via_failover=True` iff a non-primary chain entry actually
+            delivered the result — callers use that to switch the
+            usage-breakdown key.
+          - `via_failover=False` for the off / chain-empty / primary-won
+            paths so legacy attribution (via `_active_cfg_hash`) keeps
+            working unchanged.
+
+        When failover is disabled OR the chain is empty, runs the
+        primary directly without the failover overhead — same
+        behaviour as before Phase 15B.
+        """
+        from . import failover as _fo
+        from .providers import ACTIVE_MODEL as _AM
+        # Defensive `or {}`: in real code `_get_active_llm` only
+        # returns truthy when `resolve_llm_config` was non-None
+        # earlier, but the LLM gets cached on `self._active_llm`
+        # while the config dict is not. Tests routinely stub
+        # `_get_active_llm` without stubbing `resolve_llm_config`,
+        # and a config flip between the two calls (provider got
+        # disabled mid-session) is also legitimate. "?" attribution
+        # is preferable to a TypeError.
+        active_cfg = _AM.resolve_llm_config() or {}
+        primary_id: str = active_cfg.get("provider_id") or "?"
+        primary_model: str = active_cfg.get("model") or "?"
+
+        cfg = _fo.load_config()
+        if not cfg.get("enabled"):
+            return primary_fn(), primary_id, primary_model, False
+
+        attempts: list = [(primary_id, primary_model, primary_fn)]
+        for entry in cfg.get("chain", []):
+            pid = entry.get("provider_id", "")
+            em = entry.get("model", "")
+            if (pid, em) == (primary_id, primary_model):
+                continue  # already tried as primary
+            entry_cfg = _fo.resolve_entry_cfg(pid, em)
+            if entry_cfg is None:
+                continue  # provider gone or disabled
+            attempts.append((pid, em, fallback_factory(entry_cfg)))
+
+        # No chain entries actually built (all duplicates / disabled).
+        # Skip failover entirely so attribution stays clean.
+        if len(attempts) == 1:
+            return primary_fn(), primary_id, primary_model, False
+
+        winner: list[str] = [primary_id, primary_model]
+        via_failover_flag = [False]
+
+        def _on_success(used_id: str, used_model: str) -> None:
+            winner[0] = used_id
+            winner[1] = used_model
+            if (used_id, used_model) != (primary_id, primary_model):
+                via_failover_flag[0] = True
+
+        result = _fo.try_call(
+            attempts,
+            retry_on=cfg.get("retry_on"),
+            max_attempts=cfg.get("max_attempts"),
+            on_success=_on_success,
+        )
+        return result, winner[0], winner[1], via_failover_flag[0]
 
     def stats(self) -> dict:
         out = dict(self.state)
@@ -2816,16 +2906,6 @@ class DualModelRouter:
         if active is not None:
             tt = task_type.value
             self.state["last_reason"] = f"active model: {self._active_cfg_hash}"
-            # Phase B: multi-provider failover. When the failover
-            # config is enabled, build an `attempts` list — primary
-            # active model first, then each chain entry — and hand
-            # it to failover.try_call. When disabled, just call the
-            # active model directly (same behaviour as before).
-            from . import failover as _fo
-            from .providers import ACTIVE_MODEL as _AM
-            active_cfg = _AM.resolve_llm_config() or {}
-            primary_id = active_cfg.get("provider_id", "?")
-            primary_model = active_cfg.get("model", "?")
 
             def _primary_call() -> str:
                 return active.complete(
@@ -2833,34 +2913,48 @@ class DualModelRouter:
                     attachments=attachments, _task_type=tt,
                 )
 
-            cfg = _fo.load_config()
-            if not cfg.get("enabled"):
-                out = _primary_call()
-            else:
-                attempts: list = [(primary_id, primary_model, _primary_call)]
-                for entry in cfg.get("chain", []):
-                    pid = entry.get("provider_id", "")
-                    em = entry.get("model", "")
-                    if (pid, em) == (primary_id, primary_model):
-                        continue  # already tried as primary
-                    entry_cfg = _fo.resolve_entry_cfg(pid, em)
-                    if entry_cfg is None:
-                        continue  # provider gone or disabled
-                    # Bind cfg per-iteration so the closure captures
-                    # the right one, not the last loop value.
-                    def _fallback_call(c=entry_cfg) -> str:
-                        return create_llm(c).complete(
-                            system, user, max_tokens=max_tokens,
-                            temperature=temperature, attachments=attachments,
-                            _task_type=tt,
-                        )
-                    attempts.append((pid, em, _fallback_call))
-                out = _fo.try_call(
-                    attempts,
-                    retry_on=cfg.get("retry_on"),
-                    max_attempts=cfg.get("max_attempts"),
+            def _make_fallback(entry_cfg: dict):
+                def _fb(c=entry_cfg) -> str:
+                    # Build the fallback LLM lazily so a chain entry
+                    # that's never reached (primary succeeded) doesn't
+                    # pay for httpx client setup / OAuth handshake.
+                    # create_llm exceptions are wrapped as LLMError so
+                    # `failover.classify` can route them through the
+                    # retry policy — without this, a missing-key
+                    # entry stops the whole chain (classify returns
+                    # "unknown" for bare KeyError/ValueError).
+                    try:
+                        llm = create_llm(c)
+                    except LLMError:
+                        raise
+                    except Exception as e:
+                        raise LLMError(
+                            f"create_llm({c.get('provider_id')}/"
+                            f"{c.get('model')}): {e}"
+                        ) from e
+                    return llm.complete(
+                        system, user, max_tokens=max_tokens,
+                        temperature=temperature, attachments=attachments,
+                        _task_type=tt,
+                    )
+                return _fb
+
+            out, used_id, used_model, via_failover = self._call_with_failover_chain(
+                primary_fn=_primary_call,
+                fallback_factory=_make_fallback,
+            )
+            # #2 fix: attribute the call to the provider that actually
+            # answered, BUT only override the breakdown key when
+            # failover delivered via a chain entry. If the primary
+            # won (or failover was off entirely), fall through to the
+            # legacy `_active_cfg_hash`-based attribution that the
+            # existing test suite relies on.
+            if via_failover:
+                self._track_active_model_call(
+                    provider_id=used_id, model=used_model,
                 )
-            self._track_active_model_call()
+            else:
+                self._track_active_model_call()
             self._save_state()
             return out
 
@@ -2964,16 +3058,6 @@ class DualModelRouter:
                     f"(Anthropic / OpenAI / Codex / Cohere / Bedrock) or "
                     f"clear the pinned model for this task."
                 )
-            # Phase B: multi-provider failover for tool-use turns.
-            # Tool-capability is per-LLM; chain entries that don't
-            # support tools are dropped from the attempt list rather
-            # than failing the whole turn.
-            from . import failover as _fo
-            from .providers import ACTIVE_MODEL as _AM
-            active_cfg = _AM.resolve_llm_config() or {}
-            primary_id = active_cfg.get("provider_id", "?")
-            primary_model = active_cfg.get("model", "?")
-
             def _primary_call() -> str:
                 return active.complete_with_tools(
                     system, user, tools, execute_tool,
@@ -2985,45 +3069,47 @@ class DualModelRouter:
                     _task_type=tt,
                 )
 
-            cfg = _fo.load_config()
-            if not cfg.get("enabled"):
-                out = _primary_call()
-            else:
-                attempts: list = [(primary_id, primary_model, _primary_call)]
-                for entry in cfg.get("chain", []):
-                    pid = entry.get("provider_id", "")
-                    em = entry.get("model", "")
-                    if (pid, em) == (primary_id, primary_model):
-                        continue
-                    entry_cfg = _fo.resolve_entry_cfg(pid, em)
-                    if entry_cfg is None:
-                        continue
-                    # Pre-build a probe LLM to check tool support
-                    # without paying for the full call. If unsupported,
-                    # skip silently — chain is best-effort.
+            def _make_fallback(entry_cfg: dict):
+                def _fb(c=entry_cfg) -> str:
+                    # Lazy build per #16 — probe LLM only when the
+                    # chain actually reaches this entry. Tool-support
+                    # check happens BEFORE the actual call so we don't
+                    # consume an API attempt on a non-tool model.
                     try:
-                        probe = create_llm(entry_cfg)
-                    except Exception:
-                        continue
-                    if not _supports_tools(probe, tools):
-                        continue
-                    def _fallback_call(p=probe) -> str:
-                        return p.complete_with_tools(
-                            system, user, tools, execute_tool,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                            max_iterations=max_iterations,
-                            on_tool_call=on_tool_call,
-                            attachments=attachments,
-                            _task_type=tt,
+                        llm = create_llm(c)
+                    except LLMError:
+                        raise
+                    except Exception as e:
+                        raise LLMError(
+                            f"create_llm({c.get('provider_id')}/"
+                            f"{c.get('model')}): {e}"
+                        ) from e
+                    if not _supports_tools(llm, tools):
+                        raise LLMError(
+                            f"chain entry {c.get('provider_id')}/"
+                            f"{c.get('model')} does not support tools"
                         )
-                    attempts.append((pid, em, _fallback_call))
-                out = _fo.try_call(
-                    attempts,
-                    retry_on=cfg.get("retry_on"),
-                    max_attempts=cfg.get("max_attempts"),
+                    return llm.complete_with_tools(
+                        system, user, tools, execute_tool,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                        max_iterations=max_iterations,
+                        on_tool_call=on_tool_call,
+                        attachments=attachments,
+                        _task_type=tt,
+                    )
+                return _fb
+
+            out, used_id, used_model, via_failover = self._call_with_failover_chain(
+                primary_fn=_primary_call,
+                fallback_factory=_make_fallback,
+            )
+            if via_failover:
+                self._track_active_model_call(
+                    provider_id=used_id, model=used_model,
                 )
-            self._track_active_model_call()
+            else:
+                self._track_active_model_call()
             self._save_state()
             return out
 

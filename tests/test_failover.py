@@ -441,3 +441,289 @@ def test_api_reorder_validates_index_bounds(api_client):
     })
     r = api_client.post("/api/failover/reorder", json={"from_index": 0, "to_index": 5})
     assert r.status_code == 400
+
+
+# ─── on_success callback (Phase 15B audit #2 fix) ──────────────────
+
+
+def test_try_call_invokes_on_success_with_winner(store_with_job):
+    """Failover delivered via a chain entry: on_success fires with
+    that entry's (provider_id, model) so the Router can attribute
+    the call to the provider that actually answered, not the pinned
+    primary. Without this, the daily-usage breakdown is wrong."""
+    from backend.llm import LLMError
+    seen: list[tuple[str, str]] = []
+
+    def fail_429():
+        raise LLMError("A 429")
+    def succeed():
+        return "ok"
+
+    _fo.try_call(
+        [
+            ("anthropic-default", "claude-3-5", fail_429),
+            ("openai-default", "gpt-4o", succeed),
+        ],
+        on_success=lambda pid, m: seen.append((pid, m)),
+    )
+    assert seen == [("openai-default", "gpt-4o")]
+
+
+def test_try_call_on_success_not_called_when_all_fail(store_with_job):
+    from backend.llm import LLMError
+    seen: list[tuple[str, str]] = []
+
+    def fail():
+        raise LLMError("A 429")
+    with pytest.raises(LLMError):
+        _fo.try_call(
+            [("a", "m", fail), ("b", "m", fail)],
+            on_success=lambda pid, m: seen.append((pid, m)),
+        )
+    assert seen == []
+
+
+# ─── Scrubber (audit #14: don't persist API keys in error logs) ────
+
+
+def test_scrub_secret_redacts_bearer_token():
+    txt = "401 Unauthorized: Bearer sk-ant-supersecretkey1234567890 invalid"
+    out = _fo.scrub_secret(txt)
+    assert "supersecretkey1234567890" not in out
+    assert "sk-ant-***" in out or "Bearer ***" in out
+
+
+def test_scrub_secret_redacts_query_string_key():
+    txt = "GET /v1/messages?api_key=sk-leaked12345 failed"
+    out = _fo.scrub_secret(txt)
+    assert "leaked12345" not in out
+    assert "api_key=***" in out
+
+
+def test_scrub_secret_handles_empty():
+    assert _fo.scrub_secret("") == ""
+    assert _fo.scrub_secret(None) is None  # type: ignore[arg-type]
+
+
+def test_record_attempt_scrubs_error_before_storage(store_with_job):
+    store, job = store_with_job
+    _fo.record_attempt(
+        provider_id="openai", model="gpt-4o", ok=False,
+        error="401 Unauthorized: Bearer sk-ant-myrealkey9999 invalid",
+        category="auth_error", elapsed_ms=42,
+    )
+    j = store.get(job.id)
+    assert j.attempts[0]["error"]
+    assert "myrealkey9999" not in j.attempts[0]["error"]
+
+
+# ─── No-API-key error → auth_error (audit #3 fix) ──────────────────
+
+
+def test_classify_no_api_key_buckets_as_auth_error():
+    """create_llm raises `LLMError('No API key for OpenAI-compatible
+    provider (model=...)')` when a chain entry is misconfigured.
+    Pre-fix: this classified as 'unknown' → not retryable → one bad
+    chain entry blocked every entry below it. After fix: classifies
+    as auth_error → retryable → chain keeps walking past it."""
+    cases = [
+        "No API key for OpenAI-compatible provider (model='gpt-4o')",
+        "Missing API key in environment",
+        "Не задан ANTHROPIC_API_KEY в окружении/.env",
+    ]
+    for msg in cases:
+        assert _fo.classify(Exception(msg)) == "auth_error", (
+            f"{msg!r} classified wrong"
+        )
+
+
+# ─── Integration: Router.call with failover end-to-end ─────────────
+#
+# These tests are the safety net for audit #17 — they exercise the
+# Router.call / call_with_tools glue (build attempts list, dedupe
+# primary, skip disabled providers, attribute the call to the
+# winning provider) that pure failover.try_call tests can't reach.
+
+
+def test_router_call_attributes_to_winning_provider_after_failover(
+    store_with_job, monkeypatch,
+):
+    """Anthropic 429 → OpenAI delivers. Router.call must
+    `_track_active_model_call(provider_id=openai, model=gpt-4o)` —
+    NOT attribute the call to the pinned anthropic primary."""
+    from unittest.mock import MagicMock
+    from backend import llm as _llm
+    from backend.llm import LLMError
+
+    # Configure failover.
+    _fo.save_config({
+        "enabled": True,
+        "chain": [{"provider_id": "openai-fallback", "model": "gpt-4o"}],
+        "retry_on": list(_fo.DEFAULT_RETRY_ON),
+        "max_attempts": 4,
+    })
+
+    # Fake the resolve to point at anthropic primary.
+    monkeypatch.setattr(
+        "backend.providers.ACTIVE_MODEL.resolve_llm_config",
+        lambda: {"provider_id": "anthropic-primary", "model": "claude-3-5", "provider": "anthropic"},
+    )
+    # Fake the chain entry resolution.
+    monkeypatch.setattr(
+        _fo, "resolve_entry_cfg",
+        lambda pid, m: {"provider_id": pid, "model": m, "provider": "openai"} if pid == "openai-fallback" else None,
+    )
+    # Fake create_llm to return a mock LLM whose `complete` returns "ok".
+    fallback_llm = MagicMock()
+    fallback_llm.complete.return_value = "answer-from-openai"
+    monkeypatch.setattr(_llm, "create_llm", lambda cfg: fallback_llm)
+
+    # Build a Router with stub `_get_active_llm` that returns a primary
+    # mock that 429s.
+    primary_llm = MagicMock()
+    primary_llm.complete.side_effect = LLMError("Anthropic API 429: rate_limit_error")
+
+    # We don't want to construct a real Router (depends on config
+    # files), so we patch the helper directly via a minimal stub.
+    class _StubRouter(_llm.DualModelRouter):
+        def __init__(self):
+            # Skip Router.__init__ — we don't need its state.
+            self.state = {
+                "api_calls_today": 0,
+                "api_cost_today": 0.0,
+                "active_model_calls_today": 0,
+                "total_active_model_calls": 0,
+                "active_model_breakdown": {},
+            }
+            self.cfg_router = {"estimated_cost_per_call_usd": 0.01}
+            self._active_cfg_hash = "anthropic-primary:claude-3-5"
+        def _save_state(self):
+            pass
+        def _get_active_llm(self):
+            return primary_llm
+
+    router = _StubRouter()
+
+    # Use TaskType.SOLVE — any valid one. Just need .value for the
+    # _task_type kwarg.
+    from backend.llm import TaskType
+    out = router.call(TaskType.COMPLEX_SOLVING, "system", "user")
+    assert out == "answer-from-openai"
+    # Attribution: breakdown key should be openai-fallback:gpt-4o,
+    # NOT anthropic-primary:claude-3-5.
+    breakdown = router.state["active_model_breakdown"]
+    assert "openai-fallback:gpt-4o" in breakdown
+    assert breakdown["openai-fallback:gpt-4o"] == 1
+    assert "anthropic-primary:claude-3-5" not in breakdown
+
+
+def test_router_call_skips_chain_entry_with_missing_provider(
+    store_with_job, monkeypatch,
+):
+    """Chain entry that resolves to None (provider gone or disabled)
+    is skipped — failover keeps walking to the next valid entry.
+    Without this fix the chain would either crash or stop at the
+    bad entry."""
+    from unittest.mock import MagicMock
+    from backend import llm as _llm
+    from backend.llm import LLMError, TaskType
+
+    _fo.save_config({
+        "enabled": True,
+        "chain": [
+            {"provider_id": "gone", "model": "x"},
+            {"provider_id": "working", "model": "y"},
+        ],
+        "retry_on": list(_fo.DEFAULT_RETRY_ON),
+        "max_attempts": 4,
+    })
+    monkeypatch.setattr(
+        "backend.providers.ACTIVE_MODEL.resolve_llm_config",
+        lambda: {"provider_id": "primary", "model": "p1", "provider": "openai"},
+    )
+    # `gone` resolves None (provider disabled); `working` resolves fine.
+    monkeypatch.setattr(
+        _fo, "resolve_entry_cfg",
+        lambda pid, m: None if pid == "gone" else {"provider_id": pid, "model": m, "provider": "openai"},
+    )
+    fallback_llm = MagicMock()
+    fallback_llm.complete.return_value = "answer-via-working"
+    monkeypatch.setattr(_llm, "create_llm", lambda cfg: fallback_llm)
+
+    primary = MagicMock()
+    primary.complete.side_effect = LLMError("primary 429")
+
+    class _StubRouter(_llm.DualModelRouter):
+        def __init__(self):
+            self.state = {"api_calls_today": 0, "api_cost_today": 0.0,
+                          "active_model_calls_today": 0,
+                          "total_active_model_calls": 0,
+                          "active_model_breakdown": {}}
+            self.cfg_router = {"estimated_cost_per_call_usd": 0.01}
+            self._active_cfg_hash = "primary:p1"
+        def _save_state(self):
+            pass
+        def _get_active_llm(self):
+            return primary
+
+    out = _StubRouter().call(TaskType.COMPLEX_SOLVING, "s", "u")
+    assert out == "answer-via-working"
+
+
+def test_router_call_create_llm_failure_is_retryable(store_with_job, monkeypatch):
+    """Audit #3: chain entry whose create_llm fails (missing api key)
+    should be treated as retryable so failover walks past it. Pre-fix:
+    create_llm raised LLMError('No API key...') → classify returns
+    'auth_error' (after the pattern we added) → retryable → chain
+    continues. Pre-pre-fix: classify returned 'unknown' → chain stopped."""
+    from unittest.mock import MagicMock
+    from backend import llm as _llm
+    from backend.llm import LLMError, TaskType
+
+    _fo.save_config({
+        "enabled": True,
+        "chain": [
+            {"provider_id": "broken", "model": "x"},
+            {"provider_id": "working", "model": "y"},
+        ],
+        "retry_on": list(_fo.DEFAULT_RETRY_ON),
+        "max_attempts": 4,
+    })
+    monkeypatch.setattr(
+        "backend.providers.ACTIVE_MODEL.resolve_llm_config",
+        lambda: {"provider_id": "primary", "model": "p1", "provider": "openai"},
+    )
+    monkeypatch.setattr(
+        _fo, "resolve_entry_cfg",
+        lambda pid, m: {"provider_id": pid, "model": m, "provider": "openai"},
+    )
+
+    # create_llm raises for `broken`, returns a real mock for `working`.
+    def _fake_create(cfg):
+        if cfg["provider_id"] == "broken":
+            raise LLMError("No API key for OpenAI-compatible provider (model='x')")
+        m = MagicMock()
+        m.complete.return_value = "answer-via-working"
+        return m
+
+    monkeypatch.setattr(_llm, "create_llm", _fake_create)
+
+    primary = MagicMock()
+    primary.complete.side_effect = LLMError("primary 429")
+
+    class _StubRouter(_llm.DualModelRouter):
+        def __init__(self):
+            self.state = {"api_calls_today": 0, "api_cost_today": 0.0,
+                          "active_model_calls_today": 0,
+                          "total_active_model_calls": 0,
+                          "active_model_breakdown": {}}
+            self.cfg_router = {"estimated_cost_per_call_usd": 0.01}
+            self._active_cfg_hash = "primary:p1"
+        def _save_state(self):
+            pass
+        def _get_active_llm(self):
+            return primary
+
+    out = _StubRouter().call(TaskType.COMPLEX_SOLVING, "s", "u")
+    # Failover walked past the broken entry to the working one.
+    assert out == "answer-via-working"

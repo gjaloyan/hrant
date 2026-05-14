@@ -1047,12 +1047,33 @@ def cmd_failover_disable(args: argparse.Namespace) -> int:
 
 
 def cmd_failover_add(args: argparse.Namespace) -> int:
-    """Append a (provider, model) pair to the end of the chain."""
+    """Append a (provider, model) pair to the end of the chain.
+
+    Validates the provider exists AND (best-effort) that the model
+    is one of the provider's declared `models` — otherwise the
+    failover will silently skip this entry at runtime because
+    create_llm couldn't find it. Pass `--force` to bypass the model
+    check for providers whose model list isn't pre-discovered
+    (e.g. fresh Ollama install)."""
     from . import failover as _fo
     from .providers import get_provider
-    if not get_provider(args.provider_id):
+    from .cli_colors import c
+    provider = get_provider(args.provider_id)
+    if not provider:
         _print_err(f"no provider with id '{args.provider_id}' "
                    "(see `hrant provider list`)")
+        return 1
+    declared_models = list(provider.get("models") or [])
+    default_model = provider.get("default_model") or ""
+    valid_models = set(declared_models)
+    if default_model:
+        valid_models.add(default_model)
+    if valid_models and args.model not in valid_models and not args.force:
+        _print_err(
+            f"model '{args.model}' is not in the provider's declared "
+            f"list ({sorted(valid_models)[:5]}{'...' if len(valid_models) > 5 else ''}). "
+            "Use --force to add anyway, or check the model name."
+        )
         return 1
     cfg = _fo.load_config()
     chain = list(cfg.get("chain") or [])
@@ -1061,7 +1082,7 @@ def cmd_failover_add(args: argparse.Namespace) -> int:
     saved = _fo.save_config(cfg)
     _print_ok(
         f"chain now has {len(saved['chain'])} entries: "
-        + " → ".join(f"{e['provider_id']}/{e['model']}" for e in saved['chain'])
+        + " " + c.muted("→") + " ".join(f"{e['provider_id']}/{e['model']}" for e in saved['chain'])
     )
     return 0
 
@@ -1898,6 +1919,10 @@ def build_parser() -> argparse.ArgumentParser:
     pf_add = sub_fo.add_parser("add", help="append a (provider, model) to the chain")
     pf_add.add_argument("provider_id", help="provider id (see `hrant provider list`)")
     pf_add.add_argument("model", help="model name (e.g. claude-3-5-sonnet-20241022)")
+    pf_add.add_argument(
+        "--force", action="store_true",
+        help="skip the model-name validation (use when adding a fresh provider whose models aren't discovered yet)",
+    )
     pf_add.set_defaults(func=cmd_failover_add)
 
     pf_remove = sub_fo.add_parser(
