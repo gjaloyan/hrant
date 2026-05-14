@@ -45,7 +45,7 @@ Where to look when answering questions about myself.
 | `hrant rollback` | `backend/cli.py:cmd_rollback` |
 | `hrant rebuild` | `backend/cli.py:cmd_rebuild` |
 | `hrant discover` | `backend/cli.py:cmd_discover` (uses `backend/discovery.py`) |
-| `hrant service install/status/uninstall` | `backend/cli.py:cmd_service_*` |
+| `hrant gateway start/stop/restart/logs/install/status/uninstall` | `backend/cli.py:cmd_gateway_*` |
 | WebUI Settings → Voice save | `PUT /api/transcribe/config` + `PUT /api/tts/config` |
 | WebUI Settings → Engine save | `PUT /api/engine/config` |
 | WebUI Settings → Autonomic interval | `PUT /api/autonomic/settings` |

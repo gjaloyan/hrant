@@ -3,7 +3,7 @@
 # dependencies; if you want a proper service (auto-start before
 # login), see install-nssm.md instead.
 #
-# Render the template via `hrant service install --platform windows`
+# Render the template via `hrant gateway install --platform windows`
 # which substitutes __PLACEHOLDERS__ with your actual paths. To use
 # this file directly, replace the placeholders below.
 

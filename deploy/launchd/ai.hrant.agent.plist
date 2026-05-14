@@ -2,7 +2,7 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Self-learning agent (Hrant) — launchd plist for macOS user agent.
-  Install via `hrant service install` which renders this template into
+  Install via `hrant gateway install` which renders this template into
   ~/Library/LaunchAgents/ai.hrant.agent.plist with __PLACEHOLDERS__
   filled in.
 

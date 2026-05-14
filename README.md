@@ -56,10 +56,24 @@ hrant rebuild                      # только пересборка фрон�
 
 ## Run as a background service
 
+Все команды для запуска агента как сервиса собраны в группе `hrant gateway` (по аналогии с `openclaw gateway`). Самый короткий путь:
+
 ```bash
-hrant service install              # systemd / launchd / Scheduled Task — авто
-hrant service status               # что показывает OS service manager
-hrant service uninstall            # удалить unit, оставить venv
+hrant gateway start                # установить unit + стартовать (idempotent)
+hrant gateway start --gateway      # bind 0.0.0.0 — другие устройства в LAN/Tailscale достанут
+hrant gateway start --port 4444    # нестандартный порт
+
+hrant gateway logs -f              # стрим логов (journalctl --user -u hrant -f)
+hrant gateway restart              # после `hrant update`
+hrant gateway stop                 # остановить (unit остаётся, перезапуск через `gateway start`)
+```
+
+Под капотом `gateway start` это `gateway install` + activation. Если хочется сначала посмотреть unit-файл — используй `gateway install` и активируй вручную.
+
+```bash
+hrant gateway install              # положить unit, НЕ стартовать
+hrant gateway status               # что показывает OS service manager
+hrant gateway uninstall            # удалить unit, оставить venv
 ```
 
 Подробнее по платформам — [deploy/README.md](deploy/README.md).

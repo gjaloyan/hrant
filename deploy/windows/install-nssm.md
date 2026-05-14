@@ -13,7 +13,7 @@ winget install NSSM.NSSM
 
 ## Create the service
 
-`hrant service install --platform windows-nssm` renders the right
+`hrant gateway install --platform windows-nssm` renders the right
 command for your paths. The manual equivalent:
 
 ```powershell

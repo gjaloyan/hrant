@@ -138,17 +138,41 @@ hrant rollback [--to SHA] [--list] [--skip-frontend] [--skip-pip]
 - `--to SHA` — explicit target.
 - `--list` — print the history, don't change anything.
 
-### `hrant service install / status / uninstall`
+### `hrant gateway start / stop / restart / logs / install / status / uninstall`
 
-Install Hrant as a background service.
+Manage Hrant as a background service. Modelled on `openclaw gateway <action>` — one subcommand group for everything related to running the agent in the background.
 
 ```
-hrant service install   [--platform linux|macos|windows] [--host HOST] [--port PORT]
-hrant service status    [--platform ...]
-hrant service uninstall [--platform ...]
+hrant gateway start     [--host HOST] [--port PORT] [--gateway] [--platform ...]
+hrant gateway stop      [--platform ...]
+hrant gateway restart   [--platform ...]
+hrant gateway logs      [-f|--follow] [--lines N] [--platform ...]
+hrant gateway install   [--host HOST] [--port PORT] [--platform ...]
+hrant gateway status    [--platform ...]
+hrant gateway uninstall [--platform ...]
 ```
 
-Renders the unit file from `deploy/<platform>/` into the user-mode location for that OS, then prints the activation command (you copy-paste it; `hrant` never runs privileged ops itself). See [deploy/README.md](../deploy/README.md) for activation details.
+#### Lifecycle (the everyday commands)
+
+- **`hrant gateway start`** — renders the platform unit file with the current install's paths, enables linger so the service survives logout (Linux), and starts the service. Idempotent — safe to re-run after `hrant update`.
+  - `--gateway` is shorthand for `--host 0.0.0.0` so other devices on your LAN / Tailscale can reach it.
+- **`hrant gateway stop`** — stop the service. Keeps the unit file (use `hrant gateway uninstall` for full teardown).
+- **`hrant gateway restart`** — restart in place. Most common use: after `hrant update` so the new engine code is loaded.
+- **`hrant gateway logs`** — tail the service's stdout/stderr:
+  - Linux: `journalctl --user -u hrant`
+  - macOS: `tail` of `logs/hrant.out.log`
+  - Windows: `Get-ScheduledTaskInfo` (Scheduled Tasks doesn't stream stdout)
+  - `-f` follows live; `--lines N` controls history (default 200).
+
+#### Lower-level surface (review-before-activate)
+
+`hrant gateway start` calls `install` internally + runs the activation step. If you'd rather inspect the unit file first, use these directly:
+
+- **`hrant gateway install`** — render the unit file from `deploy/<platform>/` into the user-mode location (`~/.config/systemd/user/hrant.service` / `~/Library/LaunchAgents/ai.hrant.agent.plist` / `deploy/windows/install-service.rendered.ps1`). Prints the activation command but never runs privileged ops itself.
+- **`hrant gateway status`** — wraps the platform's native status command (`systemctl --user status hrant` / `launchctl print …` / `Get-ScheduledTask`).
+- **`hrant gateway uninstall`** — remove the unit file. Prints the matching disable command so the user can disable + remove from the service manager.
+
+See [deploy/README.md](../deploy/README.md) for the underlying unit-file templates.
 
 ## Legacy REPL commands
 

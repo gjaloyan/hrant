@@ -1,4 +1,4 @@
-"""Tests for `hrant service install / status / uninstall`.
+"""Tests for `hrant gateway install / status / uninstall`.
 
 Render unit files for systemd / launchd / Windows from the
 deploy/ templates with __PLACEHOLDERS__ substituted for the current
@@ -9,11 +9,11 @@ just writes the file and prints next steps. These tests pin:
   - all templates use the documented placeholders
   - _render_service_template fills every placeholder with the
     expected values (no leftover `__SOMETHING__` markers)
-  - cmd_service_install writes to the user-mode location for the
+  - cmd_gateway_install writes to the user-mode location for the
     chosen platform, redirected via tmp_path so the test machine's
     real systemd/launchd state isn't touched
-  - cmd_service_install prints platform-correct next-step commands
-  - cmd_service_uninstall removes the unit file and prints disable
+  - cmd_gateway_install prints platform-correct next-step commands
+  - cmd_gateway_uninstall removes the unit file and prints disable
     instructions
 """
 from __future__ import annotations
@@ -99,7 +99,7 @@ def test_detect_platform_maps_known_systems(monkeypatch):
         assert cli_mod._detect_platform() == expected
 
 
-# --- cmd_service_install ------------------------------------------------
+# --- cmd_gateway_install ------------------------------------------------
 
 
 def _ns(platform=None, host=None, port=None):
@@ -116,7 +116,7 @@ def test_install_linux_writes_to_systemd_user(tmp_path, monkeypatch, capsys):
     # on every dev machine.
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    rc = cli_mod.cmd_service_install(_ns(platform="linux"))
+    rc = cli_mod.cmd_gateway_install(_ns(platform="linux"))
     assert rc == 0
     target = tmp_path / ".config" / "systemd" / "user" / "hrant.service"
     assert target.exists()
@@ -131,7 +131,7 @@ def test_install_linux_writes_to_systemd_user(tmp_path, monkeypatch, capsys):
 
 def test_install_macos_writes_to_launchagents(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    rc = cli_mod.cmd_service_install(_ns(platform="macos"))
+    rc = cli_mod.cmd_gateway_install(_ns(platform="macos"))
     assert rc == 0
     target = tmp_path / "Library" / "LaunchAgents" / "ai.hrant.agent.plist"
     assert target.exists()
@@ -155,7 +155,7 @@ def test_install_windows_writes_rendered_script(tmp_path, monkeypatch, capsys):
     dest = tmp_path / "deploy" / "windows" / "install-service.ps1"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    rc = cli_mod.cmd_service_install(_ns(platform="windows", port=9000))
+    rc = cli_mod.cmd_gateway_install(_ns(platform="windows", port=9000))
     assert rc == 0
     rendered = tmp_path / "deploy" / "windows" / "install-service.rendered.ps1"
     assert rendered.exists()
@@ -167,23 +167,23 @@ def test_install_windows_writes_rendered_script(tmp_path, monkeypatch, capsys):
 
 
 def test_install_invalid_platform_returns_error(capsys):
-    rc = cli_mod.cmd_service_install(_ns(platform="haiku"))
+    rc = cli_mod.cmd_gateway_install(_ns(platform="haiku"))
     # argparse normally catches invalid choices at parse time, but
-    # cmd_service_install is called directly here. Our renderer
+    # cmd_gateway_install is called directly here. Our renderer
     # raises ValueError → returns 2.
     assert rc == 2
 
 
-# --- cmd_service_uninstall ---------------------------------------------
+# --- cmd_gateway_uninstall ---------------------------------------------
 
 
 def test_uninstall_removes_file(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     # Install then uninstall.
-    cli_mod.cmd_service_install(_ns(platform="linux"))
+    cli_mod.cmd_gateway_install(_ns(platform="linux"))
     target = tmp_path / ".config" / "systemd" / "user" / "hrant.service"
     assert target.exists()
-    rc = cli_mod.cmd_service_uninstall(_ns(platform="linux"))
+    rc = cli_mod.cmd_gateway_uninstall(_ns(platform="linux"))
     assert rc == 0
     assert not target.exists()
     out = capsys.readouterr().out
@@ -192,7 +192,7 @@ def test_uninstall_removes_file(tmp_path, monkeypatch, capsys):
 
 def test_uninstall_warns_when_missing(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
-    rc = cli_mod.cmd_service_uninstall(_ns(platform="linux"))
+    rc = cli_mod.cmd_gateway_uninstall(_ns(platform="linux"))
     assert rc == 0  # still returns 0 — idempotent
     out = capsys.readouterr().out
     assert "not present" in out or "warn" in out
@@ -201,14 +201,14 @@ def test_uninstall_warns_when_missing(tmp_path, monkeypatch, capsys):
 # --- subparser wiring ---------------------------------------------------
 
 
-def test_service_subcommand_in_help(capsys):
+def test_gateway_subcommand_in_help(capsys):
     parser = cli_mod.build_parser()
     help_text = parser.format_help()
-    assert "service" in help_text
+    assert "gateway" in help_text
 
 
-def test_service_install_reachable_via_parser():
+def test_gateway_install_reachable_via_parser():
     parser = cli_mod.build_parser()
-    args = parser.parse_args(["service", "install", "--platform", "linux"])
-    assert args.func is cli_mod.cmd_service_install
+    args = parser.parse_args(["gateway", "install", "--platform", "linux"])
+    assert args.func is cli_mod.cmd_gateway_install
     assert args.platform == "linux"

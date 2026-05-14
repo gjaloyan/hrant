@@ -1,6 +1,6 @@
 [Unit]
 # Self-learning agent (Hrant) — systemd unit for user-mode operation.
-# Install via `hrant service install` which renders this template into
+# Install via `hrant gateway install` which renders this template into
 # ~/.config/systemd/user/hrant.service with __PLACEHOLDERS__ filled in.
 #
 # Why user-mode (not system-mode):

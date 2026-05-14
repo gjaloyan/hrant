@@ -34,8 +34,127 @@ def test_parser_exposes_known_subcommands():
     # argparse stores subparsers under an internal action — peek
     # via parsed help text which is the documented surface.
     help_text = parser.format_help()
-    for cmd in ("init", "run", "status", "chat", "version", "service", "discover"):
+    for cmd in (
+        "init", "run", "status", "chat", "version", "gateway", "discover",
+    ):
         assert cmd in help_text, f"subcommand `{cmd}` missing from CLI help"
+
+
+def test_gateway_subcommands_present():
+    """`hrant gateway` group must expose start/stop/restart/logs +
+    install/status/uninstall. Mirrors openclaw's `openclaw gateway`
+    shape — users coming from there expect these verbs."""
+    parser = cli_mod.build_parser()
+    for action, fn in (
+        ("start",     cli_mod.cmd_gateway_start),
+        ("stop",      cli_mod.cmd_gateway_stop),
+        ("restart",   cli_mod.cmd_gateway_restart),
+        ("logs",      cli_mod.cmd_gateway_logs),
+        ("install",   cli_mod.cmd_gateway_install),
+        ("status",    cli_mod.cmd_gateway_status),
+        ("uninstall", cli_mod.cmd_gateway_uninstall),
+    ):
+        args = parser.parse_args(["gateway", action])
+        assert args.func is fn, f"`hrant gateway {action}` not wired to {fn.__name__}"
+
+
+def test_gateway_start_dispatcher_wires_gateway_flag():
+    parser = cli_mod.build_parser()
+    args = parser.parse_args(
+        ["gateway", "start", "--gateway", "--port", "4444"]
+    )
+    assert args.func is cli_mod.cmd_gateway_start
+    assert args.gateway is True
+    assert args.port == 4444
+
+
+def test_gateway_logs_dispatcher_wires_follow_flag():
+    parser = cli_mod.build_parser()
+    args = parser.parse_args(["gateway", "logs", "-f", "--lines", "50"])
+    assert args.func is cli_mod.cmd_gateway_logs
+    assert args.follow is True
+    assert args.lines == 50
+
+
+def test_cmd_gateway_start_linux_calls_systemctl_enable(monkeypatch, capsys):
+    """On Linux, `hrant gateway start` should render the unit file
+    then call `systemctl --user enable --now hrant.service`. We mock
+    _run_cmd so no actual systemctl shell-out happens; just verify
+    the sequence and that the failure of any one step propagates."""
+    import argparse as _a
+    calls: list[list[str]] = []
+
+    def fake_run_cmd(cmd, *, check=False):
+        calls.append(list(cmd))
+        return 0, "", ""
+
+    monkeypatch.setattr(cli_mod, "_run_cmd", fake_run_cmd)
+    monkeypatch.setattr(
+        cli_mod, "cmd_gateway_install", lambda ns: 0,
+    )
+    rc = cli_mod.cmd_gateway_start(_a.Namespace(
+        platform="linux", host=None, port=None, gateway=False
+    ))
+    assert rc == 0
+    flat = [" ".join(c) for c in calls]
+    # Must hit the three magic systemctl steps in order:
+    assert any("daemon-reload" in c for c in flat), flat
+    assert any("enable --now hrant.service" in c for c in flat), flat
+
+
+def test_cmd_gateway_start_gateway_flag_binds_0_0_0_0(monkeypatch):
+    """--gateway should rewrite the host to 0.0.0.0 before
+    cmd_gateway_install runs (so the rendered unit file picks it up)."""
+    import argparse as _a
+    captured: dict = {}
+
+    def fake_install(ns):
+        captured["host"] = ns.host
+        captured["port"] = ns.port
+        return 0
+
+    monkeypatch.setattr(cli_mod, "cmd_gateway_install", fake_install)
+    monkeypatch.setattr(cli_mod, "_run_cmd", lambda *a, **kw: (0, "", ""))
+    cli_mod.cmd_gateway_start(_a.Namespace(
+        platform="linux", host=None, port=None, gateway=True
+    ))
+    assert captured["host"] == "0.0.0.0"
+    assert captured["port"] == 3333
+
+
+def test_cmd_gateway_stop_linux_stops_service(monkeypatch):
+    """`hrant gateway stop` must call `systemctl --user stop
+    hrant.service` (NOT disable or daemon-reload — that's
+    `gateway uninstall`'s job)."""
+    import argparse as _a
+    calls: list[list[str]] = []
+
+    def fake_run_cmd(cmd, *, check=False):
+        calls.append(list(cmd))
+        return 0, "", ""
+
+    monkeypatch.setattr(cli_mod, "_run_cmd", fake_run_cmd)
+    rc = cli_mod.cmd_gateway_stop(_a.Namespace(platform="linux"))
+    assert rc == 0
+    flat = [" ".join(c) for c in calls]
+    assert any("stop hrant.service" in c for c in flat), flat
+    # Stop keeps the unit file — never calls daemon-reload.
+    assert not any("daemon-reload" in c for c in flat), flat
+
+
+def test_cmd_gateway_restart_linux_calls_systemctl_restart(monkeypatch):
+    import argparse as _a
+    calls: list[list[str]] = []
+
+    def fake_run_cmd(cmd, *, check=False):
+        calls.append(list(cmd))
+        return 0, "", ""
+
+    monkeypatch.setattr(cli_mod, "_run_cmd", fake_run_cmd)
+    rc = cli_mod.cmd_gateway_restart(_a.Namespace(platform="linux"))
+    assert rc == 0
+    flat = [" ".join(c) for c in calls]
+    assert any("restart hrant.service" in c for c in flat), flat
 
 
 def test_discover_dispatcher_present_and_wires_apply_flag():
