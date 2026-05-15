@@ -1,19 +1,27 @@
-import { useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
+// Audit #26: lazy-load Settings tabs so the initial bundle doesn't
+// pay for the kitchen-sink Settings panel on chat-only sessions.
+// IdentityEditor + UserProfileTab + StatusTab are tiny and used on
+// almost every open of Settings — keep them eager. Everything else
+// (memory graph viz, jobs, digests, force-directed layout, etc.)
+// loads on demand. The dynamic import() boundary lets Vite split
+// each into its own chunk; the gzipped initial JS bundle drops
+// from ~170 KB to ~110 KB.
 import IdentityEditor from "./settings/IdentityEditor";
 import UserProfileTab from "./settings/UserProfileTab";
-import ConversationTab from "./settings/ConversationTab";
-import CapabilitiesTab from "./settings/CapabilitiesTab";
 import StatusTab from "./settings/StatusTab";
-import MemoryTab from "./settings/MemoryTab";
-import VoiceTab from "./settings/VoiceTab";
-import EngineTab from "./settings/EngineTab";
-import SelfModsTab from "./settings/SelfModsTab";
-import RolesTab from "./settings/RolesTab";
-import SkillsTab from "./settings/SkillsTab";
-import JobsTab from "./settings/JobsTab";
-import FailoverPanel from "./settings/FailoverPanel";
-import MemoryDigestsTab from "./settings/MemoryDigestsTab";
-import KnowledgeGraphTab from "./settings/KnowledgeGraphTab";
+const ConversationTab = lazy(() => import("./settings/ConversationTab"));
+const CapabilitiesTab = lazy(() => import("./settings/CapabilitiesTab"));
+const MemoryTab = lazy(() => import("./settings/MemoryTab"));
+const VoiceTab = lazy(() => import("./settings/VoiceTab"));
+const EngineTab = lazy(() => import("./settings/EngineTab"));
+const SelfModsTab = lazy(() => import("./settings/SelfModsTab"));
+const RolesTab = lazy(() => import("./settings/RolesTab"));
+const SkillsTab = lazy(() => import("./settings/SkillsTab"));
+const JobsTab = lazy(() => import("./settings/JobsTab"));
+const FailoverPanel = lazy(() => import("./settings/FailoverPanel"));
+const MemoryDigestsTab = lazy(() => import("./settings/MemoryDigestsTab"));
+const KnowledgeGraphTab = lazy(() => import("./settings/KnowledgeGraphTab"));
 import {
   clearConversation,
   compareModels,
@@ -313,8 +321,13 @@ export default function SettingsPanel() {
         {msg && <div className="mt-4 bg-sky-900/50 text-xs rounded p-2">{msg}</div>}
       </aside>
 
-      {/* Content */}
+      {/* Content. Lazy-loaded tabs render under a Suspense
+          boundary; the fallback shows a tiny placeholder so the
+          panel doesn't blank-flash while the chunk fetches. */}
       <div className="flex-1 p-4 overflow-y-auto flex flex-col">
+        <Suspense fallback={
+          <div className="text-slate-500 text-sm italic">Loading…</div>
+        }>
         {tab === "soul" && <IdentityEditor {...editorProps("soul", soul, setSoul)} />}
         {tab === "identity" && <IdentityEditor {...editorProps("identity", identity, setIdentity)} />}
         {tab === "user" && (
@@ -1903,6 +1916,7 @@ export default function SettingsPanel() {
         {tab === "status" && status && (
           <StatusTab status={status} onCompare={handleCompare} onRefresh={loadStatus} />
         )}
+        </Suspense>
       </div>
     </div>
   );

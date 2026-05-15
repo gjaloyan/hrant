@@ -10,6 +10,39 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## QA-audit-fix5 — frontend code-splitting (2026-05-15)
+
+Closes **audit #26**: Settings tabs are now lazy-loaded via
+`React.lazy` + `Suspense`. Each tab becomes its own Vite chunk;
+the kitchen-sink import in `SettingsPanel.tsx` no longer pulls
+the entire Settings panel into the initial JS bundle.
+
+**Result:**
+- Initial bundle: **613 KB → 526 KB** (−87 KB)
+- Initial gzipped: **171 KB → 152 KB** (−19 KB)
+- 13 tab chunks now load on demand (largest: VoiceTab 12 KB,
+  KnowledgeGraphTab 11 KB)
+
+Kept eager: `IdentityEditor`, `UserProfileTab`, `StatusTab` —
+small + used on almost every Settings open. Everything else
+fetches its chunk when the user actually clicks the tab.
+
+**Remaining audit findings (deferred — documented in QA report,
+not silently skipped):**
+
+- **#21** `cli.py` 2417 LOC split — true refactor, would move 80+
+  functions across 5-10 new files. Risk of breaking the 23
+  existing CLI tests. Better as a dedicated session.
+- **#22** `llm.py` 3197 LOC base-class for the 8 LLM clients —
+  each provider has subtle HTTP retry differences; consolidating
+  needs careful comparison. Real work, not mechanical.
+- **#25** `init_wizard.py` 742 LOC provider-flow registry —
+  refactor for future-proofing; not a bug fix.
+
+Tests: 1279 still pass.
+
+---
+
 ## QA-audit-fix4 — smoke tests + embedder path fix (2026-05-15)
 
 Closes **audit #8** by adding smoke tests for the largest previously-untested modules (~7K LOC of code that had no dedicated test file). 8 new test files, 92 new tests. Strategy: pin the public surface + happy paths without requiring live HTTP / Telegram / LLM calls.
