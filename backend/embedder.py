@@ -48,8 +48,13 @@ DEFAULT_LLAMA_CPP_MODEL = "bge-m3"  # what we echo back; server runs whatever GG
 
 
 def _config_path() -> Path:
-    from .config import CONFIG
-    return Path(CONFIG.knowledge["base_dir"]) / "embedder_config.json"
+    # Audit cleanup: route through paths.knowledge_dir() so test
+    # overrides of HRANT_DATA_DIR are honoured at call time. Pre-fix
+    # this read `CONFIG.knowledge["base_dir"]` which is captured at
+    # import — tests that set the env var AFTER import wrote to the
+    # dev's real ~/.hrant/data/ instead of the tmp directory.
+    from . import paths
+    return paths.knowledge_dir() / "embedder_config.json"
 
 
 def load_config() -> dict:

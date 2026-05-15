@@ -10,6 +10,30 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## QA-audit-fix4 — smoke tests + embedder path fix (2026-05-15)
+
+Closes **audit #8** by adding smoke tests for the largest previously-untested modules (~7K LOC of code that had no dedicated test file). 8 new test files, 92 new tests. Strategy: pin the public surface + happy paths without requiring live HTTP / Telegram / LLM calls.
+
+**New test files:**
+- `tests/test_providers_smoke.py` — 14 tests. Provider CRUD, default-key resolution, PKCE, ACTIVE_MODEL set/clear/resolve.
+- `tests/test_channels_smoke.py` — 13 tests. Channel record CRUD, lazy `CHANNELS_PATH`, ChannelManager status, send-to-telegram-chat returns False (not crash) when no bot running, `_MAX_CONCURRENT_AGENT_RUNS` invariant.
+- `tests/test_llm_smoke.py` — 15 tests. `TaskType` enum required members, `create_llm` dispatch for every provider type, `_parse_json_response` markdown-fence stripping + prose-around handling, `TokenTracker` reset + record round-trip, router singleton.
+- `tests/test_tts_smoke.py` — 9 tests. Voice picker (Russian vs default by Cyrillic content), config round-trips, tolerates invalid JSON, status/reset don't crash.
+- `tests/test_transcriber_smoke.py` — 6 tests. Same shape as TTS.
+- `tests/test_embedder_smoke.py` — 5 tests. Acknowledges the project-wide conftest fixture that disables embedder during tests; pins the audit-relevant claim that `_config_path()` resolves via `paths.knowledge_dir()` at call time, not the CONFIG snapshot.
+- `tests/test_memory_extractor_smoke.py` — 8 tests. recall/recall_block/stats shape, extract_and_store with mocked router (write-on-facts, no-write on empty, swallow LLMError).
+- `tests/test_self_modifier_smoke.py` — 14 tests. Proposal CRUD + status transitions, `_validate_test_command` allow/reject matrix (pytest, python -m, bare python — accepted; bare paths + shell injection — rejected), persistence round-trip, stats.
+- `tests/test_identity_smoke.py` — 8 tests. Default templates, set_user_profile persistence, per-speaker isolation (Telegram users keep separate profile files), legacy `webui:default` path.
+
+**Bonus bug fix surfaced by writing the tests:**
+- `backend/embedder.py:_config_path()` was reading `CONFIG.knowledge["base_dir"]` — captured at import time. Test overrides of `HRANT_DATA_DIR` were silently going to the dev's real `~/.hrant/data/`. Switched to `paths.knowledge_dir()` which re-reads on every call. The audit had flagged this same anti-pattern for `channels.py:CHANNELS_PATH` in #19; embedder had it too.
+
+**Test isolation:** initial drafts used `importlib.reload()` to refresh module state; that pattern leaked into other tests' singletons and caused 23 cascade failures. Reworked all fixtures to `monkeypatch.setattr(_mod, "SINGLETON", fresh_instance)` instead.
+
+1279 tests passing total (1187 → 1279, +92 smoke tests).
+
+---
+
 ## QA-audit-fix3 (2026-05-15)
 
 Closes 7 more findings from the original full-codebase audit:
