@@ -2,11 +2,14 @@
 from __future__ import annotations
 import asyncio
 import json
+import logging
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
+
+log = logging.getLogger(__name__)
 
 from ..agent import Agent
 from ..conversation import CONVERSATION
@@ -158,7 +161,20 @@ async def chat(req: ChatRequest, request: Request):
             answer_payload["job_id"] = job_id
             queue.put_nowait({"type": "answer", "data": answer_payload})
         except Exception as e:
-            queue.put_nowait({"type": "error", "message": str(e)})
+            # log.exception so the FULL traceback lands in journalctl.
+            # Pre-fix, this handler emitted `{type: error, message:
+            # str(e)}` only — when something raised a slice (a real
+            # production bug we're tracking) the SSE event carried
+            # `slice(None, 200, None)` to the WebUI and there was no
+            # traceback to diagnose from.
+            log.exception(
+                "chat SSE handler failed for speaker=%s message=%r",
+                target_speaker, (req.message or "")[:100],
+            )
+            queue.put_nowait({
+                "type": "error",
+                "message": f"{type(e).__name__}: {str(e) or 'no detail'}",
+            })
         finally:
             queue.put_nowait(None)
 
