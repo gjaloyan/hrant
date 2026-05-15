@@ -1976,3 +1976,91 @@ export const fetchDigests = (limit: number = 30) =>
 
 export const fetchDigest = (date_str: string) =>
   json_get<Digest>(`/api/consolidation/digests/${encodeURIComponent(date_str)}`);
+
+
+// ---------- Memory knowledge graph (Phase 16C) ----------
+//
+// Distinct from the older `GraphNode`/`GraphStats`/`fetchGraphStats` etc.
+// further up in this file — those describe the note-triples graph
+// served at `/api/graph/*`. The KGraph types below describe the
+// memory consolidation knowledge graph at `/api/kgraph/*`
+// (facts ↔ topics ↔ skills ↔ projects ↔ entities). The two graphs
+// coexist; eventually we may unify them.
+
+export type KGraphNodeKind = "fact" | "topic" | "skill" | "project" | "entity";
+export type KGraphEdgeKind =
+  | "is_about"
+  | "uses"
+  | "mentions"
+  | "relates_to"
+  | "continues";
+
+export type KGraphNode = {
+  id: string;
+  kind: KGraphNodeKind;
+  label: string;
+  weight: number;
+  metadata: Record<string, any>;
+};
+
+export type KGraphEdge = {
+  source: string;
+  target: string;
+  kind: KGraphEdgeKind;
+  weight: number;
+  metadata: Record<string, any>;
+};
+
+export type KGraphFull = {
+  version: number;
+  updated_at: number;
+  node_count: number;
+  edge_count: number;
+  nodes: KGraphNode[];
+  edges: KGraphEdge[];
+};
+
+export type KGraphStats = {
+  total_nodes: number;
+  total_edges: number;
+  by_kind: Record<KGraphNodeKind, number>;
+  edge_kinds: Record<string, number>;
+  top_topics: Array<{ id: string; label: string; degree: number }>;
+};
+
+export type KGraphSearchResult = KGraphNode & { degree: number };
+
+export type KGraphNeighborhood = {
+  node: KGraphNode;
+  neighbors: Array<{
+    edge: KGraphEdge;
+    node: KGraphNode;
+    direction: "in" | "out";
+  }>;
+  neighbor_count: number;
+};
+
+export const fetchKGraphStats = () =>
+  json_get<KGraphStats>("/api/kgraph/stats");
+
+export const fetchKGraph = () =>
+  json_get<KGraphFull>("/api/kgraph");
+
+export const searchKGraph = (q: string, kind?: KGraphNodeKind, limit: number = 30) => {
+  const params = new URLSearchParams({ q, limit: String(limit) });
+  if (kind) params.set("kind", kind);
+  return json_get<{ q: string; kind: string | null; results: KGraphSearchResult[] }>(
+    `/api/kgraph/search?${params.toString()}`,
+  );
+};
+
+export const fetchKGraphNode = (node_id: string) =>
+  json_get<KGraphNeighborhood>(
+    `/api/kgraph/node/${encodeURIComponent(node_id)}`,
+  );
+
+export const rebuildKGraph = () =>
+  json_post<{ ok: boolean; stats: Record<string, number> }>(
+    "/api/kgraph/rebuild",
+    {},
+  );

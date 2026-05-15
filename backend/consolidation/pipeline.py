@@ -331,7 +331,7 @@ def run(
         raw_facts = []
         d.error = (d.error or "") + f" facts step: {e};"
 
-    # Step 4: dedup + promote
+    # Step 4: dedup + promote (+ insert into knowledge graph)
     existing = _existing_fact_summaries()
     for raw in raw_facts:
         text = str(raw.get("text") or "").strip()
@@ -350,6 +350,27 @@ def run(
         else:
             if not dry_run:
                 _append_memory_fact(text, category, conf, topics, date_str)
+                # Phase 16C: also mirror the fact into the knowledge
+                # graph. Best-effort — graph failures must not block
+                # the consolidation pipeline. The graph is a derived
+                # view; it can always be rebuilt from sources later.
+                try:
+                    from ..graph import builder as _graph_builder
+                    from ..graph.store import GRAPH as _G
+                    _graph_builder.add_fact(
+                        text=text,
+                        related_topics=topics,
+                        category=category,
+                        confidence=conf,
+                        source=f"consolidation:{date_str}",
+                    )
+                    _G.save()
+                    d.links_added.append({
+                        "fact": text,
+                        "topics": topics,
+                    })
+                except Exception as e:
+                    log.warning("graph.add_fact failed for %r: %s", text[:60], e)
             fact.promoted = True
             existing.add(text.lower())
         d.new_facts.append(fact)

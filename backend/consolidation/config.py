@@ -45,11 +45,12 @@ GATHER_WINDOW_SECONDS: float = float(
     os.environ.get("HRANT_CONSOLIDATION_WINDOW_SECONDS", 26 * 60 * 60)
 )
 
-# Activity gate is OFF per the user's instruction: fire even on
-# zero-job days. Kept as a config in case someone wants to flip
-# it back later.
+# Activity gate. Default 1: skip days with literally zero turns
+# (no point spinning the LLM pipeline + writing an empty digest
+# every quiet 24h). Set to 0 to fire even on empty days; set
+# higher to require a meaningful amount of activity.
 MIN_JOBS_FOR_RUN: int = int(
-    os.environ.get("HRANT_CONSOLIDATION_MIN_JOBS", 0)
+    os.environ.get("HRANT_CONSOLIDATION_MIN_JOBS", 1)
 )
 
 # Cost cap is OFF per the user's spec — track for reporting only,

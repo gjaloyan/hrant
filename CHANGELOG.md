@@ -10,6 +10,40 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## Phase 16C (2026-05-15)
+
+**Knowledge graph — see what the agent knows + how it connects.**
+
+A small graph over the agent's persistent knowledge — facts, topics, skills, projects, named entities — automatically grown by the daily consolidation pipeline and viewable in the WebUI.
+
+**Data model:**
+- Nodes: `fact`, `topic`, `skill`, `project`, `entity`
+- Edges: `is_about` (fact→topic), `uses` (skill→topic), `mentions` (fact→entity, with predicate metadata), `relates_to` (fact↔fact, LLM-proposed in 16C.1), `continues` (project→fact)
+- Stored as a single `~/.hrant/data/knowledge/graph.json` with atomic-ish writes
+
+**Sources:**
+- `memory_facts.jsonl` → fact nodes + topic edges + RDF triples
+- Skills registry (Phase 12) → skill nodes + topic edges via skill triggers
+- `goals.json` → project nodes (best-effort, shape-tolerant)
+
+**Integration with consolidation (Phase 16A):**
+After each consolidation promotes a new fact, the pipeline mirrors it into the graph: `add_fact()` upserts a fact node, walks the related_topics list creating topic nodes + `is_about` edges, processes any RDF triples. Failures are caught and logged; the graph is derivable from sources, so a bad add doesn't break consolidation.
+
+**Surfaces:**
+- REST: `GET /api/kgraph`, `GET /stats`, `GET /search?q=…&kind=…`, `GET /node/{id}`, `POST /rebuild`
+- CLI: `hrant graph stats / search <q> [--kind …] / show <node_id> / rebuild`
+- WebUI: `Settings → Knowledge Graph` tab with two views:
+  - **Explorer:** search box + filtered list of nodes, click any node to see its neighbourhood pane (incoming + outgoing edges with direction arrows)
+  - **Graph view:** SVG node-link diagram laid out by a built-in force-directed simulation (no extra deps). Color-coded by kind. Topic/skill/project labels shown; fact labels hidden to avoid clutter at >50 nodes.
+
+**Why namespaced `/api/kgraph` not `/api/graph`:** an older notes-derived triples graph already owns `/api/graph` in `backend/api/intel.py`. The two coexist; this knowledge graph (the broader memory graph) is incremental, the old one is derived from note frontmatter. They may unify later.
+
+**Tests:** +27 — id dedup (case/whitespace), fact_id collision check at 100 facts, store round-trip + upsert merge semantics (weight max for nodes, sum for edges), schema-version guard for forward-compat, builder idempotency, neighborhood direction tagging, search ranking by degree + kind filter, REST surface.
+
+**Config tweak:** `MIN_JOBS_FOR_RUN` default changed from 0 → 1. Consolidation now skips truly empty 24h periods. Set `HRANT_CONSOLIDATION_MIN_JOBS=0` to keep firing on quiet days.
+
+---
+
 ## Phase 16A (2026-05-15)
 
 **Daily memory consolidation — like sleep, but for the agent.**

@@ -180,6 +180,7 @@ from .api import (  # noqa: E402
     jobs as jobs_api,
     failover as failover_api,
     consolidation as consolidation_api,
+    graph as graph_api,
 )
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
@@ -187,7 +188,7 @@ for mod in (
     chat, knowledge, projects, finetune, status_api, identity,
     intel, goals, sessions, providers_api, channels_api, attachments_api,
     health_api, voice_api, engine_api, roles_api, skills_api, jobs_api,
-    failover_api, consolidation_api,
+    failover_api, consolidation_api, graph_api,
 ):
     app.include_router(mod.router)
 app.include_router(autonomic_router)

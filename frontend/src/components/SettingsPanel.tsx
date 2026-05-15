@@ -13,6 +13,7 @@ import SkillsTab from "./settings/SkillsTab";
 import JobsTab from "./settings/JobsTab";
 import FailoverPanel from "./settings/FailoverPanel";
 import MemoryDigestsTab from "./settings/MemoryDigestsTab";
+import KnowledgeGraphTab from "./settings/KnowledgeGraphTab";
 import {
   clearConversation,
   compareModels,
@@ -65,7 +66,7 @@ import {
   type AvailableModel,
 } from "../api";
 
-type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "digests" | "conversation" | "capabilities" | "status";
+type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "digests" | "kgraph" | "conversation" | "capabilities" | "status";
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState<IdentityTab>("soul");
@@ -281,6 +282,7 @@ export default function SettingsPanel() {
     { id: "skills", label: "Skills" },
     { id: "jobs", label: "Jobs" },
     { id: "digests", label: "Memory Digests" },
+    { id: "kgraph", label: "Knowledge Graph" },
     { id: "conversation", label: "Conversation" },
     { id: "capabilities", label: "Capabilities" },
     { id: "status", label: "System Status" },
@@ -355,6 +357,8 @@ export default function SettingsPanel() {
         {tab === "jobs" && <JobsTab flash={flash} />}
 
         {tab === "digests" && <MemoryDigestsTab flash={flash} />}
+
+        {tab === "kgraph" && <KnowledgeGraphTab flash={flash} />}
 
         {tab === "providers" && (
           <div className="space-y-4">

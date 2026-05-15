@@ -1264,6 +1264,101 @@ def cmd_consolidate_show(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- graph (Phase 16C: knowledge graph) -------------------------------
+
+
+def cmd_graph_stats(args: argparse.Namespace) -> int:
+    """`hrant graph stats` — totals + top topics."""
+    from .graph import query as _gq
+    from .cli_colors import c
+    s = _gq.stats()
+    print()
+    print(c.heading("  Knowledge graph"))
+    print()
+    print(f"  {c.muted('total nodes:'):<18} {s['total_nodes']}")
+    print(f"  {c.muted('total edges:'):<18} {s['total_edges']}")
+    print()
+    print(c.muted("  by kind:"))
+    for kind, count in s["by_kind"].items():
+        if count > 0:
+            print(f"    {kind:<10}  {count}")
+    if s["top_topics"]:
+        print()
+        print(c.muted("  top topics:"))
+        for t in s["top_topics"]:
+            print(f"    {c.accent(t['label']):<32}  {c.muted(str(t['degree']) + ' connections')}")
+    print()
+    return 0
+
+
+def cmd_graph_search(args: argparse.Namespace) -> int:
+    from .graph import query as _gq
+    from .cli_colors import c
+    results = _gq.search(args.query, kind=args.kind, limit=args.limit)
+    if not results:
+        print(c.muted("  no matches"))
+        return 0
+    print()
+    print(c.heading(f"  Search: '{args.query}'  ({len(results)} results)"))
+    print()
+    for r in results:
+        kind_c = {
+            "fact": c.success(r["kind"]),
+            "topic": c.accent(r["kind"]),
+            "skill": c.warn(r["kind"]),
+            "project": c.info(r["kind"]),
+            "entity": c.muted(r["kind"]),
+        }.get(r["kind"], r["kind"])
+        deg = c.muted(f"  ({r.get('degree', 0)} conn)")
+        print(f"  [{kind_c}] {r['label'][:100]}{deg}")
+    print()
+    return 0
+
+
+def cmd_graph_show(args: argparse.Namespace) -> int:
+    from .graph import query as _gq
+    from .cli_colors import c
+    n = _gq.neighborhood(args.node_id)
+    if n is None:
+        _print_err(f"no node with id '{args.node_id}'")
+        return 1
+    node = n["node"]
+    print()
+    print(c.heading(f"  {node['label']}"))
+    print(f"  {c.muted('id:'):<14} {node['id']}")
+    print(f"  {c.muted('kind:'):<14} {node['kind']}")
+    print(f"  {c.muted('weight:'):<14} {node['weight']}")
+    if node.get("metadata"):
+        print(f"  {c.muted('metadata:'):<14} {node['metadata']}")
+    print()
+    print(c.muted(f"  neighbors ({n['neighbor_count']}):"))
+    for entry in n["neighbors"]:
+        e = entry["edge"]
+        o = entry["node"]
+        arrow = "→" if entry["direction"] == "out" else "←"
+        kind_c = {
+            "fact": c.success,
+            "topic": c.accent,
+            "skill": c.warn,
+            "project": c.info,
+            "entity": c.muted,
+        }.get(o["kind"], lambda x: x)
+        print(f"    {arrow} {c.muted(e['kind']):<14} [{kind_c(o['kind'])}] {o['label'][:80]}")
+    print()
+    return 0
+
+
+def cmd_graph_rebuild(args: argparse.Namespace) -> int:
+    from .graph import builder as _gb
+    stats = _gb.rebuild()
+    _print_ok(
+        f"graph rebuilt: {stats['facts']} facts, {stats['topics']} topics, "
+        f"{stats['skills']} skills, {stats['projects']} projects, "
+        f"{stats['edges']} edges"
+    )
+    return 0
+
+
 # --- rebuild (frontend) -------------------------------------------------
 
 
@@ -2176,6 +2271,34 @@ def build_parser() -> argparse.ArgumentParser:
     pc_show = sub_cons.add_parser("show", help="full record for one date")
     pc_show.add_argument("date", help="YYYY-MM-DD (see `hrant consolidate list`)")
     pc_show.set_defaults(func=cmd_consolidate_show)
+
+    # `graph` group — knowledge graph (Phase 16C).
+    p_graph = sub.add_parser(
+        "graph",
+        help="knowledge graph (facts ↔ topics ↔ skills ↔ projects)",
+    )
+    sub_graph = p_graph.add_subparsers(dest="graph_cmd", metavar="<action>")
+
+    pg_stats = sub_graph.add_parser("stats", help="totals + top topics by degree")
+    pg_stats.set_defaults(func=cmd_graph_stats)
+
+    pg_search = sub_graph.add_parser("search", help="substring search across node labels")
+    pg_search.add_argument("query")
+    pg_search.add_argument(
+        "--kind", default=None,
+        choices=("fact", "topic", "skill", "project", "entity"),
+    )
+    pg_search.add_argument("--limit", type=int, default=30)
+    pg_search.set_defaults(func=cmd_graph_search)
+
+    pg_show = sub_graph.add_parser("show", help="one node + its neighbourhood")
+    pg_show.add_argument("node_id", help="canonical node id (e.g. topic:voice)")
+    pg_show.set_defaults(func=cmd_graph_show)
+
+    pg_rebuild = sub_graph.add_parser(
+        "rebuild", help="re-derive the graph from memory_facts + skills + goals",
+    )
+    pg_rebuild.set_defaults(func=cmd_graph_rebuild)
 
     p_rebuild = sub.add_parser(
         "rebuild",

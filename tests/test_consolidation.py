@@ -428,12 +428,25 @@ def test_scheduler_fires_when_cooldown_done_and_idle(home, monkeypatch):
     assert reason == "ready"
 
 
-def test_scheduler_fires_when_no_jobs_at_all(home, monkeypatch):
-    """Empty jobs dir + min_jobs=0 → fires (will write empty digest)."""
+def test_scheduler_fires_when_no_jobs_and_min_jobs_zero(home, monkeypatch):
+    """Empty jobs dir + min_jobs=0 → fires (writes empty digest).
+    Useful for users who want a daily "I was here" record even on
+    truly quiet days."""
     monkeypatch.setattr(_cfg, "COOLDOWN_SECONDS", 1.0)
     monkeypatch.setattr(_cfg, "MIN_JOBS_FOR_RUN", 0)
     should, reason = _sched._should_fire()
     assert should is True
+
+
+def test_scheduler_default_skips_when_no_jobs(home, monkeypatch):
+    """Default MIN_JOBS_FOR_RUN=1 → skip on zero-activity days
+    (the LLM pipeline would short-circuit anyway, but skipping at
+    the scheduler avoids a useless state.save round-trip)."""
+    monkeypatch.setattr(_cfg, "COOLDOWN_SECONDS", 1.0)
+    monkeypatch.setattr(_cfg, "MIN_JOBS_FOR_RUN", 1)
+    should, reason = _sched._should_fire()
+    assert should is False
+    assert "too few" in reason
 
 
 def test_scheduler_respects_min_jobs_when_configured(home, monkeypatch):
