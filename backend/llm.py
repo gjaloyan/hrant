@@ -862,6 +862,101 @@ def _curate_synth_messages_cohere(messages: list[dict]) -> list[dict]:
     return out
 
 
+# ─── HTTP retry helper (audit #22) ─────────────────────────────────────
+#
+# Every provider client (Anthropic, OpenAI-compatible, Codex, Cohere,
+# Google, Bedrock, Copilot, Ollama — 8 in total) does roughly the
+# same thing in its `_post`:
+#   1. POST to a URL with headers + JSON payload
+#   2. On 4xx/5xx/connection error, retry with exponential backoff
+#   3. On non-retryable status, raise LLMError with a parsed message
+# Pre-fix that loop was duplicated ~8× with subtle bugs in each
+# copy. The helper below extracts the common shape; provider
+# clients can call it (or keep their own `_post` for back-compat).
+# Migrating one client at a time is safer than a big-bang rewrite.
+
+# Default set of statuses worth retrying. Providers can override.
+_DEFAULT_RETRYABLE_STATUSES: frozenset[int] = frozenset({429, 500, 502, 503, 529})
+
+
+def post_with_retry(
+    url: str,
+    *,
+    payload: dict,
+    headers: dict,
+    provider_name: str,
+    model: str = "",
+    timeout: float = 120.0,
+    max_retries: int = 5,
+    retryable_statuses: frozenset[int] = _DEFAULT_RETRYABLE_STATUSES,
+    parse_error: Optional[Callable[[httpx.HTTPStatusError], str]] = None,
+) -> dict:
+    """POST `payload` to `url` with retry on transient errors. On
+    final failure raises `LLMError(provider/model: detail)`.
+
+    `parse_error` lets the caller customise how a non-retryable
+    response gets formatted (Anthropic / OpenAI / Cohere each
+    have different error JSON shapes). Default extracts `error.message`
+    from the response JSON, falling back to the raw body.
+    """
+    log = logging.getLogger("llm")
+    last_error: Optional[Exception] = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
+            r.raise_for_status()
+            return r.json()
+        except httpx.HTTPStatusError as e:
+            last_error = e
+            status = e.response.status_code
+            if status in retryable_statuses and attempt < max_retries:
+                retry_after = e.response.headers.get("retry-after")
+                if retry_after:
+                    try:
+                        wait = min(float(retry_after), 60.0)
+                    except ValueError:
+                        wait = min(2 ** attempt * 2, 60.0)
+                else:
+                    wait = min(2 ** attempt * 2, 60.0)
+                log.warning(
+                    "%s API %s, retry %d/%d in %.1fs...",
+                    provider_name, status, attempt + 1, max_retries, wait,
+                )
+                time.sleep(wait)
+                continue
+            # Non-retryable status or retries exhausted — format detail.
+            if parse_error is not None:
+                detail = parse_error(e)
+            else:
+                body = (e.response.text or "").strip()
+                try:
+                    err = e.response.json().get("error", {})
+                    detail = f"{err.get('type', '?')}: {err.get('message', body)}"
+                except Exception:
+                    detail = body or str(e)
+            tag = f"(model={model!r})" if model else ""
+            raise LLMError(
+                f"{provider_name} API {status} {tag}: {detail}".strip()
+            ) from e
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            last_error = e
+            if attempt < max_retries:
+                wait = min(2 ** attempt * 2, 60.0)
+                log.warning(
+                    "%s connection error: %s, retry %d/%d in %.1fs...",
+                    provider_name, e, attempt + 1, max_retries, wait,
+                )
+                time.sleep(wait)
+                continue
+            raise LLMError(
+                f"{provider_name} API error after {max_retries} retries: {e}"
+            ) from e
+    raise LLMError(
+        f"{provider_name} API failed after {max_retries} retries: {last_error}"
+    )
+
+
 class BaseLLM:
     def complete(
         self,
@@ -894,68 +989,23 @@ class AnthropicLLM(BaseLLM):
     def _post(self, payload: dict, *, _max_retries: int = 5) -> dict:
         """POST to Anthropic API with automatic retry on transient errors.
 
-        Retries on: 429 (rate limit), 529 (overloaded), 500/502/503 (server),
-        and connection/timeout errors. Uses exponential backoff with the
-        Retry-After header when provided.
-        """
+        Audit #22: delegates the retry loop to `post_with_retry` so
+        the shared logic (exponential backoff, Retry-After handling,
+        retryable-status set) lives in one place instead of being
+        copy-pasted across the 8 provider clients."""
         headers = {
             "x-api-key": self.api_key,
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        RETRYABLE_STATUSES = {429, 500, 502, 503, 529}
-        last_error: Exception | None = None
-
-        for attempt in range(_max_retries + 1):
-            try:
-                r = httpx.post(self.url, json=payload, headers=headers, timeout=120.0)
-                r.raise_for_status()
-                return r.json()
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                status = e.response.status_code
-                if status in RETRYABLE_STATUSES and attempt < _max_retries:
-                    # Use Retry-After header if present, otherwise exponential backoff
-                    retry_after = e.response.headers.get("retry-after")
-                    if retry_after:
-                        try:
-                            wait = min(float(retry_after), 60.0)
-                        except ValueError:
-                            wait = min(2 ** attempt * 2, 60.0)
-                    else:
-                        wait = min(2 ** attempt * 2, 60.0)
-                    import logging
-                    logging.getLogger("llm").warning(
-                        f"Anthropic API {status}, retry {attempt+1}/{_max_retries} "
-                        f"in {wait:.1f}s..."
-                    )
-                    time.sleep(wait)
-                    continue
-                # Non-retryable status or retries exhausted
-                body = (e.response.text or "").strip()
-                try:
-                    err = e.response.json().get("error", {})
-                    detail = f"{err.get('type', '?')}: {err.get('message', body)}"
-                except Exception:
-                    detail = body or str(e)
-                raise LLMError(
-                    f"Anthropic API {status} "
-                    f"(model={self.model!r}): {detail}"
-                ) from e
-            except (httpx.HTTPError, httpx.TimeoutException) as e:
-                last_error = e
-                if attempt < _max_retries:
-                    wait = min(2 ** attempt * 2, 60.0)
-                    import logging
-                    logging.getLogger("llm").warning(
-                        f"Anthropic connection error: {e}, retry {attempt+1}/{_max_retries} "
-                        f"in {wait:.1f}s..."
-                    )
-                    time.sleep(wait)
-                    continue
-                raise LLMError(f"Anthropic API error after {_max_retries} retries: {e}") from e
-        # Should not reach here, but just in case
-        raise LLMError(f"Anthropic API failed after {_max_retries} retries: {last_error}")
+        return post_with_retry(
+            self.url,
+            payload=payload,
+            headers=headers,
+            provider_name="Anthropic",
+            model=self.model,
+            max_retries=_max_retries,
+        )
 
     @staticmethod
     def _build_user_content(user: str, attachments: list[str] | None) -> "str | list[dict]":
@@ -1216,37 +1266,25 @@ class OpenAICompatibleLLM(BaseLLM):
         return {}
 
     def _post(self, payload: dict, *, _max_retries: int = 5) -> dict:
+        """Audit #22: delegates the retry loop to `post_with_retry`.
+        Custom error formatter preserves the pre-fix message shape
+        `OpenAI API {status} ({provider_name}/{model}): {body[:500]}`
+        so log greps and existing test assertions still hit."""
         auth = self._get_auth_headers()
-        headers = {
-            **auth,
-            "Content-Type": "application/json",
-        }
-        RETRYABLE = {429, 500, 502, 503, 529}
-        last_error: Exception | None = None
+        headers = {**auth, "Content-Type": "application/json"}
 
-        for attempt in range(_max_retries + 1):
-            try:
-                r = httpx.post(self.url, json=payload, headers=headers, timeout=120.0)
-                r.raise_for_status()
-                return r.json()
-            except httpx.HTTPStatusError as e:
-                last_error = e
-                status = e.response.status_code
-                if status in RETRYABLE and attempt < _max_retries:
-                    retry_after = e.response.headers.get("retry-after")
-                    wait = float(retry_after) if retry_after else min(2 ** attempt * 2, 60.0)
-                    wait = min(wait, 60.0)
-                    time.sleep(wait)
-                    continue
-                body = e.response.text[:500]
-                raise LLMError(f"OpenAI API {status} ({self.provider_name}/{self.model}): {body}") from e
-            except (httpx.HTTPError, httpx.TimeoutException) as e:
-                last_error = e
-                if attempt < _max_retries:
-                    time.sleep(min(2 ** attempt * 2, 60.0))
-                    continue
-                raise LLMError(f"OpenAI API error after {_max_retries} retries: {e}") from e
-        raise LLMError(f"OpenAI API failed: {last_error}")
+        def _parse_openai_error(e: httpx.HTTPStatusError) -> str:
+            return f"({self.provider_name}/{self.model}): {(e.response.text or '')[:500]}"
+
+        return post_with_retry(
+            self.url,
+            payload=payload,
+            headers=headers,
+            provider_name="OpenAI",
+            model=self.model,
+            max_retries=_max_retries,
+            parse_error=_parse_openai_error,
+        )
 
     @staticmethod
     def _build_user_content(user: str, attachments: list[str] | None) -> "str | list[dict]":

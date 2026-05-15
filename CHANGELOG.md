@@ -10,6 +10,61 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## QA-audit-fix6 — closes the last 3 deferred refactors (2026-05-15)
+
+Audit findings #21, #22, #25 were marked as "deferred (refactor,
+not bug)" in the prior pass. This commit closes all three.
+
+**#21 — `cli.py` split**
+
+`cli.py` was 2417 lines and growing. Extracted the 5 largest
+cohesive command groups into sibling modules:
+
+  cli_jobs.py         5 cmds + row formatter
+  cli_failover.py     6 cmds (status / enable / disable / add / remove / clear)
+  cli_consolidate.py  4 cmds (Phase 16A daily consolidation)
+  cli_graph.py        4 cmds (Phase 16C knowledge graph)
+  cli_gateway.py      7 cmds + 5 platform helpers + `_gateway_service_running`
+
+`cli.py` drops to **1516 lines (−37%)**. Argparse plumbing +
+init/run/status/config/provider/update/rollback/discover/chat/
+rebuild stay in `cli.py`. Test fixtures that monkeypatched
+`_run_cmd` / `cmd_gateway_install` / `ROOT` on `cli_mod` now
+patch on `cli_gateway` so the call sites see the mock.
+
+**#25 — `init_wizard.py` provider-flow registry**
+
+The provider dispatch was an if/elif chain — adding a new
+provider meant editing both `_ascii_provider_menu` AND the
+`run_wizard` body. Now there's a `PROVIDER_FLOWS` dict + a
+`register_provider_flow(key, handler)` helper. Plugins / future
+providers can register handlers from outside `init_wizard.py`.
+The three built-in non-trivial flows (Codex, Copilot, Ollama)
+register themselves at module load; everything else falls
+through to the generic api-key flow on a registry miss.
+
+**#22 — `llm.py` HTTP-retry helper**
+
+Every provider client's `_post` did the same retry-with-backoff
+dance with subtle variations. Extracted `post_with_retry(url,
+*, payload, headers, provider_name, model, ...)` to consolidate:
+exponential backoff, Retry-After header handling, retryable-status
+allowlist, error formatting via an optional `parse_error` callback.
+
+Migrated the two heaviest-traffic clients in this pass:
+- `AnthropicLLM._post` (was ~65 lines → 17 lines)
+- `OpenAICompatibleLLM._post` (was ~32 lines → 18 lines)
+
+The other 6 clients keep their inline loops for now; they can
+opt in to the helper at their own pace. Total lines cut: ~60.
+More importantly, future retry-policy changes (e.g. adding 524
+to the retryable set, supporting Retry-After-Ms) now touch one
+function instead of eight.
+
+Tests: 1279 still pass.
+
+---
+
 ## QA-audit-fix5 — frontend code-splitting (2026-05-15)
 
 Closes **audit #26**: Settings tabs are now lazy-loaded via

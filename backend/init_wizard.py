@@ -38,7 +38,7 @@ import os
 import sys
 import time
 import webbrowser
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -169,6 +169,27 @@ def _maybe_open_url(url: str, label: str = "this URL") -> None:
 
 
 # --- Provider sub-flows -----------------------------------------------
+
+
+# ─── Provider-flow registry (audit #25) ────────────────────────────────
+#
+# Maps a provider menu key → the wizard sub-flow that registers it.
+# Adding a new provider used to require both editing
+# `_ascii_provider_menu` AND adding an `elif` branch in `run_wizard`.
+# With the registry, a new provider only needs to (a) append a
+# `(key, label, blurb)` row to the menu and (b) register its handler
+# in `PROVIDER_FLOWS` (or rely on the generic api-key flow). The
+# dispatch stays a single lookup.
+
+PROVIDER_FLOWS: dict[str, Callable[[], Optional[dict]]] = {}
+
+
+def register_provider_flow(key: str, handler: Callable[[], Optional[dict]]) -> None:
+    """Wire a custom wizard sub-flow for `key`. Last writer wins so
+    a plugin can override the built-in handler if it really wants
+    to (rare). For the standard providers this is called once at
+    module load — see the registrations below the handler defs."""
+    PROVIDER_FLOWS[key] = handler
 
 
 def _ascii_provider_menu() -> list[tuple[str, str, str]]:
@@ -437,6 +458,15 @@ _KNOWN_MODELS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+# Register the built-in flows AFTER their handlers are defined.
+# Generic api-key providers (anthropic, openai, groq, etc.) intentionally
+# don't register a custom handler — they fall through to
+# `_wizard_provider_api_key(chosen_key)` via the registry miss path.
+register_provider_flow("openai_codex", _wizard_provider_codex)
+register_provider_flow("github_copilot", _wizard_provider_copilot)
+register_provider_flow("ollama", _wizard_provider_ollama)
+
+
 def _wizard_model_picker(provider: dict) -> Optional[str]:
     """After a provider's connected, pick the default model. Uses
     the provider's `models` list if populated; otherwise falls back
@@ -636,14 +666,16 @@ def run_wizard(existing_env: dict[str, str]) -> dict:
     provider: Optional[dict] = None
     if chosen_key == "skip":
         _warn("skipping provider setup — agent won't chat until you add one")
-    elif chosen_key == "openai_codex":
-        provider = _wizard_provider_codex()
-    elif chosen_key == "github_copilot":
-        provider = _wizard_provider_copilot()
-    elif chosen_key == "ollama":
-        provider = _wizard_provider_ollama()
     else:
-        provider = _wizard_provider_api_key(chosen_key)
+        # Audit #25: registry-driven dispatch. Custom flows
+        # (codex / copilot / ollama / future plugins) opt in via
+        # `register_provider_flow`; everything else falls through
+        # to the generic api-key path.
+        handler = PROVIDER_FLOWS.get(chosen_key)
+        if handler is not None:
+            provider = handler()
+        else:
+            provider = _wizard_provider_api_key(chosen_key)
 
     # --- Step 2: model + active ---
     if provider:
