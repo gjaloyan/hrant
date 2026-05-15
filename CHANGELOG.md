@@ -10,6 +10,34 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## Phase 16C.1 (2026-05-15)
+
+**LLM-proposed `relates_to` edges between facts.**
+
+A new step in the daily consolidation pipeline — runs after fact promotion + profile updates, before open-threads detection. The LLM is shown today's newly-promoted facts plus the top ~20 most-connected existing facts in the graph, and asked to identify pairs that are semantically related but don't already share a topic tag.
+
+**What this catches that topic edges miss:**
+- "User uses Tailscale" + "Whisper STT runs on 100.124.210.21" — both about home network infra but tagged with different topics
+- A new fact about a project + an older fact about the same project that's drifted to a different tag set
+- Cross-domain connections the user might not have realised the agent could see
+
+**Symmetry handling:** `relates_to` is conceptually undirected. The proposer canonicalises pairs by sorting node ids before upserting — so `A↔B` and `B↔A` hit the same edge key and accumulate weight rather than creating duplicates across runs.
+
+**Cost / safety:**
+- Skipped in `--dry-run` mode (no preview-burn)
+- Skipped when there's only one new fact and zero existing facts to relate against
+- LLM failures swallowed — graph keeps its existing state, digest just records `links_added=[]` for this run
+- Cap: max 6 links per run, max 15 new + 20 existing facts in the prompt → ~1k tokens input, cheap
+
+**Surfaces:**
+- Edges land in `knowledge/graph.json` as `relates_to` with `{reason, source: "consolidation:<date>", proposed_at}` metadata
+- Visible in the WebUI Knowledge Graph tab: Explorer view's neighborhood pane shows the edge + its reason; Graph view renders the cross-link
+- Recorded in `Digest.links_added[]` alongside the is_about edges from step 4
+
+**Tests:** +12 (10 proposer-unit covering empty/single-fact short-circuits, edge canonicalisation, whitespace drift in fact-text resolution, hallucinated-text dropping, cap enforcement, disk persistence, LLM-failure swallowing; 2 pipeline integration covering the new step firing on real runs and being skipped under `--dry-run`).
+
+---
+
 ## Phase 16C (2026-05-15)
 
 **Knowledge graph — see what the agent knows + how it connects.**

@@ -515,6 +515,67 @@ def test_api_digest_get_returns_full_record(home, api_client):
     assert r.json()["narrative"] == "hello"
 
 
+def test_pipeline_proposes_relates_to_edges_after_promoting_facts(
+    home, mock_llm,
+):
+    """Phase 16C.1: after fact promotion, the pipeline calls the
+    graph proposer with the new fact texts. Edges land in graph.json
+    and appear in the digest's `links_added` list."""
+    _mk_job(home, prompt="x", response="y")
+    # First call (narrative) returns text. Then 4 call_json calls:
+    # facts, profile, propose_links, threads.
+    mock_llm.call.return_value = "narrative"
+    mock_llm.call_json.side_effect = [
+        # Step 3: facts
+        {"new_facts": [
+            {"text": "User uses Tailscale.", "related_topics": ["network"],
+             "confidence": 0.92, "category": "preference"},
+            {"text": "Has Telegram bot.", "related_topics": ["telegram"],
+             "confidence": 0.9, "category": "preference"},
+        ]},
+        # Step 5: profile (one speaker)
+        {"should_update": False, "entry": ""},
+        # Step 5.5: propose_links — connect the two new facts
+        {"links": [{
+            "from": "User uses Tailscale.",
+            "to": "Has Telegram bot.",
+            "reason": "both are about the user's personal infra",
+        }]},
+        # Step 6: threads
+        {"open_threads": []},
+    ]
+    bundle = _gather.gather()
+    d = _pipeline.run(bundle=bundle)
+    # The is_about edges (from step 4) AND the relates_to link
+    # (from step 5.5) both got appended to `links_added`.
+    relates_links = [l for l in d.links_added if l.get("kind") == "relates_to"]
+    assert len(relates_links) == 1
+    assert "infra" in relates_links[0]["reason"]
+
+
+def test_pipeline_skips_proposer_in_dry_run(home, mock_llm):
+    """`--dry-run` should NOT call the LLM proposer — saves tokens
+    on a preview. Profile + threads still run normally."""
+    _mk_job(home, prompt="x", response="y")
+    mock_llm.call.return_value = "narrative"
+    mock_llm.call_json.side_effect = [
+        {"new_facts": [
+            {"text": "fact a", "related_topics": ["x"], "confidence": 0.95,
+             "category": "general"},
+            {"text": "fact b", "related_topics": ["x"], "confidence": 0.95,
+             "category": "general"},
+        ]},
+        {"should_update": False, "entry": ""},
+        # NO proposer call here — pipeline must skip it in dry_run
+        {"open_threads": []},
+    ]
+    d = _pipeline.run(bundle=_gather.gather(), dry_run=True)
+    assert d.status == "success"
+    # All side_effect entries consumed = the proposer was indeed
+    # skipped (otherwise we'd need 4 entries to satisfy 4 calls).
+    assert mock_llm.call_json.call_count == 3
+
+
 def test_api_digest_get_rejects_path_traversal(home, api_client):
     r = api_client.get("/api/consolidation/digests/..%2F..%2Fetc%2Fpasswd")
     # FastAPI normalises the URL, so this either becomes a 404 or

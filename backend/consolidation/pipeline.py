@@ -412,6 +412,27 @@ def run(
             pre_size_bytes=pre_size,
         ))
 
+    # Step 5.5: LLM-proposed `relates_to` edges between today's
+    # facts and the graph's hubs (Phase 16C.1). Best-effort: if the
+    # proposer raises, log and continue — the graph keeps whatever
+    # edges it has from `add_fact` above. Skipped when dry_run is on
+    # to avoid burning tokens on a preview that doesn't persist.
+    if not dry_run:
+        try:
+            from ..graph import proposer as _graph_proposer
+            promoted_texts = [f.text for f in d.new_facts if f.promoted]
+            proposed = _graph_proposer.propose_links(
+                new_fact_texts=promoted_texts,
+                digest_date=date_str,
+            )
+            # Each entry is `{from, to, reason, kind}` — extends
+            # the `links_added` list already populated by the
+            # is_about edges from step 4.
+            for link in proposed:
+                d.links_added.append(link)
+        except Exception as e:
+            log.warning("consolidation.propose_links failed: %s", e)
+
     # Step 6: open threads
     try:
         threads_resp = _call_router_json(

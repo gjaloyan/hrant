@@ -401,3 +401,197 @@ def test_api_full_graph_includes_nodes_and_edges(home, api_client):
     assert body["node_count"] >= 3   # 1 fact + 2 topics
     assert isinstance(body["nodes"], list)
     assert isinstance(body["edges"], list)
+
+
+# ─── proposer.py: LLM-proposed relates_to edges (Phase 16C.1) ──────
+
+
+@pytest.fixture
+def mock_router(monkeypatch):
+    """Mock the LLM router. Tests configure the return value via
+    `mock_router.call_json.return_value = {...}`."""
+    from unittest.mock import MagicMock
+    fake = MagicMock()
+    monkeypatch.setattr("backend.llm.router", lambda: fake)
+    return fake
+
+
+def test_proposer_empty_input_returns_empty(home, mock_router):
+    """No new facts → no LLM call, return []."""
+    from backend.graph import proposer as _p
+    out = _p.propose_links(new_fact_texts=[], digest_date="2026-05-15")
+    assert out == []
+    assert mock_router.call_json.call_count == 0
+
+
+def test_proposer_skips_when_only_one_fact_and_no_existing(home, mock_router):
+    """One new fact + empty graph → nothing to relate AGAINST.
+    Skip the LLM call entirely (saves tokens)."""
+    from backend.graph import proposer as _p
+    out = _p.propose_links(
+        new_fact_texts=["solo fact"], digest_date="2026-05-15",
+    )
+    assert out == []
+    assert mock_router.call_json.call_count == 0
+
+
+def test_proposer_calls_llm_with_two_or_more_new_facts(home, mock_router):
+    """Two new facts can be related to each other even if the
+    existing graph is empty. Proposer should run."""
+    from backend.graph import proposer as _p
+    mock_router.call_json.return_value = {"links": []}
+    _p.propose_links(
+        new_fact_texts=["fact a", "fact b"], digest_date="2026-05-15",
+    )
+    assert mock_router.call_json.call_count == 1
+
+
+def test_proposer_creates_relates_to_edges_for_matched_pairs(home, mock_router):
+    """Happy path: LLM proposes a link between two facts that both
+    exist in the graph. Proposer resolves the texts to fact_ids
+    and upserts a relates_to edge."""
+    from backend.graph import builder as _gb, proposer as _p
+    # Seed the graph with two facts so resolution works.
+    _gb.add_fact(text="user uses Tailscale", related_topics=["network"], confidence=0.9)
+    _gb.add_fact(text="Whisper STT runs on 100.124.210.21", related_topics=["voice"], confidence=0.9)
+    mock_router.call_json.return_value = {
+        "links": [
+            {
+                "from": "user uses Tailscale",
+                "to": "Whisper STT runs on 100.124.210.21",
+                "reason": "both are about the home network",
+            },
+        ],
+    }
+    out = _p.propose_links(
+        new_fact_texts=["user uses Tailscale", "Whisper STT runs on 100.124.210.21"],
+        digest_date="2026-05-15",
+    )
+    assert len(out) == 1
+    relates = list(_store.GRAPH.iter_edges(kind="relates_to"))
+    assert len(relates) == 1
+    assert relates[0].metadata["reason"] == "both are about the home network"
+    assert relates[0].metadata["source"] == "consolidation:2026-05-15"
+
+
+def test_proposer_resolves_facts_with_whitespace_drift(home, mock_router):
+    """LLM occasionally tweaks whitespace/punctuation. The
+    resolver normalises both sides so minor drift doesn't drop
+    the link."""
+    from backend.graph import builder as _gb, proposer as _p
+    _gb.add_fact(text="User uses Tailscale.", related_topics=["network"], confidence=0.9)
+    _gb.add_fact(text="Has Telegram bot.", related_topics=["telegram"], confidence=0.9)
+    mock_router.call_json.return_value = {
+        "links": [{
+            "from": "  user   uses tailscale.  ",   # whitespace + case drift
+            "to": "Has Telegram bot.",
+            "reason": "personal infra",
+        }],
+    }
+    _p.propose_links(
+        new_fact_texts=["User uses Tailscale.", "Has Telegram bot."],
+        digest_date="2026-05-15",
+    )
+    assert len(list(_store.GRAPH.iter_edges(kind="relates_to"))) == 1
+
+
+def test_proposer_drops_links_when_fact_text_unresolvable(home, mock_router):
+    """LLM hallucinated a fact text that isn't in the input.
+    Proposer silently drops it rather than creating an edge to
+    a non-existent node."""
+    from backend.graph import builder as _gb, proposer as _p
+    _gb.add_fact(text="real fact", related_topics=["x"], confidence=0.9)
+    mock_router.call_json.return_value = {
+        "links": [
+            {"from": "real fact", "to": "made-up fact never seen", "reason": "..."},
+        ],
+    }
+    out = _p.propose_links(
+        new_fact_texts=["real fact"], digest_date="2026-05-15",
+    )
+    # Real-fact alone + zero existing matches (the hallucinated
+    # one) → empty result.
+    assert out == [] or len(list(_store.GRAPH.iter_edges(kind="relates_to"))) == 0
+
+
+def test_proposer_canonicalises_edge_direction(home, mock_router):
+    """`A relates_to B` and `B relates_to A` are the same edge.
+    Proposer picks a canonical direction (sorted node ids) so
+    duplicate proposals across runs hit the same edge key and
+    increment its weight rather than creating two edges."""
+    from backend.graph import builder as _gb, proposer as _p
+    _gb.add_fact(text="fact x", related_topics=["a"], confidence=0.9)
+    _gb.add_fact(text="fact y", related_topics=["b"], confidence=0.9)
+    mock_router.call_json.return_value = {
+        "links": [
+            {"from": "fact x", "to": "fact y", "reason": "first"},
+        ],
+    }
+    _p.propose_links(
+        new_fact_texts=["fact x", "fact y"], digest_date="2026-05-15",
+    )
+    # Now propose the OPPOSITE direction.
+    mock_router.call_json.return_value = {
+        "links": [
+            {"from": "fact y", "to": "fact x", "reason": "second"},
+        ],
+    }
+    _p.propose_links(
+        new_fact_texts=["fact y"], digest_date="2026-05-15",
+    )
+    relates = list(_store.GRAPH.iter_edges(kind="relates_to"))
+    assert len(relates) == 1
+    # Second proposal incremented the weight (each upsert adds 1.0).
+    assert relates[0].weight == 2.0
+
+
+def test_proposer_swallows_llm_failure(home, mock_router):
+    """An LLM exception must not propagate. Return [] and log."""
+    from backend.graph import builder as _gb, proposer as _p
+    _gb.add_fact(text="X", related_topics=["a"], confidence=0.9)
+    mock_router.call_json.side_effect = RuntimeError("LLM down")
+    out = _p.propose_links(
+        new_fact_texts=["X", "Y"], digest_date="2026-05-15",
+    )
+    assert out == []
+    # Graph unchanged — no relates_to edges added.
+    assert len(list(_store.GRAPH.iter_edges(kind="relates_to"))) == 0
+
+
+def test_proposer_caps_at_max_links_per_run(home, mock_router):
+    """If LLM returns 20 links, only the first MAX_LINKS_PER_RUN
+    are processed. Guards against runaway prompts."""
+    from backend.graph import builder as _gb, proposer as _p
+    # Seed 10 facts so we have IDs to resolve against.
+    for i in range(10):
+        _gb.add_fact(text=f"fact {i}", related_topics=["x"], confidence=0.9)
+    mock_router.call_json.return_value = {
+        "links": [
+            {"from": f"fact {i}", "to": f"fact {(i + 1) % 10}", "reason": "..."}
+            for i in range(20)
+        ],
+    }
+    _p.propose_links(
+        new_fact_texts=[f"fact {i}" for i in range(10)],
+        digest_date="2026-05-15",
+    )
+    relates = list(_store.GRAPH.iter_edges(kind="relates_to"))
+    assert len(relates) <= _p.MAX_LINKS_PER_RUN
+
+
+def test_proposer_persists_to_disk(home, mock_router):
+    """After successful propose_links, graph.json on disk includes
+    the new relates_to edges. The WebUI reads from disk on load."""
+    from backend.graph import builder as _gb, proposer as _p
+    _gb.add_fact(text="A", related_topics=["x"], confidence=0.9)
+    _gb.add_fact(text="B", related_topics=["y"], confidence=0.9)
+    mock_router.call_json.return_value = {
+        "links": [{"from": "A", "to": "B", "reason": "test"}],
+    }
+    _p.propose_links(
+        new_fact_texts=["A", "B"], digest_date="2026-05-15",
+    )
+    # Force fresh load from disk and check.
+    fresh = _store.Graph(root=home / "knowledge")
+    relates = list(fresh.iter_edges(kind="relates_to"))
+    assert len(relates) == 1
