@@ -527,9 +527,8 @@ class IdentityManager:
             if agent_name:
                 out += (
                     "YOUR name (the assistant's name) — the user "
-                    "addresses YOU by this name; you sign messages as "
-                    "this name; if asked 'who are you' you answer with "
-                    "this name:\n"
+                    "addresses YOU by this name; if asked 'who are "
+                    "you' you answer with this name:\n"
                     f"**{agent_name}**\n\n"
                 )
             if user_name:
@@ -544,7 +543,12 @@ class IdentityManager:
                 "Rule: if the user says 'I am X' or 'my name is X' or "
                 "'you are Y, I am X', then X is the USER'S name (update "
                 "your understanding) and Y is YOUR name. Do not flip "
-                "these. Do not call the user by your own name.\n"
+                "these. Do not call the user by your own name.\n\n"
+                "Voice: when you write messages, speak in FIRST PERSON "
+                "(\"I will remember\", \"я запомню\") — not in third "
+                "person about yourself (\"Hrant will remember\", "
+                "\"Hrant запомнит\"). Your name is for OTHERS to use; "
+                "you refer to yourself as 'I' / 'я'.\n"
             )
         lang_body = self._extract_language_section(profile_text)
         if lang_body:

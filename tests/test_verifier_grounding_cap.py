@@ -113,3 +113,21 @@ def test_cap_constant_matches_critic_threshold():
     from backend.config import CONFIG
     threshold = CONFIG.verification.get("critic_threshold", 50)
     assert UNGROUNDED_CONFIDENCE_CAP <= threshold
+
+
+# --- source-grounded floor (Minor #13 from audit) ----------------------
+
+
+def test_floor_constants_relationship():
+    """The strong-grounding floor must be ABOVE the critic threshold —
+    otherwise it does nothing (the retry path still fires). And
+    above the ungrounded cap — otherwise a capped answer could
+    bounce up to the floor and skip the retry signal."""
+    from backend.verifier import (
+        SOURCE_GROUNDED_CONFIDENCE_FLOOR,
+        UNGROUNDED_CONFIDENCE_CAP,
+    )
+    from backend.config import CONFIG
+    threshold = CONFIG.verification.get("critic_threshold", 50)
+    assert SOURCE_GROUNDED_CONFIDENCE_FLOOR > threshold
+    assert SOURCE_GROUNDED_CONFIDENCE_FLOOR > UNGROUNDED_CONFIDENCE_CAP

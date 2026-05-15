@@ -445,6 +445,16 @@ def _compute_confidence(verified: int, unverified: int, contradictions: int) -> 
 # low-confidence banner instead of presenting the answer as solid.
 UNGROUNDED_CONFIDENCE_CAP = 50
 
+# Floor applied when the agent read substantial source material AND
+# the LLM verifier produced verified_claims with zero contradictions.
+# Production audit hit clean self-analysis answers at 67% confidence
+# — the verifier-LLM is over-cautious on long technical answers
+# because it flags small phrasing claims as 'unverified' against
+# the source. Floor at 75 so demonstrably-grounded answers don't
+# trip the critic-retry threshold.
+SOURCE_GROUNDED_TOOL_CTX_MIN = 20_000
+SOURCE_GROUNDED_CONFIDENCE_FLOOR = 75
+
 
 def _proper_nouns(text: str) -> list[str]:
     """Capitalised tokens that look like proper nouns / domain terms.
@@ -676,6 +686,25 @@ Available topics: {', '.join(used_topics)}"""
             "located in any loaded note or tool output — likely "
             "fabrication or training-data recall without grounding"
         )
+
+    # Strong-grounding floor: when the agent read substantial source
+    # material (~20KB+ of tool output) AND the verifier found at
+    # least one verified claim with zero contradictions, the answer
+    # has solid evidence behind it. Production audit hit a clean
+    # "what programming language are you written in?" turn at 67%
+    # confidence — formula-correct (verifier flagged a few minor
+    # claims as unverified) but misleading next to read_file output
+    # that quoted the actual `from __future__ import annotations`
+    # line. Floor at SOURCE_GROUNDED_CONFIDENCE_FLOOR so the
+    # critic-retry threshold doesn't trip on demonstrably-grounded
+    # answers.
+    if (
+        len(tool_context) >= SOURCE_GROUNDED_TOOL_CTX_MIN
+        and len(verified) > 0
+        and len(contradictions) == 0
+        and confidence < SOURCE_GROUNDED_CONFIDENCE_FLOOR
+    ):
+        confidence = SOURCE_GROUNDED_CONFIDENCE_FLOOR
 
     return VerificationResult(
         confidence=confidence,
