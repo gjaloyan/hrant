@@ -17,6 +17,7 @@ foreground caller decides how to present the failure.
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -24,6 +25,27 @@ from . import jobs
 from .agent import Agent, AgentAnswer
 
 log = logging.getLogger(__name__)
+
+
+def _summarize_tool_args(raw: object) -> str:
+    """Render whatever the `args` field holds as a short string for
+    storage. `ToolCallDetail.args` is typed as `dict`, so the natural
+    repr is JSON. Pre-fix, the code did
+        `(data.get("args_summary") or data.get("args") or "")[:200]`
+    and crashed with `KeyError: slice(None, 200, None)` when args
+    was a non-empty dict — `dict[:200]` does dict lookup, not string
+    slicing. Caught in production via /api/chat + Telegram on every
+    tool-using turn (web_search, fetch_url, read_file)."""
+    if raw is None or raw == "" or raw == {}:
+        return ""
+    if isinstance(raw, str):
+        return raw[:200]
+    if isinstance(raw, (dict, list)):
+        try:
+            return json.dumps(raw, ensure_ascii=False)[:200]
+        except Exception:
+            return str(raw)[:200]
+    return str(raw)[:200]
 
 
 def _extract_tool_calls(answer: AgentAnswer) -> list[dict]:
@@ -50,7 +72,9 @@ def _extract_tool_calls(answer: AgentAnswer) -> list[dict]:
             data = {}
         out.append({
             "name": data.get("name") or data.get("tool") or "?",
-            "args_summary": (data.get("args_summary") or data.get("args") or "")[:200],
+            "args_summary": _summarize_tool_args(
+                data.get("args_summary") or data.get("args")
+            ),
             "ok": step.event == "tool",
             "error": data.get("error") if step.event == "tool_error" else None,
             "elapsed_ms": data.get("elapsed_ms"),
