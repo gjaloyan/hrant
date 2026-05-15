@@ -45,6 +45,14 @@ class Graph:
         self._edges: dict[tuple[str, str, str], GraphEdge] = {}
         self._loaded = False
         self._updated_at: float = 0.0
+        # Audit #19: surface load failures via a stable accessor
+        # (read-only string + boolean). When the file is corrupt or
+        # has a future schema version we still start with an empty
+        # in-memory graph, but the status endpoint can now tell the
+        # user WHY they're seeing no nodes ("graph.json unreadable —
+        # rebuild from sources") instead of silently pretending
+        # everything's fine.
+        self._load_error: Optional[str] = None
 
     @property
     def path(self) -> Path:
@@ -63,12 +71,17 @@ class Graph:
             p = self.path
             if not p.exists():
                 self._loaded = True
+                self._load_error = None
                 return
             try:
                 data = json.loads(p.read_text(encoding="utf-8"))
             except Exception as e:
                 log.warning("graph.json unreadable (%s); starting empty", e)
                 self._loaded = True
+                self._load_error = (
+                    f"graph.json unreadable ({type(e).__name__}). "
+                    "Run `hrant graph rebuild` to re-derive from sources."
+                )
                 return
             version = int(data.get("version") or 0)
             if version > GRAPH_SCHEMA_VERSION:
@@ -78,6 +91,11 @@ class Graph:
                     version, GRAPH_SCHEMA_VERSION,
                 )
                 self._loaded = True
+                self._load_error = (
+                    f"graph.json version {version} is newer than this build "
+                    f"supports ({GRAPH_SCHEMA_VERSION}). Older code can't "
+                    "safely read it. Either upgrade or rebuild from sources."
+                )
                 return
             for raw in data.get("nodes") or []:
                 try:
@@ -93,6 +111,7 @@ class Graph:
                     continue
             self._updated_at = float(data.get("updated_at") or 0.0)
             self._loaded = True
+            self._load_error = None
 
     def save(self) -> Path:
         with self._lock:
@@ -176,6 +195,15 @@ class Graph:
             "nodes": [asdict(n) for n in self._nodes.values()],
             "edges": [asdict(e) for e in self._edges.values()],
         }
+
+    @property
+    def load_error(self) -> Optional[str]:
+        """Human-readable reason the on-disk file couldn't be
+        loaded, if any. None means the current state matches what
+        was on disk (or there was no file). Used by the stats
+        endpoint to surface "rebuild needed" hints in the WebUI."""
+        self._ensure_loaded()
+        return self._load_error
 
     # ─── Mutate ─────────────────────────────────────────────────
 

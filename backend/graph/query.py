@@ -52,6 +52,10 @@ def stats(*, graph: Optional[Graph] = None) -> dict:
         "by_kind": by_kind,
         "edge_kinds": dict(edge_kinds),
         "top_topics": top_topics,
+        # Audit #19: expose any on-disk load failure so the WebUI
+        # can show a "rebuild required" banner instead of silently
+        # pretending the user's graph is empty.
+        "load_error": g.load_error,
     }
 
 

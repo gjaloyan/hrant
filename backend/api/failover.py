@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .. import failover as _fo
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -44,6 +45,7 @@ def get_failover():
 
 @router.put("/api/failover")
 def put_failover(body: FailoverConfig):
+    require_owner_for_writes(action="changing failover config")
     cfg = body.model_dump()
     saved = _fo.save_config(cfg)
     return {"ok": True, "config": saved}
@@ -59,6 +61,7 @@ def reorder(req: ReorderRequest):
     """Move chain entry [from_index] to position [to_index]. WebUI
     sends this on up/down arrow clicks. Validates indices server-side
     so the persisted file never goes out of bounds."""
+    require_owner_for_writes(action="reordering the failover chain")
     cfg = _fo.load_config()
     chain = list(cfg.get("chain") or [])
     n = len(chain)
@@ -79,6 +82,7 @@ class ToggleRequest(BaseModel):
 def toggle(req: ToggleRequest):
     """Flip the `enabled` bit without touching the chain — single
     button in the WebUI doesn't have to re-send the full config."""
+    require_owner_for_writes(action="toggling failover")
     cfg = _fo.load_config()
     cfg["enabled"] = bool(req.enabled)
     saved = _fo.save_config(cfg)

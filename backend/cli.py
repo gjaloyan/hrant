@@ -858,8 +858,12 @@ def cmd_config(args: argparse.Namespace) -> int:
 
 
 def _format_job_row(job, *, width_id: int = 14, width_status: int = 12) -> str:
-    """One-line summary of a job for the `hrant jobs list` table."""
-    from .cli_colors import c
+    """One-line summary of a job for the `hrant jobs list` table.
+
+    Audit #22: ANSI escape codes don't count as visible chars but
+    f-string `:<N` padding counts them anyway. Use `pad_visible`
+    so columns line up whether colors are on or off."""
+    from .cli_colors import c, pad_visible
     import datetime as _dt
     age = _dt.datetime.fromtimestamp(job.created_at).strftime("%m-%d %H:%M")
     status_colored = {
@@ -872,10 +876,10 @@ def _format_job_row(job, *, width_id: int = 14, width_status: int = 12) -> str:
     }.get(job.status, job.status)
     prompt = (job.prompt or "").replace("\n", " ").strip()[:60]
     return (
-        f"  {c.muted(job.id):<{width_id}}  "
-        f"{status_colored:<{width_status}}  "
+        f"  {pad_visible(c.muted(job.id), width_id)}  "
+        f"{pad_visible(status_colored, width_status)}  "
         f"{c.muted(age)}  "
-        f"{c.muted(job.channel):<10}  "
+        f"{pad_visible(c.muted(job.channel), 10)}  "
         f"{prompt}"
     )
 

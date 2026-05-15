@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..graph import builder as _builder, query as _query
 from ..graph.store import GRAPH
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -70,5 +71,6 @@ def rebuild():
     (memory_facts.jsonl + skills + goals.json). Synchronous — runs
     in the request thread. At <1k facts this completes in under
     a second; if it ever gets slow, move to a background task."""
+    require_owner_for_writes(action="rebuilding the knowledge graph")
     stats = _builder.rebuild()
     return {"ok": True, "stats": stats}

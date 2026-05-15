@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ..consolidation import digest as _digest_mod
 from ..consolidation import scheduler as _sched
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -48,6 +49,11 @@ async def run_consolidation(
     `hrant consolidate run`. Returns the full digest synchronously
     — caller blocks until the LLM pipeline completes (~30-60s for
     a typical day)."""
+    # Audit #7: gate the manual fire — it runs the active LLM
+    # (real cost) and writes to memory_facts / profiles. If the
+    # gateway is bound to 0.0.0.0 anyone on the LAN/Tailnet could
+    # otherwise trigger arbitrary consolidations.
+    require_owner_for_writes(action="trigger consolidation")
     # NB: the `force` flag is mostly cosmetic — `fire_now` always
     # forces. Kept on the URL so a future "request but respect gates"
     # mode has a place to live without a breaking change.

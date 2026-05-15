@@ -2026,6 +2026,10 @@ export type KGraphStats = {
   by_kind: Record<KGraphNodeKind, number>;
   edge_kinds: Record<string, number>;
   top_topics: Array<{ id: string; label: string; degree: number }>;
+  // Phase 16C audit #19: non-null when graph.json couldn't be
+  // loaded (corrupt JSON, forward-version schema). The WebUI
+  // shows a "rebuild required" banner when set.
+  load_error?: string | null;
 };
 
 export type KGraphSearchResult = KGraphNode & { degree: number };

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, ReactNode, useEffect, useRef, useState } from "react";
 import {
   KGraphFull,
   KGraphNode,
@@ -154,6 +154,12 @@ export default function KnowledgeGraphTab({ flash }: Props) {
             </button>
           </div>
         </div>
+        {stats?.load_error && (
+          <div className="mb-2 bg-red-950/40 border border-red-800/50 rounded p-2 text-xs text-red-200">
+            <span className="font-semibold">Graph file warning:</span>{" "}
+            {stats.load_error}
+          </div>
+        )}
         {stats && (
           <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-400">
             <div>
@@ -269,12 +275,14 @@ export default function KnowledgeGraphTab({ flash }: Props) {
           </div>
         </div>
       ) : (
-        <GraphView
-          graph={graph}
-          loading={loading}
-          onNodeClick={handleOpen}
-          selectedId={selected?.node.id}
-        />
+        <GraphErrorBoundary>
+          <GraphView
+            graph={graph}
+            loading={loading}
+            onNodeClick={handleOpen}
+            selectedId={selected?.node.id}
+          />
+        </GraphErrorBoundary>
       )}
     </div>
   );
@@ -388,27 +396,55 @@ function GraphView({
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dims, setDims] = useState({ w: 800, h: 600 });
+  const [layout, setLayout] = useState<LayoutResult | null>(null);
+  const [layoutPending, setLayoutPending] = useState(false);
 
+  // Audit #21: use a ResizeObserver instead of window resize so
+  // we re-measure when the parent panel resizes (e.g. user drags
+  // the settings sidebar) and when the tab transitions out of a
+  // display:none state where clientWidth would have been 0 on
+  // initial mount.
   useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
     const update = () => {
-      if (containerRef.current) {
-        setDims({
-          w: containerRef.current.clientWidth,
-          h: containerRef.current.clientHeight,
-        });
+      const w = node.clientWidth;
+      const h = node.clientHeight;
+      if (w > 0 && h > 0) {
+        setDims((prev) =>
+          prev.w === w && prev.h === h ? prev : { w, h },
+        );
       }
     };
     update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
+    const ro = new ResizeObserver(update);
+    ro.observe(node);
+    return () => ro.disconnect();
   }, []);
 
-  // Compute positions via a simple force-directed simulation. Runs
-  // once on mount of the graph data; not interactive (no drag).
-  // For ≤500 nodes this gives a usable layout in <100ms.
-  const layout = useMemo(() => {
-    if (!graph || graph.nodes.length === 0) return null;
-    return runForceLayout(graph.nodes, graph.edges, dims.w, dims.h);
+  // Audit #9: run the force-directed sim ASYNCHRONOUSLY after
+  // first paint. The previous useMemo version computed inside the
+  // render cycle and blocked the browser for ~500ms on a 200-node
+  // graph. Now we render an empty SVG immediately, then a
+  // setTimeout(0) trampoline kicks off the layout — the browser
+  // can paint the "computing layout..." state and stay responsive.
+  useEffect(() => {
+    if (!graph || graph.nodes.length === 0 || dims.w === 0) {
+      setLayout(null);
+      return;
+    }
+    setLayoutPending(true);
+    let cancelled = false;
+    const handle = window.setTimeout(() => {
+      const result = runForceLayout(graph.nodes, graph.edges, dims.w, dims.h);
+      if (cancelled) return;
+      setLayout(result);
+      setLayoutPending(false);
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(handle);
+    };
   }, [graph, dims.w, dims.h]);
 
   if (loading) {
@@ -418,10 +454,20 @@ function GraphView({
       </div>
     );
   }
-  if (!graph || !layout) {
+  if (!graph) {
     return (
       <div className="flex-1 flex items-center justify-center text-slate-500 italic">
         No graph data — click Rebuild.
+      </div>
+    );
+  }
+  if (!layout) {
+    return (
+      <div
+        ref={containerRef}
+        className="flex-1 flex items-center justify-center text-slate-400 bg-slate-900 rounded min-h-0"
+      >
+        {layoutPending ? "Computing layout…" : "Sizing…"}
       </div>
     );
   }
@@ -481,6 +527,54 @@ function GraphView({
 }
 
 
+/* ─── Error boundary ─────────────────────────────────────────────── */
+
+// Audit #10: the SVG renderer + force layout do arithmetic on
+// floating-point node positions; a corrupt graph file (NaN
+// weights, undefined edge endpoints from manual edits, etc.)
+// could throw inside the render. Without a boundary, that
+// cascades up and crashes the whole Settings panel with a white
+// screen. ErrorBoundary keeps the rest of Settings alive and
+// shows a recovery hint.
+
+type ErrorBoundaryState = { error: Error | null };
+type ErrorBoundaryProps = { children: ReactNode; fallback?: ReactNode };
+
+class GraphErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { error: null };
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // eslint-disable-next-line no-console
+    console.error("KnowledgeGraphTab caught:", error, info);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        this.props.fallback ?? (
+          <div className="flex-1 bg-red-950/40 rounded p-4 text-red-200 text-sm">
+            <div className="font-semibold mb-1">Graph view crashed.</div>
+            <div className="text-xs text-red-300/80">
+              {this.state.error.message}
+            </div>
+            <div className="text-xs text-red-300/60 mt-2">
+              Try Rebuild. If the error persists, delete{" "}
+              <span className="font-mono">~/.hrant/data/knowledge/graph.json</span>{" "}
+              and rebuild from sources.
+            </div>
+          </div>
+        )
+      );
+    }
+    return this.props.children;
+  }
+}
+
+
 /* ─── Force-directed layout (no dependency) ───────────────────────── */
 
 
@@ -508,8 +602,18 @@ function runForceLayout(
     };
   });
   const byId: Record<string, Positioned> = {};
-  positioned.forEach((n) => {
+  // Build a `nodeId → array index` Map once. Audit #1: the old
+  // code called `positioned.indexOf(s)` inside the per-edge loop
+  // for every iteration of the sim — O(N × E × iters) overall.
+  // At 200 nodes / 400 edges / 150 iters that was ~24M indexOf
+  // calls each scanning ~100 entries → ~2 billion comparisons,
+  // synchronously inside useMemo. Browser tab froze. A Map
+  // lookup is O(1), so the same workload now drops to ~24M map
+  // hits → <100ms.
+  const indexOf = new Map<string, number>();
+  positioned.forEach((n, i) => {
     byId[n.id] = n;
+    indexOf.set(n.id, i);
   });
 
   const iterations = nodes.length > 200 ? 80 : 150;
@@ -546,27 +650,23 @@ function runForceLayout(
       }
     }
 
-    // Attraction (along edges).
+    // Attraction (along edges). O(1) index lookup per endpoint.
     for (const e of edges) {
-      const s = byId[e.source];
-      const t = byId[e.target];
-      if (!s || !t) continue;
+      const si = indexOf.get(e.source);
+      const ti = indexOf.get(e.target);
+      if (si === undefined || ti === undefined) continue;
+      const s = positioned[si];
+      const t = positioned[ti];
       const dxi = s.x - t.x;
       const dyi = s.y - t.y;
       const dist = Math.sqrt(dxi * dxi + dyi * dyi) || 1;
       const force = dist * dist * attractK;
       const fx = (dxi / dist) * force;
       const fy = (dyi / dist) * force;
-      const si = positioned.indexOf(s);
-      const ti = positioned.indexOf(t);
-      if (si >= 0) {
-        dx[si] -= fx;
-        dy[si] -= fy;
-      }
-      if (ti >= 0) {
-        dx[ti] += fx;
-        dy[ti] += fy;
-      }
+      dx[si] -= fx;
+      dy[si] -= fy;
+      dx[ti] += fx;
+      dy[ti] += fy;
     }
 
     // Apply with cooling + clamp to viewport.

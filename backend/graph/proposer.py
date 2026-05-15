@@ -42,6 +42,10 @@ log = logging.getLogger(__name__)
 # yourself wanting more, you probably want a different pipeline
 # (graph rebuild from scratch).
 MAX_LINKS_PER_RUN = 6
+# NB: pipeline step 3 currently caps the extract-facts response at
+# 12, so in practice MAX_NEW_FACTS_IN_PROMPT is never hit. Kept
+# here as a defence in depth — if some future caller passes us a
+# huge batch directly, we still bound the prompt size.
 MAX_NEW_FACTS_IN_PROMPT = 15
 MAX_EXISTING_FACTS_IN_PROMPT = 20
 
@@ -132,20 +136,39 @@ def _canonical_pair(a: str, b: str) -> tuple[str, str]:
     return (a, b) if a <= b else (b, a)
 
 
-def _resolve_to_fact_id(text: str, *, graph: Graph) -> Optional[str]:
-    """Find the graph fact node whose label matches `text` after
-    lower-case + whitespace-collapse normalisation. The LLM is
-    asked to echo fact texts verbatim, but it occasionally tweaks
-    punctuation; we normalise on both sides to recover from minor
-    drift."""
-    if not text:
-        return None
-    norm = " ".join(text.strip().lower().split())
+def _normalise(text: str) -> str:
+    """Same normalisation the resolver uses on both sides — lower-
+    case + whitespace collapse. Centralised so the prebuilt index
+    in `_build_label_index` can't disagree with the per-lookup
+    normalisation."""
+    return " ".join((text or "").strip().lower().split())
+
+
+def _build_label_index(graph: Graph) -> dict[str, str]:
+    """One-shot pass to produce `{normalised_label → node_id}` for
+    every fact in the graph. Audit #14 fix: the prior version
+    scanned all facts on every `_resolve_to_fact_id` call —
+    O(N × L) where L is the number of LLM-proposed links. With
+    the index, each lookup is O(1)."""
+    out: dict[str, str] = {}
     for node in graph.iter_nodes(kind="fact"):
-        node_norm = " ".join((node.label or "").strip().lower().split())
-        if node_norm == norm:
-            return node.id
-    return None
+        key = _normalise(node.label or "")
+        if key:
+            out[key] = node.id
+    return out
+
+
+def _existing_relates_to_pairs(graph: Graph) -> set[tuple[str, str]]:
+    """Set of canonicalised (src, dst) pairs already connected by
+    a `relates_to` edge. Audit #16: pre-filter known pairs out of
+    the LLM prompt so we don't burn tokens proposing edges we
+    already have. The dedup at write time still catches anything
+    that slips through (upsert just bumps the weight)."""
+    out: set[tuple[str, str]] = set()
+    for e in graph.iter_edges(kind="relates_to"):
+        a, b = e.source, e.target
+        out.add((a, b) if a <= b else (b, a))
+    return out
 
 
 def _call_llm_for_links(
@@ -242,17 +265,29 @@ def propose_links(
     if not proposals:
         return []
 
+    # Build the resolver index + the pre-existing edge set ONCE
+    # (audit #14 + #16). Both are read-only during this loop.
+    label_to_id = _build_label_index(g)
+    already_linked = _existing_relates_to_pairs(g)
+
     persisted: list[dict] = []
     seen_pairs: set[tuple[str, str]] = set()
     for link in proposals:
-        a_id = _resolve_to_fact_id(link.from_text, graph=g)
-        b_id = _resolve_to_fact_id(link.to_text, graph=g)
+        a_id = label_to_id.get(_normalise(link.from_text))
+        b_id = label_to_id.get(_normalise(link.to_text))
         if a_id is None or b_id is None or a_id == b_id:
             continue
         src, dst = _canonical_pair(a_id, b_id)
         if (src, dst) in seen_pairs:
             continue
         seen_pairs.add((src, dst))
+        # Audit #16: skip pairs already connected by a relates_to
+        # edge. Upserting would still work (just bumps weight by 1)
+        # but we'd be wasting an LLM token-budget on something we
+        # already knew. Future runs that DO surface a new pair
+        # still write through cleanly.
+        if (src, dst) in already_linked:
+            continue
         g.upsert_edge(GraphEdge(
             source=src, target=dst, kind="relates_to", weight=1.0,
             metadata={

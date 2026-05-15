@@ -516,9 +516,14 @@ def test_proposer_drops_links_when_fact_text_unresolvable(home, mock_router):
 
 def test_proposer_canonicalises_edge_direction(home, mock_router):
     """`A relates_to B` and `B relates_to A` are the same edge.
-    Proposer picks a canonical direction (sorted node ids) so
-    duplicate proposals across runs hit the same edge key and
-    increment its weight rather than creating two edges."""
+    Proposer picks a canonical direction (sorted node ids) so a
+    re-proposal from the opposite direction hits the same edge
+    key.
+
+    After the audit #16 fix (pre-filter known pairs), the second
+    proposal is skipped before reaching the LLM-output processing
+    code — the graph keeps ONE edge with weight 1.0. Without
+    canonicalisation we'd see TWO edges (one per direction)."""
     from backend.graph import builder as _gb, proposer as _p
     _gb.add_fact(text="fact x", related_topics=["a"], confidence=0.9)
     _gb.add_fact(text="fact y", related_topics=["b"], confidence=0.9)
@@ -530,7 +535,8 @@ def test_proposer_canonicalises_edge_direction(home, mock_router):
     _p.propose_links(
         new_fact_texts=["fact x", "fact y"], digest_date="2026-05-15",
     )
-    # Now propose the OPPOSITE direction.
+    # Now propose the OPPOSITE direction — pre-filter must catch
+    # it as the same canonical pair.
     mock_router.call_json.return_value = {
         "links": [
             {"from": "fact y", "to": "fact x", "reason": "second"},
@@ -541,8 +547,39 @@ def test_proposer_canonicalises_edge_direction(home, mock_router):
     )
     relates = list(_store.GRAPH.iter_edges(kind="relates_to"))
     assert len(relates) == 1
-    # Second proposal incremented the weight (each upsert adds 1.0).
-    assert relates[0].weight == 2.0
+    assert relates[0].weight == 1.0
+
+
+def test_proposer_skips_pairs_already_connected_by_relates_to(home, mock_router):
+    """Audit #16: don't burn LLM tokens proposing edges that
+    already exist. After the first run creates a relates_to edge,
+    a subsequent identical proposal is filtered out before
+    upserting."""
+    from backend.graph import builder as _gb, proposer as _p
+    _gb.add_fact(text="alpha", related_topics=["x"], confidence=0.9)
+    _gb.add_fact(text="beta", related_topics=["y"], confidence=0.9)
+    # Round 1 — establishes the edge.
+    mock_router.call_json.return_value = {
+        "links": [{"from": "alpha", "to": "beta", "reason": "first"}],
+    }
+    _p.propose_links(
+        new_fact_texts=["alpha", "beta"], digest_date="2026-05-15",
+    )
+    assert len(list(_store.GRAPH.iter_edges(kind="relates_to"))) == 1
+    # Round 2 — LLM re-proposes the same pair (perhaps phrased
+    # differently). Pre-filter blocks the upsert; edge unchanged.
+    mock_router.call_json.return_value = {
+        "links": [{"from": "alpha", "to": "beta", "reason": "second"}],
+    }
+    out = _p.propose_links(
+        new_fact_texts=["alpha"], digest_date="2026-05-15",
+    )
+    assert out == []  # the proposal was filtered, nothing persisted
+    relates = list(_store.GRAPH.iter_edges(kind="relates_to"))
+    assert len(relates) == 1
+    # Reason is from the FIRST proposal — the filter blocked the
+    # second from overwriting it.
+    assert relates[0].metadata["reason"] == "first"
 
 
 def test_proposer_swallows_llm_failure(home, mock_router):

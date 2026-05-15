@@ -17,6 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 
 from .. import jobs as _jobs
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -85,6 +86,7 @@ def retry_job(job_id: str):
     run it — the new job sits queued until the user re-sends the
     prompt via /api/chat or the equivalent channel. Returns the
     new job id so the WebUI can poll its status."""
+    require_owner_for_writes(action="retrying a job")
     orig = _jobs.JOBS.get(job_id)
     if orig is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -96,6 +98,7 @@ def retry_job(job_id: str):
 
 @router.post("/api/jobs/{job_id}/cancel")
 def cancel_job(job_id: str):
+    require_owner_for_writes(action="cancelling a job")
     job = _jobs.JOBS.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -108,6 +111,7 @@ def cancel_job(job_id: str):
 
 @router.delete("/api/jobs/{job_id}")
 def delete_job(job_id: str):
+    require_owner_for_writes(action="deleting a job")
     ok = _jobs.JOBS.delete(job_id)
     if not ok:
         raise HTTPException(status_code=404, detail="job not found")
@@ -128,6 +132,7 @@ def cleanup_jobs(
 
     Manual trigger only — there's no auto-cleanup cron yet. Run from
     `Settings → Jobs → Cleanup` or `hrant jobs cleanup --older-than 30d`."""
+    require_owner_for_writes(action="cleaning up jobs")
     keep = {"failed", "interrupted"} if keep_failed else set()
     deleted = _jobs.JOBS.cleanup_old(
         max_age_seconds=max_age_days * 86400.0,

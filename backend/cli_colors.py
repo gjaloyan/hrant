@@ -17,6 +17,7 @@ Designed for one-liner ergonomics:
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 
@@ -141,3 +142,33 @@ class _Palette:
 
 
 c = _Palette()
+
+
+# ─── ANSI-aware string padding ─────────────────────────────────────
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def visible_len(text: str) -> int:
+    """Length of `text` after stripping ANSI escape sequences.
+    Use when padding colored strings to fixed widths — `f"{s:<10}"`
+    counts ANSI codes (~10 extra chars per color) which throws off
+    column alignment. `visible_len(c.muted('abc')) == 3` even
+    though the wrapped string is ~17 chars."""
+    if not text:
+        return 0
+    return len(_ANSI_RE.sub("", text))
+
+
+def pad_visible(text: str, width: int, *, align: str = "left") -> str:
+    """Right- or left-pad `text` to `width` VISIBLE columns,
+    ignoring ANSI escape codes. Audit #22 fix — without this the
+    `hrant jobs list` / `graph stats` tables misaligned whenever
+    colors were enabled."""
+    deficit = width - visible_len(text)
+    if deficit <= 0:
+        return text
+    if align == "right":
+        return (" " * deficit) + text
+    return text + (" " * deficit)

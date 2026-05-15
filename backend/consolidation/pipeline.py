@@ -154,8 +154,14 @@ def _render_transcript(bundle: gather.ActivityBundle) -> str:
     return text
 
 
-def _existing_fact_summaries(limit: int = 500) -> set[str]:
-    """Recent memory_facts.jsonl summaries lower-cased, for dedup."""
+def _existing_fact_summaries(limit: int = 5000) -> set[str]:
+    """Recent memory_facts.jsonl summaries lower-cased, for dedup.
+
+    Audit #8 fix: bumped from 500 → 5000. At 5 promoted facts/day,
+    500 lines covered ~100 days of history; at the personal-agent
+    scale (5–10 years of daily consolidation) the cap is now well
+    out of reach. Reads ~1MB max on the rare full-cap day — still
+    cheap. For larger deployments we'd need a real index."""
     p = paths.knowledge_dir() / "memory_facts.jsonl"
     if not p.exists():
         return set()
@@ -214,12 +220,19 @@ def _speaker_transcript(bundle: gather.ActivityBundle, speaker_id: str) -> str:
 
 
 def _profile_path_for(speaker_id: str) -> Path:
-    """Global `user.md` for `webui:default`, per-speaker file
-    otherwise. Per the user's spec: "global except Telegram which
-    has its own user.md per chat"."""
-    if speaker_id == "webui:default":
-        return config.user_md_path()
-    return config.profile_path_for_speaker(speaker_id)
+    """Telegram speakers get isolated per-chat profile files;
+    every other channel (WebUI, voice, future channels) writes
+    to the global `user.md`. Matches the user's stated rule:
+    "globally — telegram has only its own user.md per chat".
+
+    Audit #3 fix: pre-fix only `webui:default` mapped to the
+    global file, which meant any future non-default WebUI speaker
+    or voice speaker would silently end up with its own per-
+    speaker profile — diverging from the global file and
+    surprising the user."""
+    if speaker_id.startswith("telegram:"):
+        return config.profile_path_for_speaker(speaker_id)
+    return config.user_md_path()
 
 
 def _append_profile(path: Path, entry: str, date_str: str) -> int:
@@ -333,6 +346,11 @@ def run(
 
     # Step 4: dedup + promote (+ insert into knowledge graph)
     existing = _existing_fact_summaries()
+    # Audit #5: collect graph upserts and save ONCE at the end of
+    # the loop instead of save()-ing after every promoted fact.
+    # Pre-fix wrote the whole graph file ~10× per consolidation;
+    # one save reduces I/O by an order of magnitude.
+    any_graph_added = False
     for raw in raw_facts:
         text = str(raw.get("text") or "").strip()
         if not text:
@@ -350,13 +368,10 @@ def run(
         else:
             if not dry_run:
                 _append_memory_fact(text, category, conf, topics, date_str)
-                # Phase 16C: also mirror the fact into the knowledge
-                # graph. Best-effort — graph failures must not block
-                # the consolidation pipeline. The graph is a derived
-                # view; it can always be rebuilt from sources later.
+                # Phase 16C: mirror into the knowledge graph in
+                # memory; we save once after the loop.
                 try:
                     from ..graph import builder as _graph_builder
-                    from ..graph.store import GRAPH as _G
                     _graph_builder.add_fact(
                         text=text,
                         related_topics=topics,
@@ -364,8 +379,14 @@ def run(
                         confidence=conf,
                         source=f"consolidation:{date_str}",
                     )
-                    _G.save()
+                    any_graph_added = True
+                    # Audit #6: tag the entry with its edge kind so
+                    # the WebUI can render is_about vs relates_to
+                    # entries differently. Pre-fix the step-4 rows
+                    # had no `kind` field while the step-5.5 rows
+                    # did — the consumer had to sniff the shape.
                     d.links_added.append({
+                        "kind": "is_about",
                         "fact": text,
                         "topics": topics,
                     })
@@ -374,6 +395,13 @@ def run(
             fact.promoted = True
             existing.add(text.lower())
         d.new_facts.append(fact)
+    # Single flush to disk for the whole batch of graph upserts.
+    if any_graph_added and not dry_run:
+        try:
+            from ..graph.store import GRAPH as _G
+            _G.save()
+        except Exception as e:
+            log.warning("graph.save after consolidation batch failed: %s", e)
 
     # Step 5: per-speaker profile updates
     for speaker in bundle.speakers:

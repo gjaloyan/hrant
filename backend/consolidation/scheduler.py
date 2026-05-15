@@ -39,29 +39,57 @@ _running = asyncio.Lock()
 
 async def _fire_one(*, force: bool = False, dry_run: bool = False):
     """Run the pipeline once. Updates persisted state at the end.
-    Honours the lock so two ticks can't overlap."""
+    Honours the lock so two concurrent fire requests serialise
+    (the second waits, doesn't skip — audit #13 comment fix).
+
+    `force` only relaxes the early "another run in progress"
+    short-circuit; it does NOT bypass the lock itself. A force
+    request still queues behind whatever's running."""
     if _running.locked() and not force:
         log.info("consolidation: another run is already in progress; skipping tick")
         return None
     async with _running:
-        bundle = await asyncio.to_thread(gather.gather)
-        d = await asyncio.to_thread(pipeline.run, bundle=bundle, dry_run=dry_run)
-        path = await asyncio.to_thread(_digest_mod.write, d)
-        # Persist scheduler state for the WebUI banner.
-        st = state.load()
-        st.last_run_at = d.completed_at or time.time()
-        st.last_run_status = d.status
-        st.last_run_digest = str(path)
-        st.last_run_error = d.error
-        st.last_run_duration_seconds = (d.completed_at or 0.0) - (d.started_at or 0.0)
-        st.last_run_tokens_used = d.tokens_used
-        st.last_run_cost_usd_estimate = d.estimated_cost_usd
-        st.last_run_speakers_seen = list(d.speakers_active)
-        st.last_run_jobs_analyzed = d.turns_analyzed
-        st.last_run_facts_added = sum(1 for f in d.new_facts if f.promoted)
-        st.total_runs += 1
-        state.save(st)
-        return d
+        # Audit #2: wrap the whole pipeline + digest-write + state-
+        # save chain so an exception in any one of those updates
+        # persisted state to status=failed. Pre-fix: only
+        # pipeline.run's internal failures landed in state; an
+        # exception from `digest.write` (disk full) or `state.save`
+        # left `last_run_status` lying as "success" from the
+        # previous run, indefinitely.
+        try:
+            bundle = await asyncio.to_thread(gather.gather)
+            d = await asyncio.to_thread(pipeline.run, bundle=bundle, dry_run=dry_run)
+            path = await asyncio.to_thread(_digest_mod.write, d)
+            # Persist scheduler state for the WebUI banner.
+            st = state.load()
+            st.last_run_at = d.completed_at or time.time()
+            st.last_run_status = d.status
+            st.last_run_digest = str(path)
+            st.last_run_error = d.error
+            st.last_run_duration_seconds = (
+                (d.completed_at or 0.0) - (d.started_at or 0.0)
+            )
+            st.last_run_tokens_used = d.tokens_used
+            st.last_run_cost_usd_estimate = d.estimated_cost_usd
+            st.last_run_speakers_seen = list(d.speakers_active)
+            st.last_run_jobs_analyzed = d.turns_analyzed
+            st.last_run_facts_added = sum(1 for f in d.new_facts if f.promoted)
+            st.total_runs += 1
+            state.save(st)
+            return d
+        except Exception as e:
+            log.exception("consolidation: _fire_one outer failure: %s", e)
+            # Best-effort: record the failure in state. If state.save
+            # itself is what's broken we just log; nothing else to do.
+            try:
+                st = state.load()
+                st.last_run_at = time.time()
+                st.last_run_status = "failed"
+                st.last_run_error = f"scheduler exception: {type(e).__name__}: {e}"[:500]
+                state.save(st)
+            except Exception:
+                log.warning("could not persist failed-run state after outer error")
+            return None
 
 
 def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
@@ -78,11 +106,26 @@ def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
         idle_for = now - last_active
         if idle_for < config.IDLE_THRESHOLD_SECONDS:
             return False, f"not idle (active {int(idle_for)}s ago)"
-    # `MIN_JOBS_FOR_RUN` defaults to 0 → this guard is off by default.
+    # `MIN_JOBS_FOR_RUN` defaults to 1: skip truly empty days
+    # (the LLM pipeline would short-circuit anyway, but skipping
+    # here avoids a useless state.save round-trip).
     if config.MIN_JOBS_FOR_RUN > 0:
-        bundle = gather.gather()
-        if bundle.turn_count < config.MIN_JOBS_FOR_RUN:
-            return False, f"too few turns ({bundle.turn_count} < {config.MIN_JOBS_FOR_RUN})"
+        # Audit #4: the prior version called `gather.gather()` on
+        # every tick after cooldown ended — a full scan of jobs/
+        # every 60s. For MIN=1 (the default) we only need to know
+        # whether ANY job exists, which `last_activity_ts()` already
+        # answered above. Only fall back to the full scan when the
+        # gate requires a real count (MIN >= 2).
+        if config.MIN_JOBS_FOR_RUN == 1:
+            if last_active is None:
+                return False, "too few turns (0 < 1)"
+        else:
+            bundle = gather.gather()
+            if bundle.turn_count < config.MIN_JOBS_FOR_RUN:
+                return (
+                    False,
+                    f"too few turns ({bundle.turn_count} < {config.MIN_JOBS_FOR_RUN})",
+                )
     return True, "ready"
 
 
@@ -125,7 +168,25 @@ async def _scheduler_loop(cancel_event: asyncio.Event) -> None:
 
 
 async def start_scheduler(application) -> None:
-    """Called from main.py:lifespan() at startup."""
+    """Called from main.py:lifespan() at startup.
+
+    Audit #11: idempotent — a second call (test reruns, lifespan
+    re-entry on hot reload) cancels the previous task before
+    starting a new one rather than leaking it forever."""
+    prev = getattr(application.state, "consolidation_task", None)
+    prev_event = getattr(application.state, "consolidation_cancel", None)
+    if prev is not None and not prev.done():
+        log.info("consolidation: cancelling previous scheduler task before restart")
+        if prev_event is not None:
+            prev_event.set()
+        try:
+            await asyncio.wait_for(prev, timeout=2.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            prev.cancel()
+            try:
+                await prev
+            except (asyncio.CancelledError, Exception):
+                pass
     cancel_event = asyncio.Event()
     application.state.consolidation_cancel = cancel_event
     application.state.consolidation_task = asyncio.create_task(
@@ -134,7 +195,12 @@ async def start_scheduler(application) -> None:
 
 
 async def stop_scheduler(application) -> None:
-    """Called from main.py:lifespan() at shutdown."""
+    """Called from main.py:lifespan() at shutdown.
+
+    Audit #20: properly await the cancellation. Previously, on
+    a timeout we called `task.cancel()` but never awaited the
+    cancelled task — uvicorn could tear down with the task in a
+    half-cancelled state. Now we await again after cancel."""
     ev = getattr(application.state, "consolidation_cancel", None)
     task = getattr(application.state, "consolidation_task", None)
     if ev is not None:
@@ -142,8 +208,14 @@ async def stop_scheduler(application) -> None:
     if task is not None:
         try:
             await asyncio.wait_for(task, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except asyncio.TimeoutError:
             task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
             log.warning("consolidation scheduler shutdown error: %s", e)
 

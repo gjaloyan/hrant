@@ -10,6 +10,41 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## Phase 16-audit-fix (2026-05-15)
+
+Cleanup pass after the post-Phase-16 audit. Fixes 1 critical + 10 important + 11 minor findings across consolidation, knowledge graph, REST surfaces, WebUI, and CLI.
+
+**Critical fix**
+- **`runForceLayout` was O(N × E × iterations)** because `positioned.indexOf(node)` ran inside the edge-attraction loop. At ~200 nodes / 400 edges / 150 iterations that was ~2 billion comparisons synchronously inside `useMemo` — the Graph view froze the browser tab. Replaced with a `Map<nodeId, index>` for O(1) lookup; same workload now <100ms.
+
+**Important fixes**
+- **Scheduler exceptions outside `pipeline.run` now record `status=failed` state.** Pre-fix: a disk-write or state-save failure left `last_run_status` lying as "success" from a prior run indefinitely.
+- **Profile path now matches the user's spec:** Telegram speakers → per-chat profile files, everything else (WebUI, voice, future channels) → global `user.md`. Pre-fix: only `webui:default` mapped to the global file, so future non-default speakers would have silently diverged into per-speaker files.
+- **`_should_fire` no longer scans `jobs/` every minute.** Default `MIN_JOBS_FOR_RUN=1` now uses the single-job-existence check from `last_activity_ts()` instead of a full directory scan. Only `MIN >= 2` triggers the expensive path.
+- **Knowledge graph saves once per consolidation, not per fact.** Pre-fix: 10 promoted facts → 10 full graph-file rewrites. One flush at end of step 4 reduces I/O 10×.
+- **`Digest.links_added` entries now carry a `kind` field** (`"is_about"` for step 4, `"relates_to"` for step 5.5) so the WebUI can render them with the right styling instead of sniffing the dict shape.
+- **Owner-role gate on all new write endpoints.** Added to `POST /api/consolidation/run`, `POST /api/jobs/{id}/retry|cancel`, `DELETE /api/jobs/{id}`, `POST /api/jobs/_/cleanup`, `PUT /api/failover`, `POST /api/failover/toggle|reorder`, `POST /api/kgraph/rebuild`. Read endpoints stay open. Pre-fix: anyone reachable on a `--gateway`-bound (0.0.0.0) install could trigger LLM-costing actions or wipe state.
+- **Dedup window bumped 500 → 5000 lines.** At 5 facts/day the previous cap covered only ~100 days of history.
+- **Force layout runs asynchronously after first paint.** `setTimeout(0)` trampoline keeps the browser responsive; the "Computing layout…" placeholder shows immediately.
+- **GraphView wrapped in an `ErrorBoundary`.** A render-time crash (NaN positions from corrupt data) no longer blanks out the whole Settings panel.
+- **`start_scheduler` is idempotent.** A re-entrant call (hot reload, test rerun) cancels the previous task before creating a new one rather than leaking it.
+
+**Minor fixes**
+- Stale comment about `MIN_JOBS_FOR_RUN=0` default updated.
+- TOCTOU comment in `_fire_one` corrected (second caller waits, doesn't skip).
+- `_resolve_to_fact_id` replaced with an O(1) `{label → fact_id}` index built once.
+- Documented `MAX_NEW_FACTS_IN_PROMPT=15` as defence-in-depth despite the pipeline cap of 12.
+- Proposer pre-filters pairs already connected by `relates_to` before the LLM call — saves tokens.
+- `_G.save()` failure inside the pipeline batch no longer crashes consolidation (best-effort log).
+- Graph store surfaces a `load_error` field on `/api/kgraph/stats` when `graph.json` is corrupt or schema-newer; WebUI renders a "rebuild required" banner instead of silently showing 0 nodes.
+- `stop_scheduler` awaits the cancellation after a timeout so uvicorn doesn't tear down with a half-cancelled task.
+- `ResizeObserver` replaces the window-resize listener so Graph view sizes correctly when the Settings panel was hidden at mount.
+- New `pad_visible` helper in `cli_colors.py` for ANSI-aware column alignment. `hrant jobs list` and similar tables now line up whether colors are on or off.
+
+**Tests** added: +1 (proposer pre-filter regression). 1187 passed total, 3 skipped (Windows pty), 8 autonomic reactive-rule tests flaky on suite-order (pre-existing).
+
+---
+
 ## Phase 16C.1 (2026-05-15)
 
 **LLM-proposed `relates_to` edges between facts.**
