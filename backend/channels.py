@@ -22,7 +22,33 @@ log = logging.getLogger(__name__)
 # Engine-relative ROOT kept for legacy imports; channel state lives
 # with the user's other knowledge data, never inside the engine repo.
 ROOT = paths.repo_root()
+
+# Eager value for backward compat — existing callers that import
+# `CHANNELS_PATH` keep working. Tests that monkeypatch this
+# attribute STILL win because `_resolve_channels_path` reads it
+# back via the module namespace.
 CHANNELS_PATH = paths.knowledge_dir() / "channels.json"
+
+
+def _resolve_channels_path() -> Path:
+    """Audit fix: a previous version of this module bound
+    `CHANNELS_PATH = paths.knowledge_dir() / "channels.json"` at
+    import time. Tests that monkeypatched HRANT_DATA_DIR AFTER
+    import got a phantom mismatch — the module kept writing to the
+    dev's real ~/.hrant/data/channels.json instead of the
+    tmp_path the test set up.
+
+    Now `_load_channels` / `_save_channels` call THIS helper which
+    re-reads the module attribute (so test setattr wins) AND
+    re-resolves via paths.knowledge_dir() (so HRANT_DATA_DIR env
+    changes win). Cost: a couple of env lookups per call, never
+    on a hot path."""
+    import sys as _sys
+    module = _sys.modules.get(__name__)
+    override = getattr(module, "CHANNELS_PATH", None) if module else None
+    if override is not None and isinstance(override, Path):
+        return override
+    return paths.knowledge_dir() / "channels.json"
 
 
 class _ConflictNoiseFilter(logging.Filter):
@@ -84,9 +110,10 @@ if not any(isinstance(f, _ConflictNoiseFilter) for f in _TG_UPDATER_LOG.filters)
 # --------------- storage ---------------
 
 def _load_channels() -> list[dict]:
-    if CHANNELS_PATH.exists():
+    p = _resolve_channels_path()
+    if p.exists():
         try:
-            data = json.loads(CHANNELS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(p.read_text(encoding="utf-8"))
             return data.get("channels", [])
         except Exception:
             return []
@@ -94,7 +121,9 @@ def _load_channels() -> list[dict]:
 
 
 def _save_channels(channels: list[dict]) -> None:
-    CHANNELS_PATH.write_text(
+    p = _resolve_channels_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
         json.dumps({"channels": channels}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -292,6 +321,19 @@ def _format_trace_footer(result: Any) -> str:
     return "\n".join(lines)
 
 
+# Audit fix: cap concurrent agent.run calls from a single Telegram
+# bot. Pre-fix, a user (or group with many members) spamming the
+# bot spawned one executor thread per message → N concurrent
+# `agent.run` → N concurrent LLM streams. Cost amplification +
+# provider rate-limit thrash. 3 lets a power user keep a few
+# parallel queries going while bounding the worst case. Tune via
+# the env var if you have many trusted group members.
+import os as _os_for_concurrency
+_MAX_CONCURRENT_AGENT_RUNS = int(
+    _os_for_concurrency.environ.get("HRANT_TELEGRAM_MAX_CONCURRENCY", 3)
+)
+
+
 class TelegramBot:
     """Runs a Telegram bot that forwards messages to the agent."""
 
@@ -303,6 +345,10 @@ class TelegramBot:
         self._running = False
         self._app = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        # Per-bot semaphore. Created lazily because asyncio.Semaphore
+        # binds to the loop it's created on, and the loop is set up
+        # in `_run_in_thread`.
+        self._run_semaphore: asyncio.Semaphore | None = None
         # Track the most recent chat_id we've received a message from
         # on this bot. Used by send_text() so the WebUI's
         # "compose-as-telegram" mode can deliver the agent's reply
@@ -613,17 +659,28 @@ class TelegramBot:
                         "telegram_chat_id": update.message.chat.id,
                         "telegram_user_id": update.effective_user.id if update.effective_user else None,
                     }
-                    result, job_id = await running_loop.run_in_executor(
-                        None,
-                        lambda: _run_tracked(
-                            agent,
-                            text, project=None,
-                            attachments=attachment_shas or None,
-                            channel="telegram",
-                            speaker_id=speaker_id,
-                            reply_to=reply_to,
-                        ),
-                    )
+                    # Audit fix: bound concurrent agent.run calls. A
+                    # spam burst (or a group with many active users)
+                    # otherwise spawned one executor thread per
+                    # message → N concurrent LLM streams. The
+                    # semaphore queues excess requests; users still
+                    # get responses, just serialised.
+                    if self._run_semaphore is None:
+                        self._run_semaphore = asyncio.Semaphore(
+                            _MAX_CONCURRENT_AGENT_RUNS,
+                        )
+                    async with self._run_semaphore:
+                        result, job_id = await running_loop.run_in_executor(
+                            None,
+                            lambda: _run_tracked(
+                                agent,
+                                text, project=None,
+                                attachments=attachment_shas or None,
+                                channel="telegram",
+                                speaker_id=speaker_id,
+                                reply_to=reply_to,
+                            ),
+                        )
                     answer = result.answer or "(no answer)"
 
                     # Compact thinking + tools footer (between answer and stats).

@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from ..sessions import DEFAULT_SPEAKER, SESSIONS
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -57,6 +58,7 @@ def current_session(speaker_id: Optional[str] = Query(default=None)):
 @router.post("/api/sessions/new")
 def new_session(speaker_id: Optional[str] = Query(default=None)):
     """End the speaker's current session and start a fresh one."""
+    require_owner_for_writes(action="starting a new session")
     session = SESSIONS.new_session(speaker_id=speaker_id or DEFAULT_SPEAKER)
     return {"session": session.to_dict()}
 
@@ -71,6 +73,7 @@ def get_session(session_id: str):
 
 @router.delete("/api/sessions/{session_id}")
 def delete_session(session_id: str):
+    require_owner_for_writes(action="deleting a session")
     if not SESSIONS.delete_session(session_id):
         raise HTTPException(404, "session not found")
     return {"ok": True}
@@ -82,5 +85,6 @@ class ArchiveRequest(BaseModel):
 
 @router.post("/api/sessions/archive")
 def archive_sessions(body: ArchiveRequest):
+    require_owner_for_writes(action="archiving sessions")
     count = SESSIONS.archive_old(days=body.days)
     return {"archived": count}

@@ -15,12 +15,18 @@ from ..llm import TOKENS
 from ..models import ChatRequest
 from ..project_mode import PROJECTS
 from ..sessions import SESSIONS
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
 
 @router.post("/api/chat")
 async def chat(req: ChatRequest):
+    # Owner-only chat from the WebUI. Telegram + other channels go
+    # through their own handlers in channels.py and don't hit this
+    # endpoint. Without this gate, a `--gateway`-bound install lets
+    # anyone reachable consume the owner's LLM quota.
+    require_owner_for_writes(action="chatting with the agent")
     queue: asyncio.Queue = asyncio.Queue()
 
     def progress(event: str, msg: str, tool_call=None) -> None:

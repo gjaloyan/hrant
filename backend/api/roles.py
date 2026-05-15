@@ -24,6 +24,7 @@ from .. import roles as _roles
 from .. import contacts as _contacts
 from .. import scheduled_messages as _sched
 from ..sessions import DEFAULT_SPEAKER, normalize_speaker
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -60,9 +61,13 @@ class RoleUpdate(BaseModel):
 
 @router.put("/api/roles/{speaker_id:path}")
 def roles_set(speaker_id: str, body: RoleUpdate):
-    """Set a speaker's role + optional label. Owner-only in practice
-    — the request must come from the local WebUI which is implicitly
-    owner. Future multi-WebUI auth would gate this explicitly."""
+    """Set a speaker's role + optional label. Owner-only — pre-fix
+    relied on "the request must come from the local WebUI which is
+    implicitly owner" but nothing enforced it. On `--gateway` mode
+    that meant any reachable client could promote themselves to
+    owner with one PUT and bypass every other role check in the
+    system. Now hard-gated."""
+    require_owner_for_writes(action="changing role assignments")
     sid = normalize_speaker(speaker_id)
     try:
         entry = _roles.set_role(sid, body.role, label=body.label)  # type: ignore[arg-type]
@@ -89,6 +94,7 @@ class RelationshipsUpdate(BaseModel):
 def relationships_set(body: RelationshipsUpdate):
     """Replace the whole alias map. The UI sends the full state so
     delete-an-alias is the same operation as add-an-alias."""
+    require_owner_for_writes(action="changing relationship aliases")
     _contacts.save_relationships(body.relationships)
     return {"ok": True, "relationships": _contacts.load_relationships()}
 
@@ -121,6 +127,7 @@ def scheduled_list(status: Optional[str] = None):
 
 @router.delete("/api/scheduled-messages/{message_id}")
 def scheduled_cancel(message_id: str):
+    require_owner_for_writes(action="cancelling a scheduled message")
     if not _sched.cancel(message_id):
         raise HTTPException(404, "no pending message with that id")
     return {"ok": True}

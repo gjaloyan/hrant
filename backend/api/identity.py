@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ..conversation import CONVERSATION
 from ..identity import IDENTITY
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -23,6 +24,7 @@ def get_conversation():
 
 @router.delete("/api/conversation")
 def clear_conversation():
+    require_owner_for_writes(action="clearing conversation")
     CONVERSATION.clear()
     return {"ok": True}
 
@@ -58,6 +60,7 @@ class IdentityUpdate(BaseModel):
 
 @router.put("/api/identity")
 def update_identity(body: IdentityUpdate):
+    require_owner_for_writes(action="editing identity files")
     if body.file == "user":
         # Per-speaker profile write: snapshot + replace.
         IDENTITY.set_user_profile(body.content, speaker_id=body.speaker_id)

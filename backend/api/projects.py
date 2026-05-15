@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..project_mode import PROJECTS
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -16,6 +17,7 @@ def list_projects():
 
 @router.post("/api/projects")
 def create_project(body: dict):
+    require_owner_for_writes(action="creating a project")
     name = body.get("name", "").strip()
     if not name:
         raise HTTPException(400, "name required")
@@ -29,6 +31,7 @@ def project_detail(name: str):
 
 @router.post("/api/projects/{name}/end")
 def end_project(name: str):
+    require_owner_for_writes(action="ending a project")
     if PROJECTS.current != name:
         raise HTTPException(400, f"project '{name}' is not active")
     return {"message": PROJECTS.end()}
@@ -40,6 +43,7 @@ class ProjectContextRequest(BaseModel):
 
 @router.post("/api/projects/{name}/context")
 def add_project_context(name: str, body: ProjectContextRequest):
+    require_owner_for_writes(action="adding project context")
     if PROJECTS.current != name:
         raise HTTPException(400, f"project '{name}' is not active")
     return {"message": PROJECTS.add_context(body.text)}
@@ -52,6 +56,7 @@ class ProjectDecisionRequest(BaseModel):
 
 @router.post("/api/projects/{name}/decision")
 def add_project_decision(name: str, body: ProjectDecisionRequest):
+    require_owner_for_writes(action="adding a project decision")
     if PROJECTS.current != name:
         raise HTTPException(400, f"project '{name}' is not active")
     return {"message": PROJECTS.add_decision(body.what, body.why)}
@@ -64,6 +69,7 @@ class ProjectIssueRequest(BaseModel):
 
 @router.post("/api/projects/{name}/issue")
 def add_project_issue(name: str, body: ProjectIssueRequest):
+    require_owner_for_writes(action="adding a project issue")
     if PROJECTS.current != name:
         raise HTTPException(400, f"project '{name}' is not active")
     return {"message": PROJECTS.add_issue(body.problem, body.fix)}

@@ -11,8 +11,16 @@ from ..transcriber import (
     load_config as load_transcriber_config,
     save_config as save_transcriber_config,
 )
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
+
+
+# Audit #11: hard ceiling on upload size. Pre-fix, `file.read()`
+# slurped the whole upload into memory — a 10 GB request would
+# OOM the agent. 50 MB covers screenshots + voice notes + small
+# PDFs comfortably; raise if your users hit it.
+_MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 
 @router.post("/api/attachments")
@@ -25,7 +33,26 @@ async def upload_attachment(
     Returns the metadata record. Re-uploading identical bytes is a no-op
     and returns the same sha256 — callers can rely on this for dedup.
     """
-    data = await file.read()
+    require_owner_for_writes(action="uploading an attachment")
+    # Audit #11: chunk-read with running total so a 10 GB request
+    # 413s instead of OOMing the agent process.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"upload exceeds {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB "
+                    "limit"
+                ),
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(400, "empty upload")
     mime = file.content_type or "application/octet-stream"
@@ -110,7 +137,25 @@ async def transcribe(
     the transcript can be linked back to the original recording later
     (and re-transcription becomes idempotent).
     """
-    data = await file.read()
+    require_owner_for_writes(action="running transcription")
+    # Audit #11: same chunked-read + size cap as the upload endpoint.
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > _MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"audio exceeds {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB "
+                    "limit"
+                ),
+            )
+        chunks.append(chunk)
+    data = b"".join(chunks)
     if not data:
         raise HTTPException(400, "empty audio")
     mime = file.content_type or "audio/ogg"
@@ -162,6 +207,7 @@ def transcribe_config_get():
 
 @router.put("/api/transcribe/config")
 def transcribe_config_put(body: TranscriberConfigUpdate):
+    require_owner_for_writes(action="changing transcriber config")
     cfg = load_transcriber_config() or {}
     if body.backend is not None:
         cfg["backend"] = body.backend
@@ -179,5 +225,6 @@ def transcribe_config_put(body: TranscriberConfigUpdate):
 
 @router.post("/api/transcribe/reset")
 def transcribe_reset():
+    require_owner_for_writes(action="resetting transcriber")
     TRANSCRIBER.reset()
     return {"ok": True, "transcriber": TRANSCRIBER.status()}

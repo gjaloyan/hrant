@@ -31,6 +31,7 @@ from ..tts import (
     load_config as load_tts_config,
     save_config as save_tts_config,
 )
+from ._auth import require_owner_for_writes
 
 
 router = APIRouter()
@@ -77,6 +78,7 @@ def tts_config_put(body: TtsConfigUpdate):
     A re-probe runs immediately so the response reflects the new
     state — no separate /reset call needed for the common path.
     """
+    require_owner_for_writes(action="changing TTS config")
     cfg = load_tts_config() or {}
     if body.backend is not None:
         cfg["backend"] = body.backend
@@ -101,6 +103,7 @@ def tts_config_put(body: TtsConfigUpdate):
 def tts_reset():
     """Force a re-probe with the current saved config. Useful after
     starting Piper on the home server — saves a page reload."""
+    require_owner_for_writes(action="resetting TTS")
     SYNTHESIZER.reset()
     return {"ok": True, "tts": SYNTHESIZER.status()}
 

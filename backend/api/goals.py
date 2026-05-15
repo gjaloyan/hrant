@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..goals import GOALS
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -27,6 +28,7 @@ def list_goals():
 
 @router.post("/api/goals")
 def add_goal(body: GoalRequest):
+    require_owner_for_writes(action="adding a goal")
     goal = GOALS.add(
         description=body.description,
         priority=body.priority,
@@ -40,6 +42,7 @@ def add_goal(body: GoalRequest):
 
 @router.post("/api/goals/{goal_id}/complete")
 def complete_goal(goal_id: str):
+    require_owner_for_writes(action="completing a goal")
     if not GOALS.complete_goal(goal_id):
         raise HTTPException(404, "goal not found")
     return {"ok": True}
@@ -47,6 +50,7 @@ def complete_goal(goal_id: str):
 
 @router.post("/api/goals/{goal_id}/pause")
 def pause_goal(goal_id: str):
+    require_owner_for_writes(action="pausing a goal")
     if not GOALS.pause_goal(goal_id):
         raise HTTPException(404, "goal not found")
     return {"ok": True}
@@ -54,6 +58,7 @@ def pause_goal(goal_id: str):
 
 @router.post("/api/goals/{goal_id}/resume")
 def resume_goal(goal_id: str):
+    require_owner_for_writes(action="resuming a goal")
     if not GOALS.resume_goal(goal_id):
         raise HTTPException(404, "goal not found")
     return {"ok": True}
@@ -61,6 +66,7 @@ def resume_goal(goal_id: str):
 
 @router.post("/api/goals/{goal_id}/fail")
 def fail_goal(goal_id: str):
+    require_owner_for_writes(action="failing a goal")
     if not GOALS.fail_goal(goal_id):
         raise HTTPException(404, "goal not found")
     return {"ok": True}
@@ -68,6 +74,7 @@ def fail_goal(goal_id: str):
 
 @router.delete("/api/goals/{goal_id}")
 def delete_goal(goal_id: str):
+    require_owner_for_writes(action="deleting a goal")
     if not GOALS.delete_goal(goal_id):
         raise HTTPException(404, "goal not found")
     return {"ok": True}
@@ -79,6 +86,7 @@ class PriorityUpdate(BaseModel):
 
 @router.put("/api/goals/{goal_id}/priority")
 def update_goal_priority(goal_id: str, body: PriorityUpdate):
+    require_owner_for_writes(action="changing goal priority")
     if not GOALS.update_priority(goal_id, body.priority):
         raise HTTPException(404, "goal not found")
     return {"ok": True}

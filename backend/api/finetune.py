@@ -12,6 +12,7 @@ from ..finetune import store as finetune_store
 from ..finetune_curator import FinetuneDataCurator
 from ..model_versions import VERSIONS
 from ..models import CorrectionRequest, FinetuneEdit, ImportGgufRequest
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -48,6 +49,7 @@ def finetune_examples():
 
 @router.put("/api/finetune/examples/{pair_id}")
 def finetune_edit(pair_id: str, body: FinetuneEdit):
+    require_owner_for_writes(action="editing a finetune example")
     ok = finetune_store().edit(pair_id, assistant=body.assistant, boosted=body.boosted)
     if not ok:
         raise HTTPException(404, "not found")
@@ -56,6 +58,7 @@ def finetune_edit(pair_id: str, body: FinetuneEdit):
 
 @router.delete("/api/finetune/examples/{pair_id}")
 def finetune_delete(pair_id: str):
+    require_owner_for_writes(action="deleting a finetune example")
     ok = finetune_store().delete(pair_id)
     if not ok:
         raise HTTPException(404, "not found")
@@ -64,6 +67,7 @@ def finetune_delete(pair_id: str):
 
 @router.post("/api/finetune/examples/{pair_id}/boost")
 def finetune_boost(pair_id: str):
+    require_owner_for_writes(action="boosting a finetune example")
     ok = finetune_store().boost(pair_id)
     if not ok:
         raise HTTPException(404, "not found")
@@ -72,6 +76,7 @@ def finetune_boost(pair_id: str):
 
 @router.post("/api/finetune/correction")
 def finetune_correction(body: CorrectionRequest):
+    require_owner_for_writes(action="adding a correction")
     pair = finetune_store().add_correction(
         question=body.question,
         wrong_answer=body.wrong_answer,
@@ -84,6 +89,7 @@ def finetune_correction(body: CorrectionRequest):
 @router.post("/api/finetune/start")
 def finetune_start():
     """Запуск пайплайна с потоком прогресса."""
+    require_owner_for_writes(action="starting fine-tune pipeline")
     from ..finetune_pipeline import FineTunePipeline
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -118,6 +124,7 @@ def finetune_start():
 
 @router.post("/api/finetune/switch")
 def finetune_switch(body: dict):
+    require_owner_for_writes(action="switching the active model")
     tag = body.get("tag", "").strip()
     if not tag:
         raise HTTPException(400, "tag required")
@@ -126,6 +133,7 @@ def finetune_switch(body: dict):
 
 @router.post("/api/finetune/rollback")
 def finetune_rollback():
+    require_owner_for_writes(action="rolling back the model")
     return {"message": VERSIONS.rollback()}
 
 
@@ -141,6 +149,7 @@ def model_versions():
 
 @router.post("/api/finetune/export-cloud")
 def finetune_export_cloud():
+    require_owner_for_writes(action="exporting finetune data for cloud training")
     from ..finetune_pipeline import FineTunePipeline
     try:
         pipe = FineTunePipeline()
@@ -158,6 +167,11 @@ def finetune_export_cloud():
 
 @router.post("/api/finetune/import-gguf")
 def finetune_import_gguf(body: ImportGgufRequest):
+    # Owner gate + path traversal mitigation: combined with the gate,
+    # only the trusted owner can pass an arbitrary path. Without the
+    # gate, this endpoint reads any file the agent process can read
+    # — a remote arbitrary-file-read primitive.
+    require_owner_for_writes(action="importing a GGUF model")
     from ..finetune_pipeline import FineTunePipeline
     try:
         pipe = FineTunePipeline()
@@ -177,6 +191,7 @@ class AddToFinetuneRequest(BaseModel):
 
 @router.post("/api/finetune/add-from-chat")
 def add_from_chat(body: AddToFinetuneRequest):
+    require_owner_for_writes(action="adding a chat example to finetune")
     finetune_store().add(
         question=body.question,
         answer=body.answer,
@@ -190,6 +205,7 @@ def add_from_chat(body: AddToFinetuneRequest):
 
 @router.post("/api/finetune/compare")
 def finetune_compare():
+    require_owner_for_writes(action="comparing model versions")
     from ..model_evaluator import ModelEvaluator
     state = VERSIONS.list()
     if len(state.versions) < 2:

@@ -14,6 +14,7 @@ from ..memory_extractor import MEMORY
 from ..meta_learner import META_LEARNER
 from ..self_modifier import SELF_MODIFIER
 from ..vector_store import VECTOR_STORE
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -26,6 +27,7 @@ def graph_stats():
 
 @router.post("/api/graph/reindex")
 def graph_reindex():
+    require_owner_for_writes(action="reindexing the notes graph")
     return reindex_all_notes()
 
 
@@ -87,6 +89,7 @@ def meta_learner_failures():
 
 @router.post("/api/meta-learner/extract-patterns")
 def meta_learner_extract():
+    require_owner_for_writes(action="extracting meta-learner patterns")
     return {"patterns": META_LEARNER.extract_patterns()}
 
 
@@ -150,6 +153,11 @@ class MemoryRecallRequest(BaseModel):
 
 @router.post("/api/memory/recall")
 def memory_recall(body: MemoryRecallRequest):
+    # Owner-only: memory_facts.jsonl can contain sensitive personal
+    # info (preferences, relationships, credentials the user voiced
+    # to the agent). Brute-force probing via this endpoint is a
+    # memory-exfiltration vector if exposed.
+    require_owner_for_writes(action="recalling memory")
     facts = MEMORY.recall(body.query, limit=body.limit)
     block = MEMORY.recall_block(body.query, max_facts=body.limit)
     return {"facts": facts, "block": block}
@@ -173,6 +181,7 @@ def embeddings_status():
 
 @router.post("/api/memory/embeddings/backfill")
 def embeddings_backfill(force: bool = False):
+    require_owner_for_writes(action="backfilling embeddings")
     return backfill_embeddings(force=force)
 
 
@@ -192,6 +201,7 @@ class EmbedderConfigUpdate(BaseModel):
 @router.put("/api/memory/embeddings/config")
 def embeddings_config_put(body: EmbedderConfigUpdate):
     """Persist embedder config and re-probe. Returns the live status."""
+    require_owner_for_writes(action="changing embedder config")
     cfg = body.model_dump(exclude_none=True)
     save_embedder_config(cfg)
     EMBEDDER.reset()
@@ -208,6 +218,7 @@ def embeddings_config_put(body: EmbedderConfigUpdate):
 def embeddings_reset():
     """Drop cached backend so the next embed re-probes — call after a
     server outage to retry auto-fallback without restarting the agent."""
+    require_owner_for_writes(action="resetting the embedder")
     EMBEDDER.reset()
     return {
         "ok": True,
@@ -234,6 +245,7 @@ class AnalyzeModuleRequest(BaseModel):
 
 @router.post("/api/self-modifier/analyze")
 def self_modifier_analyze(body: AnalyzeModuleRequest):
+    require_owner_for_writes(action="running self-modifier analysis")
     proposals = SELF_MODIFIER.analyze_module(body.module)
     return {"proposals": [p.to_dict() for p in proposals]}
 
@@ -244,6 +256,7 @@ class ReviewRequest(BaseModel):
 
 @router.post("/api/self-modifier/proposals/{proposal_id}/approve")
 def self_modifier_approve(proposal_id: str, body: ReviewRequest):
+    require_owner_for_writes(action="approving a self-modifier proposal")
     if not SELF_MODIFIER.approve(proposal_id, body.note):
         raise HTTPException(404, "proposal not found")
     return {"ok": True}
@@ -251,6 +264,7 @@ def self_modifier_approve(proposal_id: str, body: ReviewRequest):
 
 @router.post("/api/self-modifier/proposals/{proposal_id}/reject")
 def self_modifier_reject(proposal_id: str, body: ReviewRequest):
+    require_owner_for_writes(action="rejecting a self-modifier proposal")
     if not SELF_MODIFIER.reject(proposal_id, body.note):
         raise HTTPException(404, "proposal not found")
     return {"ok": True}
@@ -258,6 +272,10 @@ def self_modifier_reject(proposal_id: str, body: ReviewRequest):
 
 @router.post("/api/self-modifier/proposals/{proposal_id}/apply")
 def self_modifier_apply(proposal_id: str):
+    # Critical: applying a self-modifier proposal patches the agent's
+    # OWN PYTHON CODE. Unauth would be a remote-code-execution
+    # primitive on the agent process. Owner-only, full stop.
+    require_owner_for_writes(action="applying a self-modifier patch")
     result = SELF_MODIFIER.apply(proposal_id)
     if not result["ok"]:
         raise HTTPException(400, result["message"])
@@ -291,6 +309,7 @@ def self_mods_revert_one(patch_id: str):
     """Reverse-apply a single patch and remove it from the manifest.
     Reverting a non-tip patch may surface conflicts because later
     patches were stacked on top — see the warning in the UI."""
+    require_owner_for_writes(action="reverting a self-mod patch")
     from .. import self_mods
     ok, err = self_mods.revert_one(patch_id)
     if not ok:
@@ -306,6 +325,7 @@ def self_mods_revert_all():
     Settings → Self-Modifications → History.
 
     User data (knowledge, workspace, settings) is untouched."""
+    require_owner_for_writes(action="reverting all self-mods")
     from .. import self_mods
     ok, err = self_mods.revert_all_to_official()
     if not ok:
@@ -341,6 +361,7 @@ def self_mods_history():
 def self_mods_restore_one(archive_id: str, patch_filename: str):
     """Re-apply ONE archived patch as a fresh active modification.
     The archive bundle is unchanged; restoring is non-destructive."""
+    require_owner_for_writes(action="restoring an archived self-mod")
     from dataclasses import asdict
     from .. import self_mods
     entry, err = self_mods.restore_from_history(archive_id, patch_filename)
@@ -354,6 +375,7 @@ def self_mods_restore_batch(archive_id: str):
     """Re-apply EVERY patch in an archive bundle, in order. Stops at
     the first conflict and reports which patch failed — user can
     then restore the rest one-by-one if needed."""
+    require_owner_for_writes(action="restoring a self-mod archive batch")
     from .. import self_mods
     result = self_mods.restore_archive_batch(archive_id)
     if result.get("error"):
@@ -363,6 +385,7 @@ def self_mods_restore_batch(archive_id: str):
 
 @router.delete("/api/self-modifier/proposals/{proposal_id}")
 def self_modifier_delete(proposal_id: str):
+    require_owner_for_writes(action="deleting a self-modifier proposal")
     if not SELF_MODIFIER.delete_proposal(proposal_id):
         raise HTTPException(404, "proposal not found")
     return {"ok": True}

@@ -10,6 +10,53 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## QA-audit-fix (2026-05-15)
+
+Major security + operational pass after the full-codebase QA audit. **Closes the auth gap that affected ~80 mutation endpoints across 14 API modules** — before this commit, anyone who could reach the API (notably anyone on the LAN/Tailnet when the gateway was bound to 0.0.0.0 via `hrant gateway start --gateway`) could:
+
+- Promote themselves to owner via `PUT /api/roles/{id}`
+- Apply self-modifier patches (`POST /api/self-modifier/proposals/{id}/apply`) — remote code execution on the agent process
+- Register an LLM provider with their own API key + base URL (`POST /api/providers`) — cost amplification or prompt exfiltration
+- Rewrite `soul.md` / `identity.md` (`PUT /api/identity`) — prompt-injection persistence
+- Spawn a Telegram bot with an attacker token (`POST /api/channels`)
+- Swap STT / TTS / embedding URLs (`PUT /api/transcribe|tts|embeddings/config`)
+- Read arbitrary files via `POST /api/finetune/import-gguf`
+
+**Auth gates added (modules → mutation count):**
+- `intel.py` (15 mutations, all gated): graph reindex, meta-learner extract, memory recall, embeddings backfill/config/reset, every self-modifier endpoint, every self-mods endpoint
+- `providers.py` (14): Ollama pull/delete, active-model set/clear, provider CRUD + test, every OAuth endpoint
+- `finetune.py` (11): every example edit, correction, pipeline start, switch/rollback, export-cloud, import-gguf, add-from-chat, compare
+- `goals.py` (7): add, complete, pause, resume, fail, delete, priority
+- `channels.py` (6): create, update, delete, start, stop, test
+- `projects.py` (5): create, end, context, decision, issue
+- `knowledge.py` (5): learn, delete, core add/delete, quick-note
+- `attachments.py` (4): upload, transcribe, transcriber config, transcriber reset
+- `sessions.py` (3): new, delete, archive
+- `roles.py` (3): role set, relationships PUT, scheduled-message cancel
+- `voice.py` (2): TTS config, TTS reset
+- `identity.py` (2): conversation clear, identity files PUT
+- `engine.py` (2): config PUT, config reset
+- `chat.py` (1): chat
+
+All use the shared `backend/api/_auth.py:require_owner_for_writes` helper. Read endpoints (GET) remain open — they don't change state or cost money.
+
+**Other operational fixes:**
+
+- **Attachment + audio upload size cap (50 MB).** Pre-fix, `await file.read()` slurped the whole request body into memory. A 10 GB upload OOMed the agent. Now chunk-reads with a running total; over-cap returns 413 instead of dying.
+- **Telegram concurrency bound (default 3 concurrent runs per bot).** A user spamming the bot (or a group with many active members) used to spawn one executor thread per message → N concurrent `agent.run` → N concurrent LLM streams. The semaphore queues the excess. Tune via `HRANT_TELEGRAM_MAX_CONCURRENCY` if you have many trusted group members.
+- **Lazy `CHANNELS_PATH` resolution.** `backend/channels.py` captured `paths.knowledge_dir() / "channels.json"` at import time, so a test that monkeypatched `HRANT_DATA_DIR` after import silently wrote to the dev's real ~/.hrant/data/channels.json. `_load_channels` / `_save_channels` now re-resolve on every call, prefer test-overridden `CHANNELS_PATH` when set.
+
+**Compatibility:** existing tests pass unchanged because `require_owner_for_writes` is a no-op when there's no speaker ContextVar set (CLI, tests, autonomic ticks). All 1187 tests still pass, 3 skipped (Windows pty).
+
+**Not in this commit (deferred from the audit):**
+- Smoke tests for `providers.py` / `channels.py` / `llm.py` (the three biggest untested modules — separate session)
+- `cli.py` (2417 LOC) split into per-subcommand modules
+- `llm.py` (3197 LOC) base-class refactor for the 8 client classes
+- `init_wizard.py` provider-flow registry
+- Lazy frontend bundle code-splitting
+
+---
+
 ## Phase 16-audit-fix (2026-05-15)
 
 Cleanup pass after the post-Phase-16 audit. Fixes 1 critical + 10 important + 11 minor findings across consolidation, knowledge graph, REST surfaces, WebUI, and CLI.

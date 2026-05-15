@@ -25,6 +25,7 @@ from ..runtime_config import (
     save_overrides,
     validate_partial,
 )
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -72,6 +73,7 @@ def engine_config_put(body: EngineConfigUpdate):
       - sending a field absent from the whitelist is a no-op (it shows
         up in the `rejected` list of the response, never persisted)
     """
+    require_owner_for_writes(action="changing engine config")
     incoming = body.model_dump(exclude_none=True)
     clean, rejected = validate_partial(incoming)
     existing = load_overrides()
@@ -100,6 +102,7 @@ def engine_config_reset():
     overrides — we rebuild the affected sections from scratch by
     re-importing config. Slightly heavier but bullet-proof.
     """
+    require_owner_for_writes(action="resetting engine config")
     from ..config import Config
     from ..runtime_config import _overrides_path
     p = _overrides_path()

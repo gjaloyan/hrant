@@ -10,6 +10,7 @@ from ..knowledge_manager import KM
 from ..models import CoreFactDelete, CoreFactRequest, LearnRequest
 from ..note_creator import learn_topic
 from ..project_mode import PROJECTS
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -36,6 +37,7 @@ def get_knowledge(topic: str):
 
 @router.post("/api/knowledge/learn")
 def api_learn(req: LearnRequest):
+    require_owner_for_writes(action="learning a new topic")
     note = learn_topic(
         req.topic,
         depth=req.depth,
@@ -47,6 +49,7 @@ def api_learn(req: LearnRequest):
 
 @router.delete("/api/knowledge/{topic}")
 def delete_knowledge(topic: str):
+    require_owner_for_writes(action="deleting a knowledge note")
     ok = KM.delete_note(topic)
     return {"ok": ok}
 
@@ -59,12 +62,14 @@ def get_core():
 
 @router.post("/api/core-memory")
 def add_core(req: CoreFactRequest):
+    require_owner_for_writes(action="adding a core fact")
     msg = CORE.add_fact(req.fact, req.source)
     return {"message": msg}
 
 
 @router.delete("/api/core-memory")
 def delete_core(req: CoreFactDelete):
+    require_owner_for_writes(action="deleting a core fact")
     return {"message": CORE.remove_fact(req.search_text)}
 
 
@@ -92,6 +97,7 @@ class QuickNoteRequest(BaseModel):
 
 @router.post("/api/knowledge/quick-note")
 def quick_note(req: QuickNoteRequest):
+    require_owner_for_writes(action="saving a quick note")
     note = KM.save_note(
         topic=req.text[:40],
         body=req.text,

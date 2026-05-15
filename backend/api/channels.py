@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ..channels import CHANNELS, delete_channel, get_channel, get_channels, save_channel
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -38,6 +39,7 @@ class ChannelCreateRequest(BaseModel):
 
 @router.post("/api/channels")
 def create_channel(body: ChannelCreateRequest):
+    require_owner_for_writes(action="creating a channel")
     return save_channel(body.model_dump())
 
 
@@ -50,6 +52,7 @@ class ChannelUpdateRequest(BaseModel):
 
 @router.put("/api/channels/{channel_id}")
 def update_channel(channel_id: str, body: ChannelUpdateRequest):
+    require_owner_for_writes(action="updating a channel")
     ch = get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "channel not found")
@@ -67,6 +70,7 @@ def update_channel(channel_id: str, body: ChannelUpdateRequest):
 
 @router.delete("/api/channels/{channel_id}")
 def delete_channel_api(channel_id: str):
+    require_owner_for_writes(action="deleting a channel")
     CHANNELS.stop_channel(channel_id)
     if not delete_channel(channel_id):
         raise HTTPException(404, "channel not found")
@@ -75,6 +79,7 @@ def delete_channel_api(channel_id: str):
 
 @router.post("/api/channels/{channel_id}/start")
 def start_channel(channel_id: str):
+    require_owner_for_writes(action="starting a channel")
     result = CHANNELS.start_channel(channel_id)
     if not result["ok"]:
         raise HTTPException(400, result["error"])
@@ -83,12 +88,14 @@ def start_channel(channel_id: str):
 
 @router.post("/api/channels/{channel_id}/stop")
 def stop_channel(channel_id: str):
+    require_owner_for_writes(action="stopping a channel")
     return CHANNELS.stop_channel(channel_id)
 
 
 @router.post("/api/channels/{channel_id}/test")
 async def test_channel(channel_id: str):
     """Test channel connection (validate token, etc.)."""
+    require_owner_for_writes(action="testing a channel")
     ch = get_channel(channel_id)
     if not ch:
         raise HTTPException(404, "channel not found")

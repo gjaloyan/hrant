@@ -27,6 +27,7 @@ from ..providers import (
     get_providers,
     save_provider,
 )
+from ._auth import require_owner_for_writes
 
 router = APIRouter()
 
@@ -159,6 +160,7 @@ class OllamaPullRequest(BaseModel):
 
 @router.post("/api/providers/ollama/pull")
 async def ollama_pull(body: OllamaPullRequest):
+    require_owner_for_writes(action="pulling an Ollama model")
     try:
         r = httpx.post(
             "http://localhost:11434/api/pull",
@@ -173,6 +175,7 @@ async def ollama_pull(body: OllamaPullRequest):
 
 @router.delete("/api/providers/ollama/models/{model_name:path}")
 def ollama_delete_model(model_name: str):
+    require_owner_for_writes(action="deleting an Ollama model")
     try:
         r = httpx.delete(
             "http://localhost:11434/api/delete",
@@ -198,6 +201,7 @@ class SetActiveModelRequest(BaseModel):
 
 @router.put("/api/active-model")
 def set_active_model(req: SetActiveModelRequest):
+    require_owner_for_writes(action="pinning the active model")
     try:
         result = ACTIVE_MODEL.set(req.provider_id, req.model)
         return {"ok": True, "active": result}
@@ -207,6 +211,7 @@ def set_active_model(req: SetActiveModelRequest):
 
 @router.delete("/api/active-model")
 def clear_active_model():
+    require_owner_for_writes(action="clearing the active model")
     ACTIVE_MODEL.clear()
     return {"ok": True}
 
@@ -245,6 +250,13 @@ class ProviderCreateRequest(BaseModel):
 
 @router.post("/api/providers")
 def create_provider(body: ProviderCreateRequest):
+    # Owner-only: registering a provider with an API key is the
+    # primary cost-amplification vector if the gateway is bound
+    # beyond loopback. An attacker who can hit this can either
+    # spend the owner's money (registering their own free-tier
+    # key) or harvest the owner's prompts (registering an
+    # attacker-controlled base_url).
+    require_owner_for_writes(action="registering a provider")
     return {"ok": True, "provider": save_provider(body.model_dump())}
 
 
@@ -262,6 +274,7 @@ class ProviderUpdateRequest(BaseModel):
 
 @router.put("/api/providers/{provider_id}")
 def update_provider_api(provider_id: str, body: ProviderUpdateRequest):
+    require_owner_for_writes(action="updating a provider")
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
@@ -272,6 +285,7 @@ def update_provider_api(provider_id: str, body: ProviderUpdateRequest):
 
 @router.delete("/api/providers/{provider_id}")
 def delete_provider_api(provider_id: str):
+    require_owner_for_writes(action="deleting a provider")
     if not delete_provider(provider_id):
         raise HTTPException(404, "provider not found")
     return {"ok": True}
@@ -280,6 +294,9 @@ def delete_provider_api(provider_id: str):
 # ---- test_provider: dispatcher per provider type ----
 @router.post("/api/providers/{provider_id}/test")
 async def test_provider(provider_id: str):
+    # Provider test fires a real LLM call to validate the credential.
+    # Owner-only so an attacker can't probe what credentials work.
+    require_owner_for_writes(action="testing a provider connection")
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
@@ -457,6 +474,7 @@ class OAuthConfigUpdate(BaseModel):
 
 @router.put("/api/providers/{provider_id}/auth")
 def update_provider_auth(provider_id: str, body: OAuthConfigUpdate):
+    require_owner_for_writes(action="changing provider auth config")
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
@@ -477,6 +495,7 @@ def oauth_status(provider_id: str):
 
 @router.post("/api/providers/{provider_id}/oauth/authorize-url")
 def oauth_authorize_url(provider_id: str):
+    require_owner_for_writes(action="starting OAuth flow")
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
@@ -621,6 +640,7 @@ class ClientCredentialsRequest(BaseModel):
 
 @router.post("/api/providers/{provider_id}/oauth/client-credentials")
 def oauth_client_credentials(provider_id: str):
+    require_owner_for_writes(action="acquiring OAuth tokens")
     result = OAUTH_TOKENS.client_credentials_auth(provider_id)
     if not result.get("ok"):
         raise HTTPException(400, result.get("error", "Auth failed"))
@@ -629,6 +649,7 @@ def oauth_client_credentials(provider_id: str):
 
 @router.post("/api/providers/{provider_id}/oauth/exchange-url")
 def oauth_exchange_url(provider_id: str, body: dict):
+    require_owner_for_writes(action="exchanging an OAuth code")
     redirect_url = body.get("url", "").strip()
     if not redirect_url:
         raise HTTPException(400, "Missing redirect URL")
@@ -668,6 +689,7 @@ class ManualTokenRequest(BaseModel):
 
 @router.post("/api/providers/{provider_id}/oauth/manual-token")
 def oauth_manual_token(provider_id: str, body: ManualTokenRequest):
+    require_owner_for_writes(action="storing a manual OAuth token")
     p = get_provider(provider_id)
     if not p:
         raise HTTPException(404, "provider not found")
@@ -684,5 +706,6 @@ def oauth_manual_token(provider_id: str, body: ManualTokenRequest):
 
 @router.post("/api/providers/{provider_id}/oauth/revoke")
 def oauth_revoke(provider_id: str):
+    require_owner_for_writes(action="revoking OAuth tokens")
     OAUTH_TOKENS.revoke(provider_id)
     return {"ok": True}
