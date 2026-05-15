@@ -388,6 +388,16 @@ def run(
         status="in_progress",
     )
 
+    # Token tracking: snapshot the request counters before any
+    # consolidation LLM call so we can compute a delta at the end.
+    # Pre-fix the digest claimed `tokens_used: 0` even when the
+    # narrative was a multi-paragraph LLM output (caught in the
+    # production audit). The consolidation pipeline runs outside any
+    # request context, so request_usage() may already hold cross-call
+    # state — subtract the snapshot to get just our delta.
+    from ..llm import TOKENS as _TOKENS
+    _tokens_before = _TOKENS.request_usage()
+
     # Zero-activity short-circuit: still write a digest so the UI
     # shows "consolidation ran, nothing happened". Cheap, no LLM
     # calls — saves cost on long quiet weekends.
@@ -395,6 +405,8 @@ def run(
         d.narrative = "No activity in the consolidation window."
         d.status = "success"
         d.skip_reason = "no_activity"
+        d.tokens_used = 0
+        d.estimated_cost_usd = 0.0
         d.completed_at = time.time()
         return d
 
@@ -556,6 +568,17 @@ def run(
         ][:5]
     except Exception as e:
         log.warning("consolidation.threads failed: %s", e)
+
+    # Token / cost delta — see snapshot taken at the top of run().
+    _tokens_after = _TOKENS.request_usage()
+    d.tokens_used = max(
+        0, int(_tokens_after.get("total_tokens", 0))
+            - int(_tokens_before.get("total_tokens", 0)),
+    )
+    d.estimated_cost_usd = max(
+        0.0, float(_tokens_after.get("cost_usd", 0.0))
+            - float(_tokens_before.get("cost_usd", 0.0)),
+    )
 
     d.status = "success" if d.error is None else "partial"
     d.completed_at = time.time()

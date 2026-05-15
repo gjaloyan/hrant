@@ -52,6 +52,7 @@ class IntentClassifierMixin:
         from ..agent import (
             _CHITCHAT_RE,
             _looks_like_arithmetic,
+            _looks_like_profile_recall,
             router,
             TOKENS,
         )
@@ -66,6 +67,14 @@ class IntentClassifierMixin:
         if _looks_like_arithmetic(trimmed):
             return "task"
         if _CHITCHAT_RE.match(trimmed):
+            return "chat"
+        # Profile-recall short-circuit: "what is my favorite color?",
+        # "do you remember my brother's name?", "что мой любимый цвет?".
+        # These have everything fast_chat needs (user profile +
+        # recent conversation) and don't need the full task pipeline.
+        # Pre-fix, the LLM classifier returned "task" → 4 LLM calls
+        # / $0.04 per recall. Routes to "chat" so fast_chat picks up.
+        if _looks_like_profile_recall(trimmed):
             return "chat"
 
         marker = self._attachment_marker()

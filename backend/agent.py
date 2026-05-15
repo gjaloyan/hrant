@@ -366,6 +366,48 @@ _CHITCHAT_RE = re.compile(
 )
 
 
+# Profile-recall questions — "what is my X" / "do you remember Y" /
+# "что моё X" / "помнишь Y" / etc. The agent already has user
+# profile + recent conversation in its fast_chat context, so these
+# don't need the full task_mode pipeline (think → notes → solve →
+# verify). Pre-fix, the LLM intent classifier consistently labelled
+# them "task" and the agent burned 4 LLM calls / $0.04 for what
+# should have been a single chat_reply.
+#
+# Pattern intent: match short questions whose subject is the user's
+# own profile, NOT general knowledge questions. "What is the capital
+# of Armenia?" is NOT a recall question (no possessive pronoun);
+# "What is my favorite color?" IS.
+_PROFILE_RECALL_RE = re.compile(
+    r"^\s*(?:"
+    # English: "what/where/when/who is my X", "do you remember/know my Y",
+    # "do you remember that I told you ...", "what did I tell you ...",
+    r"(?:what|where|when|who|how)(?:'s|\s+is|\s+are)\s+(?:my|mine)\b"
+    r"|do\s+you\s+(?:remember|know|recall)\s+(?:my|that\s+i|what\s+i)\b"
+    r"|what\s+did\s+i\s+(?:tell|say|mention)\b"
+    r"|tell\s+me\s+(?:about\s+myself|my\s+\w+)\b"
+    # Russian: "что мой/моя/моё/мои X", "помнишь(/-ите) мой X",
+    # "что ты обо мне знаешь", "что я тебе говорил"
+    r"|что\s+(?:мо[яийё]|мои)\s+\w+"
+    r"|какой\s+(?:мо[яийё]|мои)\s+\w+"
+    r"|помн(?:ишь|ите)\s+(?:мо[яийё]|мои|что\s+я)\b"
+    r"|что\s+ты\s+(?:обо\s+мне|про\s+меня)\s+знаешь"
+    r"|что\s+я\s+тебе\s+(?:говорил|сказал)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _looks_like_profile_recall(text: str) -> bool:
+    """True for questions whose subject is the user's own stored
+    profile / memory. Short questions only — long messages are
+    almost certainly tasks even if they happen to contain a
+    'remember' substring. See `_PROFILE_RECALL_RE` for the patterns."""
+    if not text or len(text) > 200:
+        return False
+    return bool(_PROFILE_RECALL_RE.search(text))
+
+
 # Детектор вопросов агента о самом себе — используется в _chat_reply,
 # чтобы подмешать capabilities block даже в лёгком режиме.
 _SELF_QUESTION_RE = re.compile(
@@ -1373,7 +1415,17 @@ class Agent(
         `confidence` + `contradictions` come from the verifier; the
         extractor uses them to drop agent-answer mining on low-confidence
         turns so we don't pollute the graph with wrong claims.
+
+        Skipped entirely on profile-recall turns ('what is my color?',
+        'do you remember X'). Those questions are recall-only — they
+        don't introduce new facts about the user, but pre-fix the
+        extractor was scanning the agent's answer ('Your color is
+        teal') and creating a duplicate of an already-stored fact on
+        every recall. The memory log doubled in size on every
+        conversation about previously-stored topics.
         """
+        if _looks_like_profile_recall(user_msg):
+            return
         try:
             facts = MEMORY.extract_and_store(
                 user_msg, answer, intent=intent,
@@ -1855,6 +1907,18 @@ class Agent(
                     vr.confidence < critic_threshold
                     and not no_notes  # don't retry if there's no evidence at all
                 )
+                # Self-analysis retry guard: the audit caught a single
+                # "how are you built?" turn racking up 11 LLM calls /
+                # $0.26 because the verifier returned 67% confidence
+                # (under the 70 threshold), triggering a retry that
+                # re-ran think + solve + verify. For self-analysis
+                # turns, the first answer already had access to up to
+                # 60K of source code via read_file/view_file — a
+                # retry won't discover new code that wasn't
+                # accessible before, so it just burns cost without
+                # improving the answer. Cap retries to 0 here.
+                if is_self_analysis:
+                    should_retry = False
                 # Accumulate tool_context across retry attempts so the
                 # verifier on attempt N still sees evidence collected
                 # on attempts 1..N-1.

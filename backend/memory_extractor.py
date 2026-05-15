@@ -135,6 +135,39 @@ def _looks_like_agent_self_rule(
     return False
 
 
+# Normative relations turn an "I refused to do X because Y is bad
+# practice" answer into would-be user facts. Production audit caught
+# the extractor pulling:
+#   (plaintext password, should_not_be_stored_in, chat memory)
+#   (staging server credential, should_be_stored_in, password manager)
+# both from a single agent REFUSAL. These read as advice / norms,
+# not facts about the user — they pollute user_profile and KG. The
+# filter below drops triples whose relation starts with these
+# prefixes; legitimate user facts use `is`, `has`, `prefers`,
+# `lives_in`, etc.
+_NORMATIVE_RELATION_PREFIXES = (
+    "should_", "must_", "ought_to_", "need_to_", "needs_to_",
+    "shall_", "may_not_", "cannot_", "can_not_",
+)
+
+
+def _is_normative_triple(triple: tuple[str, str, str]) -> bool:
+    """True for triples whose relation is normative advice rather
+    than a fact. Used to filter out generic best-practice claims the
+    extractor sometimes pulls from agent refusals / explanations."""
+    rel = (triple[1] or "").strip().lower().replace(" ", "_")
+    return rel.startswith(_NORMATIVE_RELATION_PREFIXES)
+
+
+def _filter_advice_triples(
+    triples: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Drop normative / advice-shaped triples from the list. Returns
+    the kept triples in the original order. Empty list if every
+    triple was an advice triple (caller then drops the whole fact)."""
+    return [t for t in triples if not _is_normative_triple(t)]
+
+
 class MemoryFact:
     """A single fact extracted from conversation. Tagged with the
     `speaker_id` that produced it so per-speaker filtering is
@@ -275,6 +308,21 @@ class MemoryExtractor:
                 # взаимодействия` of the Telegram speaker profile.
                 if _looks_like_agent_self_rule(raw, triples):
                     continue
+
+                # Strip normative / advice triples within a fact. The
+                # production audit caught the extractor pulling
+                # `(plaintext password, should_not_be_stored_in, chat
+                # memory)` and `(staging server credential,
+                # should_be_stored_in, password manager)` from a
+                # single agent refusal. They are best-practice
+                # advice, not facts about the user — pollute user
+                # context if persisted. If every triple in a fact is
+                # an advice triple, drop the whole fact (it's all
+                # norms, no content).
+                filtered_triples = _filter_advice_triples(triples)
+                if not filtered_triples:
+                    continue
+                triples = filtered_triples
 
                 fact = MemoryFact(
                     summary=raw.get("summary", ""),
