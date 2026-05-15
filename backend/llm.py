@@ -2961,9 +2961,20 @@ class DualModelRouter:
         choice, reason = self._pick(task_type)
         self.state["last_reason"] = reason
         tt = task_type.value
-        try:
+        # Audit #13: when failover is enabled but no active model is
+        # pinned, the default A/B path should ALSO use the chain
+        # (after the legacy A→B fallback fires). Pre-fix the chain
+        # only applied to pinned-model turns, which surprised users
+        # who configured a failover chain expecting it to always
+        # work. Strategy: try the picked model first; on LLMError,
+        # try B (if A failed) per legacy behaviour, then walk the
+        # failover chain as a final tier. The chain is best-effort
+        # — if it's disabled or empty, behaviour matches pre-fix.
+        from . import failover as _fo
+
+        def _ab_primary():
             if choice == "a":
-                out = self.model_a.complete(
+                out_local = self.model_a.complete(
                     system, user, max_tokens=max_tokens, temperature=temperature,
                     attachments=attachments, _task_type=tt,
                 )
@@ -2972,19 +2983,24 @@ class DualModelRouter:
                     self.cfg_router.get("estimated_cost_per_call_usd", 0.01)
                 )
                 self.state["total_a_calls"] += 1
+                return out_local
             else:
-                # Local Qwen (Ollama base) doesn't accept image attachments;
-                # they'll be silently dropped by the LLM. That's correct
-                # behaviour for non-vision models.
-                out = self.model_b.complete(
+                out_local = self.model_b.complete(
                     system, user, max_tokens=max_tokens, temperature=temperature,
                     _task_type=tt,
                 )
                 self.state["model_b_calls_today"] += 1
                 self.state["total_b_calls"] += 1
+                return out_local
+
+        try:
+            out = _ab_primary()
             self._save_state()
             return out
-        except LLMError:
+        except LLMError as primary_err:
+            # Tier 1: legacy A→B fallback (the only fallback before
+            # Phase 15B). Preserved for back-compat — Qwen-via-Ollama
+            # is the documented "free local model" path.
             if (
                 choice == "a"
                 and self.cfg_router.get("fallback_to_local", True)
@@ -3002,8 +3018,58 @@ class DualModelRouter:
                     return out
                 except LLMError:
                     pass
+            # Tier 2 (audit #13): walk the user-configured failover
+            # chain. Each entry is a real provider+model registered
+            # via WebUI / `hrant failover add`. Failure to load the
+            # chain config or build a client falls through to the
+            # original re-raise.
+            try:
+                cfg = _fo.load_config()
+                if cfg.get("enabled") and (cfg.get("chain") or []):
+                    attempts: list = []
+                    for entry in cfg.get("chain") or []:
+                        pid = entry.get("provider_id", "")
+                        em = entry.get("model", "")
+                        entry_cfg = _fo.resolve_entry_cfg(pid, em)
+                        if entry_cfg is None:
+                            continue
+
+                        def _fb(c=entry_cfg) -> str:
+                            try:
+                                llm = create_llm(c)
+                            except LLMError:
+                                raise
+                            except Exception as e:
+                                raise LLMError(
+                                    f"create_llm({c.get('provider_id')}/"
+                                    f"{c.get('model')}): {e}"
+                                ) from e
+                            return llm.complete(
+                                system, user, max_tokens=max_tokens,
+                                temperature=temperature, attachments=attachments,
+                                _task_type=tt,
+                            )
+
+                        attempts.append((pid, em, _fb))
+                    if attempts:
+                        out = _fo.try_call(
+                            attempts,
+                            retry_on=cfg.get("retry_on"),
+                            max_attempts=cfg.get("max_attempts"),
+                        )
+                        self.state["last_reason"] = (
+                            f"{reason} → A/B failed → failover chain"
+                        )
+                        self._save_state()
+                        return out
+            except LLMError:
+                # Chain exhausted too — fall through to the original
+                # raise so the caller sees a coherent error.
+                pass
+            except Exception as e:
+                log.warning("failover chain in A/B path crashed: %s", e)
             self._api_cache = (time.time(), False)
-            raise
+            raise primary_err
 
     def call_json(self, task_type: TaskType, system: str, user: str, **kw) -> dict:
         raw = self.call(

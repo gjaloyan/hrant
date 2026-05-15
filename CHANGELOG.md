@@ -10,6 +10,26 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## QA-audit-fix3 (2026-05-15)
+
+Closes 7 more findings from the original full-codebase audit:
+
+**Important fixes:**
+- **#9** Per-IP rate-limit on `POST /api/chat`. Defence-in-depth on top of the owner-role gate: 60 req/min, 10 req/5s burst, both tunable via env (`HRANT_CHAT_RATE_PER_MIN`, `HRANT_CHAT_RATE_BURST`). New `backend/api/_rate_limit.py` — single-process sliding-window deque, no external dep.
+- **#10** Telegram group-chat isolation. Bot now refuses messages from groups/supergroups/channels unless the speaker is in `allowed_users`. Quiet drop (no reply spam) + log line for the owner. Set `HRANT_TELEGRAM_ALLOW_GROUPS=1` to revert.
+- **#13** Failover chain now applies in the default A/B routing path too. Before: only pinned-model turns walked the chain; default routing did A→B then died. After: A→B→chain (chain runs as Tier 2 fallback when both A and B failed).
+- **#14** `agent.run` is now safe under re-entrancy. Snapshots all instance state at entry, restores in `finally`. Today no tool handler calls back into `agent.run`, but if any future skill does, outer call state survives.
+- **#16** Dedup cache for `_existing_fact_summaries`. Cache key is `(mtime, size)` of `memory_facts.jsonl` so concurrent appends from autonomic levers invalidate cleanly. Eliminates ~30ms of redundant I/O per consolidation when nothing changed on disk.
+
+**Minor fixes:**
+- **#20** `/api/notes-graph/*` alias added for the legacy `/api/graph/*` triples graph. Both URLs serve the same data; the new name is clearer about what's being queried (notes graph vs Phase 16C memory graph at `/api/kgraph/*`).
+- **#23** Dead-code audit done. `ANALOGIES`, `EVALUATOR`, `META_LEARNER`, `embedding_backfill` are all in real use — nothing to remove.
+- **#28** Stricter `require_owner_strict(request, action=...)` helper added next to the existing lenient `require_owner_for_writes`. Refuses the request when the speaker ContextVar is unset within an HTTP request context. Not applied to any endpoint yet — opt-in for endpoints that can't tolerate a "ContextVar setter bug silently passes" failure mode.
+
+All 1187 tests pass.
+
+---
+
 ## QA-audit-fix2 (2026-05-15)
 
 Second pass on the full-codebase QA audit, after honest recheck:

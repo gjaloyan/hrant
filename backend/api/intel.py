@@ -76,6 +76,44 @@ def graph_full():
     return {"nodes": nodes, "links": links}
 
 
+# ---- /api/notes-graph alias (audit #20) ---------------------------
+#
+# The legacy `/api/graph/*` endpoints above are the note-triples
+# graph extracted by `knowledge_graph.GRAPH`. Phase 16C added a
+# separate `/api/kgraph/*` for the memory/facts graph. Having two
+# endpoints called "graph" was confusing — aliasing the legacy
+# routes as `/api/notes-graph/*` lets callers (CLI, docs, future
+# WebUI) use a clearer name. Both URLs serve the same data; the
+# original `/api/graph/*` stays around so existing WebUI / scripts
+# don't break.
+
+
+@router.get("/api/notes-graph")
+def notes_graph_stats():
+    return GRAPH.stats()
+
+
+@router.post("/api/notes-graph/reindex")
+def notes_graph_reindex():
+    require_owner_for_writes(action="reindexing the notes graph")
+    return reindex_all_notes()
+
+
+@router.get("/api/notes-graph/entities")
+def notes_graph_entities():
+    return graph_entities()
+
+
+@router.get("/api/notes-graph/neighbors/{entity}")
+def notes_graph_neighbors(entity: str):
+    return graph_neighbors(entity)
+
+
+@router.get("/api/notes-graph/full")
+def notes_graph_full():
+    return graph_full()
+
+
 # ---- meta-learner ----
 @router.get("/api/meta-learner")
 def meta_learner_stats():

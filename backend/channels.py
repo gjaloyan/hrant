@@ -539,7 +539,38 @@ class TelegramBot:
                 user = update.effective_user
                 username = user.username or str(user.id)
 
-                # Check allowed users (empty = allow all)
+                # Audit #10: group-chat isolation. If the bot was
+                # added to a Telegram group (or supergroup/channel),
+                # every member can talk to it — they each show up as
+                # a distinct `telegram:<id>` speaker and consume the
+                # owner's LLM quota. By default we refuse in group
+                # chats unless the user is in `allowed_users`. Set
+                # `HRANT_TELEGRAM_ALLOW_GROUPS=1` to revert to the
+                # pre-fix behaviour (every group member chats freely).
+                chat = update.effective_chat
+                in_group = (
+                    chat is not None
+                    and chat.type in ("group", "supergroup", "channel")
+                )
+                if in_group and not _os_for_concurrency.environ.get(
+                    "HRANT_TELEGRAM_ALLOW_GROUPS"
+                ):
+                    if not allowed or (
+                        username not in allowed and str(user.id) not in allowed
+                    ):
+                        # Quiet refusal — don't reply to every group
+                        # message, that'd be its own spam pattern.
+                        # Just drop. Owner sees the access-denied
+                        # branch fire in the bot's logs.
+                        log.info(
+                            "TG group-chat %s rejected for %s (not in "
+                            "allowed_users; set HRANT_TELEGRAM_ALLOW_GROUPS "
+                            "to allow all)",
+                            chat.id, username,
+                        )
+                        return
+
+                # Check allowed users (empty = allow all in DMs)
                 if allowed and username not in allowed and str(user.id) not in allowed:
                     await update.message.reply_text("Access denied.")
                     return

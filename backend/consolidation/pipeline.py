@@ -154,6 +154,16 @@ def _render_transcript(bundle: gather.ActivityBundle) -> str:
     return text
 
 
+_FACT_CACHE: dict[str, tuple[float, int, set[str]]] = {}
+# `path → (mtime, size, summaries_set)` so repeated reads of the
+# same file inside a single process don't re-tokenise it from disk.
+# Audit #16: previously every consolidation re-read + re-scanned
+# the whole file. Cache key is mtime+size so concurrent appends
+# (autonomic lever runs while a consolidation tick is in flight)
+# invalidate cleanly. RLock not needed at single-process scale
+# but if the cache grows multiple-key, gate with one.
+
+
 def _existing_fact_summaries(limit: int = 5000) -> set[str]:
     """Recent memory_facts.jsonl summaries lower-cased, for dedup.
 
@@ -161,10 +171,26 @@ def _existing_fact_summaries(limit: int = 5000) -> set[str]:
     500 lines covered ~100 days of history; at the personal-agent
     scale (5–10 years of daily consolidation) the cap is now well
     out of reach. Reads ~1MB max on the rare full-cap day — still
-    cheap. For larger deployments we'd need a real index."""
+    cheap. For larger deployments we'd need a real index.
+
+    Audit #16: cached by (mtime, size) so two consolidations in the
+    same process don't re-parse the file. The cache key invalidates
+    on any disk change so concurrent appends (autonomic lever
+    running while a consolidation tick is in flight) refresh
+    correctly."""
     p = paths.knowledge_dir() / "memory_facts.jsonl"
     if not p.exists():
         return set()
+    # Cache lookup: same (mtime, size) → reuse previous result.
+    try:
+        stat = p.stat()
+        cache_key = (stat.st_mtime, stat.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        cached = _FACT_CACHE.get(str(p))
+        if cached is not None and (cached[0], cached[1]) == cache_key:
+            return set(cached[2])  # copy so callers can mutate freely
     out: set[str] = set()
     try:
         lines = p.read_text(encoding="utf-8").splitlines()[-limit:]
@@ -181,6 +207,11 @@ def _existing_fact_summaries(limit: int = 5000) -> set[str]:
         s = obj.get("summary") or obj.get("text")
         if s:
             out.add(str(s).strip().lower())
+    # Populate cache (size-bounded by clearing when too many keys).
+    if cache_key is not None:
+        if len(_FACT_CACHE) > 8:
+            _FACT_CACHE.clear()
+        _FACT_CACHE[str(p)] = (cache_key[0], cache_key[1], set(out))
     return out
 
 

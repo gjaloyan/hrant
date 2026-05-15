@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from ..agent import Agent
@@ -16,17 +16,22 @@ from ..models import ChatRequest
 from ..project_mode import PROJECTS
 from ..sessions import SESSIONS
 from ._auth import require_owner_for_writes
+from ._rate_limit import check_chat_rate
 
 router = APIRouter()
 
 
 @router.post("/api/chat")
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     # Owner-only chat from the WebUI. Telegram + other channels go
     # through their own handlers in channels.py and don't hit this
     # endpoint. Without this gate, a `--gateway`-bound install lets
     # anyone reachable consume the owner's LLM quota.
     require_owner_for_writes(action="chatting with the agent")
+    # Audit #9: per-IP rate-limit. Even with the role gate above
+    # in place, a leaked session or future bug could let unauth
+    # traffic through; the limiter is defence-in-depth.
+    check_chat_rate(request)
     queue: asyncio.Queue = asyncio.Queue()
 
     def progress(event: str, msg: str, tool_call=None) -> None:

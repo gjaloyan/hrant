@@ -1441,6 +1441,21 @@ class Agent(
     ) -> AgentAnswer:
         import time as _time
         from .sessions import normalize_speaker
+        # Audit #14: agent.run state used to be set unconditionally
+        # on `self`, so a re-entrant call (tool handler that itself
+        # invokes another agent.run) would clobber the outer call's
+        # state silently. Today no tool handler does that, but the
+        # design is brittle. Snapshot the prior state on entry and
+        # restore in `finally` so re-entrancy is safe even though
+        # it's still not a documented pattern.
+        _prev_state = {
+            attr: getattr(self, attr, None)
+            for attr in (
+                "_trace", "_llm_calls", "_request_id",
+                "_self_analysis_unverified", "_t0", "_attachments",
+                "_channel", "_speaker_id", "_role", "_role_token", "_mode",
+            )
+        }
         TOKENS.reset_request()
         self._trace = []
         self._llm_calls = []
@@ -2045,3 +2060,14 @@ class Agent(
                 _roles.reset_current_speaker(self._role_token)
             except Exception:
                 pass
+            # Audit #14: restore instance state captured at the top
+            # of run(). Makes re-entrancy safe — an inner run()'s
+            # state doesn't survive past its own `finally`.
+            for _attr, _val in _prev_state.items():
+                if _val is None:
+                    try:
+                        delattr(self, _attr)
+                    except AttributeError:
+                        pass
+                else:
+                    setattr(self, _attr, _val)
