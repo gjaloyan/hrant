@@ -85,9 +85,8 @@ def test_answer_with_no_proper_nouns_is_grounded_by_default():
 
 
 def test_partial_grounding_above_threshold():
-    """If at least 1/3 of proper nouns trace back to sources, the
-    answer is considered grounded — legitimate answers sometimes
-    introduce one new term while citing several known ones."""
+    """When at least HALF of proper nouns trace back to sources, the
+    answer is considered grounded. 3/4 grounded passes; 1/3 fails."""
     answer = (
         "**Yerevan**, **Gyumri**, and **Vanadzor** are major cities; "
         "**Spitak** was an earthquake site."
@@ -95,6 +94,21 @@ def test_partial_grounding_above_threshold():
     notes = "Yerevan, Gyumri and Vanadzor are Armenian cities."
     # Spitak not in notes → 3/4 grounded → not ungrounded.
     assert _is_ungrounded(answer, notes, "") is False
+
+
+def test_one_third_grounding_now_caught():
+    """Audit follow-up: an answer about 'Plasmodyne' (made up) where
+    'Kvadrigalt' (also made up, but matched a leftover note) was
+    cited got 1/3 grounding and slipped past the old threshold.
+    50% catches it now."""
+    answer = (
+        "**Plasmodyne** by **Theodorinka2** relates to the earlier "
+        "**Kvadrigalt** protocol."
+    )
+    # Old leftover note mentioned Kvadrigalt; Plasmodyne / Theodorinka2
+    # are fresh fabrications.
+    notes = "Kvadrigalt is a fictional protocol design we discussed."
+    assert _is_ungrounded(answer, notes, "") is True
 
 
 def test_empty_haystack_means_ungrounded():

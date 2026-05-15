@@ -515,16 +515,18 @@ def _is_ungrounded(answer: str, notes_text: str, tool_context: str) -> bool:
     any source. Used as a defence against the verifier-LLM accepting
     fabricated content as 'verified'.
 
-    The check is intentionally lenient: an answer is considered
-    grounded if at least 1/3 of its proper nouns appear (case-
-    insensitive substring) in notes or tool output. Less than that
-    looks like the agent invented the topic vocabulary.
+    Threshold: an answer is considered grounded when at least HALF
+    of its proper nouns appear (case-insensitive substring) in
+    notes or tool output. The initial cut at 1/3 was too lenient —
+    a follow-up audit caught an answer about an invented
+    'Plasmodyne protocol' shipping at 95% confidence because one of
+    three proper nouns ('Kvadrigalt') matched a leftover note from
+    an earlier turn while the other two ('Plasmodyne',
+    'Theodorinka2') were pure fabrication. 50% catches that case.
 
     Excludes: answers with no proper nouns at all (pure prose; no
-    grounding to check) and answers where the question itself
-    contributed the proper noun (e.g. user mentioned 'Kvadrigalt'
-    in their message — that doesn't ground anything but it also
-    doesn't add to the agent's hallucination signal)."""
+    grounding to check) and empty-source answers (separately
+    handled by the existing notes/tool empty short-circuit)."""
     nouns = _proper_nouns(answer)
     if not nouns:
         return False
@@ -532,7 +534,9 @@ def _is_ungrounded(answer: str, notes_text: str, tool_context: str) -> bool:
     if not haystack.strip():
         return True
     grounded = sum(1 for n in nouns if n.lower() in haystack)
-    return grounded < max(1, len(nouns) // 3)
+    # Half-rounded-up: 1/2, 1/3 (no — too lenient), 2/4, 2/5, 3/6...
+    needed = max(1, (len(nouns) + 1) // 2)
+    return grounded < needed
 
 
 def verify(
