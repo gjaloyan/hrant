@@ -35,9 +35,25 @@ from pathlib import Path
 from typing import Optional
 
 
-VERSION = "0.1.0"
-
 ROOT = Path(__file__).resolve().parent.parent
+
+
+def _version_str() -> str:
+    """`{base}.{commit_count}` — see `backend.version` for the scheme.
+    Wrapped in a function so `--version` / `hrant version` always
+    reflects the current git state, not whatever was cached at
+    module-import time (which is wrong after `hrant update`)."""
+    from . import version as _v
+    return _v.get_version()
+
+
+# Back-compat shim: tests / older imports referenced `cli.VERSION`.
+# Resolve via the dynamic helper instead of pinning a string so the
+# value stays correct after each commit.
+def __getattr__(name: str):  # pragma: no cover — trivial dispatcher
+    if name == "VERSION":
+        return _version_str()
+    raise AttributeError(f"module 'cli' has no attribute {name!r}")
 
 
 # --- helpers --------------------------------------------------------------
@@ -234,6 +250,25 @@ def cmd_init(args: argparse.Namespace) -> int:
 # --- run ------------------------------------------------------------------
 
 
+def cmd_version(args: argparse.Namespace) -> int:
+    """Print the running agent's version with full provenance.
+
+    Layout matches `git status`-style output (label + value, two-space
+    indent) so the same command can be scraped by tooling or read by
+    a human. The first line is just the version string — predictable
+    output for shell pipelines (`hrant version | head -1`)."""
+    from . import version as _v
+    info = _v.get_version_info()
+    print(f"hrant {info.full}")
+    if info.commit:
+        print(f"  commit  {info.commit}")
+    if info.branch:
+        print(f"  branch  {info.branch}")
+    if info.commit_date:
+        print(f"  date    {info.commit_date}")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     """Boot the FastAPI server via uvicorn.
 
@@ -300,7 +335,7 @@ def cmd_status(args: argparse.Namespace) -> int:
       - Telegram channels + running state
       - Workspace + knowledge tree sizes
     """
-    print(f"agent v{VERSION}  python {sys.version.split()[0]}  on {sys.platform}")
+    print(f"agent v{_version_str()}  python {sys.version.split()[0]}  on {sys.platform}")
     print()
 
     # --- config
@@ -1494,8 +1529,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("rest", nargs=argparse.REMAINDER)
     p_chat.set_defaults(func=cmd_chat)
 
-    p_version = sub.add_parser("version", help="print version")
-    p_version.set_defaults(func=lambda _a: (print(VERSION), 0)[1])
+    p_version = sub.add_parser(
+        "version",
+        help="print the running agent version (baseline + commit count + sha + date)",
+    )
+    p_version.set_defaults(func=cmd_version)
 
     return parser
 
@@ -1504,7 +1542,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.version:
-        print(VERSION)
+        print(_version_str())
         return 0
     if not getattr(args, "func", None):
         parser.print_help()

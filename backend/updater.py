@@ -405,6 +405,15 @@ def do_update(
     messages: list[str] = []
     old = current_sha()
     br = current_branch() or branch
+    # Snapshot version BEFORE the pull so we can show a before→after
+    # delta on success. backend.version reads `git rev-list --count
+    # HEAD` at call time, so re-resolving after the pull naturally
+    # reports the new version with no extra bookkeeping.
+    try:
+        from . import version as _vmod
+        _pre_version = _vmod.get_version()
+    except Exception:
+        _pre_version = ""
 
     # Pre-update consent: warn if active self-mods will be archived.
     active_count = count_active_self_mods()
@@ -486,10 +495,14 @@ def do_update(
         # is the canonical content anyway.
         if stashed_noisy:
             drop_top_stash()
+        msg = (
+            f"already up to date (version {_pre_version})"
+            if _pre_version else "already up to date"
+        )
         return UpdateResult(
             ok=True, old_sha=old, new_sha=old, branch=br,
             pulled_commits=0, pip_ran=False, frontend_built=False,
-            messages=["already up to date"],
+            messages=[msg],
         )
 
     # Record BEFORE we change anything so a partial-fail update
@@ -516,7 +529,21 @@ def do_update(
         ))
 
     new = current_sha()
-    messages.append(f"pulled {len(incoming)} commits ({old[:8]} → {new[:8]})")
+    # Version snapshot AFTER the pull — backend.version reads
+    # `git rev-list --count HEAD` at call time, so this reflects
+    # the post-pull state. `_pre_version` is captured at the top of
+    # this function for the before-side of the delta.
+    from . import version as _vmod
+    post_version = _vmod.get_version()
+    if _pre_version and post_version and _pre_version != post_version:
+        messages.append(
+            f"pulled {len(incoming)} commits ({old[:8]} → {new[:8]}, "
+            f"version {_pre_version} → {post_version})"
+        )
+    else:
+        messages.append(
+            f"pulled {len(incoming)} commits ({old[:8]} → {new[:8]})"
+        )
 
     pip_ran = False
     if not skip_pip:

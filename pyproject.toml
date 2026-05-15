@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agi-agent"
-version = "0.1.0"
+version = "0.16"  # baseline; runtime appends ".{commit_count}" (see backend/version.py)
 description = "Self-learning local AI agent (Claude + Qwen dual-router, claims/evidence verifier, autonomic levers)"
 readme = "README.md"
 requires-python = ">=3.11"

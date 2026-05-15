@@ -251,17 +251,26 @@ def test_parser_prog_name_is_hrant():
 
 
 def test_version_subcommand(capsys):
+    """`hrant version` first line is `hrant {full}`; subsequent lines
+    carry commit / branch / date metadata. Output is multi-line now
+    — see `backend.version` for the scheme."""
     rc = cli_mod.main(["version"])
     out = capsys.readouterr().out.strip()
     assert rc == 0
-    assert out == cli_mod.VERSION
+    lines = out.splitlines()
+    assert lines[0].startswith("hrant ")
+    from backend import version as _v
+    assert _v.get_version() in lines[0]
 
 
 def test_version_flag_top_level(capsys):
+    """`hrant --version` keeps the legacy single-line format (just
+    the version string) for shell-script compatibility."""
     rc = cli_mod.main(["--version"])
     out = capsys.readouterr().out.strip()
     assert rc == 0
-    assert out == cli_mod.VERSION
+    from backend import version as _v
+    assert out == _v.get_version()
 
 
 def test_status_runs_without_raising(capsys):
