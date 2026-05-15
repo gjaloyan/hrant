@@ -116,7 +116,11 @@ def test_commits_ahead_returns_empty_when_up_to_date():
 
 
 def test_update_refuses_on_dirty_tree(isolated_history):
+    """Real WIP edits (anything outside the auto-regen whitelist)
+    must keep blocking — silently stashing arbitrary user work
+    would feel like data loss."""
     with patch.object(updater, "is_dirty", return_value=True), \
+         patch.object(updater, "only_auto_regenerated_files_dirty", return_value=False), \
          patch.object(updater, "current_sha", return_value="old"), \
          patch.object(updater, "current_branch", return_value="master"):
         r = updater.do_update(assume_yes=True)
@@ -124,6 +128,84 @@ def test_update_refuses_on_dirty_tree(isolated_history):
     assert "dirty" in (r.error or "").lower() or "uncommitted" in (r.error or "").lower()
     # No history entry written when we refused before doing anything.
     assert not isolated_history.exists()
+
+
+def test_update_auto_stashes_only_lockfile_noise(isolated_history):
+    """When the ONLY dirty file is a known-noisy lockfile (npm
+    regenerates `frontend/package-lock.json` on every install),
+    auto-stash + proceed + drop the stash. The next `npm install`
+    step rewrites the file with the same noise anyway."""
+    stash_calls: list[str] = []
+    drop_calls: list[int] = []
+    restore_calls: list[int] = []
+
+    def _fake_stash(msg: str) -> bool:
+        stash_calls.append(msg)
+        return True
+
+    with patch.object(updater, "is_dirty", return_value=True), \
+         patch.object(updater, "only_auto_regenerated_files_dirty", return_value=True), \
+         patch.object(updater, "stash_auto_regenerated", side_effect=_fake_stash), \
+         patch.object(updater, "drop_top_stash", side_effect=lambda: drop_calls.append(1)), \
+         patch.object(updater, "restore_top_stash", side_effect=lambda: restore_calls.append(1)), \
+         patch.object(updater, "current_sha", side_effect=["old", "new"]), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "fetch_remote", return_value=(True, "")), \
+         patch.object(updater, "commits_ahead", return_value=[{"sha": "abc", "subject": "x"}]), \
+         patch.object(updater, "frontend_changed", return_value=False), \
+         patch.object(updater, "_git") as gitmock, \
+         patch.object(updater, "run_pip_install", return_value=(True, "")):
+        # `_git("pull", ...)` is the only direct call left.
+        gitmock.return_value.returncode = 0
+        r = updater.do_update(assume_yes=True)
+    assert r.ok is True
+    assert stash_calls, "expected the noisy file to be stashed"
+    # Success path drops the stash (we don't want to restore the
+    # pre-update lockfile content; the freshly regenerated one wins).
+    assert drop_calls == [1], drop_calls
+    assert restore_calls == [], "should NOT restore on success"
+
+
+def test_update_restores_stash_when_update_fails_after_stash(isolated_history):
+    """If we auto-stashed AND the update bails (fetch fails, pip
+    fails, etc.), restore the stash so the user's working tree
+    returns to its pre-update state."""
+    restore_calls: list[int] = []
+    drop_calls: list[int] = []
+    with patch.object(updater, "is_dirty", return_value=True), \
+         patch.object(updater, "only_auto_regenerated_files_dirty", return_value=True), \
+         patch.object(updater, "stash_auto_regenerated", return_value=True), \
+         patch.object(updater, "drop_top_stash", side_effect=lambda: drop_calls.append(1)), \
+         patch.object(updater, "restore_top_stash", side_effect=lambda: restore_calls.append(1)), \
+         patch.object(updater, "current_sha", return_value="old"), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "fetch_remote", return_value=(False, "no network")):
+        r = updater.do_update(assume_yes=True)
+    assert r.ok is False
+    assert "git fetch failed" in (r.error or "")
+    assert restore_calls == [1], "stash must be restored when update bailed"
+    assert drop_calls == [], "stash must NOT be dropped on failure"
+
+
+def test_only_auto_regenerated_files_dirty_distinguishes_real_wip(tmp_path):
+    """Unit-level sanity: a tree with ONLY `frontend/package-lock.json`
+    dirty returns True; adding any other file returns False."""
+    with patch.object(updater, "dirty_tracked_files", return_value=[]):
+        assert updater.only_auto_regenerated_files_dirty() is False  # clean
+    with patch.object(
+        updater, "dirty_tracked_files",
+        return_value=["frontend/package-lock.json"],
+    ):
+        assert updater.only_auto_regenerated_files_dirty() is True
+    with patch.object(
+        updater, "dirty_tracked_files",
+        return_value=["frontend/package-lock.json", "backend/agent.py"],
+    ):
+        assert updater.only_auto_regenerated_files_dirty() is False
+    with patch.object(
+        updater, "dirty_tracked_files", return_value=["backend/agent.py"],
+    ):
+        assert updater.only_auto_regenerated_files_dirty() is False
 
 
 def test_update_returns_up_to_date_when_no_incoming(isolated_history):
