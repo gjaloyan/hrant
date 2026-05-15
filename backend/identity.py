@@ -121,6 +121,65 @@ _SECTION_BY_CATEGORY: dict[str, str] = {
 _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD = "webui:default"
 
 
+# Patterns for lines that the memory extractor sometimes lands in
+# user_profile.md but actually describe AGENT behavior, not the user.
+# Example pollution (real, from a production install):
+#     ## Правила взаимодействия
+#     - Respond to the name Hrant.  _(добавлено 2026-05-14)_
+# Inside USER PROFILE that line reads as "the user is named Hrant",
+# which conflates with the actual agent name from identity.md and
+# the model starts addressing the user with the agent's own name.
+# Identity is the ONLY source of truth for the agent's name — we
+# never want this in user_profile.
+_AGENT_BEHAVIOR_PATTERNS = (
+    "respond to the name",
+    "answer to the name",
+    "reply as ",
+    "your name is",
+    "you are called",
+    "you answer to",
+    "откликаешься на имя",
+    "тебя зовут",  # only when describing the AGENT, not the user
+)
+
+
+def _looks_like_agent_behavior_line(line: str) -> bool:
+    """True for bullet lines that describe how the AGENT should behave
+    (especially agent-name rules) rather than facts about the user.
+
+    Only fires on bullet lines (`-` / `*`) inside markdown lists; section
+    headers and prose are left alone."""
+    s = line.strip()
+    if not s or not s.startswith(("-", "*")):
+        return False
+    body = s.lstrip("-*").strip().lower()
+    if not body:
+        return False
+    # "тебя зовут <name>" inside user_profile is ambiguous — keep
+    # variants that name the user explicitly. The bug only fires when
+    # the name matches identity.md's agent name, but the read-side
+    # filter can't know which name belongs to which side. So strip
+    # all "тебя зовут" lines from user_profile too — the user's name
+    # belongs in `User is named X` / `User's name is X` bullets which
+    # don't match this pattern. A false-positive removal degrades to
+    # "agent doesn't see this particular phrasing"; the canonical
+    # `User is named X` bullet (if present) survives.
+    for pat in _AGENT_BEHAVIOR_PATTERNS:
+        if pat in body:
+            return True
+    return False
+
+
+def _strip_agent_behavior_lines(text: str) -> str:
+    """Drop bullet lines that look like agent-behavior rules
+    accidentally written into user_profile.md. Section headers and
+    prose are preserved verbatim."""
+    return "\n".join(
+        ln for ln in text.splitlines()
+        if not _looks_like_agent_behavior_line(ln)
+    )
+
+
 def _sanitize_speaker_for_path(speaker_id: str) -> str:
     """Convert a speaker_id ('telegram:123', 'webui:default', …) into
     a filesystem-safe filename stem. Colons forbidden on Windows;
@@ -223,7 +282,15 @@ class IdentityManager:
         """Read the per-speaker user_profile.md. On first read for a
         non-default speaker, the file is auto-created from the
         _DEFAULT_USER template so the profile is editable from the
-        moment a new speaker arrives."""
+        moment a new speaker arrives.
+
+        Agent-behavior rules misclassified as user facts (e.g.
+        `Respond to the name Hrant.`) are stripped from the returned
+        text. They live on disk for audit history (so the user can
+        see what was extracted and correct the extractor), but they
+        must not reach the prompt — there they read as 'the user is
+        named Hrant' and trigger the cross-name confusion bug.
+        Extraction-side suppression is in memory_extractor.py."""
         path = self._user_path_for(speaker_id)
         if not path.exists():
             try:
@@ -231,7 +298,7 @@ class IdentityManager:
                 path.write_text(_DEFAULT_USER, encoding="utf-8")
             except Exception:
                 return _DEFAULT_USER
-        return path.read_text(encoding="utf-8")
+        return _strip_agent_behavior_lines(path.read_text(encoding="utf-8"))
 
     def list_speaker_profiles(self) -> list[dict]:
         """Every user_profile file present on disk. Returns
@@ -316,6 +383,40 @@ class IdentityManager:
             identity_text, ("## Имя", "## Name"),
         )
 
+    @classmethod
+    def _extract_user_name(cls, profile_text: str) -> str:
+        """Best-effort: pull the user's first name from user_profile.md.
+
+        Looks at the `## О пользователе` / `## About` / `## Name`
+        sections and tries to extract a name. The body is free-form
+        prose so we use a few simple patterns. Empty when nothing
+        matches — the caller then omits the USER NAME block instead
+        of guessing.
+        """
+        import re as _re
+        body = cls._extract_section(
+            profile_text,
+            (
+                "## Имя", "## Name",
+                "## О пользователе", "## About",
+                "## About the user",
+            ),
+        )
+        # Patterns: "User's name is X", "User is X", "Меня зовут X",
+        # "Пользователя зовут X", "User is named X". Stop at comma /
+        # period / end-of-line — names are short.
+        for pat in (
+            r"[Uu]ser'?s?\s+name\s+is\s+([A-Z][A-Za-zА-Яа-яЁё\-]+)",
+            r"[Uu]ser\s+is\s+named\s+([A-Z][A-Za-zА-Яа-яЁё\-]+)",
+            r"[Uu]ser\s+is\s+([A-Z][A-Za-zА-Яа-яЁё\-]+)\s*[,.]",
+            r"[Мм]еня\s+зовут\s+([A-Za-zА-Яа-яЁё\-]+)",
+            r"[Пп]ользователя\s+зовут\s+([A-Za-zА-Яа-яЁё\-]+)",
+        ):
+            m = _re.search(pat, body)
+            if m:
+                return m.group(1).strip()
+        return ""
+
     def preamble(self, *, speaker_id: str | None = None) -> str:
         """Блок, который подмешивается в system prompt всех диалоговых вызовов.
 
@@ -339,20 +440,38 @@ class IdentityManager:
             "# USER PROFILE\n"
             f"{profile_text}\n"
         )
-        # Name override: same trick as LANGUAGE OVERRIDE — pull the
-        # `## Имя` body from identity.md and re-state it at the END of
-        # the preamble, where the model's attention weights it highest.
-        # Inside the IDENTITY block alone the name was getting lost
-        # under the longer SOUL section + recent conversation turns
-        # where the agent had previously denied being called by name.
-        name_body = self._extract_name_section(identity_text)
-        if name_body:
+        # NAMES block: place at the END (highest model attention) so the
+        # agent never confuses its OWN name with the USER'S name. Both
+        # names are stated explicitly with `you` / `the user` labels.
+        # This block replaces the earlier AGENT NAME OVERRIDE — that one
+        # only stated the agent name and pushed the model so hard not to
+        # deny it that on group-chats and follow-up turns the agent
+        # started addressing the user as "Hrant" (its own name).
+        agent_name_body = self._extract_name_section(identity_text)
+        user_name = self._extract_user_name(profile_text)
+        if agent_name_body or user_name:
+            out += "\n# NAMES — DO NOT CONFUSE\n"
+            if agent_name_body:
+                out += (
+                    "YOUR name (the assistant's name) — the user "
+                    "addresses YOU by this name; you sign messages as "
+                    "this name; if asked 'who are you' you answer with "
+                    "this name:\n"
+                    f"{agent_name_body}\n\n"
+                )
+            if user_name:
+                out += (
+                    f"USER'S name — the person you are talking to is "
+                    f"named **{user_name}**. Address the user as "
+                    f"'{user_name}' (or by a pronoun in their language). "
+                    f"NEVER address the user by YOUR own name. The user "
+                    f"is NOT named the same as you.\n\n"
+                )
             out += (
-                "\n# AGENT NAME OVERRIDE\n"
-                "When the user addresses you by the name(s) below, "
-                "they ARE talking to YOU. Acknowledge it as your own "
-                "name. Do not deny it. Do not say 'I'm not <name>'.\n"
-                f"{name_body}\n"
+                "Rule: if the user says 'I am X' or 'my name is X' or "
+                "'you are Y, I am X', then X is the USER'S name (update "
+                "your understanding) and Y is YOUR name. Do not flip "
+                "these. Do not call the user by your own name.\n"
             )
         lang_body = self._extract_language_section(profile_text)
         if lang_body:

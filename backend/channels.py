@@ -174,6 +174,25 @@ def delete_channel(channel_id: str) -> bool:
 # --------------- Telegram bot ---------------
 
 
+# Whitelist of agent progress events that may surface to the user.
+# The agent emits ~30 different event names (core, chat, strategy,
+# tool_starting, found, learning, learned, solve, verify, memory_save,
+# cleanup, etc.). Most of those are internal pipeline trace — surfacing
+# them in chat reads like a debug log spilled into the conversation.
+# We keep only events that name a user-visible action ("searching the
+# web", "reading source code") and translate them into a short
+# human-readable label. Everything else collapses into the generic
+# "🧠 Thinking…" tick so the user still sees the bot is alive.
+_USER_VISIBLE_PROGRESS_EVENTS: dict[str, str] = {
+    "learning": "📚 Learning a new topic",
+    "learned": "📚 Saved a note",
+    "subtask": "🧩 Subtask",
+    "tool_starting": "🔧 Using a tool",
+    "self_critic": "🔁 Re-checking the answer",
+    "found": "📎 Found relevant notes",
+}
+
+
 class _TgProgressStream:
     """Streams agent progress events into a single Telegram message in
     near-real-time, by repeatedly editing one placeholder.
@@ -196,37 +215,52 @@ class _TgProgressStream:
       to flush the latest snapshot — so the user always sees the most
       recent state, but we don't burn rate-limit budget.
 
-    Buffering:
-      Only the last `MAX_LINES` events are rendered, so a long trace
-      doesn't push past Telegram's 4096-char message cap.
+    Filtering:
+      Only events in `_USER_VISIBLE_PROGRESS_EVENTS` are rendered.
+      Internal pipeline trace (core, chat, strategy, solve, verify,
+      memory_save, cleanup, raw tool JSON results, …) stays out of
+      the chat — those went straight to the user before the filter
+      was added, producing a debug-log-in-Telegram UX bug.
     """
 
     EDIT_INTERVAL_SEC = 1.2
-    MAX_LINES = 30
-    MAX_LINE_LEN = 180
+    MAX_LINE_LEN = 120
 
     def __init__(self, bot: Any, chat_id: int, message_id: int, loop: Any):
         self.bot = bot
         self.chat_id = chat_id
         self.message_id = message_id
         self.loop = loop
-        self._lines: list[str] = []
+        # Single "latest user-visible action" line, not an accumulating
+        # list. The placeholder is a status indicator, not a transcript.
+        self._latest_label: str = "🧠 Thinking…"
         self._lock = threading.Lock()
         self._last_edit = 0.0
         self._pending = False
         self._closed = False
 
     def push(self, event: str, message: str) -> None:
-        """Sync entry point — called from the agent thread."""
+        """Sync entry point — called from the agent thread.
+
+        Events outside the user-visible whitelist are dropped. For
+        whitelisted events we render `<emoji label>: <short detail>`
+        and replace (not append to) the placeholder body, so the user
+        only ever sees the agent's CURRENT action, not its full
+        breadcrumb trail."""
         if self._closed:
             return
-        line = f"{event}: {message}"
+        label = _USER_VISIBLE_PROGRESS_EVENTS.get(event)
+        if label is None:
+            return
+        detail = (message or "").strip()
+        if detail:
+            line = f"{label}: {detail}"
+        else:
+            line = label
         if len(line) > self.MAX_LINE_LEN:
             line = line[: self.MAX_LINE_LEN - 1] + "…"
         with self._lock:
-            self._lines.append(line)
-            if len(self._lines) > self.MAX_LINES:
-                self._lines = self._lines[-self.MAX_LINES :]
+            self._latest_label = line
         self._schedule_edit()
 
     def _schedule_edit(self) -> None:
@@ -237,11 +271,7 @@ class _TgProgressStream:
 
     def _render(self) -> str:
         with self._lock:
-            body = "\n".join(self._lines[-self.MAX_LINES :])
-        text = "🧠 Thinking…\n" + body
-        if len(text) > 3900:
-            text = text[:3895] + "…"
-        return text
+            return self._latest_label
 
     async def _maybe_edit(self) -> None:
         now = time.time()
@@ -354,6 +384,15 @@ class TelegramBot:
         # "compose-as-telegram" mode can deliver the agent's reply
         # back to the user's TG without us having to enumerate chats.
         self._last_chat_id: int | None = None
+        # Telegram delivers photo albums as ONE update per photo, each
+        # carrying the same `media_group_id`. Pre-fix, the bot ran a
+        # full agent turn for every photo, producing N disjoint replies
+        # for one user "send". Buffer entries by media_group_id and
+        # flush after a short debounce so the agent sees the whole
+        # batch as a single message. Keyed by media_group_id; each
+        # value is { 'shas': [...], 'caption': str, 'first_update':
+        # Update, 'flush_task': asyncio.Task | None }.
+        self._media_groups: dict[str, dict] = {}
 
     def start(self) -> None:
         if self._running:
@@ -617,6 +656,70 @@ class TelegramBot:
                 # Pick up any media (photos / voice / audio / docs)
                 attachment_shas = await _gather_attachments(update)
 
+                # Media-group batching. Telegram delivers a photo album
+                # as multiple Update objects, each with the same
+                # `media_group_id`. Without batching, we ran the agent
+                # once per photo and the user got N disjoint replies
+                # for one logical message. Strategy:
+                #   - first photo of the group: register a flush task
+                #     after MEDIA_GROUP_DEBOUNCE_SEC of inactivity,
+                #     remember this update as the one we'll reply to
+                #   - subsequent photos: append their sha + extend
+                #     the caption, then return without running the
+                #     agent
+                #   - flush task: pop the buffered shas + caption,
+                #     overwrite `attachment_shas` / `text` with the
+                #     merged values, fall through to the normal turn.
+                # `_media_groups` is mutated from the bot's event-loop
+                # thread only (this handler runs there), so no extra
+                # lock needed.
+                MEDIA_GROUP_DEBOUNCE_SEC = 1.2
+                mg_id = getattr(update.message, "media_group_id", None)
+                if mg_id:
+                    entry = self._media_groups.get(mg_id)
+                    if entry is None:
+                        entry = {
+                            "shas": list(attachment_shas),
+                            "caption": text,
+                            "first_update": update,
+                            "speaker_id": f"telegram:{user.id}",
+                            "username": username,
+                            "user_sent_voice": user_sent_voice,
+                            "flush_event": asyncio.Event(),
+                        }
+                        self._media_groups[mg_id] = entry
+
+                        async def _flush_media_group(group_id: str) -> None:
+                            try:
+                                await asyncio.sleep(MEDIA_GROUP_DEBOUNCE_SEC)
+                            except asyncio.CancelledError:
+                                return
+                            e = self._media_groups.pop(group_id, None)
+                            if e is not None:
+                                e["flush_event"].set()
+
+                        asyncio.create_task(_flush_media_group(mg_id))
+                        # First update of the group — wait for the
+                        # debounce window to close, then proceed with
+                        # the merged batch below.
+                        await entry["flush_event"].wait()
+                        attachment_shas = entry["shas"]
+                        text = entry["caption"].strip()
+                    else:
+                        # Subsequent update for the same group — append
+                        # and bail. The first update's handler is still
+                        # in its sleep window and will pick up our
+                        # appended shas on flush.
+                        for sha in attachment_shas:
+                            if sha not in entry["shas"]:
+                                entry["shas"].append(sha)
+                        if text and text not in entry["caption"]:
+                            entry["caption"] = (
+                                f"{entry['caption']}\n{text}".strip()
+                                if entry["caption"] else text
+                            )
+                        return
+
                 # Voice without text → use the transcript as the message body
                 if not text and attachment_shas:
                     from .attachments import ATTACHMENTS
@@ -657,13 +760,21 @@ class TelegramBot:
                     _keep_typing(update.message.chat),
                 )
 
+                # `result` is declared here so the outer exception
+                # handler can rescue the answer even if post-processing
+                # (footer / stats / chunking) crashed AFTER the job
+                # was marked completed. Without this, a bug in the
+                # post-job stage caused the user to see "Error: ..."
+                # and never receive the actual answer the agent had
+                # already produced.
+                result = None
                 try:
                     from .agent import Agent
 
                     # Live progress placeholder — gets edited in-place as
-                    # the agent thinks, runs tools, verifies. Survives as
-                    # the trace record after the run; the actual answer
-                    # is sent as a separate message.
+                    # the agent thinks, runs tools, verifies. Replaced
+                    # in-place with the final answer once the run
+                    # completes (no separate "Done" + answer pair).
                     placeholder = await update.message.reply_text("🧠 Thinking…")
                     running_loop = asyncio.get_running_loop()
                     stream = _TgProgressStream(
@@ -769,11 +880,12 @@ class TelegramBot:
                         answer_parts.append(stats_block)
                     answer_with_stats = "\n\n".join(answer_parts)
 
-                    # Replace the placeholder with a minimal "done"
-                    # marker. Stats and trace are now in the answer,
-                    # not here.
-                    await stream.finalize("✅ Done")
-
+                    # Replace the placeholder IN-PLACE with the final
+                    # answer instead of leaving a stale `✅ Done` line
+                    # next to a separate answer bubble. The user's
+                    # mental model is: one message in, one message
+                    # out. The placeholder becomes the answer.
+                    #
                     # Smart chunking: keep the trace_footer + stats
                     # block whole in the LAST message. Naive 4000-char
                     # slicing would split the stats block at byte 4000
@@ -793,32 +905,46 @@ class TelegramBot:
 
                     LIMIT = 4000
                     if not tail or len(answer) + len(tail) + 2 <= LIMIT:
-                        # Body + tail fit in one message.
-                        await update.message.reply_text(
+                        final_chunks = [
                             answer if not tail else f"{answer}\n\n{tail}"
-                        )
+                        ]
                     else:
-                        # Chunk the body. Leave room in the LAST body
-                        # chunk for the tail when possible.
                         body_chunks: list[str] = []
                         i = 0
                         while i < len(answer):
-                            chunk = answer[i:i + LIMIT]
-                            body_chunks.append(chunk)
+                            body_chunks.append(answer[i:i + LIMIT])
                             i += LIMIT
-                        # Try to merge tail into last body chunk.
                         if (
                             body_chunks
                             and len(body_chunks[-1]) + len(tail) + 2 <= LIMIT
                         ):
                             body_chunks[-1] = f"{body_chunks[-1]}\n\n{tail}"
-                            tail_msg = None
+                            final_chunks = body_chunks
                         else:
-                            tail_msg = tail
-                        for c in body_chunks:
-                            await update.message.reply_text(c)
-                        if tail_msg:
-                            await update.message.reply_text(tail_msg)
+                            final_chunks = body_chunks + [tail]
+
+                    # The placeholder carries the FIRST chunk so the
+                    # user sees their answer appear where the "🧠
+                    # Thinking…" bubble was. The rest (if any) is
+                    # appended as fresh reply_text bubbles. Falls back
+                    # to a regular reply if the edit fails (message
+                    # too old, etc.) — better to ship two messages
+                    # than to drop the answer.
+                    head, *rest = final_chunks
+                    edit_ok = False
+                    try:
+                        await stream.finalize(head)
+                        edit_ok = True
+                    except Exception as e_edit:
+                        log.warning(
+                            "TG placeholder finalize failed (%s); "
+                            "falling back to reply_text",
+                            e_edit,
+                        )
+                    if not edit_ok:
+                        await update.message.reply_text(head)
+                    for c in rest:
+                        await update.message.reply_text(c)
 
                     # Round D + voice-fix: voice reply. When the user
                     # sent a voice message AND TTS is configured +
@@ -916,8 +1042,45 @@ class TelegramBot:
                     )
 
                 except Exception as e:
-                    log.error("Telegram bot error processing message: %s", e)
-                    await update.message.reply_text(f"Error: {str(e)[:500]}")
+                    # log.exception (not log.error) so the FULL
+                    # traceback lands in journalctl. We had a slice
+                    # error reach chat as `Error: slice(None, 200,
+                    # None)` and there was no traceback to debug from;
+                    # use the exception logger so the next occurrence
+                    # is diagnosable.
+                    log.exception(
+                        "Telegram bot error processing message", exc_info=e,
+                    )
+                    # Sanitize the user-visible message — `str(e)` can
+                    # be empty (NetworkError), a slice repr (a
+                    # different bug we're tracking), or a multi-line
+                    # traceback. Force a short, single-line, human-
+                    # readable error.
+                    err_text = (str(e) or type(e).__name__).strip()
+                    err_text = err_text.splitlines()[0] if err_text else type(e).__name__
+                    if len(err_text) > 300:
+                        err_text = err_text[:297] + "…"
+                    # If the agent already produced an answer before
+                    # the crash (i.e. post-processing failed, not the
+                    # agent run itself), ship the answer FIRST so the
+                    # user sees the actual reply, then a small error
+                    # note. Pre-fix, a post-processing slice bug ate
+                    # the entire turn and the user only saw
+                    # "Error: ..." with no answer at all.
+                    rescued_answer = ""
+                    try:
+                        if result is not None:
+                            rescued_answer = (getattr(result, "answer", "") or "").strip()
+                    except Exception:
+                        rescued_answer = ""
+                    if rescued_answer:
+                        try:
+                            await update.message.reply_text(rescued_answer[:4000])
+                        except Exception:
+                            pass
+                    await update.message.reply_text(
+                        f"⚠️ {type(e).__name__}: {err_text}"
+                    )
                 finally:
                     # Stop the typing-indicator refresher whether the
                     # turn completed cleanly, crashed, or was cancelled.

@@ -89,6 +89,52 @@ CORRECTIONS — IMPORTANT:
   emit it whenever the conversation makes the correction explicit."""
 
 
+def _looks_like_agent_self_rule(
+    raw: dict, triples: list[tuple[str, str, str]],
+) -> bool:
+    """True for extracted facts that describe how the AGENT should
+    behave (especially agent name/addressing rules) rather than facts
+    about the user. These belong in identity.md, not user_profile.md.
+
+    The prompt later reads user_profile under a `# USER PROFILE`
+    header, and rules like 'Respond to the name X' get
+    re-interpreted as 'the user is named X', causing the agent to
+    address the user by its own name.
+
+    Heuristics:
+      - summary mentions agent-side patterns ("respond to the name",
+        "your name is", "answer to <name>", "откликаешься на имя")
+      - any triple's subject is the agent itself
+        ("you", "agent", "assistant", "hrant" in lowercase) and the
+        relation is identity-shaped (`is_named`, `name`, `responds_to`,
+        `answers_to`)
+    """
+    summary = (raw.get("summary") or "").lower()
+    patterns = (
+        "respond to the name",
+        "answer to the name",
+        "your name is",
+        "you answer to",
+        "you are called",
+        "reply as ",
+        "откликаешься на имя",
+    )
+    if any(p in summary for p in patterns):
+        return True
+    agent_aliases = {
+        "you", "agent", "assistant", "the agent", "the assistant",
+        "hrant", "ассистент", "агент", "бот", "bot",
+    }
+    name_relations = {
+        "is_named", "named", "name", "responds_to", "responds",
+        "answers_to", "answer_to", "called",
+    }
+    for subj, rel, _ in triples:
+        if subj.strip().lower() in agent_aliases and rel.strip().lower() in name_relations:
+            return True
+    return False
+
+
 class MemoryFact:
     """A single fact extracted from conversation. Tagged with the
     `speaker_id` that produced it so per-speaker filtering is
@@ -217,6 +263,17 @@ class MemoryExtractor:
                         triples.append((str(t[0]), str(t[1]), str(t[2])))
 
                 if not triples:
+                    continue
+
+                # Drop facts that describe AGENT behavior (e.g. how the
+                # agent should address itself) — those belong in
+                # identity.md, not user_profile.md. Without this filter
+                # the prompt later reads "the user is named Hrant" and
+                # the agent starts calling the user by its own name. The
+                # bug was a real production incident with a fact
+                # `Respond to the name Hrant.` landing under `## Правила
+                # взаимодействия` of the Telegram speaker profile.
+                if _looks_like_agent_self_rule(raw, triples):
                     continue
 
                 fact = MemoryFact(
