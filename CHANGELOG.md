@@ -10,6 +10,41 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## QA-audit-fix2 (2026-05-15)
+
+Second pass on the full-codebase QA audit, after honest recheck:
+"are these all fixed?" → no, not all. The prior commit closed the
+Critical auth gap + 3 of the 12 Important findings. This commit
+closes 4 more Important + 1 Minor.
+
+**Closed in this commit:**
+- **#15 memory_facts.jsonl growth bound** — rotates to a dated `.archive` file at 50,000 lines (~27 years of typical use). Active file stays small, dedup scan stays cheap, history preserved as separate archive files. Configurable via `HRANT_MEMORY_FACTS_ROTATE`.
+- **#17 jobs/ auto-cleanup** — daily consolidation now opportunistically purges completed/cancelled jobs older than 30 days. Failed and interrupted jobs are kept indefinitely (audit log). No more 30k-file `jobs/` after a year.
+- **#18 recover_interrupted in background** — was synchronous inside FastAPI startup; with 30k+ jobs the port stayed closed for ~15s. Now runs as an `asyncio.create_task`, port opens immediately. The Telegram interrupted-job notification awaits the same task, so users still get their "I got interrupted" message.
+- **#27 ANSI-aware f-string padding** — instead of patching the 27 individual `:<14`-style call sites in `cli.py`, fixed the root cause: `c.muted()` / `c.success()` / etc. now return an `_AnsiAware` str subclass whose `__format__` honours visible (non-escape) length. Every existing colored-column table in the CLI lines up automatically; no per-site changes needed.
+
+**Still open (deferred or by-design):**
+
+Important:
+- **#8 missing tests** for `providers.py` (1467 LOC) / `channels.py` (1021 LOC) / `llm.py` (3197 LOC) clients. Designing fixtures for HTTP mocking + Telegram bot lifecycle is a session each.
+- **#9 `/api/chat` rate-limit** — auth gate added, but no per-IP rate-limit. For a personal-agent single-WebUI deployment this is fine; for shared deployments add a `slowapi` middleware.
+- **#10 Telegram group-chat isolation** — the bot answers every group member equally. Phase 11's role-gate restricts MUTATIONS but not chat consumption. Design decision: do we want guests to talk to the agent at all, or only owner+trusted?
+- **#13 Failover not applied in default A/B path** — user previously chose to leave this; only the pinned-model path uses the failover chain.
+- **#14 `agent.run` re-entrant state brittleness** — instance attrs (`_speaker_id`, `_channel`, `_t0`, ...) would clobber on re-entry. Not triggered today (no tool handler calls back into agent.run). Worth a refactor before that pattern ever appears.
+
+Minor:
+- **#20 two graphs at `/api/graph` (note triples) vs `/api/kgraph` (memory graph)** — coexistence documented; merge is design work.
+- **#21 cli.py 2417 LOC split** — refactor.
+- **#22 llm.py 3197 LOC base-class** — refactor.
+- **#23 dead-code audit** (EmbedTracker, meta_learner, analogy_engine, evaluator usage check).
+- **#25 init_wizard.py provider-flow registry** — refactor.
+- **#26 frontend code-splitting** — 613 KB bundle; lazy-load Settings tabs would cut ~40%.
+- **#28 require_owner_for_writes trusts ContextVar=None** — by design for CLI/tests; documented.
+
+**Compatibility:** all 1187 tests still pass.
+
+---
+
 ## QA-audit-fix (2026-05-15)
 
 Major security + operational pass after the full-codebase QA audit. **Closes the auth gap that affected ~80 mutation endpoints across 14 API modules** — before this commit, anyone who could reach the API (notably anyone on the LAN/Tailnet when the gateway was bound to 0.0.0.0 via `hrant gateway start --gateway`) could:

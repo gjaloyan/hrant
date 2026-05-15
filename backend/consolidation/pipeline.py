@@ -184,12 +184,64 @@ def _existing_fact_summaries(limit: int = 5000) -> set[str]:
     return out
 
 
+# Audit #15: rotate memory_facts.jsonl when it grows past this
+# many lines. At 5 facts/day, 50k lines = ~27 years of history —
+# big enough to never hit accidentally, small enough that the
+# dedup full-file scan stays cheap. Once exceeded, the file is
+# renamed to memory_facts.jsonl.<YYYY-MM-DD>.archive and a fresh
+# one starts. Archives are preserved on disk — no data ever
+# deleted, just chunked.
+_MEMORY_FACTS_ROTATE_LINES = int(
+    __import__("os").environ.get("HRANT_MEMORY_FACTS_ROTATE", 50_000)
+)
+
+
+def _maybe_rotate_memory_facts(p) -> None:
+    """If `p` exceeds the rotation cap, rename it to
+    `memory_facts.jsonl.<YYYY-MM-DD>.archive` so the active file
+    stays bounded. Best-effort: rotation failure logs and lets the
+    file keep growing rather than blocking the consolidation."""
+    try:
+        if not p.exists():
+            return
+        # Cheap upper-bound check: file size in bytes / ~200 bytes
+        # per row >= rotate threshold? If yes, do the precise line
+        # count. Avoids reading the whole file every consolidation
+        # just to confirm it's not full.
+        if p.stat().st_size < _MEMORY_FACTS_ROTATE_LINES * 100:
+            return
+        with p.open("r", encoding="utf-8") as f:
+            line_count = sum(1 for _ in f)
+        if line_count < _MEMORY_FACTS_ROTATE_LINES:
+            return
+        from datetime import datetime as _dt
+        stamp = _dt.now().strftime("%Y-%m-%d")
+        archive = p.with_suffix(f".jsonl.{stamp}.archive")
+        # If today's archive already exists (rare — would require
+        # writing >50k facts in a day), suffix with hh-mm-ss to
+        # avoid clobbering it.
+        if archive.exists():
+            archive = p.with_suffix(
+                f".jsonl.{_dt.now().strftime('%Y-%m-%d_%H-%M-%S')}.archive",
+            )
+        p.rename(archive)
+        log.info(
+            "memory_facts rotated: %d lines moved to %s",
+            line_count, archive.name,
+        )
+    except Exception as e:
+        log.warning("memory_facts rotation skipped (%s)", e)
+
+
 def _append_memory_fact(text: str, category: str, confidence: float,
                        topics: list[str], date_str: str) -> None:
     """Append one row to `memory_facts.jsonl`, shape compatible
-    with the existing autonomic lever."""
+    with the existing autonomic lever. Rotates the file when it
+    exceeds _MEMORY_FACTS_ROTATE_LINES so the dedup scan stays
+    bounded."""
     p = paths.knowledge_dir() / "memory_facts.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
+    _maybe_rotate_memory_facts(p)
     entry = {
         "summary": text,
         "text": text,                    # alias for forward-compat

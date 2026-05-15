@@ -81,17 +81,53 @@ def _supports_color() -> bool:
 _ENABLED = _supports_color()
 
 
-def _wrap(code: str, text: str) -> str:
-    if not _ENABLED:
-        return text
-    return f"\033[{code}m{text}\033[0m"
+class _AnsiAware(str):
+    """A string carrying ANSI escape sequences that knows its
+    *visible* width for f-string padding. Without this, `f"{c.muted(s):<10}"`
+    counted the ~17 invisible chars of an SGR escape against the
+    target width and column tables looked staggered. The class
+    overrides `__format__` to honour `<`/`>`/`^` alignment + width
+    based on what the terminal will actually render."""
+
+    def __format__(self, spec: str) -> str:  # noqa: D401
+        if not spec:
+            return str(self)
+        m = _PAD_SPEC_RE.match(spec)
+        if not m:
+            return str(self).__format__(spec)
+        align = m.group("align") or "<"
+        width = int(m.group("width"))
+        visible = visible_len(self)
+        deficit = width - visible
+        if deficit <= 0:
+            return str(self)
+        if align == ">":
+            return (" " * deficit) + str(self)
+        if align == "^":
+            left = deficit // 2
+            right = deficit - left
+            return (" " * left) + str(self) + (" " * right)
+        return str(self) + (" " * deficit)
 
 
-def _fg(rgb: tuple[int, int, int], text: str) -> str:
+# Spec pattern: optional alignment (<|>|^), required width.
+# Doesn't handle fill chars / precision — those are rare for
+# colored output and the caller can fall back to plain str.
+import re as _re_for_pad
+_PAD_SPEC_RE = _re_for_pad.compile(r"^(?P<align>[<>^])?(?P<width>\d+)$")
+
+
+def _wrap(code: str, text: str) -> _AnsiAware:
     if not _ENABLED:
-        return text
+        return _AnsiAware(text)
+    return _AnsiAware(f"\033[{code}m{text}\033[0m")
+
+
+def _fg(rgb: tuple[int, int, int], text: str) -> _AnsiAware:
+    if not _ENABLED:
+        return _AnsiAware(text)
     r, g, b = rgb
-    return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+    return _AnsiAware(f"\033[38;2;{r};{g};{b}m{text}\033[0m")
 
 
 class _Palette:

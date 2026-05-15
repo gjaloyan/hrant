@@ -41,19 +41,31 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("could not apply runtime overrides: %s", e)
 
-    # Job recovery — before we accept any new requests, mark any
-    # jobs left in `running` / `queued` state as `interrupted`.
-    # The previous process crashed (OOM, kill -9, host reboot)
-    # while they were mid-flight; the user can retry them from the
-    # WebUI Jobs tab or `hrant jobs retry <id>`.
-    recovered: list[str] = []
-    try:
-        from . import jobs as _jobs
-        recovered = _jobs.JOBS.recover_interrupted()
-        if recovered:
-            log.info("Job recovery: %d turn(s) marked interrupted", len(recovered))
-    except Exception as e:
-        log.warning("Job recovery error: %s", e)
+    # Audit #18: run job recovery in the BACKGROUND so port-bind
+    # isn't blocked by it. The previous version walked every file
+    # in jobs/ synchronously here — at 100 jobs ~50ms (fine), at
+    # 30k jobs ~15s (port stays closed the whole time). The new
+    # task runs after the FastAPI server is accepting requests.
+    # In-flight requests can't race with recovery because the
+    # recovery only flips state for jobs marked `running` from a
+    # PREVIOUS process — those can't be currently running anymore.
+    async def _recover_jobs_background():
+        recovered: list[str] = []
+        try:
+            from . import jobs as _jobs
+            recovered = await asyncio.to_thread(_jobs.JOBS.recover_interrupted)
+            if recovered:
+                log.info(
+                    "Job recovery: %d turn(s) marked interrupted",
+                    len(recovered),
+                )
+        except Exception as e:
+            log.warning("Job recovery error: %s", e)
+        return recovered
+
+    import asyncio as _asyncio_for_recovery
+    _recovery_task = _asyncio_for_recovery.create_task(_recover_jobs_background())
+    application.state.consolidation_recovery_task = _recovery_task
 
     log.info("Server starting — auto-starting channels...")
     try:
@@ -70,52 +82,61 @@ async def lifespan(application: FastAPI):
         log.warning("Channel auto-start error: %s", e)
 
     # Telegram interrupted-job notification (Phase 15A.1).
-    # If recovery flipped any Telegram-channel jobs, give the user a
-    # heads-up message in their Telegram so they don't experience
-    # silent message loss across a server restart. The Telegram bot
-    # takes a few seconds to finish wiring up, so the actual send is
-    # delayed by 3s — `send_text` returns False until the bot's
-    # event loop is ready, and we don't want to silently drop the
-    # message. Best-effort: any failure logs and moves on.
-    if recovered:
+    # Waits for the background recovery task to finish, then if any
+    # Telegram-channel jobs got marked interrupted, sends the user a
+    # heads-up so they don't experience silent message loss across a
+    # server restart.
+    async def _notify_telegram_after_recovery() -> None:
+        try:
+            recovered_ids = await _recovery_task
+        except Exception as e:
+            log.warning("recovery task crashed: %s", e)
+            return
+        if not recovered_ids:
+            return
         try:
             from . import jobs as _jobs
-            from asyncio import sleep, create_task
-
             tg_interrupted = [
-                j for j in (_jobs.JOBS.get(jid) for jid in recovered)
+                j for j in (_jobs.JOBS.get(jid) for jid in recovered_ids)
                 if j is not None
                 and j.channel == "telegram"
                 and (j.reply_to or {}).get("telegram_chat_id")
             ]
-            if tg_interrupted:
-                async def _notify_interrupted() -> None:
-                    await sleep(3.0)
-                    for j in tg_interrupted:
-                        try:
-                            chat_id = int(j.reply_to["telegram_chat_id"])
-                        except (TypeError, ValueError):
-                            continue
-                        preview = (j.prompt or "").replace("\n", " ").strip()
-                        if len(preview) > 200:
-                            preview = preview[:200] + "…"
-                        msg = (
-                            "⚠️ I was interrupted earlier when you asked:\n\n"
-                            f"«{preview}»\n\n"
-                            f"Job id: `{j.id}` — open the WebUI Jobs tab "
-                            "to retry, or just resend your message."
-                        )
-                        try:
-                            CHANNELS.send_to_telegram_chat(chat_id, msg)
-                        except Exception as e:
-                            log.warning("TG interrupted notify failed for %s: %s", j.id, e)
-                create_task(_notify_interrupted())
-                log.info(
-                    "Telegram: scheduled %d interrupted-job notification(s)",
-                    len(tg_interrupted),
+            if not tg_interrupted:
+                return
+            # Let the Telegram bot's event loop finish wiring up.
+            # send_text returns False until then.
+            await _asyncio_for_recovery.sleep(3.0)
+            for j in tg_interrupted:
+                try:
+                    chat_id = int(j.reply_to["telegram_chat_id"])
+                except (TypeError, ValueError):
+                    continue
+                preview = (j.prompt or "").replace("\n", " ").strip()
+                if len(preview) > 200:
+                    preview = preview[:200] + "…"
+                msg = (
+                    "⚠️ I was interrupted earlier when you asked:\n\n"
+                    f"«{preview}»\n\n"
+                    f"Job id: `{j.id}` — open the WebUI Jobs tab "
+                    "to retry, or just resend your message."
                 )
+                try:
+                    CHANNELS.send_to_telegram_chat(chat_id, msg)
+                except Exception as e:
+                    log.warning(
+                        "TG interrupted notify failed for %s: %s", j.id, e,
+                    )
+            log.info(
+                "Telegram: scheduled %d interrupted-job notification(s)",
+                len(tg_interrupted),
+            )
         except Exception as e:
             log.warning("Telegram interrupted-notify scheduler error: %s", e)
+
+    application.state.consolidation_notify_task = (
+        _asyncio_for_recovery.create_task(_notify_telegram_after_recovery())
+    )
 
     bundle = build_scheduler()
     application.state.autonomic_bundle = bundle

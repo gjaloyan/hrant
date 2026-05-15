@@ -76,6 +76,25 @@ async def _fire_one(*, force: bool = False, dry_run: bool = False):
             st.last_run_facts_added = sum(1 for f in d.new_facts if f.promoted)
             st.total_runs += 1
             state.save(st)
+            # Audit #17: piggyback an opportunistic jobs/ cleanup
+            # on each daily consolidation so the directory doesn't
+            # grow unbounded. Default keeps failed/interrupted
+            # forever (they're the audit log) and prunes
+            # completed/cancelled jobs older than 30 days. Best
+            # effort — cleanup failures must not break the run.
+            try:
+                from .. import jobs as _jobs
+                purged = _jobs.JOBS.cleanup_old(
+                    max_age_seconds=30 * 86400.0,
+                    keep_statuses={"failed", "interrupted"},
+                )
+                if purged:
+                    log.info(
+                        "consolidation: opportunistic jobs cleanup removed %d",
+                        len(purged),
+                    )
+            except Exception as e:
+                log.warning("consolidation: jobs cleanup failed: %s", e)
             return d
         except Exception as e:
             log.exception("consolidation: _fire_one outer failure: %s", e)
