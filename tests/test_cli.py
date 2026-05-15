@@ -88,9 +88,13 @@ def test_cmd_gateway_start_linux_calls_systemctl_enable(monkeypatch, capsys):
         calls.append(list(cmd))
         return 0, "", ""
 
-    monkeypatch.setattr(cli_mod, "_run_cmd", fake_run_cmd)
+    # Audit #21 (cli.py split): handlers + helpers moved to
+    # `backend.cli_gateway`. Patch there so the call site inside
+    # cmd_gateway_start sees the fake.
+    from backend import cli_gateway as gw_mod
+    monkeypatch.setattr(gw_mod, "_run_cmd", fake_run_cmd)
     monkeypatch.setattr(
-        cli_mod, "cmd_gateway_install", lambda ns: 0,
+        gw_mod, "cmd_gateway_install", lambda ns: 0,
     )
     rc = cli_mod.cmd_gateway_start(_a.Namespace(
         platform="linux", host=None, port=None, gateway=False
@@ -113,8 +117,9 @@ def test_cmd_gateway_start_gateway_flag_binds_0_0_0_0(monkeypatch):
         captured["port"] = ns.port
         return 0
 
-    monkeypatch.setattr(cli_mod, "cmd_gateway_install", fake_install)
-    monkeypatch.setattr(cli_mod, "_run_cmd", lambda *a, **kw: (0, "", ""))
+    from backend import cli_gateway as gw_mod
+    monkeypatch.setattr(gw_mod, "cmd_gateway_install", fake_install)
+    monkeypatch.setattr(gw_mod, "_run_cmd", lambda *a, **kw: (0, "", ""))
     cli_mod.cmd_gateway_start(_a.Namespace(
         platform="linux", host=None, port=None, gateway=True
     ))
@@ -133,7 +138,11 @@ def test_cmd_gateway_stop_linux_stops_service(monkeypatch):
         calls.append(list(cmd))
         return 0, "", ""
 
-    monkeypatch.setattr(cli_mod, "_run_cmd", fake_run_cmd)
+    # Audit #21 (cli.py split): handlers + helpers moved to
+    # `backend.cli_gateway`. Patch there so the call site inside
+    # cmd_gateway_start sees the fake.
+    from backend import cli_gateway as gw_mod
+    monkeypatch.setattr(gw_mod, "_run_cmd", fake_run_cmd)
     rc = cli_mod.cmd_gateway_stop(_a.Namespace(platform="linux"))
     assert rc == 0
     flat = [" ".join(c) for c in calls]
@@ -150,7 +159,11 @@ def test_cmd_gateway_restart_linux_calls_systemctl_restart(monkeypatch):
         calls.append(list(cmd))
         return 0, "", ""
 
-    monkeypatch.setattr(cli_mod, "_run_cmd", fake_run_cmd)
+    # Audit #21 (cli.py split): handlers + helpers moved to
+    # `backend.cli_gateway`. Patch there so the call site inside
+    # cmd_gateway_start sees the fake.
+    from backend import cli_gateway as gw_mod
+    monkeypatch.setattr(gw_mod, "_run_cmd", fake_run_cmd)
     rc = cli_mod.cmd_gateway_restart(_a.Namespace(platform="linux"))
     assert rc == 0
     flat = [" ".join(c) for c in calls]

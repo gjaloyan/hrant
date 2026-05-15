@@ -87,3 +87,4 @@ _backup_pre_*/
 # (~/.hrant/data/self_mods/). If a test accidentally writes one
 # at the repo root, we don't want it tracked.
 self_mods/
+deploy/windows/install-service.rendered.ps1

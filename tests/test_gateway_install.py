@@ -148,7 +148,10 @@ def test_install_windows_writes_rendered_script(tmp_path, monkeypatch, capsys):
     (since Windows doesn't have a standard user-service directory
     we can drop into). Redirect ROOT to tmp_path for the test so
     the real deploy/ directory stays untouched."""
-    monkeypatch.setattr(cli_mod, "ROOT", tmp_path)
+    # Audit #21: gateway code now lives in cli_gateway; the `ROOT`
+    # constant used by `_service_template_paths` is on that module.
+    from backend import cli_gateway as gw_mod
+    monkeypatch.setattr(gw_mod, "ROOT", tmp_path)
     # Need to copy the template into the patched ROOT so the helper
     # finds it.
     src = Path(__file__).resolve().parent.parent / "deploy" / "windows" / "install-service.ps1"
