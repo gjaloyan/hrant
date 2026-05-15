@@ -49,8 +49,14 @@ class HybridSearcher:
         fuzzy_weight: float = 0.45,
         graph_weight: float = 0.25,
         vector_weight: float = 0.30,
-        vector_score_floor: float = 0.30,
-        graph_score_floor: float = 0.10,
+        # bge-m3 (the default embedder) produces cosine 0.30-0.45 on
+        # genuinely unrelated text pairs in the same language. The old
+        # 0.30 floor let "mercury boiling point" pull in "Scary Movie"
+        # / "German vocabulary" as matched topics. 0.45 cuts off the
+        # noise band without blocking true cross-domain matches (which
+        # usually land >0.55 with bge-m3).
+        vector_score_floor: float = 0.45,
+        graph_score_floor: float = 0.15,
     ):
         self._searcher = searcher or SEARCHER
         self._graph = graph or GRAPH

@@ -116,30 +116,89 @@ def run_tracked(
     # its (provider, model, ok, error) attempt onto the same Job.
     from . import failover as _fo
     token = _fo.set_current_job_id(job.id)
+    # Track whether a terminal status (completed / failed) was
+    # written. If we leave the function without writing one, the
+    # `finally` block stamps `failed` — pre-fix, a crash AFTER
+    # `mark_running` but BEFORE `mark_completed` (e.g. the slice
+    # KeyError in `_extract_tool_calls`) left the job stuck in
+    # `running` forever. The new flag closes that gap.
+    terminal_written = False
+    answer: Optional[AgentAnswer] = None
     try:
-        answer = agent.run(
-            task,
-            project,
-            attachments,
-            channel=channel,
-            speaker_id=speaker_id,
-        )
-    except Exception as e:
-        # Anything that escapes Agent.run is a real failure — LLM
-        # provider error, tool crash, internal bug. Persist the
-        # reason so the user can see it in the Jobs tab and retry.
-        jobs.JOBS.mark_failed(job.id, error=f"{type(e).__name__}: {e}")
-        log.exception("job %s failed", job.id)
-        raise
+        try:
+            answer = agent.run(
+                task,
+                project,
+                attachments,
+                channel=channel,
+                speaker_id=speaker_id,
+            )
+        except Exception as e:
+            # Anything that escapes Agent.run is a real failure — LLM
+            # provider error, tool crash, internal bug. Persist the
+            # reason so the user can see it in the Jobs tab and retry.
+            jobs.JOBS.mark_failed(job.id, error=f"{type(e).__name__}: {e}")
+            terminal_written = True
+            log.exception("job %s failed", job.id)
+            raise
+
+        # Successful run — persist response + tool trace. The
+        # `_extract_tool_calls` call is the historical crash site
+        # (slice KeyError, fixed in 66c506d3) so we still wrap the
+        # whole block: any future bug here marks failed instead of
+        # leaving the job orphaned in `running`.
+        try:
+            tool_calls = _extract_tool_calls(answer)
+        except Exception as e:
+            jobs.JOBS.mark_failed(
+                job.id,
+                error=f"post-run tool-trace serialisation failed: "
+                      f"{type(e).__name__}: {e}",
+            )
+            terminal_written = True
+            log.exception(
+                "job %s failed post-run during tool-trace extraction",
+                job.id,
+            )
+            raise
+        try:
+            jobs.JOBS.mark_completed(
+                job.id,
+                response=answer.answer or "",
+                tool_calls=tool_calls,
+            )
+            terminal_written = True
+        except Exception as e:
+            jobs.JOBS.mark_failed(
+                job.id,
+                error=f"mark_completed failed: {type(e).__name__}: {e}",
+            )
+            terminal_written = True
+            log.exception(
+                "job %s failed at mark_completed step", job.id,
+            )
+            raise
+        return answer, job.id
     finally:
         # Always clear the ContextVar — leaking it would mean the
         # next request's LLM calls record onto the previous Job.
         _fo.reset_current_job_id(token)
-
-    # Successful run — persist response + tool trace.
-    jobs.JOBS.mark_completed(
-        job.id,
-        response=answer.answer or "",
-        tool_calls=_extract_tool_calls(answer),
-    )
-    return answer, job.id
+        # Belt-and-braces: if execution somehow exits this function
+        # without a terminal status written (e.g. KeyboardInterrupt,
+        # SystemExit, an unwound future raise that we didn't model),
+        # stamp the job as failed so the Jobs tab doesn't show a
+        # phantom "running" row forever.
+        if not terminal_written:
+            try:
+                jobs.JOBS.mark_failed(
+                    job.id,
+                    error="job exited without a terminal status "
+                          "(no exception, no completion)",
+                )
+            except Exception:
+                # Last-resort logging only — don't shadow the original
+                # exit cause with a bookkeeping error.
+                log.exception(
+                    "job %s: also failed to write fallback `failed` status",
+                    job.id,
+                )

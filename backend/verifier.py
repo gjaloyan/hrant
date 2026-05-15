@@ -436,6 +436,95 @@ def _compute_confidence(verified: int, unverified: int, contradictions: int) -> 
     return max(0, min(100, round(100.0 * verified / denom)))
 
 
+# Cap applied when the answer mentions specific named entities that
+# can't be located in any source (notes or tool output). Set high
+# enough that legitimate but-novel answers (training-data recall)
+# don't get punished too hard; set low enough that a Kvadrigalt-style
+# fabrication can't ship at 95% confidence. 50 sits at the chat
+# critic_threshold so the agent triggers a retry / surfaces a
+# low-confidence banner instead of presenting the answer as solid.
+UNGROUNDED_CONFIDENCE_CAP = 50
+
+
+def _proper_nouns(text: str) -> list[str]:
+    """Capitalised tokens that look like proper nouns / domain terms.
+
+    Heuristic: a CapitalizedToken of 4+ characters, not at the very
+    start of a sentence (where a leading capital is meaningless). We
+    use this for grounding checks — entities that appear in the answer
+    must trace back to something in notes / tool output, otherwise
+    the answer reads as fabrication."""
+    import re as _re
+    out: list[str] = []
+    seen: set[str] = set()
+    # Markdown bold (**Name**) is the agent's preferred emphasis; pull
+    # those first so we don't miss them after stripping punctuation.
+    # Allow multi-word entities like `**Drift Test**` — store the
+    # whole phrase AND also the individual capitalised words so a
+    # haystack that only has one of them still grounds.
+    for m in _re.finditer(
+        r"\*\*([A-Z][A-Za-z][A-Za-z0-9\- ]{1,40})\*\*", text,
+    ):
+        phrase = m.group(1).strip()
+        if phrase.lower() not in seen:
+            seen.add(phrase.lower())
+            out.append(phrase)
+        # Also break the phrase on whitespace and add each capitalised
+        # word individually — improves grounding for "Drift Test" when
+        # only "drift" appears in notes.
+        for part in phrase.split():
+            if (
+                part and part[0].isupper() and len(part) > 2
+                and part.lower() not in seen
+            ):
+                seen.add(part.lower())
+                out.append(part)
+    # Then bare CapitalizedToken occurrences after some prior char
+    # (avoids capturing the first word of a sentence which is just
+    # English grammar, not a proper noun).
+    for m in _re.finditer(r"(?:[\.\?\!\—\-,;:]\s|\(|\s)([A-Z][A-Za-z][A-Za-z0-9\-]{3,})", text):
+        tok = m.group(1)
+        if tok.lower() not in seen:
+            seen.add(tok.lower())
+            out.append(tok)
+    # Filter common English starts/connectors that slip past the
+    # boundary check — they're capitalized but not proper nouns.
+    _STOP = {
+        "The", "Then", "This", "These", "Those", "There", "That", "They",
+        "And", "But", "For", "From", "However", "Note", "When", "While",
+        "What", "Where", "Which", "Why", "Who", "With", "Without", "Step",
+        "First", "Second", "Third", "Each", "Both", "Either", "Some",
+        "Many", "Most", "All", "Any", "More", "Less", "After", "Before",
+        "Because", "Since", "Until", "Just", "Only", "Even", "Also",
+    }
+    return [t for t in out if t not in _STOP]
+
+
+def _is_ungrounded(answer: str, notes_text: str, tool_context: str) -> bool:
+    """True when the answer's proper-noun-like terms aren't backed by
+    any source. Used as a defence against the verifier-LLM accepting
+    fabricated content as 'verified'.
+
+    The check is intentionally lenient: an answer is considered
+    grounded if at least 1/3 of its proper nouns appear (case-
+    insensitive substring) in notes or tool output. Less than that
+    looks like the agent invented the topic vocabulary.
+
+    Excludes: answers with no proper nouns at all (pure prose; no
+    grounding to check) and answers where the question itself
+    contributed the proper noun (e.g. user mentioned 'Kvadrigalt'
+    in their message — that doesn't ground anything but it also
+    doesn't add to the agent's hallucination signal)."""
+    nouns = _proper_nouns(answer)
+    if not nouns:
+        return False
+    haystack = (notes_text + "\n" + tool_context).lower()
+    if not haystack.strip():
+        return True
+    grounded = sum(1 for n in nouns if n.lower() in haystack)
+    return grounded < max(1, len(nouns) // 3)
+
+
 def verify(
     question: str,
     answer: str,
@@ -566,10 +655,30 @@ Available topics: {', '.join(used_topics)}"""
             if c.lower() not in existing_lower:
                 contradictions.append(c)
                 existing_lower.add(c.lower())
+    confidence = _compute_confidence(
+        len(verified), len(unverified), len(contradictions)
+    )
+    # Grounding guard: cap confidence when the answer's named entities
+    # don't trace back to ANY source. Production audit caught the
+    # verifier-LLM reporting 95% confidence on a fully fabricated
+    # 4-phase protocol ('Kvadrigalt' / 'Theodorinka' — both invented
+    # by the user as a test). The LLM had irrelevant notes loaded
+    # ('Scary Movie', 'static web page') so the empty-source short-
+    # circuit at line 467 didn't fire — it was the deterministic
+    # text-grounding check that was missing.
+    if (
+        confidence > UNGROUNDED_CONFIDENCE_CAP
+        and _is_ungrounded(answer, notes_text, tool_context)
+    ):
+        confidence = UNGROUNDED_CONFIDENCE_CAP
+        unverified.append(
+            "answer mentions specific named entities that cannot be "
+            "located in any loaded note or tool output — likely "
+            "fabrication or training-data recall without grounding"
+        )
+
     return VerificationResult(
-        confidence=_compute_confidence(
-            len(verified), len(unverified), len(contradictions)
-        ),
+        confidence=confidence,
         verified_claims=verified,
         unverified_claims=unverified,
         contradictions=contradictions,

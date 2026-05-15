@@ -31,18 +31,37 @@ def test_extract_name_section_returns_body_when_present(tmp_path):
     assert "Hrant" in idm._extract_name_section(idm.identity())
 
 
-def test_preamble_no_names_block_when_nothing_known(tmp_path):
+def test_preamble_includes_default_agent_name_even_when_identity_silent(tmp_path):
+    """Production regression: a live install whose identity.md uses
+    `## Me` instead of `## Имя`/`## Name` ended up with no NAMES block
+    at all — the agent literally answered "I don't have a fixed
+    personal name yet". Now `agent_name()` falls back to the canonical
+    `DEFAULT_AGENT_NAME` so the prompt always carries the agent's
+    name, even when identity.md is silent or differently labelled."""
     idm = IdentityManager(base_dir=tmp_path)
-    # Empty identity.md `## Имя` AND empty user profile → no names block.
-    # (Note: the default templates seed an empty `## Имя` section so the
-    # extractor returns ""; the block is only added when there's something
-    # concrete to say.)
     pre = idm.preamble()
-    assert "NAMES — DO NOT CONFUSE" not in pre
+    assert "NAMES — DO NOT CONFUSE" in pre
+    body = pre.split("# NAMES — DO NOT CONFUSE", 1)[1]
+    assert IdentityManager.DEFAULT_AGENT_NAME in body
 
 
-def test_preamble_includes_agent_name_only(tmp_path):
-    """Identity has the agent name but the user profile has no name yet."""
+def test_preamble_picks_up_name_from_me_section(tmp_path):
+    """The production install we just audited used `## Me` instead of
+    `## Имя`/`## Name`. The whole-file scanner now finds the name in
+    free-form prose so the agent doesn't lose its identity."""
+    idm = IdentityManager(base_dir=tmp_path)
+    idm.identity_path.write_text(
+        "# Identity\n\n## Me\nMy name is Saruv.\n- self-learning agent\n",
+        encoding="utf-8",
+    )
+    assert idm.agent_name() == "Saruv"
+    pre = idm.preamble()
+    body = pre.split("# NAMES — DO NOT CONFUSE", 1)[1]
+    assert "Saruv" in body
+
+
+def test_preamble_includes_agent_name_from_curated_section(tmp_path):
+    """Identity has the agent name in the curated `## Имя` section."""
     idm = IdentityManager(base_dir=tmp_path)
     idm.identity_path.write_text(
         "# Identity\n\n## Имя\nMeня зовут Hrant.\n\n## Я\n- agent\n",

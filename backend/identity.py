@@ -376,12 +376,85 @@ class IdentityManager:
             profile_text, ("## Язык общения", "## Language", "## Язык"),
         )
 
+    # Canonical agent name. Used as the LAST-RESORT fallback in
+    # `agent_name()` when neither identity.md nor any other source
+    # reveals the name. The brand-level fact that this agent is called
+    # Hrant is asserted in pyproject.toml and the CLI banner; this
+    # constant keeps the runtime in sync if a user's identity.md gets
+    # accidentally cleaned out.
+    DEFAULT_AGENT_NAME = "Hrant"
+
     @classmethod
     def _extract_name_section(cls, identity_text: str) -> str:
-        """Pull the body of the `## Имя` section from identity.md."""
+        """Pull the body of the `## Имя` / `## Name` section from
+        identity.md. Live installs sometimes ship a template with a
+        differently-labelled self section (`## Me`, `## I`, …) — the
+        caller falls back to scanning the whole file via
+        `_scan_agent_name` when this returns empty."""
         return cls._extract_section(
             identity_text, ("## Имя", "## Name"),
         )
+
+    @classmethod
+    def _scan_agent_name(cls, identity_text: str) -> str:
+        """Last-resort scan: pick the agent's own name out of free-form
+        identity.md prose. Looks for the same phrasing the user might
+        write in a fresh template ('My name is X', 'Меня зовут X',
+        'I am X', 'I'm X — a…'). Returns the captured name or ''."""
+        import re as _re
+        patterns = (
+            r"[Mm]y\s+name\s+is\s+\*{0,2}([A-Z][A-Za-zА-Яа-яЁё\-]+)",
+            r"[Мм]еня\s+зовут\s+\*{0,2}([A-Za-zА-Яа-яЁё\-]+)",
+            r"\bI\s+am\s+\*{0,2}([A-Z][A-Za-zА-Яа-яЁё\-]+)",
+            r"\bI'?m\s+\*{0,2}([A-Z][A-Za-zА-Яа-яЁё\-]+)\s+[—–-]",
+        )
+        for pat in patterns:
+            m = _re.search(pat, identity_text)
+            if m:
+                candidate = m.group(1).strip("* ")
+                # Filter out generic words a sloppy regex could grab.
+                # "I am a..." → "a"; "I am Self-learning" → "Self-learning"
+                # both shouldn't pass.
+                low = candidate.lower()
+                if low in {"a", "an", "the", "self", "your", "still", "always"}:
+                    continue
+                if "-" in candidate and low.split("-", 1)[0] in {"self"}:
+                    continue
+                return candidate
+        return ""
+
+    def agent_name(self) -> str:
+        """Canonical resolution of THIS agent's name.
+
+        Order of precedence:
+          1. The body of `## Имя` / `## Name` in identity.md (the
+             curated section). Already-known phrases like 'My name is
+             Hrant' inside that body get cleaned by the caller.
+          2. A free-form scan of identity.md for 'My name is X' /
+             'Меня зовут X' patterns. Survives templates whose self
+             section is labelled `## Me` / `## I` / similar.
+          3. `DEFAULT_AGENT_NAME` ('Hrant'). The brand-level fact —
+             the CLI is `hrant`, the systemd unit is `hrant.service`,
+             pyproject.toml says so. If identity.md is silent, it's
+             still the agent's name."""
+        body = self._extract_name_section(self.identity())
+        if body:
+            named = self._scan_agent_name(body)
+            if named:
+                return named
+            # Section exists but no recognisable pattern — take the
+            # first non-empty line (commonly the bare name itself).
+            for ln in body.splitlines():
+                cleaned = ln.strip().strip("*-• ").strip()
+                if cleaned and len(cleaned) < 40:
+                    return cleaned
+        # Fall through to whole-file scan for installs whose self
+        # section is labelled differently (the production install
+        # we just audited uses `## Me`).
+        scanned = self._scan_agent_name(self.identity())
+        if scanned:
+            return scanned
+        return self.DEFAULT_AGENT_NAME
 
     @classmethod
     def _extract_user_name(cls, profile_text: str) -> str:
@@ -443,21 +516,21 @@ class IdentityManager:
         # NAMES block: place at the END (highest model attention) so the
         # agent never confuses its OWN name with the USER'S name. Both
         # names are stated explicitly with `you` / `the user` labels.
-        # This block replaces the earlier AGENT NAME OVERRIDE — that one
-        # only stated the agent name and pushed the model so hard not to
-        # deny it that on group-chats and follow-up turns the agent
-        # started addressing the user as "Hrant" (its own name).
-        agent_name_body = self._extract_name_section(identity_text)
+        # The agent name comes from agent_name() which falls back to
+        # the canonical DEFAULT_AGENT_NAME when identity.md is silent —
+        # the prior version only rendered the block if `## Имя`/`## Name`
+        # was present, and an install with `## Me` got NO name at all.
+        agent_name = self.agent_name()
         user_name = self._extract_user_name(profile_text)
-        if agent_name_body or user_name:
+        if agent_name or user_name:
             out += "\n# NAMES — DO NOT CONFUSE\n"
-            if agent_name_body:
+            if agent_name:
                 out += (
                     "YOUR name (the assistant's name) — the user "
                     "addresses YOU by this name; you sign messages as "
                     "this name; if asked 'who are you' you answer with "
                     "this name:\n"
-                    f"{agent_name_body}\n\n"
+                    f"**{agent_name}**\n\n"
                 )
             if user_name:
                 out += (
