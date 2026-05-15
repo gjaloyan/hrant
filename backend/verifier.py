@@ -680,8 +680,19 @@ Available topics: {', '.join(used_topics)}"""
     # ('Scary Movie', 'static web page') so the empty-source short-
     # circuit at line 467 didn't fire — it was the deterministic
     # text-grounding check that was missing.
+    #
+    # Skip the check when tool_context is substantial. Re-audit
+    # follow-up: a CORRECT self-analysis answer ("written in Python,
+    # routes LLM in backend/llm.py") got 50%-capped because the
+    # proper-noun extractor missed some grounded terms while
+    # picking up an explicitly-disconfirmed name (LLMRouter — agent
+    # explicitly said it does NOT exist). The cap is for the case
+    # where notes+tools were sparse or irrelevant. When the agent
+    # read substantial source material, the grounding signal is
+    # already strong — defer to the LLM verifier's verdict.
     if (
         confidence > UNGROUNDED_CONFIDENCE_CAP
+        and len(tool_context) < SOURCE_GROUNDED_TOOL_CTX_MIN
         and _is_ungrounded(answer, notes_text, tool_context)
     ):
         confidence = UNGROUNDED_CONFIDENCE_CAP
