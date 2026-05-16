@@ -53,6 +53,7 @@ class IntentClassifierMixin:
             _CHITCHAT_RE,
             _looks_like_arithmetic,
             _looks_like_profile_recall,
+            _looks_like_system_directive,
             router,
             TOKENS,
         )
@@ -65,6 +66,15 @@ class IntentClassifierMixin:
         # classifier for this — both have been observed routing
         # "2+2" to chat, where the model answers from training data.
         if _looks_like_arithmetic(trimmed):
+            return "task"
+        # System directives ("измени голос на мужской", "switch model
+        # to gpt-4o", "поставь язык русский") MUST route to task so
+        # the agent uses tools to apply the change. Pre-fix the LLM
+        # classifier labelled them "preference" → just saved a fact
+        # in user_profile.md → no actual change → the user repeated
+        # the same request 4 times in production before noticing
+        # nothing was happening.
+        if _looks_like_system_directive(trimmed):
             return "task"
         if _CHITCHAT_RE.match(trimmed):
             return "chat"

@@ -108,18 +108,33 @@ def _format_llm_error_short(exc: BaseException, *, max_len: int = 200) -> str:
 
 
 def _with_identity(base_system: str, *, speaker_id: str | None = None) -> str:
-    """Склеивает identity preamble + per-speaker permissions с
-    конкретным system-промптом шага.
+    """Склеивает identity preamble + agent state snapshot +
+    per-speaker permissions с конкретным system-промптом шага.
 
     `speaker_id` selects which user_profile and role/permission
     block to inject. Default None falls back to the WebUI speaker
-    (which is always owner) for back-compat."""
+    (which is always owner) for back-compat.
+
+    The STATE SNAPSHOT block (`backend.self_state`) is what gives
+    the agent line-of-sight to its own current settings — active
+    TTS voice, active model, config file paths, tools registered.
+    Without it, "change your voice to male" became "Понял" + a
+    stored preference fact + no actual change; with it, the LLM
+    sees the current voice + config path + the `terminal_exec`
+    tool it can use to mutate the file."""
     from . import roles as _roles
+    from . import self_state as _ss
     perms = _roles.permissions_block(speaker_id)
+    try:
+        state = _ss.current_self_state(speaker_id=speaker_id)
+        snapshot = _ss.render_snapshot(state)
+    except Exception:
+        snapshot = ""  # never block a turn over the bookkeeping block
     return (
         f"{IDENTITY.preamble(speaker_id=speaker_id)}\n\n"
-        f"---\n\n{base_system}\n\n"
-        f"---\n\n{perms}"
+        + (f"---\n\n{snapshot}\n\n" if snapshot else "")
+        + f"---\n\n{base_system}\n\n"
+        + f"---\n\n{perms}"
     )
 
 
@@ -406,6 +421,130 @@ def _looks_like_profile_recall(text: str) -> bool:
     if not text or len(text) > 200:
         return False
     return bool(_PROFILE_RECALL_RE.search(text))
+
+
+# Directive verbs that mean "go DO something with a setting / config",
+# NOT "save this as my preference". Pre-fix, "измени голос на мужской"
+# routed to preference → saved to user_profile.md → no actual change.
+# `_handle_preference` and the LLM classifier both saw it as
+# "preference" because the wording ("change X") superficially matches
+# how users phrase preferences. This regex catches the imperative-
+# directive shape and forces it onto the task path where tools fire.
+#
+# Pattern intent:
+#   - Imperative verb at the start of the message
+#   - Optionally addressed to the agent ("ты", "you")
+#   - The thing being changed is a setting / property / state attribute
+#     ("голос", "voice", "language", "model", "config", "voice id",
+#     "tone", "speed", "voice_id", ...)
+# We deliberately don't match "I prefer male voice" / "always use
+# male voice" — those ARE preferences. We match the *directive* shape
+# only.
+_DIRECTIVE_VERBS_RE = re.compile(
+    r"^\s*(?:"
+    # English directives
+    r"(?:please\s+)?(?:change|switch|set|make|update|configure|use|"
+    r"turn\s+(?:on|off)|enable|disable|apply|put|select|pick|"
+    r"give\s+(?:me\s+)?(?:a\s+|the\s+)?[a-z]+\s+(?:voice|model|setting))\b"
+    # Russian directives — most-common imperative forms the user
+    # actually types in chat (the production audit caught
+    # "измени голос на мужской" repeated 4 times).
+    r"|(?:пожалуйста\s+)?(?:измен[иьяет]+|"
+    r"смени|поменя[йли]+|"
+    r"переключ[иьи]+|перенастро[йли]+|"
+    r"сдела[йли]+|"
+    r"поста[вьи]+|постав[ьи]+|"
+    r"включ[иьи]+|выключ[иьи]+|"
+    r"настро[йли]+|"
+    r"вырубай|вруби|выруби)\b"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+# Mention of a system-side attribute that's in the agent's
+# AGENT STATE SNAPSHOT. Used together with `_DIRECTIVE_VERBS_RE`
+# — directive + system attribute = "the user wants me to apply
+# this", not "the user wants me to remember this preference".
+_SYSTEM_ATTRIBUTE_RE = re.compile(
+    r"(?:"
+    r"voice|tts|голос|озвучк[ауи]+|"
+    r"language|язык|"
+    r"model|модель|"
+    r"provider|провайдер|"
+    r"channel|канал|"
+    r"tone|тон|стиль|"
+    r"speed|скорост|"
+    r"backend|бэкенд|"
+    r"config|конфиг|настройк[уаи]+|"
+    r"setting"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _looks_like_system_directive(text: str) -> bool:
+    """True for messages that are imperatives targeting a system-side
+    setting the agent owns. Routes to `task` (not preference) so the
+    agent escalates to tool use instead of just saving a fact.
+
+    Examples that match:
+      "Измени голос на мужской"           → change voice
+      "switch model to gpt-4o"            → change model
+      "поставь язык русский"              → change language
+      "Set the TTS voice to a male voice" → change voice
+
+    Examples that DON'T match (still preferences):
+      "I prefer male voice"     → no directive verb
+      "Always use Russian"      → "always" qualifier, no directive
+      "My favorite color is X"  → no system attribute"""
+    if not text:
+        return False
+    if len(text) > 300:
+        return False
+    if not _DIRECTIVE_VERBS_RE.search(text):
+        return False
+    return bool(_SYSTEM_ATTRIBUTE_RE.search(text))
+
+
+def _looks_like_system_setting_preference(text: str) -> bool:
+    """True for preference-shaped messages that touch a system
+    attribute the agent owns (`voice`, `model`, `language`, …).
+
+    Used as a SECONDARY signal: the LLM intent classifier may
+    label a message as `preference` because the wording ("I prefer
+    X", "always use Y") looks like a stable trait — but if the
+    subject of that preference is a config the agent can mutate,
+    we should escalate to the task path with tools, not just save
+    a fact. Same destination as `_looks_like_system_directive`,
+    different entry signal.
+
+    Decoupled from `_looks_like_system_directive` because that one
+    requires an imperative verb at message start. A user-profile
+    preference like "Respond using a male voice" has NO imperative
+    verb — but it still touches the TTS config and should be
+    applied, not just stored."""
+    if not text:
+        return False
+    if len(text) > 300:
+        return False
+    # Must mention a system attribute we recognise; that's the
+    # cheap gate.
+    if not _SYSTEM_ATTRIBUTE_RE.search(text):
+        return False
+    # Heuristic words that hint "this is a request/preference about
+    # behaviour" rather than e.g. "what voice are you using?" (recall)
+    # or "how do I change the voice?" (question). Without this gate
+    # the function fires on every TTS-related question too.
+    preference_hint = re.search(
+        r"(?:respond|reply|answer|use|prefer|always|"
+        r"отвеча[йитл]+|использ[оуьте]+|"
+        r"должен|должна|должно|"
+        r"prefer|wanted?|want|need|должен)",
+        text, re.IGNORECASE,
+    )
+    if not preference_hint:
+        return False
+    return True
 
 
 # Детектор вопросов агента о самом себе — используется в _chat_reply,
@@ -1627,6 +1766,26 @@ class Agent(
 
             # Branch 2: preference — user configures the agent or shares
             # personal info. Save to user.md and acknowledge briefly.
+            #
+            # Pre-ack guard: if the preference touches a SYSTEM
+            # ATTRIBUTE the agent owns (voice, model, language, …),
+            # escalate to the task path instead of just saving a
+            # fact. Pre-fix, "respond using a male voice" got saved
+            # as a preference in user_profile.md and nothing
+            # changed; the user repeated the request 4 times in
+            # production. The directive regex catches imperative
+            # form; this catches the preference form ("I want X /
+            # always X / use X") that mentions a system attribute
+            # the agent can mutate. Same destination — task path
+            # with tools — different entry signal.
+            if intent == "preference" and _looks_like_system_setting_preference(task):
+                self.progress(
+                    "preference_to_task",
+                    "preference touches a system setting; "
+                    "running as a task so tools fire",
+                )
+                intent = "task"
+
             if intent == "preference":
                 category, fact, ack = self._save_preference(task)
                 # The "_(saved to user.md ...)" debug suffix only shows up
