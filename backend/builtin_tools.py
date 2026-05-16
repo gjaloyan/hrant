@@ -190,6 +190,127 @@ def _set_setting_handler(key: str, value: str = "") -> str:
     return json.dumps(result, ensure_ascii=False)
 
 
+def _save_user_fact_handler(category: str, fact: str) -> str:
+    """Persist a stable user-profile fact to the per-speaker
+    user_profile.md. Replaces the old `preference` pipeline branch
+    — in the unified agent loop, the LLM decides when to save a
+    fact and calls this tool, instead of intent classification
+    routing every user message into preference vs task.
+
+    `category` ∈ {"language", "style", "about_user", "rule"}.
+    Dedup is automatic at IDENTITY.add_user_fact level."""
+    from .identity import IDENTITY
+    from .roles import current_speaker
+
+    cat = (category or "about_user").strip().lower()
+    valid = ("language", "style", "about_user", "rule")
+    if cat not in valid:
+        return json.dumps({
+            "ok": False,
+            "error": f"category must be one of {valid}, got {category!r}",
+        }, ensure_ascii=False)
+    fact_clean = (fact or "").strip()
+    if not fact_clean:
+        return json.dumps({
+            "ok": False,
+            "error": "empty fact",
+        }, ensure_ascii=False)
+    try:
+        IDENTITY.add_user_fact(
+            fact_clean, category=cat,  # type: ignore[arg-type]
+            speaker_id=current_speaker(),
+        )
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "category": cat,
+        "fact": fact_clean,
+    }, ensure_ascii=False)
+
+
+def _search_knowledge_handler(query: str, limit: int = 5) -> str:
+    """Hybrid-search across notes + knowledge graph + vector store.
+    Returns a JSON list of `{topic, score, source, snippet}`. Use
+    this BEFORE answering questions about anything you might already
+    have a note on — it's cheaper than reading the whole file and
+    avoids hallucinating about content you've forgotten."""
+    from .hybrid_searcher import HYBRID
+    try:
+        hits = HYBRID.search(query, limit=max(1, min(int(limit) or 5, 20)))
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e), "results": []}, ensure_ascii=False)
+    out = []
+    for h in hits:
+        entry = h.entry
+        out.append({
+            "topic": entry.topic,
+            "category": entry.category,
+            "path": str(entry.path),
+            "score": round(h.score, 3),
+            "source": h.source,
+        })
+    return json.dumps({"ok": True, "query": query, "results": out}, ensure_ascii=False)
+
+
+def _propose_self_modification_handler(
+    description: str, files: str = "", rationale: str = "",
+) -> str:
+    """Request a self-modification proposal. OWNER-only. Triggers
+    the self_modifier subsystem which generates a diff, sandboxes
+    it for review, and surfaces it in the WebUI's Self-Modifications
+    tab for the owner to apply / reject.
+
+    `description`: short summary of WHAT to change.
+    `files`: comma-separated list of file paths to focus on (optional).
+    `rationale`: WHY this change is being proposed."""
+    from .roles import current_speaker, is_owner
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — self-modification is owner-only",
+        }, ensure_ascii=False)
+    try:
+        from . import self_modifier
+        # The self_modifier API surface is module-level — different
+        # callers use it differently; we keep the bridge thin and
+        # let the agent's planner decide what details to provide.
+        proposal = self_modifier.propose(
+            description=description or "",
+            files=[f.strip() for f in (files or "").split(",") if f.strip()],
+            rationale=rationale or "",
+            requester=speaker_id or "webui:default",
+        )
+    except AttributeError:
+        # propose() doesn't exist yet — graceful fallback so the
+        # tool surface is stable even before the self_modifier
+        # subsystem grows a public entry point.
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "self_modifier.propose() not implemented yet — the "
+                "self-mod subsystem currently triggers from "
+                "is_self_analysis paths in agent.run. File a request "
+                "in the WebUI's Self-Modifications tab manually."
+            ),
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"{type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "proposal_id": getattr(proposal, "id", "") if proposal else "",
+        "description": description,
+        "files": files,
+    }, ensure_ascii=False)
+
+
 def _delegate_handler(role: str, task: str) -> str:
     """Dispatch a focused subtask to a role-specific subagent.
 
@@ -519,6 +640,115 @@ def register_builtin_tools() -> None:
             "required": ["code"],
         },
         handler=_run_python_handler,
+    )
+
+    # save_user_fact — replaces the old `preference` pipeline branch
+    # in the unified-agent loop. LLM decides when to save a stable
+    # user-profile fact and calls this tool directly.
+    reg.register_func(
+        name="save_user_fact",
+        description=(
+            "Persist a stable user-profile fact (language preference, "
+            "style/tone, personal info, or interaction rule). Dedup is "
+            "automatic. Use this when the user shares a STABLE trait or "
+            "preference about themselves or how to interact — NOT for "
+            "temporary task state. Examples:\n"
+            "  - User says 'I prefer Russian' → "
+            "save_user_fact('language', 'Respond in Russian')\n"
+            "  - User says 'My name is Gor' → "
+            "save_user_fact('about_user', 'User is Gor')\n"
+            "  - User says 'always be brief' → "
+            "save_user_fact('style', 'Keep responses brief')\n"
+            "  - User says 'don't mention my brother' → "
+            "save_user_fact('rule', 'Do not mention the user's brother')\n"
+            "Do NOT use for system-setting CHANGES (voice, model, etc.) "
+            "— those go through `set_setting`. Do NOT use for one-off "
+            "task requests (write a note for me, schedule a message)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "description": "One of: language, style, about_user, rule.",
+                    "enum": ["language", "style", "about_user", "rule"],
+                },
+                "fact": {
+                    "type": "string",
+                    "description": (
+                        "Canonical third-person phrase. E.g. 'User prefers terse "
+                        "answers', not 'I want short replies'."
+                    ),
+                },
+            },
+            "required": ["category", "fact"],
+        },
+        handler=_save_user_fact_handler,
+    )
+
+    reg.register_func(
+        name="search_knowledge",
+        description=(
+            "Hybrid-search the agent's own knowledge base — notes + "
+            "knowledge graph + vector store — for material relevant to "
+            "a query. Returns a list of {topic, category, path, score, "
+            "source}. Use BEFORE answering questions where you might "
+            "have a note on the topic; it's cheaper than reading the "
+            "whole file. Empty list = nothing relevant; answer from "
+            "the source of truth (read_file / web_search / training "
+            "data with a confidence caveat)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Free-form query.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max hits to return (default 5, max 20).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+        handler=_search_knowledge_handler,
+    )
+
+    reg.register_func(
+        name="propose_self_modification",
+        description=(
+            "Open a self-modification proposal — generates a diff "
+            "against the agent's own source, sandboxes it for the "
+            "owner to review in the WebUI's Self-Modifications tab. "
+            "OWNER-only. Use when the user requests structural code "
+            "changes ('add a tool for X', 'refactor Y', 'fix Z') and "
+            "you've already designed the change. Not for read-only "
+            "code inspection — that's `read_file` / `locate_symbol`. "
+            "Not for config — that's `set_setting`."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Short summary of WHAT to change.",
+                },
+                "files": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated paths to focus on (optional)."
+                    ),
+                },
+                "rationale": {
+                    "type": "string",
+                    "description": "WHY this change is being proposed.",
+                },
+            },
+            "required": ["description"],
+        },
+        handler=_propose_self_modification_handler,
     )
 
     # set_setting — single-call config mutation. Description includes

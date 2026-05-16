@@ -1724,6 +1724,51 @@ class Agent(
         # report which tier ran.
         self._mode: str = ""
 
+        # Unified-agent path: when HRANT_UNIFIED_AGENT=1 is set in
+        # the env, the entire legacy pipeline (intent classifier +
+        # preference branch + chat/task/deep tiers) is bypassed in
+        # favour of a single tool-use loop where the LLM sees ALL
+        # tools every turn and decides for itself. See
+        # backend/unified_agent.py for the architectural rationale
+        # and what stays vs gets removed.
+        #
+        # Pre-flight context-compaction / sticky / role / state
+        # ContextVar setup are still done in the legacy path below
+        # before the early-return — keeps multi-step state setup
+        # (re-entrancy snapshot, role ContextVar) consistent
+        # across both paths.
+        from . import unified_agent as _ua
+        if _ua.unified_enabled():
+            self._mode = "unified"
+            try:
+                return _ua.run_unified(
+                    agent=self,
+                    task=task,
+                    project=project,
+                    attachments=attachments,
+                    channel=channel,
+                    speaker_id=self._speaker_id,
+                )
+            finally:
+                # Mirror the legacy finally{}: speaker ContextVar
+                # must reset even on the unified path. (Sticky
+                # ContextVar isn't set on the unified path —
+                # unified_agent reads CONVERSATION directly so no
+                # token to reset here.)
+                try:
+                    _roles.reset_current_speaker(self._role_token)
+                except Exception:
+                    pass
+                # Re-entrancy state restore — same as legacy path.
+                for _attr, _val in _prev_state.items():
+                    if _val is None:
+                        try:
+                            delattr(self, _attr)
+                        except AttributeError:
+                            pass
+                    else:
+                        setattr(self, _attr, _val)
+
         # Context compaction: when the speaker's recent history
         # exceeds the chars budget, summarise the middle band into
         # one structured `[CONTEXT COMPACTION]` turn so the tail
