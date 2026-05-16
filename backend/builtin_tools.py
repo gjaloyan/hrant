@@ -14,6 +14,11 @@ from .tool_registry import get_registry
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
 from .tools.locate_symbol import locate_symbol
+from .tools.terminal_exec import (
+    DEFAULT_TIMEOUT_SECONDS as _TERMINAL_DEFAULT_TIMEOUT,
+    MAX_TIMEOUT_SECONDS as _TERMINAL_MAX_TIMEOUT,
+    run_terminal,
+)
 from .tools.web_search import fetch_url, web_search
 
 
@@ -147,6 +152,64 @@ def _run_python_handler(code: str, timeout: int = 10) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def _delegate_handler(role: str, task: str) -> str:
+    """Dispatch a focused subtask to a role-specific subagent.
+
+    The dispatcher itself enforces owner-only + depth-cap; the
+    handler just translates the SubagentResult to JSON. We don't
+    pass `depth` through from here because the LLM shouldn't be
+    in control of recursion depth — the dispatcher hard-codes
+    `depth=0` (top-level call) and refuses if a nested call
+    somehow leaks through."""
+    from .subagents import run_subagent
+    res = run_subagent(role, task, depth=0)
+    return json.dumps({
+        "ok": res.ok,
+        "role": res.role,
+        "task": res.task,
+        "answer": res.answer,
+        "tool_summary": res.tool_summary,
+        "iterations": res.iterations,
+        "elapsed_ms": res.elapsed_ms,
+        "error": res.error,
+    }, ensure_ascii=False)
+
+
+def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
+    """Run an allowlisted shell command on behalf of the OWNER.
+
+    Allowlist + denylist live in `backend.tools.terminal_exec`. Non-
+    owner callers get an immediate refusal — the gate runs BEFORE
+    subprocess so even a polluted allowlist would still refuse a
+    `telegram:guest` request.
+    """
+    from .roles import current_speaker, is_owner
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "command": command,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "",
+            "truncated": False,
+            "elapsed_ms": 0,
+            "error": "permission denied — terminal_exec is owner-only",
+        }, ensure_ascii=False)
+    t = int(timeout) if timeout else _TERMINAL_DEFAULT_TIMEOUT
+    res = run_terminal(command, timeout_seconds=t)
+    return json.dumps({
+        "ok": res.ok,
+        "command": res.command,
+        "exit_code": res.exit_code,
+        "stdout": res.stdout,
+        "stderr": res.stderr,
+        "truncated": res.truncated,
+        "elapsed_ms": res.elapsed_ms,
+        "error": res.error,
+    }, ensure_ascii=False)
 
 
 def _schedule_message_handler(
@@ -420,6 +483,108 @@ def register_builtin_tools() -> None:
             "required": ["code"],
         },
         handler=_run_python_handler,
+    )
+
+    # Build the role description dynamically so the registry stays in
+    # sync with the subagents/roles.py registry. If a new role is
+    # added there, the parent LLM sees it immediately.
+    from .subagents import available_roles as _avail_roles
+    _role_descriptions = _avail_roles()
+    _role_lines = "\n".join(
+        f"      - {name}: {desc}"
+        for name, desc in _role_descriptions.items()
+    )
+    reg.register_func(
+        name="delegate",
+        description=(
+            "Delegate a focused subtask to a specialised SUBAGENT. The "
+            "subagent runs in isolation with its own restricted tool set "
+            "and a role-specific system prompt; you receive a single "
+            "answer + tool-call summary back, not the child's full "
+            "thinking trace.\n\n"
+            "Available roles:\n"
+            f"{_role_lines}\n\n"
+            "When to use this vs. doing the work yourself:\n"
+            "  - You need WEB RESEARCH with citations → researcher\n"
+            "  - You need to READ + EXPLAIN source code → coder\n"
+            "  - You want a SECOND OPINION on an answer / diff → reviewer\n"
+            "Don't use delegate for: short factual answers you can give "
+            "directly, casual chat, or pure arithmetic.\n\n"
+            "Hard limits: depth-1 (subagents cannot recurse), "
+            "owner-only, sequential (no parallel batches yet)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "description": (
+                        "Role name from the list above (researcher / coder / reviewer)."
+                    ),
+                },
+                "task": {
+                    "type": "string",
+                    "description": (
+                        "Concrete subtask for the subagent. Include enough "
+                        "context that the child can act WITHOUT seeing the "
+                        "parent's conversation — phrase it as if you're "
+                        "asking a colleague who just walked into the room."
+                    ),
+                },
+            },
+            "required": ["role", "task"],
+        },
+        handler=_delegate_handler,
+    )
+
+    reg.register_func(
+        name="terminal_exec",
+        description=(
+            "Run an allowlisted shell command on the host machine and return "
+            "stdout/stderr/exit_code. OWNER-ONLY — guest / trusted callers "
+            "get permission denied without subprocess being touched.\n\n"
+            "ALLOWED: read-only inspection commands — `ls`, `cat`, `head`, "
+            "`tail`, `grep`, `find`, `ps`, `top`, `free`, `df`, `du`, "
+            "`uname`, `hostname`, `date`, `env`, `which`, `journalctl`, "
+            "`systemctl status / is-active / show / list-units / cat`, "
+            "`git status / log / diff / show / branch`, `pip list / show`, "
+            "`apt list / show`, `ping`, `dig`, `curl`, `python --version`, "
+            "etc.\n\n"
+            "REFUSED: any compound command (no `;`, `&&`, `||`, `|`, "
+            "backticks, `$(...)`, `>`, `<` — make separate calls); any "
+            "destructive operation (`rm`, `dd`, `mkfs`, `git push / reset / "
+            "rebase`, `systemctl stop / restart`, …); absolute paths to "
+            "binaries (`/usr/bin/foo`) — use the bare name.\n\n"
+            "Returns JSON: {ok, command, exit_code, stdout, stderr, "
+            "truncated, elapsed_ms, error}. `ok=False` with `exit_code=-1` "
+            "means the command was REFUSED before execution (see `error` "
+            "field); `ok=False` with `exit_code>0` means the command RAN "
+            "and exited non-zero. Output is capped at 16KB combined; "
+            "`truncated=True` when either stream was cut.\n\n"
+            "Use this for status checks (\"is the gateway running?\"), log "
+            "spelunking (\"why did the bot restart at 03:14?\"), file "
+            "inspection (\"what's in /etc/hostname?\"), and similar "
+            "read-only diagnostics."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Single shell command (no compound features).",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": (
+                        f"Wall-clock timeout in seconds (default "
+                        f"{_TERMINAL_DEFAULT_TIMEOUT}, cap {_TERMINAL_MAX_TIMEOUT})."
+                    ),
+                    "default": _TERMINAL_DEFAULT_TIMEOUT,
+                },
+            },
+            "required": ["command"],
+        },
+        handler=_terminal_exec_handler,
     )
 
     reg.register_func(
