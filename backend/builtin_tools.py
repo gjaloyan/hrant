@@ -154,6 +154,42 @@ def _run_python_handler(code: str, timeout: int = 10) -> str:
     )
 
 
+def _set_setting_handler(key: str, value: str = "") -> str:
+    """Apply a user-mutable config change through the SETTINGS router.
+
+    OWNER-only. Pre-fix, the agent applied voice changes by hand-
+    editing JSON via `terminal_exec` / `run_python` — 4-6 tool
+    calls per request. Now it's one call: the SETTINGS router
+    knows every mutable key, validates the value, persists it, and
+    resets the relevant singleton so the change applies live.
+    """
+    from .roles import current_speaker, is_owner
+    from . import settings as _s
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "key": key,
+            "error": "permission denied — set_setting is owner-only",
+        }, ensure_ascii=False)
+    try:
+        result = _s.SETTINGS.set(key, value)
+    except KeyError as e:
+        return json.dumps({
+            "ok": False,
+            "key": key,
+            "error": str(e),
+            "available_keys": [s["key"] for s in _s.SETTINGS.list_settings()],
+        }, ensure_ascii=False)
+    except ValueError as e:
+        return json.dumps({
+            "ok": False,
+            "key": key,
+            "error": str(e),
+        }, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
+
+
 def _delegate_handler(role: str, task: str) -> str:
     """Dispatch a focused subtask to a role-specific subagent.
 
@@ -483,6 +519,63 @@ def register_builtin_tools() -> None:
             "required": ["code"],
         },
         handler=_run_python_handler,
+    )
+
+    # set_setting — single-call config mutation. Description includes
+    # the live registry of valid keys so the LLM doesn't have to
+    # guess which keys exist (the SETTINGS router enumerates them).
+    from .settings import SETTINGS as _SETTINGS_ROUTER
+    _settings_keys = _SETTINGS_ROUTER.list_settings()
+    _settings_lines = "\n".join(
+        (
+            f"      - {s['key']}: {s['description']}"
+            + (
+                f" (choices: {', '.join(s['choices'])})"
+                if s["choices"] else ""
+            )
+        )
+        for s in _settings_keys
+    )
+    reg.register_func(
+        name="set_setting",
+        description=(
+            "Apply a user-mutable agent config change in ONE call. "
+            "OWNER-only. The router validates the value, persists it, "
+            "and resets the relevant subsystem so the change applies "
+            "live (no agent restart needed).\n\n"
+            "Use this INSTEAD of hand-editing config files via "
+            "terminal_exec / run_python — those still work but are "
+            "4-6× more expensive (find file, read JSON, mutate, "
+            "write back, hope singleton notices). set_setting is the "
+            "canonical path.\n\n"
+            "Available keys:\n"
+            f"{_settings_lines}\n\n"
+            "Returns JSON: {ok, key, old, new, note, error?}. `ok=False` "
+            "means refused or invalid value (see `error`); the value "
+            "was NOT applied. `old == new` with `note='value already "
+            "at requested state'` means the setting was already where "
+            "the user wants it — tell them, don't re-apply silently."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Setting key from the list above.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": (
+                        "New value. For boolean settings: "
+                        "'true'/'false'/'on'/'off'. For voice_gender: "
+                        "'male'/'female'/'auto'. Empty string clears "
+                        "the setting (where the spec allows)."
+                    ),
+                },
+            },
+            "required": ["key", "value"],
+        },
+        handler=_set_setting_handler,
     )
 
     # Build the role description dynamically so the registry stays in

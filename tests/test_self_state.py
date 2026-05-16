@@ -118,8 +118,9 @@ def test_render_carries_rules_block():
     acknowledge'. Without it the snapshot is just inventory."""
     out = ss.render_snapshot({})
     assert "# RULES" in out
-    assert "USE TOOLS" in out
-    assert "don't just acknowledge" in out
+    # After Phase 2.A the rule explicitly names `set_setting` as
+    # the canonical change-application path; check for that.
+    assert "set_setting" in out
     assert "don't pretend" in out
 
 

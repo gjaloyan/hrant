@@ -179,6 +179,17 @@ def _tool_names() -> list[str]:
         return []
 
 
+def _settings_keys() -> list[dict[str, Any]]:
+    """List of mutable settings the agent can apply via `set_setting`.
+    Pulled live from the SETTINGS router so the snapshot stays in
+    sync with the registry (new keys auto-appear in the prompt)."""
+    try:
+        from .settings import SETTINGS
+        return SETTINGS.list_settings()
+    except Exception:
+        return []
+
+
 def current_self_state(*, speaker_id: str | None = None) -> dict[str, Any]:
     """Cheap, never-raises snapshot of the agent's current settings.
 
@@ -191,6 +202,7 @@ def current_self_state(*, speaker_id: str | None = None) -> dict[str, Any]:
     model = _safe(_active_model, {})
     lang = _safe(lambda: _response_language(speaker_id), "")
     tools = _safe(_tool_names, [])
+    settings = _safe(_settings_keys, [])
     data_dir = _safe(lambda: str(paths.data_dir(require=False)), "")
     repo_root = _safe(lambda: str(paths.repo_root()), "")
     return {
@@ -200,6 +212,7 @@ def current_self_state(*, speaker_id: str | None = None) -> dict[str, Any]:
         "active_tts": tts,
         "response_language": lang,
         "tools_available": tools,
+        "mutable_settings": settings,
     }
 
 
@@ -268,18 +281,39 @@ def render_snapshot(state: dict[str, Any]) -> str:
         lines.append(f"data_dir:      {state['data_dir']}")
     if state.get("repo_root"):
         lines.append(f"repo_root:     {state['repo_root']}")
+
+    # Mutable settings: enumerate so the LLM knows EXACTLY which
+    # keys to pass to `set_setting`. Pre-Phase-2 the agent
+    # hand-edited tts_config.json via terminal_exec — 4-6 tool
+    # calls per request. With this list visible, the LLM picks
+    # `set_setting('tts.voice_gender', 'male')` in one shot.
+    settings = state.get("mutable_settings") or []
+    if settings:
+        lines.append("")
+        lines.append("# MUTABLE SETTINGS (apply via set_setting(key, value))")
+        for s in settings:
+            cur = s.get("current")
+            cur_str = "(unset)" if cur is None else str(cur)
+            if len(cur_str) > 50:
+                cur_str = cur_str[:47] + "…"
+            line = f"  {s['key']:24} = {cur_str}"
+            if s.get("choices"):
+                line += f"  choices: {', '.join(s['choices'])}"
+            lines.append(line)
+
     lines.append("")
     lines.append("# RULES")
     lines.append(
-        "- When the user asks you to CHANGE / SET / SWITCH something that's in "
-        "this snapshot, USE TOOLS to apply the change — don't just acknowledge."
+        "- When the user asks you to CHANGE / SET / SWITCH something in "
+        "MUTABLE SETTINGS, call `set_setting(key, value)` — ONE tool "
+        "call, not 4-6 of hand-editing JSON."
     )
     lines.append(
-        "- When a config is `missing`, you can CREATE it via terminal_exec / "
-        "run_python — don't pretend it's already correct."
+        "- When a config file is `missing`, set_setting will create it "
+        "with sensible defaults — don't pretend it's already correct."
     )
     lines.append(
-        "- Cite a value from this snapshot when answering "
-        "'what voice / model / language are you using?' instead of guessing."
+        "- Cite a value from this snapshot when answering 'what voice "
+        "/ model / language are you using?' instead of guessing."
     )
     return "\n".join(lines)
