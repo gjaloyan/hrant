@@ -107,20 +107,41 @@ def _format_llm_error_short(exc: BaseException, *, max_len: int = 200) -> str:
     return f"⚠ {short}"
 
 
-def _with_identity(base_system: str, *, speaker_id: str | None = None) -> str:
+import contextvars as _contextvars
+
+# Per-turn sticky-request hint resolved at `Agent.run()` entry.
+# All `_with_identity` call sites (chat / think / solve / verify)
+# read from this ContextVar, so they don't each need an extra
+# kwarg threaded through. Default is empty string = no hint added.
+_current_sticky_block: _contextvars.ContextVar[str] = _contextvars.ContextVar(
+    "hrant_current_sticky_block", default=""
+)
+
+
+def _with_identity(
+    base_system: str,
+    *,
+    speaker_id: str | None = None,
+    sticky_block: str = "",
+) -> str:
     """Склеивает identity preamble + agent state snapshot +
-    per-speaker permissions с конкретным system-промптом шага.
+    (optional) sticky-request hint + per-speaker permissions с
+    конкретным system-промптом шага.
 
     `speaker_id` selects which user_profile and role/permission
     block to inject. Default None falls back to the WebUI speaker
     (which is always owner) for back-compat.
+
+    `sticky_block` is the rendered output of
+    `backend.sticky_requests.render_sticky_block` for the current
+    turn — empty string when no sticky pattern detected.
 
     The STATE SNAPSHOT block (`backend.self_state`) is what gives
     the agent line-of-sight to its own current settings — active
     TTS voice, active model, config file paths, tools registered.
     Without it, "change your voice to male" became "Понял" + a
     stored preference fact + no actual change; with it, the LLM
-    sees the current voice + config path + the `terminal_exec`
+    sees the current voice + config path + the `set_setting`
     tool it can use to mutate the file."""
     from . import roles as _roles
     from . import self_state as _ss
@@ -130,9 +151,13 @@ def _with_identity(base_system: str, *, speaker_id: str | None = None) -> str:
         snapshot = _ss.render_snapshot(state)
     except Exception:
         snapshot = ""  # never block a turn over the bookkeeping block
+    # Fallback: if caller didn't pass sticky_block explicitly,
+    # pull from the per-turn ContextVar that `Agent.run` sets.
+    effective_sticky = sticky_block or _current_sticky_block.get()
     return (
         f"{IDENTITY.preamble(speaker_id=speaker_id)}\n\n"
         + (f"---\n\n{snapshot}\n\n" if snapshot else "")
+        + (f"---\n\n{effective_sticky}\n" if effective_sticky else "")
         + f"---\n\n{base_system}\n\n"
         + f"---\n\n{perms}"
     )
@@ -1649,7 +1674,8 @@ class Agent(
             for attr in (
                 "_trace", "_llm_calls", "_request_id",
                 "_self_analysis_unverified", "_t0", "_attachments",
-                "_channel", "_speaker_id", "_role", "_role_token", "_mode",
+                "_channel", "_speaker_id", "_role", "_role_token",
+                "_sticky_info", "_sticky_token", "_mode",
             )
         }
         TOKENS.reset_request()
@@ -1686,6 +1712,24 @@ class Agent(
         # deep_agent). Set by the branches below so AgentAnswer can
         # report which tier ran.
         self._mode: str = ""
+
+        # Sticky-request detection: inspect this speaker's recent
+        # conversation. If the SAME system attribute (voice / language
+        # / model / …) was raised in M of the last K turns and the
+        # agent's prior answers were short acks without tool calls,
+        # we plant a `# STICKY REQUEST DETECTED` block in the system
+        # prompt + force task-mode routing so this turn actually
+        # applies the change. The pattern matches the production case
+        # ("Измени голос" × 4) that motivated all of Phase 2.
+        from . import sticky_requests as _sticky
+        sticky_info = _sticky.detect_sticky_request(
+            current_user_message=task,
+            speaker_id=self._speaker_id,
+        )
+        self._sticky_info = sticky_info
+        self._sticky_token = _current_sticky_block.set(
+            _sticky.render_sticky_block(sticky_info)
+        )
         try:
             core = self._load_core()
 
@@ -1724,6 +1768,21 @@ class Agent(
                 )
 
             intent = self._classify_intent(task)
+            # Sticky override: when the detector caught the user
+            # repeating a system-setting request, force task path
+            # regardless of what the LLM classifier said. Same
+            # destination as `_looks_like_system_directive` /
+            # `_looks_like_system_setting_preference` — the sticky
+            # path is the BEHAVIOURAL backstop for the cases those
+            # syntactic guards miss.
+            if self._sticky_info.get("sticky"):
+                if intent != "task":
+                    self.progress(
+                        "sticky_override",
+                        f"sticky request on {self._sticky_info.get('attribute')!r}; "
+                        f"forcing task path",
+                    )
+                intent = "task"
 
             # Branch 1: chitchat / small-talk. One warm reply, no pipeline.
             if intent == "chat":
@@ -2286,6 +2345,14 @@ class Agent(
             # with leaked role context.
             try:
                 _roles.reset_current_speaker(self._role_token)
+            except Exception:
+                pass
+            # Same reset for the sticky-block ContextVar — a leaked
+            # block would carry into the next request and tell that
+            # request's LLM about a "sticky" pattern that wasn't
+            # its conversation.
+            try:
+                _current_sticky_block.reset(self._sticky_token)
             except Exception:
                 pass
             # Audit #14: restore instance state captured at the top
