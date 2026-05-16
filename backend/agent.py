@@ -1713,6 +1713,19 @@ class Agent(
         # report which tier ran.
         self._mode: str = ""
 
+        # Context compaction: when the speaker's recent history
+        # exceeds the chars budget, summarise the middle band into
+        # one structured `[CONTEXT COMPACTION]` turn so the tail
+        # context (recent list + active sub-thread) survives. The
+        # compactor is cheap when nothing needs compacting (just a
+        # sum check). Runs BEFORE sticky detection so the detector
+        # sees the post-compaction history.
+        try:
+            from . import context_compressor as _cc
+            _cc.maybe_compact(speaker_id=self._speaker_id)
+        except Exception as e:
+            log.debug("context_compressor failed (non-fatal): %s", e)
+
         # Sticky-request detection: inspect this speaker's recent
         # conversation. If the SAME system attribute (voice / language
         # / model / …) was raised in M of the last K turns and the
