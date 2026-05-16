@@ -394,9 +394,17 @@ class Synthesizer:
             ru=self._voice_ru,
         )
 
+        # Speech rate, e.g. "+25%" / "-10%" / "+0%". Read live from
+        # `tts_config.json` so a `set_setting('tts.rate', '+25%')`
+        # call by the agent takes effect on the very next synth —
+        # paired with `SYNTHESIZER.reset()` from the settings router
+        # so the singleton's _voice cache also re-resolves.
+        cfg_e = (load_config().get("edge_tts") or {})
+        rate = cfg_e.get("rate") or "+0%"
+
         async def _synth() -> bytes:
             buf = bytearray()
-            communicate = edge_tts.Communicate(text, chosen)
+            communicate = edge_tts.Communicate(text, chosen, rate=rate)
             async for chunk in communicate.stream():
                 if chunk.get("type") == "audio":
                     buf.extend(chunk.get("data") or b"")
