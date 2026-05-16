@@ -67,20 +67,40 @@ def _safe(fn, default):
 
 
 def _tts_status() -> dict[str, Any]:
-    """Live status from the TTS singleton + raw config file."""
+    """Live status from the TTS singleton + raw config file.
+
+    Voice resolution prefers DISK config over the in-memory singleton
+    cache. Reason: `Synthesizer._voice` is cached on first synthesis
+    and stays stale until `tts.reset()` runs — so an agent that JUST
+    wrote a new voice to `tts_config.json` would still see the old
+    voice in the snapshot if we trusted the cache. Reading disk
+    first means the snapshot reflects ground truth on the very next
+    turn, before the singleton catches up."""
     try:
         from .tts import SYNTHESIZER, load_config
         st = SYNTHESIZER.status()
         cfg = load_config()
         config_path = paths.knowledge_dir() / "tts_config.json"
+        # Pull a voice out of the on-disk config first; fall back to
+        # the singleton's cached value, then to "default".
+        disk_voice = ""
+        if isinstance(cfg, dict):
+            backend_cfg = cfg.get(cfg.get("backend") or "edge_tts") or {}
+            if isinstance(backend_cfg, dict):
+                disk_voice = backend_cfg.get("voice") or ""
+            # Some configs put voice at top level too — try that.
+            if not disk_voice:
+                disk_voice = cfg.get("voice") or ""
+        voice = disk_voice or st.get("voice") or "default"
         return {
-            "backend": st.get("backend") or "unknown",
-            "voice": st.get("voice") or "default",
-            "voice_gender": _voice_gender_hint(st.get("voice") or ""),
+            "backend": (cfg or {}).get("backend") or st.get("backend") or "unknown",
+            "voice": voice,
+            "voice_gender": _voice_gender_hint(voice),
             "config_path": str(config_path),
             "config_exists": config_path.exists(),
             "config": cfg,
             "last_error": st.get("last_error"),
+            "in_memory_voice": st.get("voice") or "",  # for debugging
         }
     except Exception as e:
         log.debug("self_state TTS failed: %s", e)
