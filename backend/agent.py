@@ -470,6 +470,12 @@ _DIRECTIVE_VERBS_RE = re.compile(
     # English directives
     r"(?:please\s+)?(?:change|switch|set|make|update|configure|use|"
     r"turn\s+(?:on|off)|enable|disable|apply|put|select|pick|"
+    # Increase/decrease/raise/lower/bump/slow down/speed up etc.
+    # Caught in the 2nd Telegram audit — "Increase voice speed by
+    # 30%" missed every prior pattern and landed on the preference
+    # path, which acked without applying.
+    r"increase|decrease|raise|lower|bump|reduce|speed\s*up|slow\s*down|"
+    # "Make X faster/slower" — common phrasing.
     r"give\s+(?:me\s+)?(?:a\s+|the\s+)?[a-z]+\s+(?:voice|model|setting))\b"
     # Russian directives — most-common imperative forms the user
     # actually types in chat (the production audit caught
@@ -481,6 +487,10 @@ _DIRECTIVE_VERBS_RE = re.compile(
     r"поста[вьи]+|постав[ьи]+|"
     r"включ[иьи]+|выключ[иьи]+|"
     r"настро[йли]+|"
+    # Раз / умень / ускор / замедл — also caught in 2nd audit:
+    # "увеличь скорость", "ускорь голос", "замедли".
+    r"увелич[ьитл]+|уменьш[итеь]+|"
+    r"ускор[ьитл]+|замедл[ьитл]+|"
     r"вырубай|вруби|выруби)\b"
     r")",
     re.IGNORECASE | re.UNICODE,
@@ -492,13 +502,14 @@ _DIRECTIVE_VERBS_RE = re.compile(
 # this", not "the user wants me to remember this preference".
 _SYSTEM_ATTRIBUTE_RE = re.compile(
     r"(?:"
-    r"voice|tts|голос|озвучк[ауи]+|"
+    r"voice|tts|голос|озвучк[ауи]+|speech|речь|реч[иь]|"
     r"language|язык|"
     r"model|модель|"
     r"provider|провайдер|"
     r"channel|канал|"
     r"tone|тон|стиль|"
-    r"speed|скорост|"
+    r"speed|скорост|rate|темп|"
+    r"volume|громкост|"
     r"backend|бэкенд|"
     r"config|конфиг|настройк[уаи]+|"
     r"setting"

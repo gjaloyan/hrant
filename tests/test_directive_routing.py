@@ -65,6 +65,28 @@ def test_enable_disable_directives():
     assert _looks_like_system_directive("Выключи озвучку")
 
 
+def test_increase_decrease_directives():
+    """2nd Telegram audit: «Increase voice speed by 30%» missed every
+    prior pattern and landed on the preference path. Increase /
+    decrease / raise / lower / speed up / slow down / ускорь /
+    замедли / увеличь now match."""
+    cases = [
+        "Increase voice speed by 30 percent",
+        "Decrease the speech speed",
+        "Raise the rate to 50%",
+        "Lower the voice volume",
+        "Speed up the voice",
+        "Slow down the speech",
+        # Russian
+        "Увеличь скорость голоса на 30 процентов",
+        "Уменьши скорость речи",
+        "Ускорь голос",
+        "Замедли голос",
+    ]
+    for msg in cases:
+        assert _looks_like_system_directive(msg), msg
+
+
 # --- preference negatives (stay on preference path) ------------------
 
 
