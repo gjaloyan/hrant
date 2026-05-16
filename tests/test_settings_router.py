@@ -154,6 +154,64 @@ def test_set_returns_note_when_value_unchanged(fake_tts):
     assert "already" in (res["note"] or "")
 
 
+# --- tts.rate (added after the second Telegram audit) -----------------
+
+
+def test_tts_rate_registered():
+    """The audit caught the agent hand-patching tts.py for rate
+    because tts.rate wasn't in the SETTINGS registry. It is now."""
+    keys = {s["key"] for s in s_mod.SETTINGS.list_settings()}
+    assert "tts.rate" in keys
+
+
+def test_tts_rate_default_is_zero_percent(fake_tts):
+    state, _ = fake_tts
+    assert s_mod.SETTINGS.get("tts.rate") == "+0%"
+
+
+def test_tts_rate_writes_to_backend_block(fake_tts):
+    state, _ = fake_tts
+    res = s_mod.SETTINGS.set("tts.rate", "+25%")
+    assert res["ok"]
+    assert state["cfg"]["edge_tts"]["rate"] == "+25%"
+
+
+def test_tts_rate_accepts_bare_number():
+    """User input is often '25' or '+25' — normalise to '+25%'."""
+    # Use a stub via monkeypatch — simpler than the fake_tts fixture
+    # because we just want to observe the normalised value.
+    saved = {}
+    from backend import tts as _tts
+
+    def _save(cfg):
+        saved.update(cfg)
+
+    def _load():
+        return dict(saved)
+
+    class _Synth:
+        def reset(self):
+            pass
+
+    with patch.object(_tts, "load_config", _load), \
+         patch.object(_tts, "save_config", _save), \
+         patch.object(_tts, "SYNTHESIZER", _Synth()):
+        s_mod.SETTINGS.set("tts.rate", "25")
+        assert saved["edge_tts"]["rate"] == "+25%"
+
+
+def test_tts_rate_rejects_out_of_range(fake_tts):
+    """+200% / -200% are outside the regex range and refused."""
+    with pytest.raises(ValueError):
+        s_mod.SETTINGS.set("tts.rate", "+200%")
+
+
+def test_tts_rate_resets_singleton(fake_tts):
+    _, reset_count = fake_tts
+    s_mod.SETTINGS.set("tts.rate", "+50%")
+    assert reset_count["n"] >= 1, "rate change must reset the synth"
+
+
 # --- end-to-end via the set_setting tool handler ----------------------
 
 

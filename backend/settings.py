@@ -219,6 +219,46 @@ def _tts_voice_gender_current() -> Optional[str]:
     return g or "auto"
 
 
+# --- TTS speed (rate) -------------------------------------------------
+
+
+# Edge TTS accepts a string like "+25%" / "-10%" / "+100%". Range
+# clamped at ±100% — beyond that audio becomes unintelligible.
+# Regex is permissive on the user-facing edges (sign + percent
+# optional) because the setter normalises bare inputs like "25" or
+# "+25" into "+25%". Range still enforced: only 0-100 magnitudes.
+_TTS_RATE_RE = r"[+-]?(?:100|[0-9]?[0-9])%?"
+
+
+def _tts_get_rate() -> str:
+    cfg = _tts_load()
+    backend = cfg.get("backend") or "edge_tts"
+    return (cfg.get(backend) or {}).get("rate") or "+0%"
+
+
+def _tts_set_rate(value: Optional[str]) -> None:
+    """Set speech rate (e.g. '+25%'). Empty/None clears the pin
+    (back to backend default = +0%)."""
+    cfg = _tts_load()
+    backend = cfg.get("backend") or "edge_tts"
+    backend_cfg = cfg.get(backend) or {}
+    if not isinstance(backend_cfg, dict):
+        backend_cfg = {}
+    if value is None:
+        backend_cfg.pop("rate", None)
+    else:
+        # Be tolerant: accept "25%" / "+25" / "25" / "+25%" all as +25%.
+        v = str(value).strip()
+        if not v.endswith("%"):
+            v = v + "%"
+        if not v.startswith(("+", "-")):
+            v = "+" + v
+        backend_cfg["rate"] = v
+    cfg[backend] = backend_cfg
+    cfg.setdefault("backend", backend)
+    _tts_save(cfg)
+
+
 # --- Response language ------------------------------------------------
 
 
@@ -311,6 +351,20 @@ def _build_registry() -> dict[str, SettingSpec]:
             get_fn=_tts_voice_gender_current,
             set_fn=_tts_set_voice_gender,
             choices=("male", "female", "auto"),
+        ),
+        "tts.rate": SettingSpec(
+            key="tts.rate",
+            description=(
+                "Speech rate as Edge-TTS percentage string. Accepts "
+                "'+25%' (25% faster), '-10%' (slower), '+100%' (max), "
+                "or '+0%' to clear. Bare numbers like '25' are auto-"
+                "normalised to '+25%'. The synthesiser singleton is "
+                "reset on write so the new rate applies to the very "
+                "next audio reply — no service restart needed."
+            ),
+            get_fn=_tts_get_rate,
+            set_fn=_tts_set_rate,
+            regex=_TTS_RATE_RE,
         ),
         "response.language": SettingSpec(
             key="response.language",

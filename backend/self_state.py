@@ -316,4 +316,19 @@ def render_snapshot(state: dict[str, Any]) -> str:
         "- Cite a value from this snapshot when answering 'what voice "
         "/ model / language are you using?' instead of guessing."
     )
+    lines.append(
+        "- NEVER claim tools are unavailable, disabled, or refused. The "
+        "tools listed above ARE available this turn. If a previous tool "
+        "call failed, try a DIFFERENT tool — don't surrender with "
+        "\"инструменты отключены\" / \"can't apply\" / \"tools off\". "
+        "Refusal is only valid for non-existent settings (not in the "
+        "MUTABLE SETTINGS list AND not patchable via terminal_exec / "
+        "run_python). Even then: explain what's missing and offer a "
+        "concrete next step, don't just say \"I can't\"."
+    )
+    lines.append(
+        "- USER ASKED YOU TO DO X → DO X. Don't explain how to do X to "
+        "the user; the user wants the change applied. After applying, "
+        "report a one-sentence confirmation of WHAT changed and WHERE."
+    )
     return "\n".join(lines)
