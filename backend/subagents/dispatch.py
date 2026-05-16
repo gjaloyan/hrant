@@ -25,6 +25,7 @@ from typing import Any, Callable
 from ..llm import LLMError, TaskType, router
 from ..roles import current_speaker, is_owner
 from .roles import RoleConfig, available_role_names, get_role
+from .store import SUBAGENT_STORE, SubagentSession
 
 
 # Hard cap shared by the dispatcher + the recursive-delegation guard.
@@ -109,6 +110,19 @@ def _make_tool_executor(allowed: tuple[str, ...]):
     return _execute
 
 
+def _current_parent_job_id() -> str:
+    """Best-effort lookup of the parent agent's Job.id. Used so the
+    persisted SubagentSession can be linked back to the row in the
+    WebUI's Jobs tab. Returns '' when no parent job is in scope
+    (CLI / test / direct API call)."""
+    try:
+        from .. import failover as _fo
+        sid = _fo.get_current_job_id()
+        return sid or ""
+    except Exception:
+        return ""
+
+
 def run_subagent(
     role_name: str,
     task: str,
@@ -183,6 +197,18 @@ def run_subagent(
         except Exception:
             pass
 
+    # Persist a session BEFORE the LLM call so the WebUI's "Active"
+    # panel can show it live. `parent_job_id` links the session back
+    # to the row in the Jobs tab (when called from inside an agent
+    # turn — empty for direct API / test callers).
+    parent_speaker = speaker_id if speaker_id is not None else (current_speaker() or "")
+    session = SUBAGENT_STORE.create(
+        role=role.name,
+        task=task,
+        parent_job_id=_current_parent_job_id(),
+        parent_speaker=parent_speaker,
+    )
+
     tool_schemas = _tool_schemas_for_role(role.tools)
     execute_tool = _make_tool_executor(role.tools)
 
@@ -223,6 +249,15 @@ def run_subagent(
             on_tool_call=_on_tool_call,
         )
     except LLMError as e:
+        elapsed = int((time.monotonic() - start) * 1000)
+        SUBAGENT_STORE.finalize(
+            session.id, status="failed",
+            error=f"LLM error: {e}",
+            iterations=sum(tool_summary.values()),
+            tool_summary=tool_summary,
+            tool_calls=tool_records,
+            elapsed_ms=elapsed,
+        )
         return SubagentResult(
             ok=False, role=role.name, task=task, answer="",
             tool_calls=tool_records,
@@ -232,12 +267,21 @@ def run_subagent(
             error=f"LLM error: {e}",
         )
     except Exception as e:  # pragma: no cover — defensive
+        elapsed = int((time.monotonic() - start) * 1000)
+        SUBAGENT_STORE.finalize(
+            session.id, status="failed",
+            error=f"{type(e).__name__}: {e}",
+            iterations=sum(tool_summary.values()),
+            tool_summary=tool_summary,
+            tool_calls=tool_records,
+            elapsed_ms=elapsed,
+        )
         return SubagentResult(
             ok=False, role=role.name, task=task, answer="",
             tool_calls=tool_records,
             tool_summary=tool_summary,
             iterations=sum(tool_summary.values()),
-            elapsed_ms=int((time.monotonic() - start) * 1000),
+            elapsed_ms=elapsed,
             error=f"unexpected error: {type(e).__name__}: {e}",
         )
 
@@ -252,6 +296,18 @@ def run_subagent(
         except Exception:
             pass
 
+    elapsed = int((time.monotonic() - start) * 1000)
+    final_status = "completed" if answer_text else "failed"
+    final_error = "" if answer_text else "empty answer from subagent"
+    SUBAGENT_STORE.finalize(
+        session.id, status=final_status,
+        answer=answer_text,
+        error=final_error,
+        iterations=sum(tool_summary.values()),
+        tool_summary=tool_summary,
+        tool_calls=tool_records,
+        elapsed_ms=elapsed,
+    )
     return SubagentResult(
         ok=bool(answer_text),
         role=role.name,
@@ -260,6 +316,6 @@ def run_subagent(
         tool_calls=tool_records,
         tool_summary=tool_summary,
         iterations=sum(tool_summary.values()),
-        elapsed_ms=int((time.monotonic() - start) * 1000),
-        error="" if answer_text else "empty answer from subagent",
+        elapsed_ms=elapsed,
+        error=final_error,
     )

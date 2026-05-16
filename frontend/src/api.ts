@@ -2068,3 +2068,78 @@ export const rebuildKGraph = () =>
     "/api/kgraph/rebuild",
     {},
   );
+
+
+// ---------- Subagents (multi-role pool) ----------
+
+export type SubagentStatus = "running" | "completed" | "failed";
+
+export type SubagentToolCall = {
+  name: string;
+  args: Record<string, any>;
+  result_preview: string;
+  is_error: boolean;
+};
+
+export type SubagentSession = {
+  id: string;
+  status: SubagentStatus;
+  role: string;
+  task: string;
+  parent_job_id: string;
+  parent_speaker: string;
+  created_at: number;
+  started_at: number;
+  completed_at: number;
+  answer: string;
+  error: string;
+  iterations: number;
+  tool_summary: Record<string, number>;
+  tool_calls: SubagentToolCall[];
+  elapsed_ms: number;
+};
+
+export type SubagentListResponse = {
+  total: number;
+  limit: number;
+  offset: number;
+  subagents: SubagentSession[];
+};
+
+export type SubagentStats = {
+  running: number;
+  completed: number;
+  failed: number;
+  total_persisted: number;
+};
+
+export const fetchSubagents = (params: {
+  status?: SubagentStatus;
+  role?: string;
+  limit?: number;
+  offset?: number;
+} = {}) => {
+  const q = new URLSearchParams();
+  if (params.status) q.set("status", params.status);
+  if (params.role) q.set("role", params.role);
+  if (params.limit !== undefined) q.set("limit", String(params.limit));
+  if (params.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString();
+  return json_get<SubagentListResponse>(
+    "/api/subagents" + (qs ? `?${qs}` : ""),
+  );
+};
+
+export const fetchActiveSubagents = () =>
+  json_get<{ count: number; subagents: SubagentSession[] }>(
+    "/api/subagents/active",
+  );
+
+export const fetchSubagent = (id: string) =>
+  json_get<SubagentSession>(`/api/subagents/${encodeURIComponent(id)}`);
+
+export const fetchSubagentStats = () =>
+  json_get<SubagentStats>("/api/subagents/_/stats");
+
+export const fetchSubagentRoles = () =>
+  json_get<{ roles: Record<string, string> }>("/api/subagents/roles");

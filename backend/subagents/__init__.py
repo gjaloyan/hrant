@@ -23,11 +23,15 @@ from .dispatch import (
     run_subagent,
 )
 from .roles import ROLE_REGISTRY, RoleConfig
+from .store import SUBAGENT_STORE, SubagentSession, SubagentStore
 
 __all__ = [
     "ROLE_REGISTRY",
     "RoleConfig",
+    "SUBAGENT_STORE",
     "SubagentResult",
+    "SubagentSession",
+    "SubagentStore",
     "available_roles",
     "run_subagent",
 ]
