@@ -1670,6 +1670,7 @@ class Agent(
         *,
         channel: str = "webui",
         speaker_id: str = "webui:default",
+        session_key: str | None = None,
     ) -> AgentAnswer:
         import time as _time
         from .sessions import normalize_speaker
@@ -1685,7 +1686,8 @@ class Agent(
             for attr in (
                 "_trace", "_llm_calls", "_request_id",
                 "_self_analysis_unverified", "_t0", "_attachments",
-                "_channel", "_speaker_id", "_role", "_role_token",
+                "_channel", "_speaker_id", "_session_key",
+                "_role", "_role_token",
                 "_sticky_info", "_sticky_token", "_mode",
             )
         }
@@ -1705,11 +1707,15 @@ class Agent(
         # branch all tag the same way without each call site
         # passing it explicitly.
         self._channel = channel or "webui"
-        # Speaker — '<channel>:<user_id>'. Primary routing key for
-        # sessions + conversation memory + per-speaker user profile.
-        # Stays on `self` so every add_turn / context_block in this
-        # run picks up the same speaker without each call passing it.
+        # Speaker — '<channel>:<user_id>'. Identity key for roles,
+        # profile, knowledge. Same person across every chat thread.
         self._speaker_id = normalize_speaker(speaker_id)
+        # Session key — thread isolation key. Same person in two
+        # different Telegram chats (or different bots) gets distinct
+        # session_keys, so their conversation buffers don't bleed.
+        # Defaults to speaker_id when the caller hasn't been updated
+        # to pass a chat-scoped key (e.g. the WebUI single-user path).
+        self._session_key = (session_key or "").strip() or self._speaker_id
         # Phase 11: per-speaker role gating. Read once at run start
         # so tool checks below don't re-read the roles file per call.
         # Set the ContextVar so deeply-nested tool handlers
@@ -1738,6 +1744,7 @@ class Agent(
                 attachments=attachments,
                 channel=channel,
                 speaker_id=self._speaker_id,
+                session_key=self._session_key,
             )
         finally:
             try:

@@ -255,11 +255,22 @@ def _budget_for(chars: int) -> int:
 # ─── Public entry points ────────────────────────────────────────────
 
 
-def needs_compaction(*, speaker_id: Optional[str] = None) -> bool:
+def needs_compaction(
+    *,
+    speaker_id: Optional[str] = None,
+    session_key: Optional[str] = None,
+) -> bool:
     """Cheap budget check — True when the recent conversation block
     would exceed COMPACTION_THRESHOLD_CHARS when rendered. Used by
-    `agent.run` as a quick gate before calling `maybe_compact`."""
-    turns = CONVERSATION.recent(50, speaker_id=speaker_id) or []
+    `agent.run` as a quick gate before calling `maybe_compact`.
+
+    When `session_key` is set, the budget is computed PER THREAD
+    (Wife's DM and Wife's group chat each have their own quota
+    even though they share speaker_id)."""
+    if session_key:
+        turns = CONVERSATION.recent(50, session_key=session_key) or []
+    else:
+        turns = CONVERSATION.recent(50, speaker_id=speaker_id) or []
     if len(turns) <= HEAD_TURNS + TAIL_TURNS + MIN_MIDDLE_TURNS:
         return False
     total = sum(_turn_chars(t) for t in turns)
@@ -269,9 +280,15 @@ def needs_compaction(*, speaker_id: Optional[str] = None) -> bool:
 def maybe_compact(
     *,
     speaker_id: Optional[str] = None,
+    session_key: Optional[str] = None,
     force: bool = False,
 ) -> CompactionStats:
-    """Compact this speaker's conversation history when over budget.
+    """Compact this thread's conversation history when over budget.
+
+    When `session_key` is supplied, compaction is per-thread — the
+    same speaker can have one quiet DM (no compaction needed) and
+    one chatty group thread (compacts independently). With only
+    `speaker_id`, falls back to per-speaker compaction.
 
     When `force=True`, runs the compaction regardless of budget /
     cooldown — useful for tests and for a future "compact now"
@@ -283,22 +300,31 @@ def maybe_compact(
     singleton."""
     start = time.monotonic()
 
+    # Internal compaction key: session_key when set, else speaker_id
+    # (preserves the legacy per-speaker behaviour for older callers).
+    compact_key = (session_key or "").strip() or speaker_id
+
     if not force and _failure_cooldown_active():
         return CompactionStats(fired=False, reason="failure cooldown active")
 
-    if not force and not needs_compaction(speaker_id=speaker_id):
+    if not force and not needs_compaction(
+        speaker_id=speaker_id, session_key=session_key,
+    ):
         return CompactionStats(fired=False, reason="under threshold")
 
-    if speaker_id is None:
-        return CompactionStats(fired=False, reason="no speaker_id")
+    if compact_key is None:
+        return CompactionStats(fired=False, reason="no compaction key")
 
-    if not _begin_compaction(speaker_id):
+    if not _begin_compaction(compact_key):
         return CompactionStats(fired=False, reason="already in flight")
 
     try:
         # Snapshot under lock — we won't see new turns added during
         # the summariser call.
-        all_turns = list(CONVERSATION.recent(200, speaker_id=speaker_id) or [])
+        if session_key:
+            all_turns = list(CONVERSATION.recent(200, session_key=session_key) or [])
+        else:
+            all_turns = list(CONVERSATION.recent(200, speaker_id=speaker_id) or [])
         if len(all_turns) <= HEAD_TURNS + TAIL_TURNS + MIN_MIDDLE_TURNS:
             return CompactionStats(
                 fired=False,
@@ -404,9 +430,10 @@ def maybe_compact(
 
         # Mutate CONVERSATION._turns in place. We've snapshotted under
         # lock, but new turns may have been ADDED after our snapshot;
-        # they shouldn't be replaced. So we splice by speaker_id.
+        # they shouldn't be replaced. So we splice by thread key.
         new_state = _splice_compaction(
             speaker_id=speaker_id,
+            session_key=session_key,
             head=head,
             new_summary_turn=new_turn,
             tail=tail,
@@ -421,8 +448,8 @@ def maybe_compact(
 
         elapsed = int((time.monotonic() - start) * 1000)
         log.info(
-            "compaction OK: speaker=%s turns=%d chars_in=%d chars_out=%d ms=%d",
-            speaker_id, len(middle), chars_in, len(full_body), elapsed,
+            "compaction OK: key=%s turns=%d chars_in=%d chars_out=%d ms=%d",
+            compact_key, len(middle), chars_in, len(full_body), elapsed,
         )
         return CompactionStats(
             fired=True,
@@ -433,34 +460,38 @@ def maybe_compact(
             elapsed_ms=elapsed,
         )
     finally:
-        _end_compaction(speaker_id)
+        _end_compaction(compact_key)
 
 
 def _splice_compaction(
     *,
     speaker_id: str,
+    session_key: Optional[str] = None,
     head: list[dict],
     new_summary_turn: dict,
     tail: list[dict],
 ) -> Optional[list[dict]]:
-    """Replace this speaker's compacted middle band with the new
-    summary turn, preserving any turns from OTHER speakers that
-    live in the same `_turns` list.
+    """Replace this thread's compacted middle band with the new
+    summary turn, preserving turns from OTHER threads (other
+    speakers, or the same speaker on a different chat) that live
+    in the same `_turns` list.
 
-    The CONVERSATION buffer is global across all speakers; we
-    filter by speaker_id on read. Here we have to be careful: we
-    keep every turn whose `speaker_id` isn't ours, and for ours
-    we rebuild as head + [summary] + tail.
+    Filters by `session_key` when supplied (correct per-thread
+    splice), else by `speaker_id` (legacy per-speaker splice).
     """
     from .sessions import normalize_speaker
-    wanted = normalize_speaker(speaker_id)
+    wanted_speaker = normalize_speaker(speaker_id)
+    wanted_key = (session_key or "").strip()
     all_turns = list(CONVERSATION._turns)
-    other_speakers = [
-        t for t in all_turns
-        if normalize_speaker(
+
+    def _belongs_to_us(t: dict) -> bool:
+        if wanted_key:
+            return (t.get("session_key") or t.get("speaker_id") or "") == wanted_key
+        return normalize_speaker(
             t.get("speaker_id") or f"{t.get('channel') or 'webui'}:legacy"
-        ) != wanted
-    ]
+        ) == wanted_speaker
+
+    other_speakers = [t for t in all_turns if not _belongs_to_us(t)]
     # Order preserved by interleaving heuristic: simplest correct
     # behaviour is to put other-speaker turns first (older, before
     # this speaker's head turn), then our head + summary + tail.

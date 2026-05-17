@@ -52,6 +52,7 @@ class Session:
         turns: list[dict] | None = None,
         title: str | None = None,
         archived: bool = False,
+        session_key: str | None = None,
     ):
         self.id = id or uuid.uuid4().hex[:12]
         self.speaker_id = normalize_speaker(speaker_id)
@@ -60,6 +61,12 @@ class Session:
         self.turns = turns or []
         self.title = title or ""
         self.archived = archived
+        # session_key isolates conversation threads — same user across
+        # different bots / DMs / groups gets distinct keys. Identity
+        # (speaker_id) stays the same; only the thread differs. Old
+        # sessions on disk have no session_key — fall back to
+        # speaker_id (one-thread-per-user, the pre-refactor behaviour).
+        self.session_key = (session_key or self.speaker_id).strip() or self.speaker_id
 
     @property
     def turn_count(self) -> int:
@@ -102,6 +109,7 @@ class Session:
         return {
             "id": self.id,
             "speaker_id": self.speaker_id,
+            "session_key": self.session_key,
             "started": self.started,
             "ended": self.ended,
             "title": self.title,
@@ -140,22 +148,27 @@ class Session:
             turns=data.get("turns", []),
             title=data.get("title", ""),
             archived=data.get("archived", False),
+            session_key=data.get("session_key") or None,
         )
 
 
 class SessionManager:
     """Manages multiple sessions with disk persistence.
 
-    Sessions are partitioned by `speaker_id` ('<channel>:<user_id>'):
-    each speaker (WebUI user, each Telegram user, future channels)
-    has its OWN current session. The agent's run() picks the right
-    one via `get_or_create_current(speaker_id=...)`.
+    Sessions are partitioned by `session_key`. The default session_key
+    is the `speaker_id` itself, so for callers that don't yet know
+    about chat-thread isolation, behaviour is unchanged: one thread
+    per speaker. For channels.py / agent.run that DO pass an explicit
+    session_key (e.g. `telegram:<bot>:<chat>:<user>`), each distinct
+    chat gets its own thread even though the speaker_id is the same.
 
-    The on-disk format stores `current_by_speaker: {speaker_id: session_id}`
-    so independent conversations don't trample each other on every
-    save. The legacy top-level `current_id` field is also written
-    for back-compat with consumers that look at "the" current
-    session — it holds the WebUI default's current id.
+    Why two keys, not one? `speaker_id` is identity (roles, profile,
+    permissions — Wife is Wife in every chat). `session_key` is
+    where the conversation lives (a group chat ≠ a DM ≠ a different
+    bot). Conflating them would break either roles or threading.
+
+    On disk we now store `current_by_session_key: {session_key: session_id}`.
+    Legacy state with `current_by_speaker` migrates lazily on load.
     """
 
     def __init__(self, path: Optional[Path] = None, archive_path: Optional[Path] = None):
@@ -163,8 +176,8 @@ class SessionManager:
         self.path = path or (kb_dir / "sessions.json")
         self.archive_path = archive_path or (kb_dir / "sessions_archive.json")
         self._sessions: list[Session] = []
-        # speaker_id -> session_id mapping. One entry per active speaker.
-        self._current_by_speaker: dict[str, str] = {}
+        # session_key -> session_id mapping. One entry per active thread.
+        self._current_by_session_key: dict[str, str] = {}
         self._load()
 
     def _load(self) -> None:
@@ -172,25 +185,38 @@ class SessionManager:
             try:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 self._sessions = [Session.from_dict(s) for s in data.get("sessions", [])]
-                self._current_by_speaker = dict(data.get("current_by_speaker") or {})
+                # New field. If absent, fall back to the legacy
+                # speaker-keyed map (each speaker_id becomes its own
+                # session_key — the pre-refactor 1:1 behaviour).
+                cbsk = data.get("current_by_session_key")
+                if cbsk:
+                    self._current_by_session_key = dict(cbsk)
+                else:
+                    self._current_by_session_key = dict(data.get("current_by_speaker") or {})
                 # Back-compat: an older single `current_id` becomes the
                 # WebUI default's current.
                 legacy_current = data.get("current_id")
-                if legacy_current and DEFAULT_SPEAKER not in self._current_by_speaker:
-                    self._current_by_speaker[DEFAULT_SPEAKER] = legacy_current
+                if legacy_current and DEFAULT_SPEAKER not in self._current_by_session_key:
+                    self._current_by_session_key[DEFAULT_SPEAKER] = legacy_current
             except Exception:
                 self._sessions = []
-                self._current_by_speaker = {}
+                self._current_by_session_key = {}
 
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             data = {
-                "current_by_speaker": dict(self._current_by_speaker),
+                "current_by_session_key": dict(self._current_by_session_key),
+                # Back-compat surface for old readers that look at the
+                # legacy speaker-keyed map. For each known speaker_id,
+                # surface ANY of its session_keys' current id — picking
+                # the first match keeps "the" current useful for
+                # single-thread consumers (the WebUI).
+                "current_by_speaker": self._derive_current_by_speaker(),
                 # Back-compat surface for old readers: surface the
                 # WebUI default's current as `current_id`. Always None
                 # when no WebUI session exists yet.
-                "current_id": self._current_by_speaker.get(DEFAULT_SPEAKER),
+                "current_id": self._current_by_session_key.get(DEFAULT_SPEAKER),
                 "sessions": [s.to_dict() for s in self._sessions],
             }
             self.path.write_text(
@@ -200,18 +226,47 @@ class SessionManager:
         except Exception:
             pass
 
-    def current_for(self, speaker_id: str = DEFAULT_SPEAKER) -> Session | None:
-        """Active session for this speaker. None if they haven't
-        started a session yet."""
-        speaker_id = normalize_speaker(speaker_id)
-        sid = self._current_by_speaker.get(speaker_id)
+    def _derive_current_by_speaker(self) -> dict[str, str]:
+        """Legacy speaker_id → session_id map computed from the
+        session_key-indexed source of truth. Picks the newest-started
+        session per speaker so single-thread consumers (the old WebUI
+        path) see the freshest one."""
+        by_speaker: dict[str, tuple[str, str]] = {}
+        for key, sid in self._current_by_session_key.items():
+            session = next((s for s in self._sessions if s.id == sid), None)
+            if session is None:
+                continue
+            sp = session.speaker_id
+            prev = by_speaker.get(sp)
+            if prev is None or session.started > prev[1]:
+                by_speaker[sp] = (sid, session.started)
+        return {sp: sid for sp, (sid, _) in by_speaker.items()}
+
+    def _resolve_key(self, speaker_id: str, session_key: str | None) -> tuple[str, str]:
+        """Normalise both keys. When session_key is not provided,
+        fall back to speaker_id (old one-thread-per-speaker behaviour)."""
+        sp = normalize_speaker(speaker_id)
+        key = (session_key or "").strip() or sp
+        return sp, key
+
+    def current_for(
+        self,
+        speaker_id: str = DEFAULT_SPEAKER,
+        *,
+        session_key: str | None = None,
+    ) -> Session | None:
+        """Active session for this thread. None if it doesn't exist
+        yet. `session_key` selects the conversation thread (defaults
+        to the speaker_id for back-compat)."""
+        _, key = self._resolve_key(speaker_id, session_key)
+        sid = self._current_by_session_key.get(key)
         if not sid:
             return None
         for s in self._sessions:
             if s.id == sid:
                 return s
         # Stale pointer (session was deleted) — clear it.
-        self._current_by_speaker.pop(speaker_id, None)
+        self._current_by_session_key.pop(key, None)
         return None
 
     @property
@@ -219,47 +274,69 @@ class SessionManager:
         """Back-compat: 'the' current session is the WebUI default's."""
         return self.current_for(DEFAULT_SPEAKER)
 
-    def get_or_create_current(self, speaker_id: str = DEFAULT_SPEAKER) -> Session:
-        """Active session for this speaker, creating one if missing.
-        Each speaker gets independent sessions — switching speakers
-        does NOT carry context across."""
-        speaker_id = normalize_speaker(speaker_id)
-        session = self.current_for(speaker_id)
+    def get_or_create_current(
+        self,
+        speaker_id: str = DEFAULT_SPEAKER,
+        *,
+        session_key: str | None = None,
+    ) -> Session:
+        """Active session for this thread, creating one if missing.
+        Each thread (session_key) gets independent sessions even if
+        the speaker_id is the same — Wife DMing vs Wife in a group
+        get distinct threads, both still owned by speaker_id `telegram:<wife>`."""
+        sp, key = self._resolve_key(speaker_id, session_key)
+        session = self.current_for(sp, session_key=key)
         if session is None:
-            session = Session(speaker_id=speaker_id)
+            session = Session(speaker_id=sp, session_key=key)
             self._sessions.append(session)
-            self._current_by_speaker[speaker_id] = session.id
+            self._current_by_session_key[key] = session.id
             self._save()
         return session
 
-    def add_turn(self, turn: dict, *, speaker_id: str = DEFAULT_SPEAKER) -> None:
-        """Append a turn to the speaker's current session."""
-        session = self.get_or_create_current(speaker_id)
+    def add_turn(
+        self,
+        turn: dict,
+        *,
+        speaker_id: str = DEFAULT_SPEAKER,
+        session_key: str | None = None,
+    ) -> None:
+        """Append a turn to the thread's current session."""
+        session = self.get_or_create_current(speaker_id, session_key=session_key)
         session.turns.append(turn)
         if not session.title and turn.get("user"):
             text = turn["user"]
             session.title = text[:60] + ("..." if len(text) > 60 else "")
         self._save()
 
-    def new_session(self, *, speaker_id: str = DEFAULT_SPEAKER) -> Session:
-        """End this speaker's current session and start a new one."""
-        speaker_id = normalize_speaker(speaker_id)
-        old = self.current_for(speaker_id)
+    def new_session(
+        self,
+        *,
+        speaker_id: str = DEFAULT_SPEAKER,
+        session_key: str | None = None,
+    ) -> Session:
+        """End this thread's current session and start a new one."""
+        sp, key = self._resolve_key(speaker_id, session_key)
+        old = self.current_for(sp, session_key=key)
         if old and not old.ended:
             old.ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        session = Session(speaker_id=speaker_id)
+        session = Session(speaker_id=sp, session_key=key)
         self._sessions.append(session)
-        self._current_by_speaker[speaker_id] = session.id
+        self._current_by_session_key[key] = session.id
         self._save()
         return session
 
-    def end_current(self, *, speaker_id: str = DEFAULT_SPEAKER) -> None:
-        """End this speaker's session without starting a new one."""
-        speaker_id = normalize_speaker(speaker_id)
-        session = self.current_for(speaker_id)
+    def end_current(
+        self,
+        *,
+        speaker_id: str = DEFAULT_SPEAKER,
+        session_key: str | None = None,
+    ) -> None:
+        """End this thread's session without starting a new one."""
+        sp, key = self._resolve_key(speaker_id, session_key)
+        session = self.current_for(sp, session_key=key)
         if session and not session.ended:
             session.ended = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            self._current_by_speaker.pop(speaker_id, None)
+            self._current_by_session_key.pop(key, None)
             self._save()
 
     def get_session(self, session_id: str) -> Session | None:

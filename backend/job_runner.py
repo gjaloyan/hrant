@@ -90,6 +90,7 @@ def run_tracked(
     *,
     channel: str = "webui",
     speaker_id: str = "webui:default",
+    session_key: Optional[str] = None,
     reply_to: Optional[dict] = None,
 ) -> tuple[AgentAnswer, str]:
     """Run a single agent turn with a Job record.
@@ -132,6 +133,7 @@ def run_tracked(
                 attachments,
                 channel=channel,
                 speaker_id=speaker_id,
+                session_key=session_key,
             )
         except Exception as e:
             # Anything that escapes Agent.run is a real failure — LLM

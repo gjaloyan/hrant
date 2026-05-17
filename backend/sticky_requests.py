@@ -99,13 +99,16 @@ def detect_sticky_request(
     *,
     current_user_message: str,
     speaker_id: str | None,
+    session_key: str | None = None,
     window: int = _DEFAULT_WINDOW,
     min_repeats: int = _DEFAULT_MIN_REPEATS,
 ) -> dict[str, Any]:
-    """Inspect the last `window` turns of this speaker's conversation
+    """Inspect the last `window` turns of this thread's conversation
     history and decide whether the CURRENT user message is a sticky
     repeat of an earlier same-topic request that the agent failed to
-    apply.
+    apply. Filtering is per-thread (`session_key`) when supplied —
+    same person in two chats can't trigger stickiness across them —
+    otherwise per-speaker (legacy).
 
     Returns:
       {
@@ -132,7 +135,10 @@ def detect_sticky_request(
         # we ran the check. Some callers (handle_message) add the
         # turn AFTER agent.run, but we don't want to be sensitive
         # to call-order quirks.
-        recent = CONVERSATION.recent(window + 1, speaker_id=speaker_id) or []
+        if session_key:
+            recent = CONVERSATION.recent(window + 1, session_key=session_key) or []
+        else:
+            recent = CONVERSATION.recent(window + 1, speaker_id=speaker_id) or []
     except Exception:
         return empty
     # Walk backwards (newest first) looking for prior user messages

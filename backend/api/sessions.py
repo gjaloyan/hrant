@@ -24,7 +24,8 @@ def list_sessions(
             include_archived=include_archived,
             speaker_id=speaker_id,
         ),
-        "current_by_speaker": dict(SESSIONS._current_by_speaker),
+        "current_by_speaker": SESSIONS._derive_current_by_speaker(),
+        "current_by_session_key": dict(SESSIONS._current_by_session_key),
         "default_speaker": DEFAULT_SPEAKER,
     }
 

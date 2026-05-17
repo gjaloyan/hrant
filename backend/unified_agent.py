@@ -238,12 +238,19 @@ def run_unified(
     attachments: Optional[list[str]],
     channel: str,
     speaker_id: str,
+    session_key: str | None = None,
 ) -> AgentAnswer:
     """Execute one unified-loop turn. Called from `Agent.run` when
     the env flag is set. `agent` is the calling Agent instance —
     we pull `progress`, `_record_llm_call`, `_trace`, etc. from it
     so the dev panel / SSE stream still receives all the same
-    events the legacy pipeline emitted."""
+    events the legacy pipeline emitted.
+
+    `session_key` isolates conversation threads — Wife in a group
+    chat and Wife in a DM share `speaker_id` (identity / roles) but
+    get distinct session_keys (thread). When unset, falls back to
+    speaker_id (one thread per speaker — the WebUI's behaviour)."""
+    skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles
     from . import sticky_requests as _sticky
@@ -259,14 +266,20 @@ def run_unified(
     from .tool_registry import get_registry
 
     # Pre-flight 1: long-history compaction (no-op when under budget).
+    # Per-thread — same person in two chats grows long history
+    # independently.
     try:
-        _cc.maybe_compact(speaker_id=speaker_id)
+        _cc.maybe_compact(speaker_id=speaker_id, session_key=skey)
     except Exception as e:
         log.debug("unified: compaction failed (non-fatal): %s", e)
 
     # Pre-flight 2: sticky-request detection (renders into prompt).
+    # Sticky detection reads RECENT turns to catch repeat asks — must
+    # be per-thread, not per-speaker, or a separate chat resurrects
+    # stale "you didn't do X" signals from a completely different
+    # conversation.
     sticky_info = _sticky.detect_sticky_request(
-        current_user_message=task, speaker_id=speaker_id,
+        current_user_message=task, speaker_id=speaker_id, session_key=skey,
     )
     sticky_block = _sticky.render_sticky_block(sticky_info)
 
@@ -282,7 +295,10 @@ def run_unified(
         snapshot = ""
 
     recall = _auto_recall_block(task)
-    convo = CONVERSATION.context_block(n=6, speaker_id=speaker_id)
+    # Per-thread conversation context — Wife's DM thread and Wife's
+    # group-chat thread don't leak into each other's prompts even
+    # though both have the same speaker_id.
+    convo = CONVERSATION.context_block(n=6, session_key=skey)
 
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
@@ -440,6 +456,7 @@ def run_unified(
         topics_used=[],
         channel=channel,
         speaker_id=speaker_id,
+        session_key=skey,
     )
 
     try:

@@ -68,6 +68,7 @@ class ConversationMemory:
         *,
         channel: str = "webui",
         speaker_id: str = "webui:default",
+        session_key: str | None = None,
         turn_id: str = "",
         token_usage: Optional[dict] = None,
         n_tool_calls: int = 0,
@@ -98,6 +99,13 @@ class ConversationMemory:
             answer_preview = answer_preview[: self.max_answer_chars] + "..."
 
         from .sessions import normalize_speaker
+        sp = normalize_speaker(speaker_id)
+        # session_key isolates conversation threads (e.g. Wife DM vs
+        # Wife in a group are distinct threads sharing the same
+        # speaker_id). When the caller hasn't been updated yet, we
+        # default to the speaker_id — one thread per speaker, the
+        # pre-refactor behaviour.
+        skey = (session_key or "").strip() or sp
         turn = {
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user": user_message.strip(),
@@ -106,7 +114,8 @@ class ConversationMemory:
             "is_chat": is_chat,
             "confidence": confidence,
             "channel": channel or "webui",
-            "speaker_id": normalize_speaker(speaker_id),
+            "speaker_id": sp,
+            "session_key": skey,
         }
         if topics_used:
             turn["topics"] = topics_used
@@ -135,21 +144,32 @@ class ConversationMemory:
         *,
         channel: Optional[str] = None,
         speaker_id: Optional[str] = None,
+        session_key: Optional[str] = None,
     ) -> list[dict]:
-        """Get the last N turns. When `speaker_id` is set, ONLY turns
-        from that speaker are returned — this is the primary filter
-        and what `agent.py` uses when assembling per-speaker context.
-        `channel` is a coarser legacy filter kept for callers that
-        haven't been speaker_id-aware yet (the WebUI default chat
-        endpoint).
+        """Get the last N turns.
 
-        Legacy turns saved without `speaker_id` are tagged with
-        '<channel>:legacy' on read so they never bleed across new
-        speakers but still surface in the cross-channel timeline.
+        Filter precedence:
+          1. `session_key` (the PRIMARY thread filter — e.g. Wife's
+             DM thread vs Wife's group-chat thread are separate even
+             though both have speaker_id `telegram:<wife>`).
+          2. `speaker_id` (identity filter, used when the caller
+             cares about "everything this person said anywhere").
+          3. `channel` (coarsest, legacy).
+
+        Legacy turns saved without `session_key` fall back to their
+        speaker_id when session_key filtering is in effect, so old
+        per-speaker buffers keep working as before until they age
+        out of the rolling window.
         """
         from .sessions import normalize_speaker
         turns = self._turns
-        if speaker_id is not None:
+        if session_key is not None:
+            wanted = (session_key or "").strip()
+            turns = [
+                t for t in turns
+                if (t.get("session_key") or t.get("speaker_id") or "") == wanted
+            ]
+        elif speaker_id is not None:
             wanted = normalize_speaker(speaker_id)
             turns = [
                 t for t in turns
@@ -167,12 +187,15 @@ class ConversationMemory:
         *,
         channel: Optional[str] = None,
         speaker_id: Optional[str] = None,
+        session_key: Optional[str] = None,
     ) -> list[dict]:
         """Like `recent` but bigger default — for the WebUI history
         list. Returns full turn dicts so the frontend can render
         without re-querying. Heavy data lazy-loaded via
         GET /api/turns/<id>."""
-        return self.recent(n, channel=channel, speaker_id=speaker_id)
+        return self.recent(
+            n, channel=channel, speaker_id=speaker_id, session_key=session_key,
+        )
 
     def context_block(
         self,
@@ -180,22 +203,27 @@ class ConversationMemory:
         *,
         channel: Optional[str] = None,
         speaker_id: Optional[str] = None,
+        session_key: Optional[str] = None,
     ) -> str:
         """Build a conversation context block for injection into prompts.
 
         Returns a formatted string showing recent exchanges. If
         there's no history, returns an empty string.
 
-        `speaker_id` is the primary filter — when set, only turns
-        from that specific speaker are included. This is how the
-        agent avoids bleeding "wife's Telegram conversation" into
-        "Gor's WebUI conversation" even on the same agent instance.
-        Knowledge (KG + notes) stays SHARED; only the recent
-        conversation buffer is per-speaker.
+        `session_key` is the primary filter — when set, only turns
+        from that specific conversation thread are included. This
+        is how the agent avoids bleeding "wife's DM" into "wife in
+        the group chat" or "wife on bot-B" — same identity, different
+        thread. `speaker_id` is the identity-level fallback (still
+        used by callers that don't yet have a session_key).
+        Knowledge (KG + notes) stays SHARED across threads — only
+        the recent buffer is scoped.
 
         `channel` is the legacy coarse filter, kept for back-compat.
         """
-        turns = self.recent(n, channel=channel, speaker_id=speaker_id)
+        turns = self.recent(
+            n, channel=channel, speaker_id=speaker_id, session_key=session_key,
+        )
         if not turns:
             return ""
 

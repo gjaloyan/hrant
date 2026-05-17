@@ -899,6 +899,15 @@ class TelegramBot:
                         "telegram_chat_id": update.message.chat.id,
                         "telegram_user_id": update.effective_user.id if update.effective_user else None,
                     }
+                    # session_key isolates conversation threads by
+                    # (bot, chat, user) — same user across different
+                    # bots OR DM vs group on the same bot get distinct
+                    # threads. Identity (speaker_id) stays per-user
+                    # so roles / profile / facts remain unified.
+                    session_key = (
+                        f"telegram:{self.channel_id}:"
+                        f"{update.message.chat.id}:{user.id}"
+                    )
                     # Audit fix: bound concurrent agent.run calls. A
                     # spam burst (or a group with many active users)
                     # otherwise spawned one executor thread per
@@ -918,6 +927,7 @@ class TelegramBot:
                                 attachments=attachment_shas or None,
                                 channel="telegram",
                                 speaker_id=speaker_id,
+                                session_key=session_key,
                                 reply_to=reply_to,
                             ),
                         )
