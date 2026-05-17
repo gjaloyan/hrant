@@ -243,9 +243,6 @@ def run_unified(
     from .knowledge_manager import KM  # noqa: F401 — used by side-effects
     from .llm import LLMError, TaskType, TOKENS, router
     from .memory_extractor import MEMORY
-    from .prompts import (
-        AGENT_NAME,  # noqa: F401 — used implicitly via identity
-    )
     from .tool_registry import get_registry
 
     # Pre-flight 1: long-history compaction (no-op when under budget).
