@@ -550,3 +550,193 @@ def _run_test_commands(
 
 
 SELF_MODIFIER = SelfModifier()
+
+
+# ─── Proposal-created notification hooks ────────────────────────────
+
+
+# Subscribers signed up via `register_on_proposal_created(fn)`. Each
+# receives the freshly-saved Proposal. Best-effort: a raising callback
+# is logged and dropped without breaking the proposer's flow.
+_ON_PROPOSAL_CREATED: list = []
+
+
+def register_on_proposal_created(fn) -> None:
+    """Add a callback fired when a new proposal lands. Used by the
+    Telegram bridge to DM the owner with inline-button approval.
+    Idempotent — registering the same callable twice is a no-op."""
+    if fn not in _ON_PROPOSAL_CREATED:
+        _ON_PROPOSAL_CREATED.append(fn)
+
+
+def _fire_proposal_created(proposal: Proposal) -> None:
+    for fn in list(_ON_PROPOSAL_CREATED):
+        try:
+            fn(proposal)
+        except Exception as e:
+            log.warning("proposal-created callback %s failed: %s", fn, e)
+
+
+# ─── Public `propose()` entry point used by the tool ────────────────
+
+
+def propose(
+    *,
+    description: str,
+    files: list[str] | None = None,
+    rationale: str = "",
+    requester: str = "webui:default",
+) -> Optional[Proposal]:
+    """Create a new pending proposal from an owner request.
+
+    Minimal shape — the agent or a later analyze pass fills in the
+    actual `old_code` / `new_code` diff. Status starts as 'pending'
+    (no diff yet) but the proposal is registered so the WebUI panel
+    can show it, the Telegram bridge can DM the owner, and the
+    autonomic loop can pick it up for analysis.
+
+    Returns the created Proposal, or None on storage failure.
+    """
+    try:
+        proposal = Proposal(
+            module=(files[0] if files else ""),
+            title=(description or "")[:80] or "(no title)",
+            description=description or "",
+            reasoning=rationale or "",
+            status="pending",
+            review_note=f"requested by {requester}",
+        )
+        SELF_MODIFIER._proposals.append(proposal)
+        SELF_MODIFIER._save()
+        _fire_proposal_created(proposal)
+        return proposal
+    except Exception as e:
+        log.warning("propose() failed: %s", e)
+        return None
+
+
+# ─── Inline-keyboard callback bridge ────────────────────────────────
+
+
+def _register_proposal_callback() -> None:
+    """Wire the proposal-approval flow into the tg_interactive
+    callback dispatcher. callback_data shapes:
+      - prop:diff:<id>      show the diff in a follow-up message
+      - prop:apply:<id>     approve + apply (with tests)
+      - prop:reject:<id>    reject without applying
+
+    Owner-only; non-owner clickers get a refusal toast."""
+    from . import tg_interactive as _tg
+    from . import roles as _roles_mod
+
+    def _handler(parts, ctx):
+        if not parts:
+            return _tg.CallbackResult(ok=False, toast="malformed callback")
+        clicker_id = ctx.get("clicker_speaker_id") or ""
+        if not _roles_mod.is_owner(clicker_id):
+            return _tg.CallbackResult(
+                ok=False,
+                toast="only the owner can act on self-modification proposals",
+                clear_keyboard=False,
+            )
+        action = parts[0]
+        if action == "diff":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed diff")
+            pid = parts[1]
+            p = next(
+                (x for x in SELF_MODIFIER._proposals if x.id == pid), None,
+            )
+            if p is None:
+                return _tg.CallbackResult(
+                    ok=False, toast="proposal not found", clear_keyboard=False,
+                )
+            # Diff goes in a separate message — keep the original
+            # approval prompt intact so the buttons remain pressable.
+            return _tg.CallbackResult(
+                ok=True,
+                toast="diff sent",
+                edited_text=None,
+                clear_keyboard=False,
+                followup_text=_render_diff_for_telegram(p),
+            )
+        if action == "apply":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed apply")
+            pid = parts[1]
+            # Approve first (no-op if already approved), then apply.
+            SELF_MODIFIER.approve(pid, note=f"approved via Telegram by {clicker_id}")
+            res = SELF_MODIFIER.apply(pid)
+            if not res.get("ok"):
+                return _tg.CallbackResult(
+                    ok=False,
+                    toast=res.get("message") or "apply failed",
+                    edited_text=(
+                        f"❌ <b>Apply failed</b>\n<i>"
+                        f"{_tg.escape_html(res.get('message') or '')}</i>"
+                    ),
+                )
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"✅ <b>Applied</b> — proposal <code>"
+                    f"{_tg.escape_html(pid)}</code> committed."
+                ),
+                toast="applied",
+            )
+        if action == "reject":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed reject")
+            pid = parts[1]
+            ok = SELF_MODIFIER.reject(pid, note=f"rejected via Telegram by {clicker_id}")
+            if not ok:
+                return _tg.CallbackResult(
+                    ok=False, toast="proposal not found", clear_keyboard=False,
+                )
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"❌ <b>Rejected</b> — proposal <code>"
+                    f"{_tg.escape_html(pid)}</code> dropped."
+                ),
+                toast="rejected",
+            )
+        return _tg.CallbackResult(ok=False, toast=f"unknown action {action!r}")
+
+    _tg.register_callback_handler("prop", _handler)
+
+
+def _render_diff_for_telegram(p: Proposal) -> str:
+    """Render the proposal's diff as HTML for a Telegram <pre> block.
+
+    Returns a multi-message-safe chunk (≤3900 chars) so a long diff
+    doesn't 400-out on the 4096-byte Telegram limit. The caller is
+    expected to split further if the diff is genuinely huge — but
+    most self-mod diffs are < 100 lines."""
+    import difflib
+    from . import tg_interactive as _tg
+    diff_lines = list(difflib.unified_diff(
+        (p.old_code or "").splitlines(),
+        (p.new_code or "").splitlines(),
+        fromfile=f"a/{p.module}" if p.module else "before",
+        tofile=f"b/{p.module}" if p.module else "after",
+        lineterm="",
+    ))
+    if not diff_lines:
+        body = (
+            f"[no diff yet — proposal is in 'pending' status with description only]\n"
+            f"description: {p.description}\n"
+            f"rationale: {p.reasoning or '(none)'}"
+        )
+    else:
+        body = "\n".join(diff_lines)
+    if len(body) > 3700:
+        body = body[:3700] + "\n…[truncated]"
+    title = p.title or p.description[:80] or p.id
+    return (
+        f"📝 <b>Diff: {_tg.escape_html(title)}</b>\n"
+        f"<pre>{_tg.escape_html(body)}</pre>"
+    )
+
+
+_register_proposal_callback()

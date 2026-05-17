@@ -122,6 +122,11 @@ class CallbackResult:
     # keyboard from the original message (a no-op when edited_text
     # is provided, since editMessageText replaces the keyboard too).
     clear_keyboard: bool = True
+    # Extra message to send AFTER the edit/toast — used when the
+    # handler wants to surface additional content (e.g. a "Show diff"
+    # button that returns the full diff in a follow-up <pre> block
+    # while keeping the original approval prompt intact). HTML-mode.
+    followup_text: Optional[str] = None
 
 
 _HANDLERS: dict[str, _CallbackHandler] = {}

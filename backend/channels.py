@@ -548,6 +548,64 @@ class TelegramBot:
                     chat_id, e,
                 )
 
+    def _on_self_mod_proposal(self, proposal) -> None:
+        """Subscribed callback: a new self-mod proposal landed. DM
+        every Telegram owner with an inline-button approval prompt.
+
+        Buttons:
+          [👀 Show diff] [✅ Approve & Apply] [❌ Reject]
+
+        Owner-only (the callback handler in self_modifier.py refuses
+        non-owner clickers); failures are logged, not raised."""
+        from . import roles as _roles
+        from . import contacts as _contacts
+        from . import tg_interactive as _tg
+
+        pid = getattr(proposal, "id", "") or ""
+        if not pid:
+            return
+        try:
+            owner_state = _roles._load()
+        except Exception:
+            return
+        owner_ids = [
+            sid for sid in (owner_state.get("owner_speaker_ids") or [])
+            if isinstance(sid, str) and sid.startswith("telegram:")
+        ]
+        if not owner_ids:
+            return
+
+        title = (proposal.title or proposal.description or proposal.id)[:80]
+        risk = getattr(proposal, "risk", "low")
+        module = getattr(proposal, "module", "")
+        module_clause = f" in <code>{_tg.escape_html(module)}</code>" if module else ""
+        text = (
+            f"🛠 <b>Self-modification proposal</b>{module_clause}\n\n"
+            f"<b>Title:</b> {_tg.escape_html(title)}\n"
+            f"<b>Risk:</b> {_tg.escape_html(str(risk))}\n"
+            f"<b>Rationale:</b> <i>{_tg.escape_html(proposal.reasoning or '(none)')}</i>\n"
+            f"<b>ID:</b> <code>{_tg.escape_html(pid)}</code>"
+        )
+        buttons = (
+            _tg.InlineButtonSet()
+            .row(
+                _tg.InlineButton("👀 Show diff", callback_data=f"prop:diff:{pid}"),
+            )
+            .row(
+                _tg.InlineButton("✅ Approve & Apply", callback_data=f"prop:apply:{pid}"),
+                _tg.InlineButton("❌ Reject", callback_data=f"prop:reject:{pid}"),
+            )
+        )
+        markup = buttons.to_markup()
+        for owner_sid in owner_ids:
+            chat_id = _contacts.chat_id_for_speaker(owner_sid)
+            if chat_id is None:
+                continue
+            try:
+                self._send_with_buttons(chat_id, text, markup)
+            except Exception as e:
+                log.warning("self-mod notify(%s) failed: %s", chat_id, e)
+
     def _send_with_buttons(self, chat_id: int, text: str, markup) -> None:
         """Schedule an HTML-formatted message with an inline keyboard.
 
@@ -642,6 +700,31 @@ class TelegramBot:
                             await query.message.edit_reply_markup(reply_markup=None)
                     except Exception as e:
                         log.debug("callback_query edit failed: %s", e)
+
+                # Optional follow-up message (e.g. "Show diff" sends
+                # the full diff as a second message so the original
+                # approval prompt with buttons stays usable).
+                if result.followup_text and query.message is not None:
+                    chat_id = update.effective_chat.id if update.effective_chat else None
+                    if chat_id is not None:
+                        # Split at the 4096-byte Telegram limit; each
+                        # chunk gets its own send so a long diff doesn't
+                        # 400 us out.
+                        text = result.followup_text
+                        LIMIT = 3900
+                        chunks = (
+                            [text] if len(text) <= LIMIT
+                            else [text[i:i + LIMIT] for i in range(0, len(text), LIMIT)]
+                        )
+                        for chunk in chunks:
+                            try:
+                                await self._app.bot.send_message(
+                                    chat_id=int(chat_id),
+                                    text=chunk,
+                                    parse_mode="HTML",
+                                )
+                            except Exception as e:
+                                log.debug("callback_query followup failed: %s", e)
 
             async def _gather_attachments(update: "Update") -> list[str]:
                 """Pull photos / voice / documents off the Telegram message,
@@ -1343,6 +1426,15 @@ class TelegramBot:
             # self-mod approvals, etc.). The tg_interactive dispatcher
             # picks the right handler by callback_data prefix.
             app.add_handler(CallbackQueryHandler(handle_callback_query))
+
+            # Subscribe to self-mod proposal-created events so the
+            # owner sees every new proposal as an inline-button DM.
+            # Idempotent: a re-register on bot restart is a no-op.
+            try:
+                from . import self_modifier as _sm
+                _sm.register_on_proposal_created(self._on_self_mod_proposal)
+            except Exception as e:
+                log.warning("self_modifier subscribe failed: %s", e)
 
             loop.run_until_complete(app.initialize())
             # Defensive: explicitly clear any webhook before polling.
