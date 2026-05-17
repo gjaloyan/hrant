@@ -226,3 +226,66 @@ def test_channels_session_key_shape(isolated_kb):
     user_id = 222
     expected = f"telegram:{channel_id}:{chat_id}:{user_id}"
     assert expected == "telegram:tg-main:-1009:222"
+
+
+# ─── describe_session_key + list_threads ─────────────────────────────
+
+
+def test_describe_session_key_dm():
+    from backend.sessions import describe_session_key
+    label = describe_session_key("telegram:tg-main:222:222")
+    assert "DM" in label
+    assert "tg-main" in label
+
+
+def test_describe_session_key_group():
+    from backend.sessions import describe_session_key
+    label = describe_session_key("telegram:tg-main:-1009:222")
+    assert "Group" in label
+    assert "-1009" in label
+
+
+def test_describe_session_key_webui():
+    from backend.sessions import describe_session_key
+    assert describe_session_key("webui:default") == "WebUI"
+
+
+def test_describe_session_key_falls_back_to_telegram_for_legacy():
+    """Pre-refactor session_keys looked like `telegram:222` (just
+    the speaker_id)."""
+    from backend.sessions import describe_session_key
+    assert describe_session_key("telegram:222") == "Telegram"
+
+
+def test_list_threads_groups_by_session_key(isolated_kb):
+    """Wife in DM and Wife in a group should appear as TWO threads
+    in list_threads even though they share speaker_id."""
+    from backend.sessions import SessionManager
+    mgr = SessionManager(path=isolated_kb / "sessions.json")
+    mgr.add_turn(
+        {"user": "dm"},
+        speaker_id="telegram:222",
+        session_key="telegram:botA:222:222",
+    )
+    mgr.add_turn(
+        {"user": "group"},
+        speaker_id="telegram:222",
+        session_key="telegram:botA:-1009:222",
+    )
+    threads = mgr.list_threads()
+    keys = {t["session_key"] for t in threads}
+    assert keys == {"telegram:botA:222:222", "telegram:botA:-1009:222"}
+    for t in threads:
+        assert t["speaker_id"] == "telegram:222"
+        assert t["thread_label"]
+
+
+def test_session_summary_includes_session_key_and_label(isolated_kb):
+    from backend.sessions import SessionManager
+    mgr = SessionManager(path=isolated_kb / "sessions.json")
+    s = mgr.get_or_create_current(
+        speaker_id="telegram:222", session_key="telegram:botA:-1009:222",
+    )
+    summary = s.summary()
+    assert summary["session_key"] == "telegram:botA:-1009:222"
+    assert "Group" in summary["thread_label"]

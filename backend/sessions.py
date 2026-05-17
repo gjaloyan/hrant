@@ -21,6 +21,44 @@ from .config import CONFIG
 DEFAULT_SPEAKER = "webui:default"
 
 
+def describe_session_key(session_key: str | None, speaker_id: str | None = None) -> str:
+    """Render a short human-readable label for a session_key.
+
+    Used by the Sessions panel so the owner can tell threads apart
+    at a glance — `DM (telegram)`, `Group -1009 (bot tg-main)`,
+    `WebUI`, etc. — without having to parse the raw session_key
+    themselves.
+
+    Channels.py builds keys of shape `telegram:<bot>:<chat>:<user>`.
+    For pre-refactor sessions where session_key == speaker_id, we
+    fall back to a coarser label ("Telegram" / "WebUI").
+    """
+    key = (session_key or "").strip()
+    if not key:
+        return "WebUI" if (speaker_id or "").startswith("webui") else "Unknown"
+    parts = key.split(":")
+    # Pre-refactor: session_key is just the speaker_id (no chat scope).
+    if len(parts) == 2:
+        channel, _ = parts
+        if channel == "webui":
+            return "WebUI"
+        if channel == "telegram":
+            return "Telegram"
+        return channel.capitalize() if channel else "Unknown"
+    # Full chat-scoped key: <channel>:<bot>:<chat>:<user>
+    if len(parts) >= 4 and parts[0] == "telegram":
+        _, bot, chat, _user = parts[:4]
+        try:
+            chat_int = int(chat)
+            # Negative chat_id → group / supergroup / channel.
+            if chat_int < 0:
+                return f"Group {chat} (bot {bot})"
+            return f"DM (bot {bot})"
+        except ValueError:
+            return f"{chat} (bot {bot})"
+    return key
+
+
 def normalize_speaker(speaker_id: str | None) -> str:
     """Coerce a speaker_id to canonical form ('<channel>:<user_id>').
 
@@ -127,6 +165,8 @@ class Session:
         return {
             "id": self.id,
             "speaker_id": self.speaker_id,
+            "session_key": self.session_key,
+            "thread_label": describe_session_key(self.session_key, self.speaker_id),
             "started": self.started,
             "ended": self.ended,
             "title": self.title,
@@ -353,18 +393,52 @@ class SessionManager:
         include_archived: bool = False,
         *,
         speaker_id: Optional[str] = None,
+        session_key: Optional[str] = None,
     ) -> list[dict]:
-        """List sessions (summaries only). When `speaker_id` is set,
-        only sessions belonging to that speaker."""
+        """List sessions (summaries only). Filter precedence:
+            session_key (most specific) > speaker_id > all."""
         if speaker_id is not None:
             speaker_id = normalize_speaker(speaker_id)
+        wanted_key = (session_key or "").strip() or None
+
         def _match(s: Session) -> bool:
+            if wanted_key is not None:
+                return s.session_key == wanted_key
             return speaker_id is None or s.speaker_id == speaker_id
+
         result = [s.summary() for s in reversed(self._sessions) if _match(s)]
         if include_archived:
             archived = self._load_archive()
             result.extend(s.summary() for s in reversed(archived) if _match(s))
         return result
+
+    def list_threads(self) -> list[dict]:
+        """Every conversation thread the system has seen — one row
+        per distinct session_key — with summary stats. Used by the
+        WebUI Sessions panel to render thread-level groupings (so
+        the owner can see "Wife · DM" and "Wife · Group -1009" as
+        separate rows even though they share speaker_id).
+
+        Returns rows of:
+          {session_key, speaker_id, thread_label, session_count,
+           last_active}
+        sorted newest-first by last_active.
+        """
+        agg: dict[str, dict] = {}
+        for s in self._sessions:
+            key = s.session_key or s.speaker_id or DEFAULT_SPEAKER
+            slot = agg.setdefault(key, {
+                "session_key": key,
+                "speaker_id": s.speaker_id,
+                "thread_label": describe_session_key(key, s.speaker_id),
+                "session_count": 0,
+                "last_active": "",
+            })
+            slot["session_count"] += 1
+            last = s.ended or s.started
+            if last and last > slot["last_active"]:
+                slot["last_active"] = last
+        return sorted(agg.values(), key=lambda r: r["last_active"], reverse=True)
 
     def list_speakers(self) -> list[dict]:
         """Speakers known to the system with their summary stats —

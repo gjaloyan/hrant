@@ -16,13 +16,14 @@ router = APIRouter()
 def list_sessions(
     include_archived: bool = False,
     speaker_id: Optional[str] = Query(default=None),
+    session_key: Optional[str] = Query(default=None),
 ):
-    """List sessions. With `speaker_id` set, only that speaker's
-    sessions; otherwise all sessions across every speaker."""
+    """List sessions. Filter precedence: session_key > speaker_id > all."""
     return {
         "sessions": SESSIONS.list_sessions(
             include_archived=include_archived,
             speaker_id=speaker_id,
+            session_key=session_key,
         ),
         "current_by_speaker": SESSIONS._derive_current_by_speaker(),
         "current_by_session_key": dict(SESSIONS._current_by_session_key),
@@ -37,6 +38,23 @@ def list_speakers():
     a per-speaker grouping."""
     return {
         "speakers": SESSIONS.list_speakers(),
+        "default_speaker": DEFAULT_SPEAKER,
+    }
+
+
+@router.get("/api/sessions/threads")
+def list_threads():
+    """Every conversation thread the system has seen — one row per
+    session_key, with `thread_label` (e.g. 'DM (bot tg-main)',
+    'Group -1009 (bot tg-main)') so the WebUI Sessions panel can
+    show distinct entries for the same speaker across different
+    chats. Returns:
+      [{session_key, speaker_id, thread_label, session_count,
+        last_active}, ...]
+    sorted newest-first by last_active.
+    """
+    return {
+        "threads": SESSIONS.list_threads(),
         "default_speaker": DEFAULT_SPEAKER,
     }
 

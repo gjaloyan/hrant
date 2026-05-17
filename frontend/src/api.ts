@@ -510,6 +510,12 @@ export const updateGoalPriority = (id: string, priority: number) =>
 export type SessionSummary = {
   id: string;
   speaker_id: string;
+  // session_key isolates conversation threads (Wife DM vs Wife group
+  // share speaker_id, get distinct session_keys). thread_label is
+  // the human-readable form rendered by the server: "DM (bot tg-main)",
+  // "Group -1009 (bot tg-main)", "WebUI", etc.
+  session_key: string;
+  thread_label: string;
   started: string;
   ended: string | null;
   title: string;
@@ -531,6 +537,14 @@ export type SpeakerSummary = {
   last_active: string;
 };
 
+export type ThreadSummary = {
+  session_key: string;
+  speaker_id: string;
+  thread_label: string;
+  session_count: number;
+  last_active: string;
+};
+
 export type SessionStats = {
   total_sessions: number;
   total_turns: number;
@@ -543,13 +557,16 @@ export type SessionStats = {
 export const fetchSessions = (
   includeArchived = false,
   speaker_id?: string,
+  session_key?: string,
 ) => {
   const params = new URLSearchParams();
   params.set("include_archived", String(includeArchived));
   if (speaker_id) params.set("speaker_id", speaker_id);
+  if (session_key) params.set("session_key", session_key);
   return json_get<{
     sessions: SessionSummary[];
     current_by_speaker: Record<string, string>;
+    current_by_session_key: Record<string, string>;
     default_speaker: string;
   }>(`/api/sessions?${params}`);
 };
@@ -557,6 +574,11 @@ export const fetchSessions = (
 export const fetchSpeakers = () =>
   json_get<{ speakers: SpeakerSummary[]; default_speaker: string }>(
     "/api/sessions/speakers",
+  );
+
+export const fetchThreads = () =>
+  json_get<{ threads: ThreadSummary[]; default_speaker: string }>(
+    "/api/sessions/threads",
   );
 
 export const fetchSessionStats = () =>

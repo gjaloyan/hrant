@@ -4,6 +4,7 @@ import {
   fetchSession,
   fetchSessionStats,
   fetchSpeakers,
+  fetchThreads,
   archiveSessions,
   deleteSession,
   newSession,
@@ -11,6 +12,7 @@ import {
   SessionDetail,
   SessionStats,
   SpeakerSummary,
+  ThreadSummary,
 } from "../api";
 
 /** Simple bar chart drawn with CSS — no external chart library needed. */
@@ -90,8 +92,11 @@ function formatDuration(seconds: number | null): string {
 export default function SessionsPanel() {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [currentBySpeaker, setCurrentBySpeaker] = useState<Record<string, string>>({});
+  const [currentByThread, setCurrentByThread] = useState<Record<string, string>>({});
   const [speakers, setSpeakers] = useState<SpeakerSummary[]>([]);
+  const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [filterSpeaker, setFilterSpeaker] = useState<string>("");  // "" = all
+  const [filterThread, setFilterThread] = useState<string>("");    // "" = all
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [selected, setSelected] = useState<SessionDetail | null>(null);
   const [showArchived, setShowArchived] = useState(false);
@@ -106,19 +111,26 @@ export default function SessionsPanel() {
 
   const load = useCallback(async () => {
     try {
-      const [sessData, statsData, speakersData] = await Promise.all([
-        fetchSessions(showArchived, filterSpeaker || undefined),
+      const [sessData, statsData, speakersData, threadsData] = await Promise.all([
+        fetchSessions(
+          showArchived,
+          filterSpeaker || undefined,
+          filterThread || undefined,
+        ),
         fetchSessionStats(),
         fetchSpeakers(),
+        fetchThreads(),
       ]);
       setSessions(sessData.sessions);
       setCurrentBySpeaker(sessData.current_by_speaker);
+      setCurrentByThread(sessData.current_by_session_key || {});
       setStats(statsData);
       setSpeakers(speakersData.speakers);
+      setThreads(threadsData.threads);
     } catch (e: any) {
       flash("Error: " + e.message);
     }
-  }, [showArchived, filterSpeaker]);
+  }, [showArchived, filterSpeaker, filterThread]);
 
   useEffect(() => {
     load();
@@ -292,12 +304,17 @@ export default function SessionsPanel() {
             </div>
           ) : (
             <div className="p-2 space-y-1">
-              {/* Phase 10: speaker filter — pick which user's sessions to view */}
+              {/* Identity filter (Phase 10) — which user's sessions. */}
               <div className="flex items-center gap-2 bg-slate-900/60 rounded p-2 text-[11px]">
-                <span className="opacity-60">Speaker:</span>
+                <span className="opacity-60 w-12 shrink-0">Speaker:</span>
                 <select
                   value={filterSpeaker}
-                  onChange={(e) => setFilterSpeaker(e.target.value)}
+                  onChange={(e) => {
+                    setFilterSpeaker(e.target.value);
+                    // Changing speaker invalidates thread filter — different
+                    // speakers don't share threads.
+                    setFilterThread("");
+                  }}
                   className="flex-1 bg-slate-800 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600"
                 >
                   <option value="">All speakers</option>
@@ -308,51 +325,94 @@ export default function SessionsPanel() {
                   ))}
                 </select>
               </div>
+              {/* Thread filter — within a speaker, pick a specific chat
+                  (DM vs group, vs different bots). Wife in a DM and
+                  Wife in a group share speaker_id but get distinct
+                  session_keys so each renders as its own row here. */}
+              <div className="flex items-center gap-2 bg-slate-900/60 rounded p-2 text-[11px]">
+                <span className="opacity-60 w-12 shrink-0">Thread:</span>
+                <select
+                  value={filterThread}
+                  onChange={(e) => setFilterThread(e.target.value)}
+                  className="flex-1 bg-slate-800 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600"
+                >
+                  <option value="">All threads</option>
+                  {threads
+                    .filter(
+                      (t) =>
+                        !filterSpeaker || t.speaker_id === filterSpeaker,
+                    )
+                    .map((t) => (
+                      <option key={t.session_key} value={t.session_key}>
+                        {t.thread_label} — {t.speaker_id} ({t.session_count})
+                      </option>
+                    ))}
+                </select>
+              </div>
               {sessions.length === 0 && (
                 <div className="text-xs opacity-40 p-2">
-                  {filterSpeaker
+                  {filterThread
+                    ? `No sessions in ${filterThread}`
+                    : filterSpeaker
                     ? `No sessions for ${filterSpeaker}`
                     : "No sessions yet"}
                 </div>
               )}
-              {sessions.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => handleSelect(s.id)}
-                  className={`w-full text-left rounded p-2 transition-colors text-xs ${
-                    selected?.id === s.id
-                      ? "bg-sky-800"
-                      : currentBySpeaker[s.speaker_id] === s.id
-                      ? "bg-emerald-900/40 hover:bg-emerald-900/60"
-                      : s.archived
-                      ? "bg-slate-800/40 hover:bg-slate-800/60 opacity-60"
-                      : "bg-slate-800/60 hover:bg-slate-700"
-                  }`}
-                >
-                  <div className="flex justify-between items-start gap-1">
-                    <span className="font-medium truncate">
-                      {s.title || "(untitled)"}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {currentBySpeaker[s.speaker_id] === s.id && (
-                        <span className="text-[9px] bg-emerald-700 rounded px-1">active</span>
-                      )}
-                      {s.archived && (
-                        <span className="text-[9px] bg-slate-600 rounded px-1">archived</span>
-                      )}
+              {sessions.map((s) => {
+                // Active = this session is the current open thread.
+                // Now keyed by session_key so the same speaker across
+                // multiple chats can have multiple "active" rows.
+                const isActiveThread =
+                  currentByThread[s.session_key] === s.id ||
+                  // Back-compat for legacy rows that pre-date session_key.
+                  (!s.session_key && currentBySpeaker[s.speaker_id] === s.id);
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => handleSelect(s.id)}
+                    className={`w-full text-left rounded p-2 transition-colors text-xs ${
+                      selected?.id === s.id
+                        ? "bg-sky-800"
+                        : isActiveThread
+                        ? "bg-emerald-900/40 hover:bg-emerald-900/60"
+                        : s.archived
+                        ? "bg-slate-800/40 hover:bg-slate-800/60 opacity-60"
+                        : "bg-slate-800/60 hover:bg-slate-700"
+                    }`}
+                  >
+                    <div className="flex justify-between items-start gap-1">
+                      <span className="font-medium truncate">
+                        {s.title || "(untitled)"}
+                      </span>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {isActiveThread && (
+                          <span className="text-[9px] bg-emerald-700 rounded px-1">active</span>
+                        )}
+                        {s.archived && (
+                          <span className="text-[9px] bg-slate-600 rounded px-1">archived</span>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex gap-2 mt-0.5 opacity-60 text-[10px]">
-                    <span className="text-violet-300" title="speaker">
-                      {s.speaker_id || "—"}
-                    </span>
-                    <span>{s.started.slice(0, 16)}</span>
-                    <span>{s.turn_count} turns</span>
-                    {s.avg_confidence > 0 && <span>{s.avg_confidence}%</span>}
-                    <span>{formatDuration(s.duration_seconds)}</span>
-                  </div>
-                </button>
-              ))}
+                    <div className="flex gap-2 mt-0.5 opacity-60 text-[10px] flex-wrap">
+                      <span className="text-violet-300" title="speaker">
+                        {s.speaker_id || "—"}
+                      </span>
+                      {s.thread_label && (
+                        <span
+                          className="text-amber-300"
+                          title={`session_key: ${s.session_key}`}
+                        >
+                          {s.thread_label}
+                        </span>
+                      )}
+                      <span>{s.started.slice(0, 16)}</span>
+                      <span>{s.turn_count} turns</span>
+                      {s.avg_confidence > 0 && <span>{s.avg_confidence}%</span>}
+                      <span>{formatDuration(s.duration_seconds)}</span>
+                    </div>
+                  </button>
+                );
+              })}
             </div>
           )}
         </div>
@@ -374,7 +434,16 @@ export default function SessionsPanel() {
             <div className="flex justify-between items-start gap-4">
               <div>
                 <h3 className="font-bold text-lg">{selected.title || "(untitled)"}</h3>
-                <div className="flex gap-3 text-xs opacity-60 mt-1">
+                <div className="flex gap-3 text-xs opacity-60 mt-1 flex-wrap">
+                  <span className="text-violet-300">{selected.speaker_id}</span>
+                  {selected.thread_label && (
+                    <span
+                      className="text-amber-300"
+                      title={`session_key: ${selected.session_key}`}
+                    >
+                      {selected.thread_label}
+                    </span>
+                  )}
                   <span>Started: {selected.started}</span>
                   {selected.ended && <span>Ended: {selected.ended}</span>}
                   <span>Duration: {formatDuration(selected.duration_seconds)}</span>
