@@ -6,6 +6,7 @@ autonomic engine in `backend/autonomic/api.py` and follow the same
 pattern.
 """
 from __future__ import annotations
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -63,8 +64,7 @@ async def lifespan(application: FastAPI):
             log.warning("Job recovery error: %s", e)
         return recovered
 
-    import asyncio as _asyncio_for_recovery
-    _recovery_task = _asyncio_for_recovery.create_task(_recover_jobs_background())
+    _recovery_task = asyncio.create_task(_recover_jobs_background())
     application.state.consolidation_recovery_task = _recovery_task
 
     # Phase B+C migration: one-shot copy of any legacy
@@ -119,7 +119,7 @@ async def lifespan(application: FastAPI):
                 return
             # Let the Telegram bot's event loop finish wiring up.
             # send_text returns False until then.
-            await _asyncio_for_recovery.sleep(3.0)
+            await asyncio.sleep(3.0)
             for j in tg_interrupted:
                 try:
                     chat_id = int(j.reply_to["telegram_chat_id"])
@@ -148,7 +148,7 @@ async def lifespan(application: FastAPI):
             log.warning("Telegram interrupted-notify scheduler error: %s", e)
 
     application.state.consolidation_notify_task = (
-        _asyncio_for_recovery.create_task(_notify_telegram_after_recovery())
+        asyncio.create_task(_notify_telegram_after_recovery())
     )
 
     bundle = build_scheduler()

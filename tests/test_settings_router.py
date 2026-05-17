@@ -212,6 +212,58 @@ def test_tts_rate_resets_singleton(fake_tts):
     assert reset_count["n"] >= 1, "rate change must reset the synth"
 
 
+# --- delta syntax (post-audit #5) -------------------------------------
+
+
+def test_tts_rate_delta_increase_from_zero(fake_tts):
+    """'+= 25%' on a +0% baseline -> +25%."""
+    state, _ = fake_tts
+    state["cfg"].setdefault("edge_tts", {})["rate"] = "+0%"
+    s_mod.SETTINGS.set("tts.rate", "+=25%")
+    assert state["cfg"]["edge_tts"]["rate"] == "+25%"
+
+
+def test_tts_rate_delta_increase_from_existing(fake_tts):
+    """The audit case: rate was +50%, user said 'increase by 25%' →
+    delta '+=25%' must produce +75%, not +25%."""
+    state, _ = fake_tts
+    state["cfg"].setdefault("edge_tts", {})["rate"] = "+50%"
+    s_mod.SETTINGS.set("tts.rate", "+=25%")
+    assert state["cfg"]["edge_tts"]["rate"] == "+75%"
+
+
+def test_tts_rate_delta_decrease(fake_tts):
+    """'-=10%' on +30% → +20%."""
+    state, _ = fake_tts
+    state["cfg"].setdefault("edge_tts", {})["rate"] = "+30%"
+    s_mod.SETTINGS.set("tts.rate", "-=10%")
+    assert state["cfg"]["edge_tts"]["rate"] == "+20%"
+
+
+def test_tts_rate_delta_clamps_to_max(fake_tts):
+    """+80% +=50% would overshoot — must clamp to +100%."""
+    state, _ = fake_tts
+    state["cfg"].setdefault("edge_tts", {})["rate"] = "+80%"
+    s_mod.SETTINGS.set("tts.rate", "+=50%")
+    assert state["cfg"]["edge_tts"]["rate"] == "+100%"
+
+
+def test_tts_rate_delta_clamps_to_min(fake_tts):
+    state, _ = fake_tts
+    state["cfg"].setdefault("edge_tts", {})["rate"] = "-80%"
+    s_mod.SETTINGS.set("tts.rate", "-=50%")
+    assert state["cfg"]["edge_tts"]["rate"] == "-100%"
+
+
+def test_tts_rate_absolute_still_works_after_delta_added(fake_tts):
+    """Regression: absolute syntax mustn't be hijacked by the new
+    delta handling."""
+    state, _ = fake_tts
+    state["cfg"].setdefault("edge_tts", {})["rate"] = "+50%"
+    s_mod.SETTINGS.set("tts.rate", "+25%")
+    assert state["cfg"]["edge_tts"]["rate"] == "+25%"
+
+
 # --- end-to-end via the set_setting tool handler ----------------------
 
 

@@ -582,6 +582,69 @@ def _list_pending_pairings_handler() -> str:
     )
 
 
+def _list_telegram_access_handler(role: str = "") -> str:
+    """Owner-only: enumerate every Telegram speaker the system knows
+    about, grouped by role. Filled gap from the post-Phase-B+C audit
+    — the agent was reaching for `terminal_exec read roles.json`
+    every time the owner asked 'who has access?'. With this tool the
+    answer is one call.
+
+    `role` filter is optional — pass 'owner' / 'trusted' / 'guest'
+    to narrow the result, omit for everyone.
+    """
+    from .roles import current_speaker, is_owner, list_roles
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — list_telegram_access is owner-only",
+        }, ensure_ascii=False)
+    state = list_roles()
+    owner_ids = set(state.get("owner_speaker_ids") or [])
+    speakers = state.get("speakers") or {}
+    wanted = (role or "").strip().lower()
+
+    def _classify(sid: str, entry: dict) -> str:
+        if sid in owner_ids:
+            return "owner"
+        return (entry.get("role") or "guest").lower()
+
+    rows: list[dict] = []
+    for sid, entry in speakers.items():
+        if not isinstance(sid, str) or not sid.startswith("telegram:"):
+            continue
+        actual = _classify(sid, entry or {})
+        if wanted and actual != wanted:
+            continue
+        rows.append({
+            "speaker_id": sid,
+            "user_id": sid.split(":", 1)[1],
+            "role": actual,
+            "label": (entry or {}).get("label", ""),
+        })
+    # Also surface owner_speaker_ids that ONLY appear in owner_ids
+    # (no entry in speakers map) — they're still owners.
+    seen = {r["speaker_id"] for r in rows}
+    for sid in owner_ids:
+        if not isinstance(sid, str) or not sid.startswith("telegram:"):
+            continue
+        if sid in seen:
+            continue
+        if wanted and wanted != "owner":
+            continue
+        rows.append({
+            "speaker_id": sid,
+            "user_id": sid.split(":", 1)[1],
+            "role": "owner",
+            "label": "",
+        })
+    rows.sort(key=lambda r: (r["role"] != "owner", r["role"] != "trusted", r["user_id"]))
+    return json.dumps(
+        {"ok": True, "count": len(rows), "users": rows},
+        ensure_ascii=False,
+    )
+
+
 # ---------- регистрация ----------
 def register_builtin_tools() -> None:
     reg = get_registry()
@@ -886,7 +949,16 @@ def register_builtin_tools() -> None:
                         "New value. For boolean settings: "
                         "'true'/'false'/'on'/'off'. For voice_gender: "
                         "'male'/'female'/'auto'. Empty string clears "
-                        "the setting (where the spec allows)."
+                        "the setting (where the spec allows).\n\n"
+                        "For `tts.rate` specifically — two syntaxes:\n"
+                        "  Absolute: '+25%' / '-10%' / '0%' — set the "
+                        "rate to that exact value.\n"
+                        "  Delta:    '+=25%' / '-=10%' — add/subtract "
+                        "from the CURRENT rate (clamped ±100%).\n"
+                        "When the user says 'increase by 25%' or "
+                        "'ускорь на 25%', that's a DELTA — use '+=25%'. "
+                        "When they say 'set rate to +25%' or 'make it "
+                        "+25%', that's absolute — use '+25%'."
                     ),
                 },
             },
@@ -1189,5 +1261,30 @@ def register_builtin_tools() -> None:
             "properties": {},
         },
         handler=_list_pending_pairings_handler,
+    )
+
+    reg.register_func(
+        name="list_telegram_access",
+        description=(
+            "Owner-only. Return every Telegram speaker the system "
+            "knows about, grouped by role (owner / trusted / guest). "
+            "Use this for any 'who has access?' / 'who are the "
+            "trusted users?' / 'кто может писать боту?' question — "
+            "do NOT read roles.json via terminal_exec for that, this "
+            "tool is the right answer. Pass `role` to filter "
+            "(owner / trusted / guest); omit for everyone."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "role": {
+                    "type": "string",
+                    "enum": ["", "owner", "trusted", "guest"],
+                    "description": "Filter to a single role. Omit (empty string) for all.",
+                    "default": "",
+                },
+            },
+        },
+        handler=_list_telegram_access_handler,
     )
 

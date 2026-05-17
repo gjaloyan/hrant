@@ -330,3 +330,29 @@ def test_migrate_doesnt_downgrade_owner(isolated_state):
     set_role("telegram:1234", "owner")
     migrate_legacy_allowed_users()
     assert role_of("telegram:1234") == "owner"
+
+
+# ─── Audit-fix #1: human-readable note in grant/revoke ───────────────
+
+
+def test_grant_returns_human_readable_note(isolated_state):
+    """The audit caught the verifier flagging 'added to channels.json'
+    as unverified because the tool result only had `updated_files`,
+    not a sentence. Now grant returns a `note` the verifier can match."""
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import grant_telegram_access
+    res = grant_telegram_access("777", role="trusted", label="Wife")
+    assert "note" in res
+    assert "roles.json" in res["note"]
+    assert "channels.json" in res["note"]
+    assert "777" in res["note"]
+
+
+def test_revoke_returns_human_readable_note(isolated_state):
+    _write_channels(isolated_state, allowed=["777"])
+    from backend.access import grant_telegram_access, revoke_telegram_access
+    grant_telegram_access("777", role="trusted")
+    res = revoke_telegram_access("777")
+    assert "note" in res
+    assert "removed from" in res["note"]
+    assert "roles.json" in res["note"]

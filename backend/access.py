@@ -416,6 +416,15 @@ def grant_telegram_access(
     except Exception:
         pass
 
+    # Build a human-readable note so the verifier can match claims
+    # like "added X to channels.json" against this exact text instead
+    # of trying to infer it from the `updated_files` array alone.
+    files_str = " and ".join(updated) if updated else "no files"
+    note = (
+        f"granted role={role} to telegram:{uid}"
+        f"{' (label=' + label + ')' if label else ''}"
+        f" — added/promoted in {files_str}"
+    )
     return {
         "ok": True,
         "user_id": uid,
@@ -423,6 +432,7 @@ def grant_telegram_access(
         "role": role,
         "label": label,
         "updated_files": updated,
+        "note": note,
     }
 
 
@@ -461,12 +471,18 @@ def revoke_telegram_access(user_id: int | str) -> dict:
             updated.append("channels.json")
     except Exception as e:
         log.warning("revoke_telegram_access: channels.json sync failed: %s", e)
+    files_str = " and ".join(updated) if updated else "no files"
+    note = (
+        f"revoked telegram:{uid} — role set to guest, "
+        f"removed from {files_str}"
+    )
     return {
         "ok": True,
         "user_id": uid,
         "speaker_id": speaker_id,
         "role": "guest",
         "updated_files": updated,
+        "note": note,
     }
 
 

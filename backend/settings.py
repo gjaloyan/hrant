@@ -227,7 +227,15 @@ def _tts_voice_gender_current() -> Optional[str]:
 # Regex is permissive on the user-facing edges (sign + percent
 # optional) because the setter normalises bare inputs like "25" or
 # "+25" into "+25%". Range still enforced: only 0-100 magnitudes.
-_TTS_RATE_RE = r"[+-]?(?:100|[0-9]?[0-9])%?"
+#
+# Two syntaxes accepted by the setter:
+#   1. Absolute     +25% / -10% / 0% / 25 → set rate to that value.
+#   2. Delta        += 25% / -= 10%       → add/subtract from CURRENT
+#                                            rate, clamped to ±100%.
+# The audit caught the ambiguity in "increase voice speed by 25%":
+# absolute syntax set it to +25%, but the user meant +25 ON TOP of
+# the current value. The delta form makes the user's intent explicit.
+_TTS_RATE_RE = r"(?:[+]=|[-]=)?\s?[+-]?(?:100|[0-9]?[0-9])%?"
 
 
 def _tts_get_rate() -> str:
@@ -237,8 +245,23 @@ def _tts_get_rate() -> str:
 
 
 def _tts_set_rate(value: Optional[str]) -> None:
-    """Set speech rate (e.g. '+25%'). Empty/None clears the pin
-    (back to backend default = +0%)."""
+    """Set speech rate. Two input syntaxes:
+
+      Absolute  '+25%' / '-10%' / '25' / '0'  → set rate to that.
+      Delta     '+=25%' / '-=10' / '+= 25%'   → add/subtract from
+                                                  the CURRENT rate.
+
+    Delta form was added after the post-Phase-B+C audit caught the
+    ambiguity in 'increase voice speed by 25%'. With absolute syntax,
+    that phrase set the rate to +25% (forgetting any prior value).
+    With delta the LLM can express 'increase by 25%' as '+=25%' and
+    get the actually-correct result.
+
+    Range is clamped to ±100% on writes; values past that point are
+    unintelligible audio.
+
+    Empty/None clears the pin (back to backend default = +0%).
+    """
     cfg = _tts_load()
     backend = cfg.get("backend") or "edge_tts"
     backend_cfg = cfg.get(backend) or {}
@@ -247,12 +270,27 @@ def _tts_set_rate(value: Optional[str]) -> None:
     if value is None:
         backend_cfg.pop("rate", None)
     else:
-        # Be tolerant: accept "25%" / "+25" / "25" / "+25%" all as +25%.
-        v = str(value).strip()
-        if not v.endswith("%"):
-            v = v + "%"
-        if not v.startswith(("+", "-")):
-            v = "+" + v
+        v = str(value).strip().replace(" ", "")
+        if v.startswith(("+=", "-=")):
+            sign = 1 if v[0] == "+" else -1
+            rest = v[2:].rstrip("%")
+            try:
+                delta = int(rest)
+            except ValueError as e:
+                raise ValueError(f"invalid tts.rate delta {value!r}") from e
+            current_str = ((cfg.get(backend) or {}).get("rate") or "+0%").rstrip("%")
+            try:
+                current = int(current_str)
+            except ValueError:
+                current = 0
+            new_val = max(-100, min(100, current + sign * delta))
+            v = ("+" if new_val >= 0 else "") + f"{new_val}%"
+        else:
+            # Absolute syntax: accept "25%" / "+25" / "25" / "+25%" all as +25%.
+            if not v.endswith("%"):
+                v = v + "%"
+            if not v.startswith(("+", "-")):
+                v = "+" + v
         backend_cfg["rate"] = v
     cfg[backend] = backend_cfg
     cfg.setdefault("backend", backend)

@@ -150,7 +150,9 @@ without a corresponding tool call is a LIE; never produce one.
     terminal_exec yourself. Approve a pending pairing request
     (an unknown user wrote and we DMed you a code) →
     `approve_pairing(code_or_user_id, label)`. List who's waiting
-    → `list_pending_pairings`.
+    → `list_pending_pairings`. "Who has access?" / "who are my
+    trusted users?" / "кто может писать боту" → `list_telegram_access`
+    (NOT terminal_exec on roles.json).
 
   - Owner-only shell inspection (status, logs, file content) →
     `terminal_exec`. NOT a substitute for `set_setting` when a
