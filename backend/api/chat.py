@@ -17,7 +17,7 @@ from ..job_runner import run_tracked
 from ..llm import TOKENS
 from ..models import ChatRequest
 from ..project_mode import PROJECTS
-from ..sessions import SESSIONS
+from ..sessions import SESSIONS  # noqa: F401 — re-exported by some legacy imports
 from ._auth import require_owner_for_writes
 from ._rate_limit import check_chat_rate
 
@@ -85,38 +85,12 @@ async def chat(req: ChatRequest, request: Request):
                     speaker_id=target_speaker,
                 ),
             )
-            # Round F-pre: include cheap summary fields directly in
-            # the session row so the WebUI badges (token usage, tool
-            # count, LLM count) survive a page refresh without
-            # waiting for the lazy /api/turns/<id> fetch. Heavy data
-            # (full thinking_trace, claims, evidence) still comes
-            # via lazy load — these are just the ~5 small numbers a
-            # restored chat needs to show counts and a token bar.
-            tu = res.token_usage
-            n_tools = sum(
-                1 for s in (res.thinking_trace or [])
-                if s.tool_call and (s.event == "tool" or s.event == "tool_error")
-            )
-            n_llm = len(res.llm_calls or [])
-            turn = {
-                "ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "user": req.message,
-                "answer": res.answer or "",
-                "intent": "chat" if res.is_chat else "task",
-                "is_chat": bool(res.is_chat),
-                "confidence": res.verification.confidence if res.verification else 0,
-                "topics": res.used_topics or [],
-                "turn_id": getattr(res, "turn_id", "") or "",
-                "channel": target_channel,
-                "speaker_id": target_speaker,
-                "token_usage": tu.model_dump() if tu else None,
-                "n_tool_calls": n_tools,
-                "n_llm_calls": n_llm,
-                # Link the session entry to its durable job record so the
-                # WebUI can deep-link Conversation → Jobs.
-                "job_id": job_id,
-            }
-            SESSIONS.add_turn(turn, speaker_id=target_speaker)
+            # Audit-fix #2: SESSIONS.add_turn used to live HERE, but
+            # the Telegram channel and CLI never duplicated it, so
+            # 99% of production turns were invisible in the Sessions
+            # panel. The write now happens inside `run_unified`
+            # itself — one source of truth for every caller. This
+            # endpoint no longer needs to assemble the turn record.
             if res.thinking_trace:
                 TOKENS.save_request_trace(
                     question=req.message,

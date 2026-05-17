@@ -289,3 +289,104 @@ def test_session_summary_includes_session_key_and_label(isolated_kb):
     summary = s.summary()
     assert summary["session_key"] == "telegram:botA:-1009:222"
     assert "Group" in summary["thread_label"]
+
+
+# ─── Audit-fix #2: run_unified writes to SESSIONS ────────────────────
+
+
+@pytest.fixture
+def mock_unified_turn(isolated_kb, monkeypatch):
+    """Provide enough scaffolding to run `run_unified` without a real
+    LLM. Returns a closure that, given a session_key, kicks
+    `agent.run` and returns the SessionManager singleton for
+    assertions."""
+    from unittest.mock import MagicMock
+    from backend import unified_agent as ua
+    from backend.models import AgentAnswer, VerificationResult, TokenUsage
+
+    # Force-mock the LLM-bound parts of run_unified.
+    # Patch the router so we don't hit real providers. router is
+    # imported lazily inside run_unified — patch at its definition
+    # site so the late-import resolution sees our stub.
+    fake_router = MagicMock()
+    fake_router.call_with_tools.return_value = "ack from unified mock"
+    from backend import llm as _llm
+    monkeypatch.setattr(_llm, "router", lambda: fake_router)
+    # Verifier should not call out either.
+    from backend import verifier as _v
+    monkeypatch.setattr(
+        _v, "verify",
+        lambda *a, **kw: VerificationResult(confidence=90),
+    )
+    # Memory extractor / goals tick / evaluator log — all wrapped
+    # in try/except by run_unified, so we let them no-op naturally
+    # (with the empty isolated_kb they have nothing real to do).
+
+    def _do_turn(*, speaker_id, session_key, task="hello", channel="webui",
+                 job_id=None):
+        from backend.agent import Agent
+        agent = Agent()
+        agent.run(
+            task,
+            channel=channel,
+            speaker_id=speaker_id,
+            session_key=session_key,
+            job_id=job_id,
+        )
+        from backend.sessions import SESSIONS
+        return SESSIONS
+
+    return _do_turn
+
+
+def test_run_unified_creates_session_for_telegram_thread(mock_unified_turn):
+    """Telegram channel: agent.run with a session_key must produce
+    a Session entry visible in SESSIONS.list_threads."""
+    sessions = mock_unified_turn(
+        speaker_id="telegram:222",
+        session_key="telegram:hrant:-1009:222",
+        channel="telegram",
+        task="hi from group chat",
+    )
+    threads = sessions.list_threads()
+    keys = {t["session_key"] for t in threads}
+    assert "telegram:hrant:-1009:222" in keys
+    thread = next(t for t in threads if t["session_key"] == "telegram:hrant:-1009:222")
+    assert thread["speaker_id"] == "telegram:222"
+    assert thread["session_count"] >= 1
+
+
+def test_run_unified_creates_session_for_cli(mock_unified_turn):
+    """CLI single-shot: agent.run without an explicit session_key
+    defaults to speaker_id, and the Session entry shows up under
+    webui:default — the same place WebUI turns land."""
+    sessions = mock_unified_turn(
+        speaker_id="webui:default",
+        session_key=None,
+        channel="webui",
+        task="hi from cli",
+    )
+    threads = sessions.list_threads()
+    keys = {t["session_key"] for t in threads}
+    assert "webui:default" in keys
+
+
+def test_run_unified_stamps_job_id_when_provided(mock_unified_turn):
+    """run_tracked passes job.id to agent.run; the SESSIONS turn
+    record must carry it back so the WebUI can deep-link
+    Conversation → Jobs even for Telegram turns."""
+    sessions = mock_unified_turn(
+        speaker_id="telegram:999",
+        session_key="telegram:hrant:-1009:999",
+        channel="telegram",
+        task="probe",
+        job_id="job-deadbeef",
+    )
+    thread_sessions = sessions.list_sessions(session_key="telegram:hrant:-1009:999")
+    assert thread_sessions
+    # Pull the Session itself for its turns
+    sid = thread_sessions[0]["id"]
+    sess = sessions.get_session(sid)
+    assert sess is not None
+    assert sess.turns
+    assert any(t.get("job_id") == "job-deadbeef" for t in sess.turns)

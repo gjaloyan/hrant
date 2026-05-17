@@ -241,6 +241,7 @@ def run_unified(
     channel: str,
     speaker_id: str,
     session_key: str | None = None,
+    job_id: str | None = None,
 ) -> AgentAnswer:
     """Execute one unified-loop turn. Called from `Agent.run` when
     the env flag is set. `agent` is the calling Agent instance —
@@ -460,6 +461,47 @@ def run_unified(
         speaker_id=speaker_id,
         session_key=skey,
     )
+
+    # Audit fix #2: persist a full Session row from EVERY agent.run
+    # path, not just WebUI's /api/chat. Pre-fix, Telegram and CLI
+    # turns updated CONVERSATION but not SESSIONS, so they were
+    # invisible in the WebUI Sessions panel even though their
+    # conversation history was retrievable. Now run_unified is the
+    # single source of truth for both — every caller (WebUI, TG, CLI)
+    # gets a Session entry on the new thread keyed by session_key.
+    try:
+        from .sessions import SESSIONS
+        from datetime import datetime as _dt
+        n_tools = sum(
+            1 for s in (agent._trace or [])
+            if getattr(s, "tool_call", None)
+            and getattr(s, "event", "") in ("tool", "tool_error")
+        )
+        tu = agent._get_token_usage()
+        turn_record = {
+            "ts": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "user": task,
+            "answer": answer or "",
+            "intent": "task",
+            "is_chat": False,
+            "confidence": vr.confidence,
+            "topics": [],
+            "channel": channel,
+            "speaker_id": speaker_id,
+            "session_key": skey,
+            "token_usage": tu.model_dump() if tu else None,
+            "n_tool_calls": n_tools,
+            "n_llm_calls": len(agent._llm_calls or []),
+        }
+        if job_id:
+            turn_record["job_id"] = job_id
+        SESSIONS.add_turn(
+            turn_record,
+            speaker_id=speaker_id,
+            session_key=skey,
+        )
+    except Exception as e:
+        log.debug("unified: sessions add_turn failed (non-fatal): %s", e)
 
     try:
         EVALUATOR.log(EvalEntry(

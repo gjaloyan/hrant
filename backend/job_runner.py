@@ -134,6 +134,7 @@ def run_tracked(
                 channel=channel,
                 speaker_id=speaker_id,
                 session_key=session_key,
+                job_id=job.id,
             )
         except Exception as e:
             # Anything that escapes Agent.run is a real failure — LLM

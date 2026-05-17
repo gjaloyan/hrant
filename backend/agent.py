@@ -1671,6 +1671,7 @@ class Agent(
         channel: str = "webui",
         speaker_id: str = "webui:default",
         session_key: str | None = None,
+        job_id: str | None = None,
     ) -> AgentAnswer:
         import time as _time
         from .sessions import normalize_speaker
@@ -1686,7 +1687,7 @@ class Agent(
             for attr in (
                 "_trace", "_llm_calls", "_request_id",
                 "_self_analysis_unverified", "_t0", "_attachments",
-                "_channel", "_speaker_id", "_session_key",
+                "_channel", "_speaker_id", "_session_key", "_job_id",
                 "_role", "_role_token",
                 "_sticky_info", "_sticky_token", "_mode",
             )
@@ -1716,6 +1717,10 @@ class Agent(
         # Defaults to speaker_id when the caller hasn't been updated
         # to pass a chat-scoped key (e.g. the WebUI single-user path).
         self._session_key = (session_key or "").strip() or self._speaker_id
+        # Job id — set by run_tracked BEFORE agent.run so unified_agent
+        # can deep-link the SESSIONS turn record to the durable Job.
+        # None for CLI / fast-path callers that don't track jobs.
+        self._job_id = job_id or None
         # Phase 11: per-speaker role gating. Read once at run start
         # so tool checks below don't re-read the roles file per call.
         # Set the ContextVar so deeply-nested tool handlers
@@ -1745,6 +1750,7 @@ class Agent(
                 channel=channel,
                 speaker_id=self._speaker_id,
                 session_key=self._session_key,
+                job_id=self._job_id,
             )
         finally:
             try:

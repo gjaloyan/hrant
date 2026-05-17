@@ -148,11 +148,12 @@ def test_unified_default_routes_into_run_unified(monkeypatch):
 
     called = {"flag": False, "task": None}
 
-    def _fake_run_unified(*, agent, task, project, attachments, channel, speaker_id, session_key=None):
+    def _fake_run_unified(*, agent, task, project, attachments, channel, speaker_id, session_key=None, job_id=None):
         called["flag"] = True
         called["task"] = task
         called["speaker_id"] = speaker_id
         called["session_key"] = session_key
+        called["job_id"] = job_id
         return fake_answer
 
     monkeypatch.setattr(ua, "run_unified", _fake_run_unified)
