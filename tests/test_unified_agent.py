@@ -28,25 +28,28 @@ from backend import unified_agent as ua
 # --- env-flag ---------------------------------------------------------
 
 
-def test_default_disabled():
-    """Default state: flag off → unified path inactive."""
-    if "HRANT_UNIFIED_AGENT" in os.environ:
-        del os.environ["HRANT_UNIFIED_AGENT"]
-    assert ua.unified_enabled() is False
+def test_default_enabled():
+    """Phase C: unified is now the DEFAULT. No env var → on."""
+    for k in ("HRANT_UNIFIED_AGENT", "HRANT_LEGACY_PIPELINE"):
+        if k in os.environ:
+            del os.environ[k]
+    assert ua.unified_enabled() is True
 
 
-def test_truthy_values_enable():
+def test_truthy_legacy_flag_disables_unified():
+    """Opt-out via HRANT_LEGACY_PIPELINE=1 for emergency rollback."""
     for v in ("1", "true", "yes", "on", "TRUE", "Yes"):
-        os.environ["HRANT_UNIFIED_AGENT"] = v
-        assert ua.unified_enabled() is True, v
-    del os.environ["HRANT_UNIFIED_AGENT"]
-
-
-def test_falsy_values_disable():
-    for v in ("0", "false", "no", "off", "", "anything-else"):
-        os.environ["HRANT_UNIFIED_AGENT"] = v
+        os.environ["HRANT_LEGACY_PIPELINE"] = v
         assert ua.unified_enabled() is False, v
-    del os.environ["HRANT_UNIFIED_AGENT"]
+    del os.environ["HRANT_LEGACY_PIPELINE"]
+
+
+def test_falsy_legacy_flag_keeps_unified():
+    """Falsy / absent / unknown values → unified stays on."""
+    for v in ("0", "false", "no", "off", "", "anything-else"):
+        os.environ["HRANT_LEGACY_PIPELINE"] = v
+        assert ua.unified_enabled() is True, v
+    del os.environ["HRANT_LEGACY_PIPELINE"]
 
 
 # --- RULES block content (regression — text content matters) ----------
@@ -130,10 +133,10 @@ def test_auto_recall_formats_hits_when_present():
 # --- end-to-end through Agent.run with the flag ----------------------
 
 
-def test_unified_flag_routes_into_run_unified(monkeypatch):
-    """When HRANT_UNIFIED_AGENT=1 is set, Agent.run() must call
-    unified_agent.run_unified instead of the legacy pipeline."""
-    monkeypatch.setenv("HRANT_UNIFIED_AGENT", "1")
+def test_unified_default_routes_into_run_unified(monkeypatch):
+    """Phase C default: Agent.run() calls unified_agent.run_unified
+    when no opt-out flag is set."""
+    monkeypatch.delenv("HRANT_LEGACY_PIPELINE", raising=False)
 
     from backend.agent import Agent
     fake_answer = MagicMock()
@@ -160,23 +163,10 @@ def test_unified_flag_routes_into_run_unified(monkeypatch):
     assert called["speaker_id"] == "webui:default"
 
 
-def test_unified_flag_off_uses_legacy(monkeypatch):
-    """Default (no env flag): the legacy classifier path runs.
-    We verify that `run_unified` is NOT called even when the
-    module is importable."""
-    monkeypatch.delenv("HRANT_UNIFIED_AGENT", raising=False)
-
-    called = {"flag": False}
-
-    def _fake_run_unified(*args, **kwargs):
-        called["flag"] = True
-        raise AssertionError("legacy path should not call run_unified")
-
-    monkeypatch.setattr(ua, "run_unified", _fake_run_unified)
-
-    # We don't run a full Agent.run here — that would exercise
-    # the legacy pipeline which hits the real LLM. Instead we
-    # just verify the flag-check returns False so the branch
-    # doesn't fire.
+def test_legacy_opt_out_keeps_run_unified_off(monkeypatch):
+    """Emergency rollback: HRANT_LEGACY_PIPELINE=1 forces the
+    legacy classifier path. We just verify the gate returns False
+    in that case — exercising the full legacy path here would
+    require a live LLM."""
+    monkeypatch.setenv("HRANT_LEGACY_PIPELINE", "1")
     assert ua.unified_enabled() is False
-    assert called["flag"] is False

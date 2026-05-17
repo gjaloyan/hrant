@@ -90,11 +90,14 @@ log = logging.getLogger(__name__)
 
 
 def unified_enabled() -> bool:
-    """True when `HRANT_UNIFIED_AGENT` is truthy in the env. Read at
-    call time so a server restart isn't needed to flip the flag
-    via systemctl edit."""
-    v = (os.getenv("HRANT_UNIFIED_AGENT", "") or "").strip().lower()
-    return v in ("1", "true", "yes", "on")
+    """Unified path is now the DEFAULT (Phase C, after A/B verified
+    on the server). Opt-OUT via `HRANT_LEGACY_PIPELINE=1` for the
+    rare emergency rollback during the post-flip window. Once Stage
+    3 lands and the legacy code is deleted, the opt-out becomes a
+    no-op too — but keeping the gate here for one more deploy lets
+    us flip back via env-only without a code change."""
+    v = (os.getenv("HRANT_LEGACY_PIPELINE", "") or "").strip().lower()
+    return v not in ("1", "true", "yes", "on")
 
 
 # ─── RULES block (the single biggest difference from legacy) ──────
