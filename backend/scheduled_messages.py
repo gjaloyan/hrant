@@ -95,7 +95,80 @@ def schedule(
     _write_all(rows)
     log.info("scheduled message %s: %s -> %s @ %s",
              row["id"], row["requested_by"], row["target_speaker"], row["due_at"])
+    _fire_message_scheduled(row)
     return row
+
+
+# ─── Notification hooks (Phase 4: Telegram preview DM) ──────────────
+
+
+_ON_MESSAGE_SCHEDULED: list = []
+
+
+def register_on_message_scheduled(fn) -> None:
+    """Subscribe to "a new scheduled message just landed" events.
+    Used by channels.TelegramBot to DM the requester a preview with
+    a [❌ Cancel] button, post-create. Idempotent."""
+    if fn not in _ON_MESSAGE_SCHEDULED:
+        _ON_MESSAGE_SCHEDULED.append(fn)
+
+
+def _fire_message_scheduled(row: dict) -> None:
+    for fn in list(_ON_MESSAGE_SCHEDULED):
+        try:
+            fn(row)
+        except Exception as e:
+            log.warning("message-scheduled callback %s failed: %s", fn, e)
+
+
+# ─── Inline-keyboard callback bridge ────────────────────────────────
+
+
+def _register_sched_callback() -> None:
+    """Wire scheduled-message preview buttons into the tg_interactive
+    dispatcher. callback_data shapes:
+      - sched:cancel:<id>  cancel a pending scheduled message
+
+    The button is owner-only; other clickers get a refusal toast."""
+    from . import tg_interactive as _tg
+    from . import roles as _roles_mod
+
+    def _handler(parts, ctx):
+        if not parts:
+            return _tg.CallbackResult(ok=False, toast="malformed callback")
+        clicker_id = ctx.get("clicker_speaker_id") or ""
+        if not _roles_mod.is_owner(clicker_id):
+            return _tg.CallbackResult(
+                ok=False,
+                toast="only the owner can manage scheduled messages",
+                clear_keyboard=False,
+            )
+        action = parts[0]
+        if action == "cancel":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed cancel")
+            mid = parts[1]
+            ok = cancel(mid)
+            if not ok:
+                return _tg.CallbackResult(
+                    ok=False,
+                    toast="not found or already delivered",
+                    clear_keyboard=False,
+                )
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"❌ <b>Cancelled</b> — scheduled message "
+                    f"<code>{_tg.escape_html(mid)}</code> won't be sent."
+                ),
+                toast="cancelled",
+            )
+        return _tg.CallbackResult(ok=False, toast=f"unknown action {action!r}")
+
+    _tg.register_callback_handler("sched", _handler)
+
+
+_register_sched_callback()
 
 
 def list_pending(*, requested_by: Optional[str] = None) -> list[dict]:

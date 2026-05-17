@@ -606,6 +606,48 @@ class TelegramBot:
             except Exception as e:
                 log.warning("self-mod notify(%s) failed: %s", chat_id, e)
 
+    def _on_message_scheduled(self, row: dict) -> None:
+        """Post-create preview DM for a scheduled message — Phase 4.
+
+        The row was just persisted by `scheduled_messages.schedule()`.
+        We DM the REQUESTER (the speaker who asked the agent to
+        schedule it) with a preview and a [❌ Cancel] button. They
+        have until `due_at` to bail out.
+
+        Best-effort: a missing chat_id (the requester never DMed this
+        bot) or a Telegram API hiccup is logged, not raised."""
+        from . import contacts as _contacts
+        from . import tg_interactive as _tg
+
+        requester = row.get("requested_by") or ""
+        if not requester.startswith("telegram:"):
+            return
+        chat_id = _contacts.chat_id_for_speaker(requester)
+        if chat_id is None:
+            return
+
+        target = row.get("target_speaker") or "?"
+        due = row.get("due_at") or ""
+        body = (row.get("text") or "").strip()
+        preview = (body[:300] + "…") if len(body) > 300 else body
+        text = (
+            f"📅 <b>Scheduled message queued</b>\n\n"
+            f"To: <code>{_tg.escape_html(target)}</code>\n"
+            f"Due: <code>{_tg.escape_html(due)}</code>\n"
+            f"Body: <i>{_tg.escape_html(preview) or '(empty)'}</i>\n\n"
+            f"<i>Tap Cancel to drop it before delivery.</i>"
+        )
+        buttons = (
+            _tg.InlineButtonSet()
+            .row(
+                _tg.InlineButton("❌ Cancel", callback_data=f"sched:cancel:{row.get('id')}"),
+            )
+        )
+        try:
+            self._send_with_buttons(chat_id, text, buttons.to_markup())
+        except Exception as e:
+            log.warning("schedule preview DM(%s) failed: %s", chat_id, e)
+
     def _send_with_buttons(self, chat_id: int, text: str, markup) -> None:
         """Schedule an HTML-formatted message with an inline keyboard.
 
@@ -652,13 +694,111 @@ class TelegramBot:
             allowed = self.allowed_users
 
             async def handle_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+                from . import tg_interactive as _tg
+                from telegram import ReplyKeyboardMarkup, KeyboardButton
                 user = update.effective_user
                 chat_id = update.effective_chat.id
-                await update.message.reply_text(
-                    f"Connected! Chat ID: {chat_id}\n"
-                    f"User: {user.username or user.first_name}\n"
-                    "Send me any message and the agent will respond."
+                handle = _tg.fmt_user_handle(
+                    user.id,
+                    username=user.username or "",
+                    full_name=user.full_name or "",
                 )
+                # Persistent quick-reply keyboard under the input box.
+                # Plain `/command` text — the labels DON'T carry
+                # emoji because a leading emoji breaks TG's "starts
+                # with /" detection for CommandHandler. The slash
+                # commands themselves still appear with descriptions
+                # in the autocomplete dropdown (set_my_commands above).
+                quick = ReplyKeyboardMarkup(
+                    [
+                        [
+                            KeyboardButton("/status"),
+                            KeyboardButton("/sessions"),
+                            KeyboardButton("/help"),
+                        ],
+                    ],
+                    resize_keyboard=True,
+                    is_persistent=True,
+                )
+                await update.message.reply_text(
+                    f"👋 <b>Connected to hrant</b>\n\n"
+                    f"Chat ID: <code>{chat_id}</code>\n"
+                    f"User: {handle}\n\n"
+                    f"Send me any message and I'll respond. "
+                    f"The quick-buttons below run the slash commands.",
+                    parse_mode="HTML",
+                    reply_markup=quick,
+                )
+
+            async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+                """/status — short bot health snapshot. HTML-formatted."""
+                from . import roles as _roles
+                from . import tg_interactive as _tg
+                user = update.effective_user
+                if user is None:
+                    return
+                speaker_id = f"telegram:{user.id}"
+                role = _roles.role_of(speaker_id)
+                # Count of trusted users (owner-only info).
+                trusted_count = 0
+                if role == "owner":
+                    state = _roles.list_roles()
+                    speakers = state.get("speakers") or {}
+                    trusted_count = sum(
+                        1 for v in speakers.values()
+                        if (v or {}).get("role") == "trusted"
+                    )
+                lines = [
+                    "📊 <b>hrant status</b>",
+                    f"You: {_tg.fmt_user_handle(user.id, username=user.username or '', full_name=user.full_name or '')}",
+                    f"Role: <code>{role}</code>",
+                ]
+                if role == "owner":
+                    lines.append(f"Trusted users: <code>{trusted_count}</code>")
+                await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+            async def handle_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+                """/sessions — list the user's recent Telegram thread sessions."""
+                from . import sessions as _sessions_mod
+                from . import tg_interactive as _tg
+                user = update.effective_user
+                if user is None:
+                    return
+                speaker_id = f"telegram:{user.id}"
+                rows = _sessions_mod.SESSIONS.list_sessions(speaker_id=speaker_id) or []
+                if not rows:
+                    await update.message.reply_text("No sessions yet.", parse_mode="HTML")
+                    return
+                lines = ["🧵 <b>Your recent sessions</b>", ""]
+                for r in rows[:10]:
+                    title = _tg.escape_html((r.get("title") or "(untitled)")[:60])
+                    label = _tg.escape_html(r.get("thread_label") or "")
+                    turns = r.get("turn_count") or 0
+                    started = _tg.escape_html((r.get("started") or "")[:16])
+                    lines.append(
+                        f"• <i>{title}</i>\n  "
+                        f"  <code>{label}</code> · {turns} turns · {started}"
+                    )
+                await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+            async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+                """/help — list available commands + capabilities."""
+                text = (
+                    "🆘 <b>hrant help</b>\n\n"
+                    "<b>Commands</b>\n"
+                    "/start — connection check\n"
+                    "/status — your role + bot health\n"
+                    "/sessions — your recent conversation threads\n"
+                    "/help — this message\n\n"
+                    "<b>What I can do</b>\n"
+                    "• Answer questions, search the knowledge base, run code (owner)\n"
+                    "• Pair new users — when a stranger writes, you get inline buttons\n"
+                    "• Self-modify — apply proposed code changes after your approval\n"
+                    "• Accept text / voice / photo / video / documents in any chat\n\n"
+                    "Different chats (DM vs group, multiple bots) get separate "
+                    "conversation threads."
+                )
+                await update.message.reply_text(text, parse_mode="HTML")
 
             async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 """Route an inline-button press through the
@@ -1413,6 +1553,9 @@ class TelegramBot:
                         pass
 
             app.add_handler(CommandHandler("start", handle_start))
+            app.add_handler(CommandHandler("status", handle_status))
+            app.add_handler(CommandHandler("sessions", handle_sessions))
+            app.add_handler(CommandHandler("help", handle_help))
             app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
             # Media handlers route through the same handle_message so caption
             # text + attachment shas reach the agent in one turn.
@@ -1427,6 +1570,18 @@ class TelegramBot:
             # picks the right handler by callback_data prefix.
             app.add_handler(CallbackQueryHandler(handle_callback_query))
 
+            # Eager-import the modules that register
+            # tg_interactive callback handlers at module-load time
+            # (`pair:` for access.py, `prop:` for self_modifier.py,
+            # `sched:` for scheduled_messages.py). Without this, the
+            # first time the user pressed a button on a pre-restart
+            # message we'd dispatch "no handler for 'pair'" because
+            # the import is otherwise lazy.
+            try:
+                from . import access as _access_eager  # noqa: F401
+            except Exception as e:
+                log.warning("access eager-import failed: %s", e)
+
             # Subscribe to self-mod proposal-created events so the
             # owner sees every new proposal as an inline-button DM.
             # Idempotent: a re-register on bot restart is a no-op.
@@ -1436,7 +1591,31 @@ class TelegramBot:
             except Exception as e:
                 log.warning("self_modifier subscribe failed: %s", e)
 
+            # Subscribe to scheduled-message events so the requester
+            # gets a preview DM with a [❌ Cancel] button. Post-create
+            # notification — the message is already scheduled; if the
+            # owner spots a typo or a wrong time, one tap rescues it.
+            try:
+                from . import scheduled_messages as _sched
+                _sched.register_on_message_scheduled(self._on_message_scheduled)
+            except Exception as e:
+                log.warning("scheduled_messages subscribe failed: %s", e)
+
             loop.run_until_complete(app.initialize())
+            # Surface the slash-command list to the Telegram UI so
+            # the user gets autocomplete when typing /. Best-effort —
+            # a transient API error here shouldn't keep the bot down.
+            try:
+                from telegram import BotCommand as _BC
+                _commands = [
+                    _BC("start",    "Connection check"),
+                    _BC("status",   "Your role + bot health"),
+                    _BC("sessions", "Your recent conversation threads"),
+                    _BC("help",     "What I can do"),
+                ]
+                loop.run_until_complete(app.bot.set_my_commands(_commands))
+            except Exception as e:
+                log.warning("set_my_commands failed: %s", e)
             # Defensive: explicitly clear any webhook before polling.
             # If anything ever sets a webhook on this token (manual
             # curl, another deploy), getUpdates would 409 forever.
