@@ -464,6 +464,11 @@ class TelegramBot:
         for access. Best-effort — failures are logged, not raised, so
         the stranger still gets their reply.
 
+        Hermes-style: the DM carries 4 inline buttons —
+        "Allow Once (1h)" / "Session (24h)" / "Always" / "Deny".
+        Pressing any of them lands in `_handle_callback_query` which
+        forwards to `access.py::_register_pairing_callback._handler`.
+
         Telegram bots can only DM users who started a conversation
         with this bot at some point. For the box owner that's almost
         always true. If we can't find their chat_id (they never DMed
@@ -472,6 +477,7 @@ class TelegramBot:
         """
         from . import roles as _roles
         from . import contacts as _contacts
+        from . import tg_interactive as _tg
 
         try:
             state = _roles._load()
@@ -494,14 +500,36 @@ class TelegramBot:
         snippet = (first_message or "").strip().replace("\n", " ")
         if len(snippet) > 160:
             snippet = snippet[:160] + "…"
-        label = tg_user.full_name or tg_user.username or str(tg_user.id)
-        handle = f"@{tg_user.username}" if tg_user.username else f"id {tg_user.id}"
-        msg = (
-            f"Pairing request: {label} ({handle}) wants access.\n"
-            f"First message: {snippet!r}\n"
-            f"Code: {decision.pairing_code}\n"
-            f"To approve, tell me: \"approve pairing {decision.pairing_code}\""
+        handle_html = _tg.fmt_user_handle(
+            tg_user.id,
+            username=tg_user.username or "",
+            full_name=tg_user.full_name or "",
         )
+        snippet_html = _tg.escape_html(snippet)
+        code = decision.pairing_code
+        text = (
+            f"🔐 <b>Pairing request</b>\n\n"
+            f"From: {handle_html}\n"
+            f"First message: <i>{snippet_html or '(no text)'}</i>\n\n"
+            f"Code: <code>{_tg.escape_html(code)}</code>"
+        )
+
+        # 4-button approval keyboard (Hermes-style).
+        # Layout:
+        #   [ 🕒 Allow Once (1h) ] [ ⏳ Session (24h) ]
+        #   [ ✅ Always           ] [ ❌ Deny           ]
+        buttons = (
+            _tg.InlineButtonSet()
+            .row(
+                _tg.InlineButton("🕒 Allow Once (1h)", callback_data=f"pair:approve:once:{code}"),
+                _tg.InlineButton("⏳ Session (24h)",   callback_data=f"pair:approve:session:{code}"),
+            )
+            .row(
+                _tg.InlineButton("✅ Always",          callback_data=f"pair:approve:always:{code}"),
+                _tg.InlineButton("❌ Deny",            callback_data=f"pair:deny:{code}"),
+            )
+        )
+        markup = buttons.to_markup()
 
         for owner_sid in owner_ids:
             chat_id = _contacts.chat_id_for_speaker(owner_sid)
@@ -513,12 +541,36 @@ class TelegramBot:
                 )
                 continue
             try:
-                self.send_text(msg, chat_id=chat_id)
+                self._send_with_buttons(chat_id, text, markup)
             except Exception as e:
                 log.warning(
-                    "notify_owners_of_pairing: send_text(%s) failed: %s",
+                    "notify_owners_of_pairing: send_with_buttons(%s) failed: %s",
                     chat_id, e,
                 )
+
+    def _send_with_buttons(self, chat_id: int, text: str, markup) -> None:
+        """Schedule an HTML-formatted message with an inline keyboard.
+
+        Wraps `bot.send_message` for the cross-thread case (caller is
+        on the agent's thread; the bot owns its own asyncio loop)."""
+        if not self._app or not self._loop:
+            return
+
+        async def _send() -> None:
+            try:
+                await self._app.bot.send_message(
+                    chat_id=int(chat_id),
+                    text=text,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                )
+            except Exception as e:
+                log.warning("send_with_buttons inner failed: %s", e)
+
+        try:
+            asyncio.run_coroutine_threadsafe(_send(), self._loop)
+        except Exception as e:
+            log.warning("send_with_buttons schedule failed: %s", e)
 
     @property
     def is_running(self) -> bool:
@@ -527,7 +579,10 @@ class TelegramBot:
     def _run(self) -> None:
         try:
             from telegram import Update
-            from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, ContextTypes, filters
+            from telegram.ext import (
+                ApplicationBuilder, MessageHandler, CommandHandler,
+                CallbackQueryHandler, ContextTypes, filters,
+            )
 
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
@@ -546,6 +601,47 @@ class TelegramBot:
                     f"User: {user.username or user.first_name}\n"
                     "Send me any message and the agent will respond."
                 )
+
+            async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+                """Route an inline-button press through the
+                tg_interactive dispatcher and apply the resulting
+                CallbackResult (edit message, show toast, drop
+                keyboard) to the original message."""
+                from . import tg_interactive as _tg
+                query = update.callback_query
+                if query is None:
+                    return
+                data = query.data or ""
+                clicker = query.from_user
+                ctx = {
+                    "clicker_speaker_id": f"telegram:{clicker.id}" if clicker else "",
+                    "chat_id": update.effective_chat.id if update.effective_chat else None,
+                    "message_id": query.message.message_id if query.message else None,
+                    "callback_data": data,
+                }
+                result = _tg.dispatch_callback(data, ctx)
+
+                # Always answer the callback so the spinning UI on
+                # the user's button stops; pass `text=` for a toast.
+                try:
+                    await query.answer(
+                        text=(result.toast or "")[:200] or None,
+                        show_alert=False,
+                    )
+                except Exception as e:
+                    log.debug("callback_query answer failed: %s", e)
+
+                # Edit the original message OR clear its keyboard.
+                if query.message is not None:
+                    try:
+                        if result.edited_text is not None:
+                            await query.message.edit_text(
+                                result.edited_text, parse_mode="HTML",
+                            )
+                        elif result.clear_keyboard:
+                            await query.message.edit_reply_markup(reply_markup=None)
+                    except Exception as e:
+                        log.debug("callback_query edit failed: %s", e)
 
             async def _gather_attachments(update: "Update") -> list[str]:
                 """Pull photos / voice / documents off the Telegram message,
@@ -1243,6 +1339,10 @@ class TelegramBot:
             app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
             app.add_handler(MessageHandler(filters.VIDEO, handle_message))
             app.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_message))
+            # Inline-button callbacks (pairing approvals, future
+            # self-mod approvals, etc.). The tg_interactive dispatcher
+            # picks the right handler by callback_data prefix.
+            app.add_handler(CallbackQueryHandler(handle_callback_query))
 
             loop.run_until_complete(app.initialize())
             # Defensive: explicitly clear any webhook before polling.

@@ -356,3 +356,200 @@ def test_revoke_returns_human_readable_note(isolated_state):
     assert "note" in res
     assert "removed from" in res["note"]
     assert "roles.json" in res["note"]
+
+
+# ─── Phase-Hermes-1: ttl_seconds + lazy auto-revoke ──────────────────
+
+
+def test_grant_with_ttl_persists_expires_at(isolated_state):
+    """grant_telegram_access(ttl_seconds=3600) stamps expires_at on
+    the roles.json entry. The grant is still 'trusted' until the
+    timer fires."""
+    import time as _t
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import grant_telegram_access
+    from backend.roles import _load
+    t0 = _t.time()
+    res = grant_telegram_access("555", role="trusted", ttl_seconds=3600)
+    assert res["ok"] is True
+    assert "expires_at" in res
+    state = _load()
+    entry = state["speakers"]["telegram:555"]
+    assert entry["role"] == "trusted"
+    assert "expires_at" in entry
+    assert t0 + 3500 < entry["expires_at"] < t0 + 3700
+
+
+def test_role_of_lazy_revokes_expired_grant(isolated_state):
+    """role_of() reading an entry whose expires_at is in the past
+    must demote to guest AND persist the demotion."""
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import grant_telegram_access
+    from backend.roles import role_of, _load
+    # Use a tiny negative offset so the timer is already past at write time.
+    grant_telegram_access("666", role="trusted", ttl_seconds=0.0001)
+    import time as _t
+    _t.sleep(0.05)  # ensure the timestamp is past now
+    assert role_of("telegram:666") == "guest"
+    state = _load()
+    assert "expires_at" not in state["speakers"]["telegram:666"]
+    assert state["speakers"]["telegram:666"]["role"] == "guest"
+
+
+def test_role_of_keeps_non_expired_grant(isolated_state):
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import grant_telegram_access
+    from backend.roles import role_of
+    grant_telegram_access("777", role="trusted", ttl_seconds=600)
+    assert role_of("telegram:777") == "trusted"
+
+
+def test_approve_pairing_once_uses_guest_with_1h_ttl(isolated_state):
+    """The 'Allow Once' button maps to role=guest, ttl=3600s."""
+    import time as _t
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import is_telegram_allowed, approve_pairing
+    from backend.roles import _load
+    t0 = _t.time()
+    d = is_telegram_allowed(8001, username="x", first_message="hi", label="X")
+    res = approve_pairing(d.pairing_code, role="guest", ttl_seconds=3600)
+    assert res["ok"]
+    state = _load()
+    entry = state["speakers"]["telegram:8001"]
+    assert entry["role"] == "guest"
+    assert t0 + 3500 < entry["expires_at"] < t0 + 3700
+
+
+def test_approve_pairing_session_uses_trusted_with_24h_ttl(isolated_state):
+    """The 'Session' button maps to role=trusted, ttl=86400s."""
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import is_telegram_allowed, approve_pairing
+    d = is_telegram_allowed(8002, username="x", first_message="hi", label="X")
+    res = approve_pairing(d.pairing_code, role="trusted", ttl_seconds=86400)
+    assert res["ok"]
+    from backend.roles import _load
+    entry = _load()["speakers"]["telegram:8002"]
+    assert entry["role"] == "trusted"
+    assert "expires_at" in entry
+
+
+def test_approve_pairing_always_no_ttl(isolated_state):
+    """The 'Always' button keeps the existing semantics (no timer)."""
+    _write_channels(isolated_state, allowed=[])
+    from backend.access import is_telegram_allowed, approve_pairing
+    d = is_telegram_allowed(8003, username="x", first_message="hi", label="X")
+    res = approve_pairing(d.pairing_code, role="trusted", ttl_seconds=None)
+    assert res["ok"]
+    from backend.roles import _load
+    entry = _load()["speakers"]["telegram:8003"]
+    assert entry["role"] == "trusted"
+    assert "expires_at" not in entry
+
+
+def test_deny_pairing_drops_request_without_granting(isolated_state):
+    from backend.access import is_telegram_allowed, deny_pairing, PAIRING_STORE
+    from backend.roles import role_of
+    d = is_telegram_allowed(8004, username="x", first_message="hi", label="X")
+    assert d.pairing_code
+    res = deny_pairing(d.pairing_code)
+    assert res["ok"] is True
+    assert role_of("telegram:8004") == "guest"   # never granted
+    assert PAIRING_STORE.list_pending() == []     # request dropped
+
+
+def test_deny_pairing_missing_returns_error(isolated_state):
+    from backend.access import deny_pairing
+    res = deny_pairing("NOSUCHCODE")
+    assert res["ok"] is False
+    assert "no pending pairing request" in res["error"]
+
+
+# ─── Inline-button callback bridge ───────────────────────────────────
+
+
+def test_pair_callback_approve_always_grants_trusted(isolated_state):
+    """Pressing 'Always' on a pairing notification grants trusted
+    role without TTL. The callback impersonates an owner."""
+    _write_channels(isolated_state, allowed=[])
+    from backend import access, tg_interactive
+    from backend.roles import role_of, set_role
+    set_role("telegram:111", "owner", label="Test Owner")
+
+    # Create a pending pairing request the same way handle_message would.
+    d = access.is_telegram_allowed(9101, username="x", first_message="hi", label="X")
+    code = d.pairing_code
+    assert code
+
+    result = tg_interactive.dispatch_callback(
+        f"pair:approve:always:{code}",
+        ctx={"clicker_speaker_id": "telegram:111"},
+    )
+    assert result.ok is True
+    assert "Approved" in (result.edited_text or "")
+    assert role_of("telegram:9101") == "trusted"
+
+
+def test_pair_callback_approve_once_grants_short_lived_guest(isolated_state):
+    _write_channels(isolated_state, allowed=[])
+    from backend import access, tg_interactive
+    from backend.roles import _load, set_role
+    set_role("telegram:111", "owner", label="Test Owner")
+
+    d = access.is_telegram_allowed(9102, username="x", first_message="hi", label="X")
+    result = tg_interactive.dispatch_callback(
+        f"pair:approve:once:{d.pairing_code}",
+        ctx={"clicker_speaker_id": "telegram:111"},
+    )
+    assert result.ok is True
+    entry = _load()["speakers"]["telegram:9102"]
+    assert entry["role"] == "guest"
+    assert "expires_at" in entry
+
+
+def test_pair_callback_deny_drops_request(isolated_state):
+    _write_channels(isolated_state, allowed=[])
+    from backend import access, tg_interactive
+    from backend.roles import role_of, set_role
+    set_role("telegram:111", "owner", label="Test Owner")
+
+    d = access.is_telegram_allowed(9103, username="x", first_message="hi", label="X")
+    result = tg_interactive.dispatch_callback(
+        f"pair:deny:{d.pairing_code}",
+        ctx={"clicker_speaker_id": "telegram:111"},
+    )
+    assert result.ok is True
+    assert "Denied" in (result.edited_text or "")
+    assert role_of("telegram:9103") == "guest"
+
+
+def test_pair_callback_refuses_non_owner_clicker(isolated_state):
+    """Critical: only owners may press these buttons. A trusted or
+    guest user pressing them gets a toast refusal, NOT a grant."""
+    _write_channels(isolated_state, allowed=[])
+    from backend import access, tg_interactive
+    from backend.roles import role_of, set_role
+    set_role("telegram:222", "trusted")  # not an owner
+
+    d = access.is_telegram_allowed(9104, username="x", first_message="hi")
+    result = tg_interactive.dispatch_callback(
+        f"pair:approve:always:{d.pairing_code}",
+        ctx={"clicker_speaker_id": "telegram:222"},
+    )
+    assert result.ok is False
+    assert "owner" in (result.toast or "").lower()
+    # And no role change happened.
+    assert role_of("telegram:9104") == "guest"
+
+
+def test_pair_callback_unknown_mode_returns_error(isolated_state):
+    _write_channels(isolated_state, allowed=[])
+    from backend import access, tg_interactive
+    from backend.roles import set_role
+    set_role("telegram:111", "owner")
+    d = access.is_telegram_allowed(9105, username="x", first_message="hi")
+    result = tg_interactive.dispatch_callback(
+        f"pair:approve:forever:{d.pairing_code}",
+        ctx={"clicker_speaker_id": "telegram:111"},
+    )
+    assert result.ok is False
+    assert "unknown" in (result.toast or "").lower()

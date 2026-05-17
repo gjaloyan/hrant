@@ -355,6 +355,8 @@ def grant_telegram_access(
     user_id: int | str,
     role: str = "trusted",
     label: str = "",
+    *,
+    ttl_seconds: Optional[float] = None,
 ) -> dict:
     """Atomically grant a Telegram user access. Updates BOTH:
       - `roles.json::speakers.<id>.role = role`
@@ -362,8 +364,17 @@ def grant_telegram_access(
         backwards-compat with any installs that still gate via
         the legacy list.
 
+    `ttl_seconds` — optional auto-revoke timer used by the
+    inline-keyboard pairing flow's "Allow Once (1h)" /
+    "Allow Session (24h)" buttons. When set, the grant carries an
+    `expires_at` field in roles.json that `roles.role_of` honours
+    by lazy-revoking back to guest. Channels.json::allowed_users is
+    NOT removed by the timer (no scheduled job here); the role
+    check inside `is_telegram_allowed` is what actually blocks the
+    user after expiry.
+
     Returns a dict the tool layer can serialise — `{ok, user_id,
-    speaker_id, role, label, updated_files, note?}`.
+    speaker_id, role, label, updated_files, note?, expires_at?}`.
     """
     from . import roles as _roles
     uid = str(user_id)
@@ -376,10 +387,17 @@ def grant_telegram_access(
         }
 
     updated = []
+    expires_at_epoch: Optional[float] = None
+    if ttl_seconds and ttl_seconds > 0:
+        expires_at_epoch = time.time() + float(ttl_seconds)
 
     # 1) roles.json — semantic role
     try:
-        _roles.set_role(speaker_id, role, label=label or None)
+        _roles.set_role(
+            speaker_id, role,
+            label=label or None,
+            expires_at=expires_at_epoch,
+        )
         updated.append("roles.json")
     except Exception as e:
         return {
@@ -420,12 +438,19 @@ def grant_telegram_access(
     # like "added X to channels.json" against this exact text instead
     # of trying to infer it from the `updated_files` array alone.
     files_str = " and ".join(updated) if updated else "no files"
+    ttl_clause = ""
+    if expires_at_epoch:
+        ttl_clause = (
+            f" — auto-revoke at "
+            f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(expires_at_epoch))}"
+        )
     note = (
         f"granted role={role} to telegram:{uid}"
         f"{' (label=' + label + ')' if label else ''}"
         f" — added/promoted in {files_str}"
+        f"{ttl_clause}"
     )
-    return {
+    result = {
         "ok": True,
         "user_id": uid,
         "speaker_id": speaker_id,
@@ -434,6 +459,9 @@ def grant_telegram_access(
         "updated_files": updated,
         "note": note,
     }
+    if expires_at_epoch:
+        result["expires_at"] = expires_at_epoch
+    return result
 
 
 def username_token(s: str) -> str:
@@ -486,9 +514,24 @@ def revoke_telegram_access(user_id: int | str) -> dict:
     }
 
 
-def approve_pairing(code_or_user_id: str, label: str = "") -> dict:
+def approve_pairing(
+    code_or_user_id: str,
+    label: str = "",
+    *,
+    role: str = "trusted",
+    ttl_seconds: Optional[float] = None,
+) -> dict:
     """Owner-side approval: look up the pending request by code or
-    by user_id, grant trusted access, clear the request."""
+    by user_id, grant access, clear the request.
+
+    Optional knobs (used by the inline-keyboard buttons in
+    channels.py):
+      - `role`     — 'trusted' (default), 'guest' (for short
+                     one-time grants), or 'owner' (only if the
+                     owner explicitly wants a co-owner).
+      - `ttl_seconds` — auto-revoke timer in seconds. 3600 = "Allow
+                     Once" (1h, guest role), 86400 = "Session" (24h,
+                     trusted role), None = "Always" (no timer)."""
     req = PAIRING_STORE.consume(code_or_user_id, platform="telegram")
     if req is None:
         return {
@@ -497,12 +540,138 @@ def approve_pairing(code_or_user_id: str, label: str = "") -> dict:
             "pending": [r.to_dict() for r in PAIRING_STORE.list_pending()],
         }
     use_label = label or req.label or req.username
-    res = grant_telegram_access(req.user_id, role="trusted", label=use_label)
+    res = grant_telegram_access(
+        req.user_id, role=role, label=use_label, ttl_seconds=ttl_seconds,
+    )
     res["pairing_request"] = req.to_dict()
+    ttl_clause = f" (TTL: {int(ttl_seconds)}s)" if ttl_seconds else ""
     res["note"] = (
-        f"granted trusted access to {use_label or req.user_id} via pairing code {req.code}"
+        f"granted role={role} access to {use_label or req.user_id} "
+        f"via pairing code {req.code}{ttl_clause}"
     )
     return res
+
+
+# ─── Inline-keyboard callback bridge ────────────────────────────────
+
+
+def _register_pairing_callback() -> None:
+    """Wire the pairing flow into the tg_interactive callback
+    dispatcher so channels.py doesn't need to know about access.py's
+    internals. Called once at module import (idempotent because the
+    dispatcher's register is idempotent).
+
+    callback_data shapes handled here:
+      - pair:approve:once:<code>     (guest, 1h TTL)
+      - pair:approve:session:<code>  (trusted, 24h TTL)
+      - pair:approve:always:<code>   (trusted, no TTL)
+      - pair:deny:<code>             (drop request)
+    """
+    from . import tg_interactive as _tg
+    from . import roles as _roles_mod
+
+    def _handler(parts: list[str], ctx: dict) -> _tg.CallbackResult:
+        if not parts:
+            return _tg.CallbackResult(ok=False, toast="malformed callback")
+
+        # Owner-only: the bot owner is the only speaker who should
+        # be able to press these. Anyone else just sees a toast.
+        clicker_id = ctx.get("clicker_speaker_id") or ""
+        if not _roles_mod.is_owner(clicker_id):
+            return _tg.CallbackResult(
+                ok=False,
+                toast="only the owner can approve pairing requests",
+                clear_keyboard=False,
+            )
+
+        action = parts[0]
+        if action == "approve":
+            if len(parts) < 3:
+                return _tg.CallbackResult(ok=False, toast="malformed approve")
+            mode, code = parts[1], parts[2]
+            mode_map = {
+                "once":    {"role": "guest",   "ttl_seconds": 3600.0,    "label": "Allow once"},
+                "session": {"role": "trusted", "ttl_seconds": 86400.0,   "label": "Session"},
+                "always":  {"role": "trusted", "ttl_seconds": None,      "label": "Always"},
+            }
+            mode_cfg = mode_map.get(mode)
+            if mode_cfg is None:
+                return _tg.CallbackResult(ok=False, toast=f"unknown mode {mode!r}")
+            res = approve_pairing(
+                code,
+                role=mode_cfg["role"],
+                ttl_seconds=mode_cfg["ttl_seconds"],
+            )
+            if not res.get("ok"):
+                return _tg.CallbackResult(
+                    ok=False,
+                    toast=res.get("error") or "approve failed",
+                    clear_keyboard=False,
+                )
+            who = res.get("label") or res.get("user_id")
+            ttl_clause = (
+                f" (auto-revoke in {int(mode_cfg['ttl_seconds'])//3600}h)"
+                if mode_cfg["ttl_seconds"] else ""
+            )
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"✅ <b>Approved</b> — {_tg.escape_html(str(who))} "
+                    f"granted role=<b>{mode_cfg['role']}</b>"
+                    f"{ttl_clause}.\n<i>Mode: {mode_cfg['label']}</i>"
+                ),
+                toast=f"approved ({mode_cfg['label']})",
+            )
+        if action == "deny":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed deny")
+            code = parts[1]
+            res = deny_pairing(code)
+            if not res.get("ok"):
+                return _tg.CallbackResult(
+                    ok=False,
+                    toast=res.get("error") or "deny failed",
+                    clear_keyboard=False,
+                )
+            who = res.get("label") or res.get("user_id")
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"❌ <b>Denied</b> — pairing request from "
+                    f"{_tg.escape_html(str(who))} dropped."
+                ),
+                toast="denied",
+            )
+        return _tg.CallbackResult(ok=False, toast=f"unknown action {action!r}")
+
+    _tg.register_callback_handler("pair", _handler)
+
+
+# Auto-wire on module import (idempotent — the dispatcher overwrites).
+_register_pairing_callback()
+
+
+def deny_pairing(code_or_user_id: str) -> dict:
+    """Owner-side rejection: drop the pending request without
+    granting anything. Symmetric counterpart of approve_pairing.
+
+    Currently no blocklist (the same stranger could re-pair from
+    the next message); a blocklist could land later as a follow-up.
+    """
+    req = PAIRING_STORE.consume(code_or_user_id, platform="telegram")
+    if req is None:
+        return {
+            "ok": False,
+            "error": f"no pending pairing request for {code_or_user_id!r}",
+        }
+    return {
+        "ok": True,
+        "user_id": req.user_id,
+        "speaker_id": req.requester_speaker_id,
+        "label": req.label,
+        "code": req.code,
+        "note": f"denied pairing code {req.code} for {req.label or req.user_id}",
+    }
 
 
 def list_pending_pairings() -> list[dict]:

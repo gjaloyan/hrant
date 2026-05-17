@@ -104,12 +104,31 @@ def _save(state: dict) -> None:
 
 def role_of(speaker_id: str | None) -> Role:
     """The role of a given speaker. Unknown speakers default to
-    `guest`. The WebUI default speaker is always owner."""
+    `guest`. The WebUI default speaker is always owner.
+
+    Time-limited grants: when a speaker's entry has `expires_at`
+    (epoch seconds) in the PAST, the role is silently demoted to
+    `guest` AND persisted back. Used by the inline-keyboard pairing
+    flow's "Allow Once" / "Session" buttons to schedule auto-revoke
+    without a separate background job."""
+    import time
     sid = normalize_speaker(speaker_id)
     state = _load()
     if sid in state["owner_speaker_ids"]:
         return "owner"
     entry = (state.get("speakers") or {}).get(sid) or {}
+    expires_at = entry.get("expires_at")
+    if expires_at and float(expires_at) < time.time():
+        # Lazy revoke — persist the demotion so subsequent callers
+        # (including channels.py / list_telegram_access tool) see a
+        # clean guest role without re-checking the timer.
+        entry["role"] = "guest"
+        entry.pop("expires_at", None)
+        try:
+            _save(state)
+        except Exception as e:
+            log.warning("lazy-revoke save failed for %s: %s", sid, e)
+        return "guest"
     raw_role = (entry.get("role") or "guest").lower()
     if raw_role in _VALID_ROLES:
         return raw_role  # type: ignore[return-value]
@@ -139,11 +158,17 @@ def is_at_least(speaker_id: str | None, min_role: Role) -> bool:
 
 def set_role(
     speaker_id: str, role: Role, *, label: Optional[str] = None,
+    expires_at: Optional[float] = None,
 ) -> dict:
     """Owner-side mutation: bless a speaker with a role + optional
     label. Promoting to 'owner' adds them to `owner_speaker_ids`.
     Demoting an owner removes them, except `webui:default` which is
     pinned (the local user must always remain owner of their own box).
+
+    `expires_at` (epoch seconds) — optional auto-revoke timer. When
+    set on a non-owner grant, `role_of` will demote the speaker back
+    to guest the first time it's read after that time. Pass None to
+    leave existing expires_at as-is, 0 to clear it explicitly.
     """
     if role not in _VALID_ROLES:
         raise ValueError(f"invalid role: {role}")
@@ -159,6 +184,8 @@ def set_role(
         entry["role"] = "owner"
         if label is not None:
             entry["label"] = label
+        # Owner role never expires — clear any prior timer.
+        entry.pop("expires_at", None)
     else:
         # Trusted / guest — remove from owner list if present, but
         # NEVER remove the WebUI default (back-stop against lockout).
@@ -171,6 +198,11 @@ def set_role(
         entry["role"] = role
         if label is not None:
             entry["label"] = label
+        if expires_at is not None:
+            if expires_at == 0:
+                entry.pop("expires_at", None)
+            else:
+                entry["expires_at"] = float(expires_at)
     _save(state)
     return entry
 
