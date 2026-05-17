@@ -495,6 +495,93 @@ def _save_to_workspace_handler(
     }, ensure_ascii=False)
 
 
+# ---------- access control (Phase B+C) ----------
+
+
+def _grant_telegram_access_handler(
+    user_id: str, role: str = "trusted", label: str = "",
+) -> str:
+    """Owner-only: grant a Telegram user access in ONE call. Updates
+    BOTH roles.json AND channels.json::allowed_users so the bot
+    accepts them on the very next message. Replaces the old 4-step
+    dance (read both files, decide, write, restart) with a single
+    atomic action."""
+    from .roles import current_speaker, is_owner
+    from . import access as _access
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — grant_telegram_access is owner-only",
+        }, ensure_ascii=False)
+    uid = str(user_id or "").strip().lstrip("@")
+    if not uid:
+        return json.dumps({"ok": False, "error": "user_id is required"}, ensure_ascii=False)
+    res = _access.grant_telegram_access(uid, role=role or "trusted", label=label or "")
+    return json.dumps(res, ensure_ascii=False)
+
+
+def _revoke_telegram_access_handler(user_id: str) -> str:
+    """Owner-only: symmetric counterpart of grant_telegram_access.
+    Drops the user back to `guest` in roles.json and removes them
+    from channels.json::allowed_users."""
+    from .roles import current_speaker, is_owner
+    from . import access as _access
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — revoke_telegram_access is owner-only",
+        }, ensure_ascii=False)
+    uid = str(user_id or "").strip().lstrip("@")
+    if not uid:
+        return json.dumps({"ok": False, "error": "user_id is required"}, ensure_ascii=False)
+    res = _access.revoke_telegram_access(uid)
+    return json.dumps(res, ensure_ascii=False)
+
+
+def _approve_pairing_handler(code_or_user_id: str, label: str = "") -> str:
+    """Owner-only: approve a pending pairing request created when an
+    unknown Telegram user wrote to the bot. Looks up the request by
+    pairing code OR by user_id, grants `trusted` role atomically,
+    clears the pending request."""
+    from .roles import current_speaker, is_owner
+    from . import access as _access
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — approve_pairing is owner-only",
+        }, ensure_ascii=False)
+    ident = str(code_or_user_id or "").strip()
+    if not ident:
+        return json.dumps({
+            "ok": False,
+            "error": "code_or_user_id is required",
+            "pending": _access.list_pending_pairings(),
+        }, ensure_ascii=False)
+    res = _access.approve_pairing(ident, label=label or "")
+    return json.dumps(res, ensure_ascii=False)
+
+
+def _list_pending_pairings_handler() -> str:
+    """Owner-only: list every pending pairing request — code, user
+    info, first-message snippet, age. Useful when the owner missed
+    the original DM notification."""
+    from .roles import current_speaker, is_owner
+    from . import access as _access
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — list_pending_pairings is owner-only",
+        }, ensure_ascii=False)
+    return json.dumps(
+        {"ok": True, "pending": _access.list_pending_pairings()},
+        ensure_ascii=False,
+    )
+
+
 # ---------- регистрация ----------
 def register_builtin_tools() -> None:
     reg = get_registry()
@@ -996,5 +1083,111 @@ def register_builtin_tools() -> None:
             "required": ["filename", "content"],
         },
         handler=_save_to_workspace_handler,
+    )
+
+    reg.register_func(
+        name="grant_telegram_access",
+        description=(
+            "Owner-only. Grant a Telegram user access in ONE call. "
+            "Updates roles.json AND channels.json::allowed_users "
+            "atomically — the bot accepts them on the very next "
+            "message, no restart needed. Use when the owner says "
+            "things like 'add my wife @lusine to trusted users' or "
+            "'give id 1562235884 access'. If you have an @username "
+            "but no numeric id, ask the owner for the id (Telegram "
+            "usernames are not always stable). `role` defaults to "
+            "'trusted'; pass 'owner' only when the owner explicitly "
+            "asks to bless another speaker as a co-owner."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "Telegram numeric user_id (e.g. '1562235884') OR @username.",
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["trusted", "owner", "guest"],
+                    "description": "Role to assign (default 'trusted').",
+                    "default": "trusted",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Display name (e.g. 'Wife', 'Lusine'). Optional but recommended.",
+                    "default": "",
+                },
+            },
+            "required": ["user_id"],
+        },
+        handler=_grant_telegram_access_handler,
+    )
+
+    reg.register_func(
+        name="revoke_telegram_access",
+        description=(
+            "Owner-only. Symmetric counterpart of "
+            "grant_telegram_access — drops the user to 'guest' role "
+            "AND removes them from channels.json::allowed_users so "
+            "the bot stops accepting their messages."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "Telegram numeric user_id.",
+                },
+            },
+            "required": ["user_id"],
+        },
+        handler=_revoke_telegram_access_handler,
+    )
+
+    reg.register_func(
+        name="approve_pairing",
+        description=(
+            "Owner-only. Approve a pending pairing request created "
+            "when an unknown Telegram user wrote to the bot. "
+            "When an unknown user DMs the bot, access.py creates a "
+            "pairing request with a short code and notifies the "
+            "owner (you see a DM from yourself like 'Pairing "
+            "request: Lusine ... Code: AB12CDEF'). To approve, call "
+            "this with that code OR with the numeric user_id. The "
+            "user gets 'trusted' role atomically — they can chat "
+            "from their next message. Pass `label` to set a display "
+            "name (e.g. 'Wife')."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "code_or_user_id": {
+                    "type": "string",
+                    "description": "Pairing code (e.g. 'AB12CDEF') or numeric Telegram user_id.",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Display name (e.g. 'Wife'). Optional.",
+                    "default": "",
+                },
+            },
+            "required": ["code_or_user_id"],
+        },
+        handler=_approve_pairing_handler,
+    )
+
+    reg.register_func(
+        name="list_pending_pairings",
+        description=(
+            "Owner-only. List every pending pairing request: code, "
+            "user info, first-message snippet, age. Useful when the "
+            "owner missed the original DM notification and wants to "
+            "see who's been trying to reach them."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {},
+        },
+        handler=_list_pending_pairings_handler,
     )
 

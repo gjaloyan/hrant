@@ -459,6 +459,67 @@ class TelegramBot:
             log.warning("TG send_text scheduling failed on %s: %s", self.channel_id, e)
             return False
 
+    def _notify_owners_of_pairing(self, decision, tg_user, first_message: str) -> None:
+        """DM every owner-on-Telegram that an unknown user is asking
+        for access. Best-effort — failures are logged, not raised, so
+        the stranger still gets their reply.
+
+        Telegram bots can only DM users who started a conversation
+        with this bot at some point. For the box owner that's almost
+        always true. If we can't find their chat_id (they never DMed
+        THIS bot), we log and move on — they'll see the request in
+        the WebUI Pairing panel.
+        """
+        from . import roles as _roles
+        from . import contacts as _contacts
+
+        try:
+            state = _roles._load()
+        except Exception as e:
+            log.warning("notify_owners_of_pairing: roles load failed: %s", e)
+            return
+
+        owner_ids = [
+            sid for sid in (state.get("owner_speaker_ids") or [])
+            if isinstance(sid, str) and sid.startswith("telegram:")
+        ]
+        if not owner_ids:
+            log.info(
+                "notify_owners_of_pairing: no telegram owner — pairing "
+                "request from %s (code=%s) will only show in WebUI",
+                tg_user.id, decision.pairing_code,
+            )
+            return
+
+        snippet = (first_message or "").strip().replace("\n", " ")
+        if len(snippet) > 160:
+            snippet = snippet[:160] + "…"
+        label = tg_user.full_name or tg_user.username or str(tg_user.id)
+        handle = f"@{tg_user.username}" if tg_user.username else f"id {tg_user.id}"
+        msg = (
+            f"Pairing request: {label} ({handle}) wants access.\n"
+            f"First message: {snippet!r}\n"
+            f"Code: {decision.pairing_code}\n"
+            f"To approve, tell me: \"approve pairing {decision.pairing_code}\""
+        )
+
+        for owner_sid in owner_ids:
+            chat_id = _contacts.chat_id_for_speaker(owner_sid)
+            if chat_id is None:
+                log.info(
+                    "notify_owners_of_pairing: owner %s has no captured "
+                    "chat_id on this bot — skipping DM",
+                    owner_sid,
+                )
+                continue
+            try:
+                self.send_text(msg, chat_id=chat_id)
+            except Exception as e:
+                log.warning(
+                    "notify_owners_of_pairing: send_text(%s) failed: %s",
+                    chat_id, e,
+                )
+
     @property
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
@@ -609,9 +670,46 @@ class TelegramBot:
                         )
                         return
 
-                # Check allowed users (empty = allow all in DMs)
-                if allowed and username not in allowed and str(user.id) not in allowed:
-                    await update.message.reply_text("Access denied.")
+                # Unified access (Phase B+C): consult access.is_telegram_allowed
+                # which checks roles.json FIRST, falls back to legacy
+                # allowed_users, then to the pairing system. The bot
+                # never has to know about roles.json — it just asks
+                # access.py "may this Telegram user speak?"
+                #
+                # Why: the previous gate only looked at allowed_users,
+                # so a user already promoted to `trusted` in roles.json
+                # was still silently blocked here. That mismatch is
+                # what made the wife-add take 4 turns; access.py is
+                # the single source of truth.
+                from .access import is_telegram_allowed
+                _initial_text = (update.message.text or update.message.caption or "").strip()
+                decision = is_telegram_allowed(
+                    user.id,
+                    username=user.username or "",
+                    legacy_allowed=allowed,
+                    first_message=_initial_text,
+                    label=user.full_name or user.username or "",
+                )
+                if not decision.allowed:
+                    if decision.pairing_pending:
+                        # Stranger re-ping: don't re-notify the owner
+                        # (idempotent — they already got the code).
+                        await update.message.reply_text(
+                            "Your access request is still pending. "
+                            "The owner has been notified — please wait."
+                        )
+                    elif decision.pairing_code:
+                        await update.message.reply_text(
+                            "Your access request has been sent to the "
+                            "owner for approval. You'll be able to "
+                            "chat once they approve."
+                        )
+                        try:
+                            self._notify_owners_of_pairing(decision, user, _initial_text)
+                        except Exception as e:
+                            log.warning("owner pairing notification failed: %s", e)
+                    else:
+                        await update.message.reply_text("Access denied.")
                     return
 
                 # Phase 10: speaker_id partitions per-Telegram-user

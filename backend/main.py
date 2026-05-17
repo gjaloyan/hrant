@@ -67,6 +67,19 @@ async def lifespan(application: FastAPI):
     _recovery_task = _asyncio_for_recovery.create_task(_recover_jobs_background())
     application.state.consolidation_recovery_task = _recovery_task
 
+    # Phase B+C migration: one-shot copy of any legacy
+    # channels.json::allowed_users entries into roles.json::trusted.
+    # Idempotent — internal marker prevents re-runs. MUST run before
+    # channels start so the bots see the unified state on their
+    # first message.
+    try:
+        from . import access as _access
+        mig = _access.migrate_legacy_allowed_users()
+        if mig.get("migrated"):
+            log.info("access migration: promoted %d telegram user(s) to trusted", mig["migrated"])
+    except Exception as e:
+        log.warning("access migration error: %s", e)
+
     log.info("Server starting — auto-starting channels...")
     try:
         channels_list = get_channels()
