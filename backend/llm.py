@@ -1014,27 +1014,58 @@ class AnthropicLLM(BaseLLM):
 
         For audio attachments we use the transcript (Anthropic doesn't
         accept raw audio); fallback to placeholder if no transcript yet.
+        For video: lazily ffmpeg-extract N sampled frames + audio
+        transcript via `video_processor.preprocess_video`, then inline
+        the frames as images and the transcript as text — see
+        backend/tools/video_processor.py for the cache semantics.
         """
         resolved = _resolve_attachments(attachments)
         if not resolved:
             return user
         import base64 as _b64
         blocks: list[dict] = []
+
+        def _emit_image_block(image_meta, image_bytes: bytes) -> None:
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_meta.mime_type,
+                    "data": _b64.b64encode(image_bytes).decode("ascii"),
+                },
+            })
+
         for meta, data in resolved:
             if meta.kind == "image":
-                blocks.append({
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": meta.mime_type,
-                        "data": _b64.b64encode(data).decode("ascii"),
-                    },
-                })
+                _emit_image_block(meta, data)
             elif meta.kind == "audio":
                 if meta.transcript:
                     blocks.append({"type": "text", "text": f"[voice transcript]\n{meta.transcript}"})
                 else:
                     blocks.append({"type": "text", "text": "[voice attachment, transcript unavailable]"})
+            elif meta.kind == "video":
+                from .tools.video_processor import preprocess_video
+                from .attachments import ATTACHMENTS as _ATT
+                pre = preprocess_video(meta.sha256)
+                blocks.append({
+                    "type": "text",
+                    "text": (
+                        f"[video {meta.filename or meta.sha256[:12]}: "
+                        f"{pre.duration_seconds:.1f}s, "
+                        f"{len(pre.frame_shas)} sampled frames "
+                        f"(evenly along the timeline)]"
+                    ),
+                })
+                for fsha in pre.frame_shas:
+                    fmeta = _ATT.get_meta(fsha)
+                    fdata = _ATT.get_bytes(fsha)
+                    if fmeta and fdata:
+                        _emit_image_block(fmeta, fdata)
+                if pre.audio_transcript:
+                    blocks.append({
+                        "type": "text",
+                        "text": f"[video audio transcript]\n{pre.audio_transcript}",
+                    })
             else:
                 blocks.append({"type": "text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
         if user:
@@ -1293,24 +1324,52 @@ class OpenAICompatibleLLM(BaseLLM):
 
         Audio attachments fall back to their transcript (text); raw audio
         in chat-completions isn't broadly supported across compat providers.
+        Video: sampled frames + transcript via video_processor.
         """
         resolved = _resolve_attachments(attachments)
         if not resolved:
             return user
         import base64 as _b64
         blocks: list[dict] = []
+
+        def _emit_image_block(image_meta, image_bytes: bytes) -> None:
+            b64 = _b64.b64encode(image_bytes).decode("ascii")
+            blocks.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_meta.mime_type};base64,{b64}"},
+            })
+
         for meta, data in resolved:
             if meta.kind == "image":
-                b64 = _b64.b64encode(data).decode("ascii")
-                blocks.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:{meta.mime_type};base64,{b64}"},
-                })
+                _emit_image_block(meta, data)
             elif meta.kind == "audio":
                 if meta.transcript:
                     blocks.append({"type": "text", "text": f"[voice transcript]\n{meta.transcript}"})
                 else:
                     blocks.append({"type": "text", "text": "[voice attachment, transcript unavailable]"})
+            elif meta.kind == "video":
+                from .tools.video_processor import preprocess_video
+                from .attachments import ATTACHMENTS as _ATT
+                pre = preprocess_video(meta.sha256)
+                blocks.append({
+                    "type": "text",
+                    "text": (
+                        f"[video {meta.filename or meta.sha256[:12]}: "
+                        f"{pre.duration_seconds:.1f}s, "
+                        f"{len(pre.frame_shas)} sampled frames "
+                        f"(evenly along the timeline)]"
+                    ),
+                })
+                for fsha in pre.frame_shas:
+                    fmeta = _ATT.get_meta(fsha)
+                    fdata = _ATT.get_bytes(fsha)
+                    if fmeta and fdata:
+                        _emit_image_block(fmeta, fdata)
+                if pre.audio_transcript:
+                    blocks.append({
+                        "type": "text",
+                        "text": f"[video audio transcript]\n{pre.audio_transcript}",
+                    })
             else:
                 blocks.append({"type": "text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
         if user:
@@ -1644,23 +1703,51 @@ class CodexLLM(BaseLLM):
 
         Audio attachments are inlined as transcript text — Responses API
         accepts `input_audio` only via Realtime API, not Codex chat path.
+        Video: sampled frames + transcript via video_processor.
         """
         resolved = _resolve_attachments(attachments)
         blocks: list[dict] = []
         if resolved:
             import base64 as _b64
+
+            def _emit_image_block(image_meta, image_bytes: bytes) -> None:
+                b64 = _b64.b64encode(image_bytes).decode("ascii")
+                blocks.append({
+                    "type": "input_image",
+                    "image_url": f"data:{image_meta.mime_type};base64,{b64}",
+                })
+
             for meta, data in resolved:
                 if meta.kind == "image":
-                    b64 = _b64.b64encode(data).decode("ascii")
-                    blocks.append({
-                        "type": "input_image",
-                        "image_url": f"data:{meta.mime_type};base64,{b64}",
-                    })
+                    _emit_image_block(meta, data)
                 elif meta.kind == "audio":
                     if meta.transcript:
                         blocks.append({"type": "input_text", "text": f"[voice transcript]\n{meta.transcript}"})
                     else:
                         blocks.append({"type": "input_text", "text": "[voice attachment, transcript unavailable]"})
+                elif meta.kind == "video":
+                    from .tools.video_processor import preprocess_video
+                    from .attachments import ATTACHMENTS as _ATT
+                    pre = preprocess_video(meta.sha256)
+                    blocks.append({
+                        "type": "input_text",
+                        "text": (
+                            f"[video {meta.filename or meta.sha256[:12]}: "
+                            f"{pre.duration_seconds:.1f}s, "
+                            f"{len(pre.frame_shas)} sampled frames "
+                            f"(evenly along the timeline)]"
+                        ),
+                    })
+                    for fsha in pre.frame_shas:
+                        fmeta = _ATT.get_meta(fsha)
+                        fdata = _ATT.get_bytes(fsha)
+                        if fmeta and fdata:
+                            _emit_image_block(fmeta, fdata)
+                    if pre.audio_transcript:
+                        blocks.append({
+                            "type": "input_text",
+                            "text": f"[video audio transcript]\n{pre.audio_transcript}",
+                        })
                 else:
                     blocks.append({"type": "input_text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
         if user:

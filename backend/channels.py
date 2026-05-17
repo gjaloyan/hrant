@@ -630,6 +630,39 @@ class TelegramBot:
                     except Exception as e:
                         log.warning("Telegram document download failed: %s", e)
 
+                # Regular video (msg.video) — Telegram pre-encodes most
+                # uploads as mp4. Stored with kind="video"; the LLM
+                # build-content step lazily extracts sampled frames +
+                # audio transcript via video_processor on first use.
+                if getattr(msg, "video", None):
+                    try:
+                        f = await msg.video.get_file()
+                        data = await f.download_as_bytearray()
+                        mime = msg.video.mime_type or "video/mp4"
+                        rec = ATTACHMENTS.save(
+                            bytes(data), mime,
+                            filename=msg.video.file_name or f"telegram_video_{msg.video.file_unique_id}.mp4",
+                            kind="video",
+                        )
+                        shas.append(rec.sha256)
+                    except Exception as e:
+                        log.warning("Telegram video download failed: %s", e)
+
+                # Video note ("кружочек") — square, no caption, always
+                # mp4. Same handling as msg.video.
+                if getattr(msg, "video_note", None):
+                    try:
+                        f = await msg.video_note.get_file()
+                        data = await f.download_as_bytearray()
+                        rec = ATTACHMENTS.save(
+                            bytes(data), "video/mp4",
+                            filename=f"telegram_videonote_{msg.video_note.file_unique_id}.mp4",
+                            kind="video",
+                        )
+                        shas.append(rec.sha256)
+                    except Exception as e:
+                        log.warning("Telegram video_note download failed: %s", e)
+
                 return shas
 
             async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1208,6 +1241,8 @@ class TelegramBot:
             app.add_handler(MessageHandler(filters.VOICE, handle_message))
             app.add_handler(MessageHandler(filters.AUDIO, handle_message))
             app.add_handler(MessageHandler(filters.Document.ALL, handle_message))
+            app.add_handler(MessageHandler(filters.VIDEO, handle_message))
+            app.add_handler(MessageHandler(filters.VIDEO_NOTE, handle_message))
 
             loop.run_until_complete(app.initialize())
             # Defensive: explicitly clear any webhook before polling.

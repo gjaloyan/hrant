@@ -14,9 +14,13 @@ Two design rules that fall out of using sha256 as the primary key:
     feature — attachment search, knowledge-graph linking, transcript
     re-use — keys off the same handle.
 
-Three "kinds" supported in v0:
+Four "kinds" supported:
     image     bitmap formats (jpeg/png/webp/gif)
     audio     speech recordings (ogg/webm/wav/mp3/m4a)
+    video     mp4/webm/mov/mkv — the full payload is stored, plus
+              derived assets (sampled frame_shas + audio transcript)
+              are cached on the same record so we don't re-run ffmpeg
+              on every turn
     file      anything else — txt/pdf/doc; treated as opaque blob
 
 The kind is inferred from the mime type at save time and recorded in the
@@ -46,11 +50,21 @@ _AUDIO_MIMES = frozenset({
     "audio/mp3", "audio/mpeg", "audio/m4a", "audio/x-m4a",
     "audio/flac", "audio/aac",
 })
+_VIDEO_MIMES = frozenset({
+    "video/mp4", "video/webm", "video/quicktime", "video/x-msvideo",
+    "video/x-matroska", "video/x-ms-wmv", "video/3gpp", "video/mpeg",
+    "video/ogg",
+})
 
 # Images > ~20 MB rarely come from chat; cap to keep payloads sane.
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_AUDIO_BYTES = 50 * 1024 * 1024
 MAX_FILE_BYTES = 50 * 1024 * 1024
+# Telegram's default Bot API caps inbound video at 20 MB unless the
+# bot runs against a local Bot API server (which lifts the cap to 2 GB).
+# 200 MB gives headroom for the local-server path without inviting OOM
+# on the default-deploy box.
+MAX_VIDEO_BYTES = 200 * 1024 * 1024
 
 
 def classify_kind(mime_type: str) -> str:
@@ -59,19 +73,27 @@ def classify_kind(mime_type: str) -> str:
         return "image"
     if m in _AUDIO_MIMES:
         return "audio"
+    if m in _VIDEO_MIMES or m.startswith("video/"):
+        return "video"
     return "file"
 
 
 @dataclass
 class Attachment:
     sha256: str
-    kind: str  # "image" | "audio" | "file"
+    kind: str  # "image" | "audio" | "video" | "file"
     mime_type: str
     size: int
     filename: str = ""        # original upload name, optional
     transcript: str = ""      # set later by /api/transcribe for audio
+                              # OR by video preprocessing for the
+                              # extracted audio dialogue track
     created: str = ""         # ISO-8601 first-seen timestamp
     workspace_path: str = ""  # repo-relative path to the workspace mirror
+    # Video-specific derived assets, populated lazily by
+    # `video_processor.preprocess_video()` on first use:
+    frame_shas: list[str] = field(default_factory=list)
+    duration_seconds: float = 0.0
 
     @classmethod
     def from_record(cls, rec: dict) -> "Attachment":
@@ -241,10 +263,35 @@ class AttachmentStore:
         cap = {
             "image": MAX_IMAGE_BYTES,
             "audio": MAX_AUDIO_BYTES,
+            "video": MAX_VIDEO_BYTES,
             "file": MAX_FILE_BYTES,
         }.get(kind, MAX_FILE_BYTES)
         if size > cap:
             raise ValueError(f"{kind} attachment size {size} exceeds cap {cap}")
+
+    def set_video_assets(
+        self,
+        sha256: str,
+        *,
+        frame_shas: list[str],
+        audio_transcript: str = "",
+        duration_seconds: float = 0.0,
+    ) -> bool:
+        """Cache the derived video assets (sampled frames + audio
+        transcript + duration) on the video attachment so the next
+        turn doesn't re-run ffmpeg. Returns False if no such
+        attachment is registered."""
+        with self._lock:
+            rec = self._index.get(sha256)
+            if not rec:
+                return False
+            rec["frame_shas"] = list(frame_shas)
+            if audio_transcript:
+                rec["transcript"] = audio_transcript
+            if duration_seconds:
+                rec["duration_seconds"] = float(duration_seconds)
+            self._save_index()
+            return True
 
 
 ATTACHMENTS = AttachmentStore()
