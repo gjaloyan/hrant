@@ -178,6 +178,21 @@ If no trigger fired but the catalog hints a relevant skill, call
 Skills capture pitfalls (ffmpeg flags, Telegram cache paths, edge
 cases) that ad-hoc tool loops have to rediscover painfully.
 
+### Universal fallback — unknown file / unknown task
+
+If the catalogue is silent on the user's request — unknown file
+format, unfamiliar software, conversion / extraction you've never
+done, anything that makes you tempted to reply "I can't do this" —
+**do NOT refuse**. Instead, call `load_skill("universal_resolver")`
+and follow its 7-phase workflow: understand → inventory → identify
+gaps → research → choose tools safely → test on a copy → solve
+and deliver, then `propose_skill(...)` to capture what worked.
+
+The resolver explicitly forbids two failure modes that have hit
+us in production: (1) burning the iteration budget on probing
+without a plan, and (2) auto-running `pip install` / `apt install`
+without owner approval. Read the skill body before improvising.
+
 When you finish a non-trivial task that involved a sequence of
 tool calls and produced a working result, consider proposing a
 reusable workflow via `propose_skill(...)`. The owner reviews it
