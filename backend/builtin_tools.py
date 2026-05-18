@@ -16,6 +16,7 @@ from .tools.code_executor import run_python
 from .tools.file_reader import read_file
 from .tools.locate_symbol import locate_symbol
 from .tools.sandbox import sandbox_exec as _sandbox_exec
+from .tools.search_package import search_package as _search_package
 from .tools.terminal_exec import (
     DEFAULT_TIMEOUT_SECONDS as _TERMINAL_DEFAULT_TIMEOUT,
     MAX_TIMEOUT_SECONDS as _TERMINAL_MAX_TIMEOUT,
@@ -352,6 +353,24 @@ def _load_skill_handler(name: str) -> str:
         "body": sk.body,
         "source": sk.source,
     }, ensure_ascii=False)
+
+
+def _search_package_handler(name: str, manager: str = "pip") -> str:
+    """Look up a package in its registry (PyPI / crates.io / npm).
+    Returns JSON with existence + latest version + summary +
+    homepage + canonical install command. Used by the
+    universal_resolver Research step (4) instead of trusting a
+    blog post for "is this package real / what's the latest version
+    / what's the install command".
+    """
+    try:
+        result = _search_package(name, manager)
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"search error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps(result, ensure_ascii=False)
 
 
 def _sandbox_exec_handler(
@@ -921,6 +940,47 @@ def register_builtin_tools() -> None:
             "required": ["query"],
         },
         handler=_web_search_handler,
+    )
+
+    reg.register_func(
+        name="search_package",
+        description=(
+            "Query an authoritative package registry (PyPI / "
+            "crates.io / npm) for a single package. Returns whether "
+            "it exists, the latest version, summary, homepage, "
+            "license, maintainer, and the canonical install command "
+            "— directly from the registry's JSON API.\n\n"
+            "Use this in the universal_resolver Research step (4) "
+            "INSTEAD of trusting a blog post for `is package X "
+            "real / what version / what's the install command`. "
+            "Output is structured and the source is canonical.\n\n"
+            "Supported managers:\n"
+            "  - 'pip' (alias 'pypi') → pypi.org\n"
+            "  - 'cargo' (alias 'crates') → crates.io\n"
+            "  - 'npm' → registry.npmjs.org\n\n"
+            "Returns JSON: `{ok, exists, manager, name, "
+            "latest_version, summary, homepage, project_urls, "
+            "license, author, release_count, canonical_install, "
+            "registry_url, error?}`. `ok=False` means the registry "
+            "call failed (network / 4xx) and `exists` is meaningless."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Package identifier (single name, no whitespace).",
+                },
+                "manager": {
+                    "type": "string",
+                    "enum": ["pip", "pypi", "cargo", "crates", "npm"],
+                    "description": "Registry to query (default 'pip').",
+                    "default": "pip",
+                },
+            },
+            "required": ["name"],
+        },
+        handler=_search_package_handler,
     )
 
     reg.register_func(

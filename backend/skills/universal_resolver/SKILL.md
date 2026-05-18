@@ -116,22 +116,33 @@ specific gap, not the entire problem.
 
 ### 4. Research (and only research)
 
-Use `web_search` followed by `fetch_url` on the most-promising
-result. Prefer sources in this priority order:
+Source priority (highest trust first):
 
-1. Official documentation: language stdlib docs, the project's own
-   GitHub README / wiki, vendor docs.
-2. Package registries: pypi.org, crates.io, npmjs.com — the
-   project's page tells you the canonical install command and
-   maintainer.
-3. Established Q&A: StackOverflow accepted answers, GitHub issues
-   on the official repo.
-4. Reputable blogs: only when the official source explains
-   nothing and the blog clearly cites versions / sources.
+1. **`search_package(name, manager)`** — hits the package
+   registry's JSON API directly (PyPI / crates.io / npm). Always
+   start here when the gap is "do I need a Python / Rust / Node
+   library and which one". The output is the canonical maintainer,
+   latest version, install command, and homepage — no blog
+   interpretation needed.
+2. Official documentation — the project's own GitHub README /
+   wiki, vendor docs. Use `fetch_url` on the URL `search_package`
+   returned as `registry_url` or `homepage`.
+3. Language stdlib docs (python.org, doc.rust-lang.org, MDN).
+4. Established Q&A — StackOverflow accepted answers, GitHub
+   issues on the OFFICIAL repo.
+5. Reputable blogs — only when the official sources are silent
+   AND the blog clearly cites versions / sources.
+
+Fallback when the registry has nothing useful: `web_search` →
+`fetch_url`. But cross-check anything a blog claims against
+`search_package` (does the package even exist on the registry?
+which version does it say?). If the blog claims `pip install
+foo-bar` and `search_package('foo-bar', 'pip')` says ok=False,
+the blog is stale or wrong.
 
 NEVER follow a "magic one-liner" from a random blog without
-checking it against the official docs first. NEVER paste curl
-| bash from a non-vendor source.
+checking it against the official source first. NEVER paste
+`curl | bash` from a non-vendor source.
 
 For Russian-language tasks: it's fine to research in English even
 if the user wrote in Russian; the answer will come back in the
