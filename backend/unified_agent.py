@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time as _time
 from typing import Optional
 
@@ -193,6 +194,18 @@ available this turn — refusal is only valid when:
 
 If a tool call failed, try a DIFFERENT tool — don't surrender.
 
+## Iteration ceiling
+
+You have a fixed budget of tool-call iterations per turn. When you
+sense you're approaching it without a working result, STOP probing
+and write a plain-language status report: what was tried, what's
+missing, what concrete input from the user would unblock the next
+attempt. NEVER output `<tool_call name="...">` XML in the final
+answer — that's a runtime artefact, not a tool we support, and the
+user sees it as broken output. If you need to make another tool
+call, make it as a native tool-use; if you can't, just describe
+what you would have done in plain text.
+
 ## Chat vs task
 
 Not every turn needs a tool. Casual chat ("hi", "thanks", "how
@@ -216,6 +229,65 @@ and use it this turn."""
 
 
 # ─── Auto-recall ───────────────────────────────────────────────────
+
+
+_XML_TOOL_CALL_RE = re.compile(
+    r"<tool_call\s+name\s*=\s*[\"']([^\"']+)[\"']",
+    re.IGNORECASE,
+)
+
+
+def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
+    """If the final LLM answer is an XML-style tool-call dump (the
+    failure mode that fires when max_iterations is hit and the model
+    can't execute another real tool), rewrite it as a plain-language
+    status report based on the agent's actual trace.
+
+    A "dump" is detected when the first significant chunk of the
+    answer (first 200 non-whitespace chars) opens with `<tool_call
+    name=...>`. Plain answers that merely mention the words "tool
+    call" in prose are untouched.
+    """
+    if not answer or not isinstance(answer, str):
+        return answer or ""
+    stripped = answer.lstrip()
+    if not stripped.startswith("<tool_call"):
+        return answer
+
+    m = _XML_TOOL_CALL_RE.search(stripped[:300])
+    intended_tool = m.group(1) if m else "(unknown tool)"
+
+    # Summarise what DID run, from the trace.
+    tool_names_run: list[str] = []
+    for step in (getattr(agent, "_trace", None) or []):
+        ev = getattr(step, "event", "") or ""
+        if ev not in ("tool", "tool_error"):
+            continue
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None
+        )
+        if name:
+            tool_names_run.append(name)
+    n_ran = len(tool_names_run)
+    last_few = ", ".join(tool_names_run[-4:]) if tool_names_run else "none"
+
+    return (
+        f"⚠️ I hit the iteration ceiling without finishing.\n\n"
+        f"Tools I actually ran ({n_ran} of {n_ran} budgeted): {last_few}.\n"
+        f"The next call I wanted to make was `{intended_tool}` but the "
+        f"loop budget ran out before I could execute it.\n\n"
+        f"Common ways to unblock me:\n"
+        f"  • tell me the missing detail (e.g. logo bounding box "
+        f"`x=… y=… w=… h=…` if this was a video task);\n"
+        f"  • narrow the request (one objective per turn);\n"
+        f"  • or just say \"continue\" and I'll resume with a fresh "
+        f"iteration budget.\n\n"
+        f"_(Never emit `&lt;tool_call …&gt;` XML as the final answer "
+        f"again — that's a runtime artefact, not a tool I support.)_"
+    )
 
 
 def _auto_recall_block(task: str, *, limit: int = 3) -> str:
@@ -455,7 +527,15 @@ def run_unified(
             execute_tool=_execute_with_progress,
             max_tokens=4000,
             temperature=0.3,
-            max_iterations=10,
+            # 10 was too tight for multi-step media work: the
+            # post-mortem on the logo-removal task showed all 10
+            # iterations spent on metadata probes + frame extraction
+            # before the agent could reach the actual delogo render.
+            # 20 still bounds runaway loops but leaves room for the
+            # natural shape of complex workflows (load skill → find
+            # file → probe → sample frames → analyze_image x N →
+            # render → verify → deliver).
+            max_iterations=20,
             on_tool_call=_on_tool_call,
             attachments=attachments or None,
         )
@@ -463,6 +543,19 @@ def run_unified(
         # Bubble up — outer run() / SSE handler classifies and
         # surfaces to the user.
         raise
+
+    # Post-parser: when the model exhausts max_iterations and still
+    # wants to call another tool, some providers (Codex / gpt-5.5 in
+    # particular) emit the next intended call as XML-like text in
+    # the final synthesis turn:
+    #   <tool_call name="terminal_exec">
+    #     <arg name="cmd">...</arg>
+    #   </tool_call>
+    # That XML never executed — it's just text the user sees as a
+    # broken-looking message. Rewrite it into a plain-language
+    # status report so the human knows what was tried and what
+    # input is missing.
+    answer = _rewrite_xml_tool_call_dump(answer, agent)
 
     # Record the (super) LLM call for the dev panel. We treat the
     # whole tool loop as one labelled call — per-iteration detail

@@ -11,6 +11,7 @@ from collections import OrderedDict
 from typing import Any
 
 from .tool_registry import get_registry
+from .tools.analyze_image import analyze_image as _analyze_image
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
 from .tools.locate_symbol import locate_symbol
@@ -254,6 +255,25 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
             "source": h.source,
         })
     return json.dumps({"ok": True, "query": query, "results": out}, ensure_ascii=False)
+
+
+def _analyze_image_handler(sha256: str, question: str) -> str:
+    """Ask the multimodal LLM a question about an image-attachment.
+    Returns JSON {ok, answer, sha256, question}. Used by skills that
+    need pixel-level inspection — e.g. 'where is the logo in this
+    frame'. Costs roughly one LLM call per invocation."""
+    if not sha256 or not isinstance(sha256, str):
+        return json.dumps({"ok": False, "error": "sha256 required"}, ensure_ascii=False)
+    if not question or not isinstance(question, str):
+        return json.dumps({"ok": False, "error": "question required"}, ensure_ascii=False)
+    answer = _analyze_image(sha256.strip(), question.strip())
+    is_err = answer.startswith("[analyze_image error:") or answer.startswith("[analyze_image: ")
+    return json.dumps({
+        "ok": not is_err,
+        "sha256": sha256,
+        "question": question,
+        "answer": answer,
+    }, ensure_ascii=False)
 
 
 def _list_skills_handler(tag: str = "", category: str = "") -> str:
@@ -832,6 +852,40 @@ def register_builtin_tools() -> None:
             "required": ["url"],
         },
         handler=_fetch_url_handler,
+    )
+
+    reg.register_func(
+        name="analyze_image",
+        description=(
+            "Ask the multimodal LLM a specific question about an "
+            "image-attachment (referenced by sha256). Use this when "
+            "you need to inspect a frame visually — locating a logo "
+            "in pixel coordinates, identifying foreground colour, "
+            "checking whether an overlay is still present after a "
+            "filter pass, reading text rendered into the image, etc. "
+            "Costs one LLM call. The model answers in plain text, "
+            "in whichever language the question is in. For coordinate "
+            "answers, request the form `x=<int> y=<int> w=<int> "
+            "h=<int>` explicitly so downstream ffmpeg-delogo can "
+            "consume the result.\n\n"
+            "DO NOT pass a video sha — extract frames first via "
+            "`run_python` with backend.tools.video_processor."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "sha256": {
+                    "type": "string",
+                    "description": "Image attachment sha256 (kind=image).",
+                },
+                "question": {
+                    "type": "string",
+                    "description": "Free-form question about the image.",
+                },
+            },
+            "required": ["sha256", "question"],
+        },
+        handler=_analyze_image_handler,
     )
 
     reg.register_func(
