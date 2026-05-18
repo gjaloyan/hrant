@@ -192,6 +192,31 @@ def _validate_command(raw: str) -> tuple[bool, str, list[str]]:
         ), []
 
     cmd = head.lower()
+
+    # Install-gate (G2): catch package-install attempts BEFORE the
+    # allowlist check so the LLM gets a specific hint pointing at
+    # `propose_install`. Some of these (apt-get, yarn, pnpm, gem,
+    # cargo, pipx) aren't in _ALLOWED_COMMANDS at all, so without
+    # this early check they'd get the generic "not on allowlist"
+    # refusal and the LLM tends to retry with a different phrasing.
+    _PKG_INSTALL_MGRS = {
+        "pip", "pip3", "pipx", "apt", "apt-get", "aptitude",
+        "npm", "yarn", "pnpm", "gem", "cargo", "go",
+    }
+    if cmd in _PKG_INSTALL_MGRS:
+        argv_lower = [a.lower() for a in argv[1:]]
+        # Treat any of these tokens as an install intent.
+        if any(tok in argv_lower for tok in ("install", "i", "inject", "add")):
+            return False, (
+                f"package installation through terminal_exec is blocked "
+                f"(supply-chain gate). Use the `propose_install` tool: "
+                f"it requests owner approval via Telegram inline buttons "
+                f"and only then runs the install. Example: "
+                f"`propose_install(packages='<pkg>', manager='pip', "
+                f"reason='<why>')`. apt / npm-global aren't supported by "
+                f"the gate — ask the owner to run them by hand."
+            ), []
+
     if cmd not in _ALLOWED_COMMANDS:
         return False, (
             f"command {cmd!r} is not on the terminal_exec allowlist. "

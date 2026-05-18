@@ -190,8 +190,14 @@ and deliver, then `propose_skill(...)` to capture what worked.
 
 The resolver explicitly forbids two failure modes that have hit
 us in production: (1) burning the iteration budget on probing
-without a plan, and (2) auto-running `pip install` / `apt install`
-without owner approval. Read the skill body before improvising.
+without a plan, and (2) running `pip install` / `apt install` via
+terminal_exec. Both are guarded structurally:
+  - Iteration ceiling section above kicks in before XML-dump.
+  - Package installs go through `propose_install(packages, manager,
+    reason)` — owner approves via Telegram inline buttons, and only
+    then does the install actually run. terminal_exec REFUSES any
+    `pip install` / `pipx inject` / `apt install` / `npm install` /
+    `cargo install` etc. with a hint pointing at `propose_install`.
 
 When you finish a non-trivial task that involved a sequence of
 tool calls and produced a working result, consider proposing a

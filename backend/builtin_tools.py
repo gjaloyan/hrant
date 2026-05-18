@@ -353,6 +353,62 @@ def _load_skill_handler(name: str) -> str:
     }, ensure_ascii=False)
 
 
+def _propose_install_handler(
+    packages: str,
+    manager: str = "pip",
+    reason: str = "",
+) -> str:
+    """Open an install request. OWNER-only. The packages are NOT
+    installed yet — a Telegram DM goes to the owner with inline
+    `[Show] [Approve] [Reject]` buttons; only on Approve does the
+    actual `pip install …` (or pipx inject) run.
+
+    Use this when the universal_resolver workflow concludes the
+    task needs a library/CLI tool that's not present. Never call
+    `pip install` through `terminal_exec` directly — that's blocked
+    by the install gate.
+    """
+    from .roles import current_speaker, is_owner
+    from . import installer as _installer
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — propose_install is owner-only",
+        }, ensure_ascii=False)
+    pkgs = [p.strip() for p in (packages or "").split(",") if p.strip()]
+    if not pkgs:
+        return json.dumps({
+            "ok": False, "error": "packages list is empty",
+        }, ensure_ascii=False)
+    try:
+        req = _installer.propose(
+            packages=pkgs,
+            manager=manager or "pip",
+            reason=reason or "",
+            requester=speaker_id or "webui:default",
+        )
+    except ValueError as e:
+        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
+    if req is None:
+        return json.dumps({
+            "ok": False, "error": "install request could not be persisted",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "code": req.code,
+        "packages": req.packages,
+        "manager": req.manager,
+        "note": (
+            f"Install request {req.code} created. The owner sees a "
+            f"DM with [Show] [Approve] [Reject] inline buttons. "
+            f"Nothing has been installed yet — wait for the next "
+            f"turn (or for the owner to approve) before assuming "
+            f"the packages are available."
+        ),
+    }, ensure_ascii=False)
+
+
 def _propose_skill_handler(
     name: str,
     description: str,
@@ -1109,6 +1165,60 @@ def register_builtin_tools() -> None:
             "required": ["name"],
         },
         handler=_load_skill_handler,
+    )
+
+    reg.register_func(
+        name="propose_install",
+        description=(
+            "Open a package-install request. OWNER-only. Nothing is "
+            "installed until the owner taps Approve in their Telegram "
+            "DM. Use when the universal_resolver workflow concluded "
+            "the task needs a library or CLI tool that isn't already "
+            "available. Supported managers: 'pip' (Python via the "
+            "running interpreter), 'pipx' (inject into the agi-agent "
+            "venv).\n\n"
+            "Constraints:\n"
+            "  - `packages` is a comma-separated list of package "
+            "names. URL installs (`git+...`, `https://...`, "
+            "`file://...`) are REFUSED to keep the supply chain "
+            "checkable. Names must match `[A-Za-z0-9._+\\-\\[\\]]`.\n"
+            "  - `apt`/`npm -g` not supported here — those require "
+            "sudo / root decisions outside this gate.\n"
+            "  - Returns immediately with a request `code`. The "
+            "actual install only runs on owner approval. Do NOT "
+            "assume the packages are importable later in the same "
+            "turn — the next turn will see them."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "packages": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated package names. E.g. "
+                        "'openpyxl, pandas' or 'qpdf-bindings'."
+                    ),
+                },
+                "manager": {
+                    "type": "string",
+                    "enum": ["pip", "pipx"],
+                    "description": "Package manager to use (default 'pip').",
+                    "default": "pip",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why this is needed for the current task. "
+                        "Shown to the owner in the approval DM so "
+                        "they can decide whether the install is "
+                        "appropriate."
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["packages"],
+        },
+        handler=_propose_install_handler,
     )
 
     reg.register_func(

@@ -148,13 +148,21 @@ task; only descend on real failure.
    libreoffice, imagemagick, qpdf, etc. are likely present.
 3. Already-installed Python libraries: try `python3 -c "import X"`
    before pip-installing — many libraries are pre-loaded.
-4. NEW installs — REQUIRES OWNER APPROVAL. Do not call
-   `pip install`, `apt install`, `npm install -g`, or any other
-   package-fetching command directly. Use the dedicated approval
-   tool (when it lands; see RULES) or, until then, ASK the owner
-   explicitly in a clear message:
-       "I need to install <package> from <source>. Approve?"
-   and STOP, waiting for the next turn.
+4. NEW installs — owner approval is REQUIRED. Go through
+   `propose_install(packages, manager, reason)`. The tool writes
+   a pending request and DMs the owner `[👀 Show] [✅ Approve]
+   [❌ Reject]` inline buttons; only on Approve does the install
+   command actually run.
+   - Supported managers: `pip` (default), `pipx`.
+   - `apt` / `npm -g` are NOT supported by the gate — sudo /
+     root decisions sit outside this layer. Ask the owner to
+     run them manually if absolutely needed.
+   - Calling `pip install` / `pipx inject` / `apt install` /
+     `npm install` / `cargo install` etc. through `terminal_exec`
+     will be REFUSED with an error pointing back here.
+   - After `propose_install`, STOP and wait. Don't assume the
+     package is importable in the same turn — the install runs
+     in the next turn after the owner approves.
 
 The reasoning isn't paranoia about your own choices — it's that
 any auto-install is a supply-chain decision the owner needs to
