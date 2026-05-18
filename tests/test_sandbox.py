@@ -57,7 +57,25 @@ def test_detect_tier_falls_back_to_unshare(monkeypatch):
         return "/usr/bin/unshare" if name == "unshare" else None
 
     monkeypatch.setattr(sandbox.shutil, "which", fake_which)
+    # detect_tier runtime-probes unshare since the kernel can reject
+    # the call even when the binary exists. Pretend the probe passed.
+    monkeypatch.setattr(sandbox, "_unshare_actually_works", lambda: True)
+    monkeypatch.setattr(sandbox, "_UNSHARE_PROBE_CACHE", None)
     assert sandbox.detect_tier() == sandbox.TIER_UNSHARE
+
+
+def test_detect_tier_demotes_to_degraded_when_unshare_kernel_refuses(monkeypatch):
+    """unshare exists but the kernel won't let us create namespaces
+    (e.g. user_namespaces disabled). Must fall through to degraded."""
+    from backend.tools import sandbox
+
+    def fake_which(name):
+        return "/usr/bin/unshare" if name == "unshare" else None
+
+    monkeypatch.setattr(sandbox.shutil, "which", fake_which)
+    monkeypatch.setattr(sandbox, "_unshare_actually_works", lambda: False)
+    monkeypatch.setattr(sandbox, "_UNSHARE_PROBE_CACHE", None)
+    assert sandbox.detect_tier() == sandbox.TIER_DEGRADED
 
 
 def test_detect_tier_degraded_when_nothing_present(monkeypatch):

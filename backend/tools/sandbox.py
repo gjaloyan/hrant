@@ -97,15 +97,45 @@ def _which(binary: str) -> Optional[str]:
 
 
 def detect_tier() -> str:
-    """Pick the strongest available isolation tier. Called at import
-    and at every sandbox_exec to pick up newly-installed tools."""
+    """Pick the strongest available isolation tier. Called at every
+    sandbox_exec so newly-installed isolators are picked up.
+
+    Unshare specifically is runtime-probed: some kernel configurations
+    disable user-namespace creation entirely (kernel.unprivileged_
+    userns_clone=0), and a missing `--map-root-user` capability
+    silently breaks our previous setup. The probe runs a tiny
+    `unshare --user --fork true` and falls through to degraded if
+    it fails."""
     if _which("bwrap") is not None:
         return TIER_BWRAP
     if _which("firejail") is not None:
         return TIER_FIREJAIL
-    if _which("unshare") is not None:
+    if _which("unshare") is not None and _unshare_actually_works():
         return TIER_UNSHARE
     return TIER_DEGRADED
+
+
+def _unshare_actually_works() -> bool:
+    """Verify the box's unshare can create a user+net namespace. The
+    check is cheap (~ms) but we still cache the answer for the
+    lifetime of the process — kernel toggles don't flip mid-flight."""
+    global _UNSHARE_PROBE_CACHE
+    cached = _UNSHARE_PROBE_CACHE
+    if cached is not None:
+        return cached
+    try:
+        proc = subprocess.run(
+            ["unshare", "--user", "--fork", "--net", "true"],
+            capture_output=True, timeout=5,
+        )
+        ok = proc.returncode == 0
+    except Exception:
+        ok = False
+    _UNSHARE_PROBE_CACHE = ok
+    return ok
+
+
+_UNSHARE_PROBE_CACHE: Optional[bool] = None
 
 
 def _truncate(data: bytes, cap: int) -> str:
@@ -180,9 +210,31 @@ def _firejail_argv(scratch: Path, *, network: bool) -> list[str]:
 
 def _unshare_argv(*, network: bool) -> list[str]:
     """unshare lacks read-only-bind plumbing, so we just isolate
-    namespaces. The scratch dir is the cwd; the command sees the
-    real filesystem (no chroot)."""
-    argv = ["unshare", "--user", "--map-root-user", "--fork", "--pid", "--mount-proc"]
+    the namespaces the kernel will let us into without privileges.
+
+    On most production boxes (incl. ours) `kernel.unprivileged_userns_clone=1`
+    but mapping uid 0 inside the namespace is disabled — writing
+    /proc/self/uid_map fails with EPERM. That means we CAN'T use
+    `--map-root-user` (and therefore can't use `--mount-proc` or
+    `--pid` which need root-in-namespace). Strip them.
+
+    What we keep:
+      - `--user` — fresh user namespace (the process's view of
+        uid/gid mappings differs from host).
+      - `--fork` — exec the command in a child so the unshare
+        process exits cleanly.
+      - `--net` (when network=False) — fresh network namespace
+        with no interfaces; the sandboxed command can't reach
+        the LAN or the internet.
+
+    What we lose vs the bwrap tier:
+      - No fs read-only bind. The command sees the real /etc,
+        /home, etc. read-write.
+      - No PID isolation — `ps` sees the host process table.
+    The `notes` field in the result calls this out so the caller
+    knows to be conservative.
+    """
+    argv = ["unshare", "--user", "--fork"]
     if not network:
         argv.append("--net")
     return argv
