@@ -1070,13 +1070,27 @@ class TelegramBot:
                     except Exception as e:
                         log.warning("Telegram voice handling failed: %s", e)
 
-                # Audio / documents that look like images or audio
+                # Audio files (mp3 / m4a / wav sent as TG audio). Same
+                # treatment as msg.voice — auto-transcribe so the LLM
+                # can read what the user said without an explicit
+                # tool call. The file-type audit caught this: voice
+                # auto-transcribed, audio file didn't, so the model
+                # had to invent a workaround.
                 if getattr(msg, "audio", None):
                     try:
                         f = await msg.audio.get_file()
                         data = await f.download_as_bytearray()
                         mime = msg.audio.mime_type or "audio/mpeg"
-                        rec = ATTACHMENTS.save(bytes(data), mime, filename=msg.audio.file_name or "audio", kind="audio")
+                        fname = msg.audio.file_name or f"telegram_audio_{msg.audio.file_unique_id}"
+                        rec = ATTACHMENTS.save(bytes(data), mime, filename=fname, kind="audio")
+                        try:
+                            text = TRANSCRIBER.transcribe(
+                                bytes(data), mime_type=mime, filename=fname,
+                            )
+                            if text:
+                                ATTACHMENTS.set_transcript(rec.sha256, text)
+                        except Exception as e:
+                            log.debug("Telegram audio transcribe failed (non-fatal): %s", e)
                         shas.append(rec.sha256)
                     except Exception as e:
                         log.warning("Telegram audio download failed: %s", e)

@@ -1,7 +1,55 @@
-"""Чтение PDF/DOCX/TXT/изображений (OCR — не реализован, только метаданные)."""
+"""Read PDF / DOCX / a wide range of text formats / images (with a
+redirect to `analyze_image` for visual questions).
+
+Whitelist of text-like extensions intentionally broad — the audit
+on "what file types can Hrant handle?" found .csv / .html / .css /
+.sh / .c / .cpp / .rs / .go / .java / .h / .toml / .ini / .xml all
+silently rejected as «неподдерживаемый формат» even though they're
+just plain text. Same fix here: read as utf-8.
+"""
 from __future__ import annotations
 from pathlib import Path
 from typing import Optional
+
+
+# Text-like extensions read directly as UTF-8.
+_TEXT_LIKE_EXTS = frozenset({
+    # Plain prose / docs
+    ".txt", ".md", ".rst", ".log",
+    # Structured config
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+    ".env",
+    # Web / markup
+    ".html", ".htm", ".xml", ".svg", ".css", ".scss", ".less",
+    # Tabular text
+    ".csv", ".tsv",
+    # Languages
+    ".py", ".pyi", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx",
+    ".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh",
+    ".rs", ".go", ".java", ".kt", ".kts", ".scala",
+    ".rb", ".php", ".pl", ".lua", ".sh", ".bash", ".zsh", ".fish",
+    ".ps1", ".bat", ".cmd",
+    ".sql", ".graphql", ".gql", ".proto",
+    ".swift", ".m", ".mm", ".dart", ".ex", ".exs",
+    # Build / project
+    ".dockerfile", ".gitignore", ".gitattributes", ".editorconfig",
+    ".diff", ".patch",
+})
+
+_IMAGE_EXTS = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".avif",
+})
+
+
+def _resolve_alias(stem: str, suffix: str) -> str:
+    """Some text-like files have no extension (Dockerfile, Makefile,
+    LICENSE). Match on stem when suffix didn't help."""
+    s = stem.lower()
+    if s in ("dockerfile", "makefile", "rakefile", "license", "licence",
+             "readme", "changelog", "notice", "authors", "contributors",
+             "todo", ".env"):
+        return ".txt"
+    return suffix
 
 
 def read_file(
@@ -24,8 +72,12 @@ def read_file(
     if not p.exists():
         return f"[файл не найден: {path}]"
     suffix = p.suffix.lower()
+    if not suffix:
+        # Extension-less files — match on stem (Dockerfile / Makefile
+        # / LICENSE / README without a suffix).
+        suffix = _resolve_alias(p.stem, suffix)
 
-    if suffix in (".txt", ".md", ".py", ".js", ".ts", ".json", ".yaml", ".yml"):
+    if suffix in _TEXT_LIKE_EXTS:
         text = p.read_text(encoding="utf-8", errors="replace")
         if start_line is not None or end_line is not None:
             lines = text.splitlines()
@@ -64,7 +116,32 @@ def read_file(
         except Exception as e:
             return f"[docx read error: {e}]"
 
-    if suffix in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
-        return f"[изображение {p.name}, OCR не реализован]"
+    if suffix in _IMAGE_EXTS:
+        # Auto-ingest the image into AttachmentStore and tell the caller
+        # to ask `analyze_image` for whatever they actually wanted to
+        # know about it. This closes the "image arrived as Document,
+        # read_file gave up" gap from the file-type audit.
+        try:
+            from ..attachments import ATTACHMENTS
+            data = p.read_bytes()
+            ext_to_mime = {
+                ".png": "image/png", ".webp": "image/webp",
+                ".gif": "image/gif", ".bmp": "image/bmp",
+                ".heic": "image/heic", ".avif": "image/avif",
+            }
+            mime = ext_to_mime.get(suffix, "image/jpeg")
+            rec = ATTACHMENTS.save(data, mime, filename=p.name, kind="image")
+            return (
+                f"[image saved to AttachmentStore as sha256={rec.sha256[:16]}…"
+                f" ({mime}, {len(data)} bytes). "
+                f"To inspect contents call `analyze_image("
+                f"sha256={rec.sha256!r}, question=...)` — that's the "
+                f"vision tool. read_file does NOT OCR images itself.]"
+            )
+        except Exception as e:
+            return (
+                f"[image {p.name} on disk but could not be ingested: {e}. "
+                f"Read the bytes manually via run_python + Pillow if needed.]"
+            )
 
-    return f"[неподдерживаемый формат: {suffix}]"
+    return f"[unsupported format: {suffix!r}. read_file handles text-like + .pdf + .docx + images (via analyze_image redirect). For other binary content, use run_python with the appropriate library.]"
