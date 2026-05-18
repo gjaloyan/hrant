@@ -174,11 +174,20 @@ permanently.
 Before you produce a deliverable:
 
 - Run the workflow on a **copy** of the input, never the original
-  source file. Copy with `cp` or Python `shutil.copy` into
-  `/tmp/<turn>/`.
-- For unknown executables / archives / scripts: **do not** run
-  them directly. Open with the chosen tool (libreoffice headless,
-  unrar -l, etc.) without executing embedded macros / payloads.
+  source file. Use `sandbox_exec(command, input_paths=...)` —
+  it copies the inputs into a fresh scratch dir, runs the command
+  with HOME overridden, network off by default, and PID/mount
+  namespaces fresh. Strongest isolation tier picked automatically
+  (bubblewrap → firejail → unshare → degraded fallback).
+- For unknown executables / archives / scripts: ALWAYS go through
+  `sandbox_exec`. Don't invoke `terminal_exec` on an unverified
+  binary — `terminal_exec` is for known read-only inspection
+  commands, not "run this thing I just downloaded".
+- Check `result.isolation` — if it's `'degraded'`, no real
+  containment happened (the box has no bwrap/firejail/unshare).
+  Either tell the owner before trusting the output, or call
+  `propose_install(packages=['bubblewrap'], manager='apt', …)`
+  through them.
 - Watch for non-zero exit codes. ffmpeg `returncode 187`,
   imagemagick policy.xml refusals, libreoffice timeout — surface
   the actual error, don't paper over it.

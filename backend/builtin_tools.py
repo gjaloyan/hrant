@@ -15,6 +15,7 @@ from .tools.analyze_image import analyze_image as _analyze_image
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
 from .tools.locate_symbol import locate_symbol
+from .tools.sandbox import sandbox_exec as _sandbox_exec
 from .tools.terminal_exec import (
     DEFAULT_TIMEOUT_SECONDS as _TERMINAL_DEFAULT_TIMEOUT,
     MAX_TIMEOUT_SECONDS as _TERMINAL_MAX_TIMEOUT,
@@ -351,6 +352,39 @@ def _load_skill_handler(name: str) -> str:
         "body": sk.body,
         "source": sk.source,
     }, ensure_ascii=False)
+
+
+def _sandbox_exec_handler(
+    command: str,
+    input_paths: str = "",
+    timeout: int = 60,
+    network: bool = False,
+) -> str:
+    """Run `command` inside the strongest sandbox available
+    (bubblewrap > firejail > unshare > degraded). OWNER-only.
+    `input_paths` is a comma-separated list of files to stage into
+    the scratch dir before the command runs."""
+    from .roles import current_speaker, is_owner
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — sandbox_exec is owner-only",
+        }, ensure_ascii=False)
+    paths = [p.strip() for p in (input_paths or "").split(",") if p.strip()]
+    try:
+        result = _sandbox_exec(
+            command,
+            input_paths=paths,
+            timeout=int(timeout) if timeout else 60,
+            network=bool(network),
+        )
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"sandbox error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps(result.to_dict(), ensure_ascii=False)
 
 
 def _propose_install_handler(
@@ -1489,6 +1523,72 @@ def register_builtin_tools() -> None:
             "required": ["command"],
         },
         handler=_terminal_exec_handler,
+    )
+
+    reg.register_func(
+        name="sandbox_exec",
+        description=(
+            "Run a shell command inside an isolated sandbox. "
+            "OWNER-only. Use when the universal_resolver workflow "
+            "needs to TEST something on a copy of the input — "
+            "extract an unknown archive, run libreoffice headless "
+            "to convert .doc, probe a binary you just downloaded, "
+            "etc. Stronger isolation than `terminal_exec`: a fresh "
+            "scratch dir, HOME overridden, network off by default, "
+            "PID/mount namespaces fresh.\n\n"
+            "Three tiers picked automatically by what's installed:\n"
+            "  - bubblewrap (`bwrap`) — strongest. Read-only system "
+            "mounts, fresh /tmp + /proc.\n"
+            "  - firejail — comparable strength.\n"
+            "  - unshare — Linux kernel namespaces, no FS isolation.\n"
+            "  - degraded — no isolator on PATH; just env + cwd "
+            "constraint. Warning surfaces in result.notes.\n\n"
+            "`input_paths` is a comma-separated list of real files "
+            "(or dirs) to copy into the scratch dir BEFORE the "
+            "command runs. They appear at `<scratch>/<basename>`.\n\n"
+            "Returns JSON: {ok, exit_code, stdout, stderr, "
+            "isolation, elapsed_ms, scratch_dir, network, notes}. "
+            "Check `isolation` — if it's 'degraded' your test ran "
+            "without real containment; treat the result as such."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "Shell command (passed via `sh -c` inside "
+                        "the sandbox so pipes / redirects work)."
+                    ),
+                },
+                "input_paths": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated absolute paths to stage "
+                        "into the sandbox scratch dir. Empty = "
+                        "no inputs."
+                    ),
+                    "default": "",
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Wall-clock timeout in seconds (default 60).",
+                    "default": 60,
+                },
+                "network": {
+                    "type": "boolean",
+                    "description": (
+                        "Allow network access. Default false. Set "
+                        "true ONLY when the test genuinely needs "
+                        "to fetch something — that's an attack "
+                        "surface."
+                    ),
+                    "default": False,
+                },
+            },
+            "required": ["command"],
+        },
+        handler=_sandbox_exec_handler,
     )
 
     reg.register_func(
