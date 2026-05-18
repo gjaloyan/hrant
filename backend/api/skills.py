@@ -48,10 +48,16 @@ def _read_skill_md(name: str) -> str:
     sk = SKILLS.get(name)
     if sk is None:
         raise HTTPException(404, f"skill not found: {name}")
+    # Skill.path is the skill's DIRECTORY (see _parse_skill_md), not
+    # the SKILL.md file itself. Reading the directory directly raises
+    # IsADirectoryError → bubbled as a 500 with no helpful detail in
+    # the WebUI. Resolve the actual file before reading.
+    skill_dir = Path(sk.path)
+    md_path = skill_dir / "SKILL.md" if skill_dir.is_dir() else skill_dir
     try:
-        return Path(sk.path).read_text(encoding="utf-8")
+        return md_path.read_text(encoding="utf-8")
     except OSError as e:
-        raise HTTPException(500, f"could not read SKILL.md: {e}")
+        raise HTTPException(500, f"could not read SKILL.md ({md_path}): {e}")
 
 
 def _require_owner_for_writes() -> None:
