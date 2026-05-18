@@ -330,3 +330,202 @@ class SkillsManager:
 
 
 SKILLS = SkillsManager()
+
+
+# ─── Self-improvement loop: propose a new skill ─────────────────────
+
+
+# Subscribers fire when `propose()` creates a new draft skill. The
+# Telegram bridge subscribes to DM the owner with an inline-button
+# approval prompt; the WebUI could subscribe too.
+_ON_SKILL_PROPOSED: list = []
+
+
+def register_on_skill_proposed(fn) -> None:
+    """Idempotent subscribe to skill-proposed events."""
+    if fn not in _ON_SKILL_PROPOSED:
+        _ON_SKILL_PROPOSED.append(fn)
+
+
+def _fire_skill_proposed(skill: Skill) -> None:
+    for fn in list(_ON_SKILL_PROPOSED):
+        try:
+            fn(skill)
+        except Exception as e:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "skill-proposed callback %s failed: %s", fn, e,
+            )
+
+
+def _render_skill_md(
+    *,
+    name: str,
+    description: str,
+    triggers: list[str] | None,
+    when_to_use: str,
+    body: str,
+) -> str:
+    """Build a SKILL.md text from structured inputs. YAML frontmatter
+    is intentionally minimal — name/description/triggers/when_to_use —
+    so a human reading the proposal in Telegram or the WebUI sees
+    exactly the fields the registry cares about."""
+    trig_yaml = "[" + ", ".join(repr(t) for t in (triggers or [])) + "]"
+    fm_lines = [
+        "---",
+        f"name: {name}",
+        f"description: {description!r}",
+        f"triggers: {trig_yaml}",
+    ]
+    wtu = (when_to_use or "").strip()
+    if wtu:
+        # Multi-line when_to_use through YAML block-literal so the
+        # author can write a paragraph without quoting issues.
+        fm_lines.append("when_to_use: |")
+        for ln in wtu.splitlines():
+            fm_lines.append(f"  {ln}")
+    fm_lines.append("---")
+    return "\n".join(fm_lines) + "\n\n" + (body or "").lstrip()
+
+
+def propose(
+    *,
+    name: str,
+    description: str,
+    triggers: list[str] | None = None,
+    when_to_use: str = "",
+    body: str = "",
+    requester: str = "webui:default",
+) -> Optional[Skill]:
+    """Create a new draft skill from a structured request.
+
+    Self-improvement loop entry point. The agent calls this after
+    successfully completing a non-trivial workflow that future turns
+    could reuse. The new skill is written to the user-tier directory
+    (`~/.hrant/data/skills/<name>/SKILL.md`) BUT IS DISABLED by
+    default — the owner must press 'Activate' in Telegram (or
+    enable in the WebUI) before it goes live. That's the safety
+    backstop: an agent-authored skill can't auto-execute on the
+    next turn without explicit human OK.
+
+    Returns the freshly-loaded Skill (disabled state) or None on
+    persistence failure.
+    """
+    clean_name = "".join(
+        c if c.isalnum() or c in "_-" else "_" for c in (name or "")
+    ).strip("_")
+    if not clean_name:
+        return None
+    content = _render_skill_md(
+        name=clean_name,
+        description=description or "",
+        triggers=triggers,
+        when_to_use=when_to_use,
+        body=body,
+    )
+    try:
+        sk = SKILLS.upsert_user_skill(clean_name, content)
+    except Exception as e:
+        import logging as _l
+        _l.getLogger(__name__).warning("propose(): upsert failed: %s", e)
+        return None
+    # Disable by default — owner must explicitly activate.
+    SKILLS.set_enabled(clean_name, False)
+    sk = SKILLS.get(clean_name)
+    if sk is None:
+        return None
+    _fire_skill_proposed(sk)
+    return sk
+
+
+# ─── Inline-keyboard callback dispatcher (skill: prefix) ────────────
+
+
+def _register_skill_callback() -> None:
+    """Wire skill-proposal approval into the tg_interactive dispatcher.
+
+    callback_data shapes:
+      - skill:enable:<name>  activate (remove from disabled.json)
+      - skill:show:<name>    return the SKILL.md body as a followup
+      - skill:delete:<name>  remove the user-tier skill from disk
+
+    Owner-only. Non-owner clickers get a refusal toast.
+    """
+    from . import tg_interactive as _tg
+    from . import roles as _roles_mod
+
+    def _handler(parts, ctx):
+        if not parts:
+            return _tg.CallbackResult(ok=False, toast="malformed callback")
+        clicker_id = ctx.get("clicker_speaker_id") or ""
+        if not _roles_mod.is_owner(clicker_id):
+            return _tg.CallbackResult(
+                ok=False,
+                toast="only the owner can manage skills",
+                clear_keyboard=False,
+            )
+        action = parts[0]
+        if action == "enable":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed enable")
+            sname = parts[1]
+            sk = SKILLS.set_enabled(sname, True)
+            if sk is None:
+                return _tg.CallbackResult(
+                    ok=False, toast=f"skill {sname!r} not found",
+                    clear_keyboard=False,
+                )
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"✅ <b>Skill activated</b>\n"
+                    f"<code>{_tg.escape_html(sname)}</code> is now live."
+                ),
+                toast="activated",
+            )
+        if action == "show":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed show")
+            sname = parts[1]
+            sk = SKILLS.get(sname)
+            if sk is None:
+                return _tg.CallbackResult(
+                    ok=False, toast=f"skill {sname!r} not found",
+                    clear_keyboard=False,
+                )
+            body = sk.body or "(empty body)"
+            if len(body) > 3700:
+                body = body[:3700] + "\n…[truncated]"
+            return _tg.CallbackResult(
+                ok=True,
+                toast="body sent",
+                followup_text=(
+                    f"📄 <b>SKILL: {_tg.escape_html(sname)}</b>\n"
+                    f"<pre>{_tg.escape_html(body)}</pre>"
+                ),
+                clear_keyboard=False,
+            )
+        if action == "delete":
+            if len(parts) < 2:
+                return _tg.CallbackResult(ok=False, toast="malformed delete")
+            sname = parts[1]
+            ok = SKILLS.delete_user_skill(sname)
+            if not ok:
+                return _tg.CallbackResult(
+                    ok=False, toast=f"skill {sname!r} not found or not user-tier",
+                    clear_keyboard=False,
+                )
+            return _tg.CallbackResult(
+                ok=True,
+                edited_text=(
+                    f"❌ <b>Skill deleted</b>\n"
+                    f"<code>{_tg.escape_html(sname)}</code> removed from disk."
+                ),
+                toast="deleted",
+            )
+        return _tg.CallbackResult(ok=False, toast=f"unknown action {action!r}")
+
+    _tg.register_callback_handler("skill", _handler)
+
+
+_register_skill_callback()

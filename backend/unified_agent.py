@@ -164,6 +164,24 @@ without a corresponding tool call is a LIE; never produce one.
   - Self-mod (structural code changes the user requested) →
     `propose_self_modification(description, files, rationale)`.
 
+## Skills come BEFORE ad-hoc tool loops
+
+If the AVAILABLE SKILLS block lists a skill whose `description` /
+`when_to_use` matches the task, FOLLOW THAT SKILL. Trigger-matched
+skills already have their full instructions injected into this
+prompt as a `## SKILL: <name>` block — read that block carefully,
+then act on it.
+
+If no trigger fired but the catalog hints a relevant skill, call
+`load_skill(name)` to pull its body BEFORE attempting the work.
+Skills capture pitfalls (ffmpeg flags, Telegram cache paths, edge
+cases) that ad-hoc tool loops have to rediscover painfully.
+
+When you finish a non-trivial task that involved a sequence of
+tool calls and produced a working result, consider proposing a
+reusable workflow via `propose_skill(...)`. The owner reviews it
+in Telegram and one tap activates it for future turns.
+
 ## Refusals must be honest
 
 NEVER say "tools are disabled" / "инструменты отключены" / "I
@@ -289,6 +307,31 @@ def run_unified(
     # Pre-flight 3: progress event.
     agent.progress("unified", "single-loop turn starting")
 
+    # Pre-flight 4: skills. Two things happen here:
+    #   1. Each skill's `handler.py` (if any) registers its tools
+    #      into the global ToolRegistry — so `registry.to_anthropic_list`
+    #      below sees skill-provided tools as well as builtins.
+    #   2. `match(task)` walks every enabled skill's triggers; on a
+    #      hit the FULL `system_block()` (description + when_to_use
+    #      + body) is appended to the prompt so the model gets the
+    #      step-by-step instructions in this same turn.
+    # This was lost during the Phase C migration from agent.py → run_unified;
+    # restoring it brings skill-driven workflows back on the production path.
+    from .skills import SKILLS as _SKILLS
+    try:
+        _SKILLS.ensure_loaded()
+    except Exception as e:
+        log.debug("SKILLS.ensure_loaded failed (non-fatal): %s", e)
+    try:
+        matched_skills = _SKILLS.match(task) or []
+    except Exception:
+        matched_skills = []
+    if matched_skills:
+        agent.progress(
+            "skill",
+            "active skills: " + ", ".join(s.name for s in matched_skills),
+        )
+
     # System prompt assembly.
     perms = _roles.permissions_block(speaker_id)
     try:
@@ -303,6 +346,13 @@ def run_unified(
     # though both have the same speaker_id.
     convo = CONVERSATION.context_block(n=6, session_key=skey)
 
+    # Skill catalog (cheap, ~one line per skill) + full body of each
+    # auto-matched skill (richer, but only on actual trigger hits).
+    try:
+        catalog = _SKILLS.catalog_block()
+    except Exception:
+        catalog = ""
+
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
     ]
@@ -314,11 +364,20 @@ def run_unified(
         system_parts.append(f"---\n\n{recall}")
     if convo:
         system_parts.append(f"---\n\n{convo}")
+    if catalog:
+        system_parts.append(f"---\n\n{catalog}")
+    for sk in matched_skills:
+        try:
+            system_parts.append(f"---\n\n{sk.system_block()}")
+        except Exception as e:
+            log.debug("skill %s system_block failed: %s", sk.name, e)
     system_parts.append(f"---\n\n{_UNIFIED_RULES}")
     system_parts.append(f"---\n\n{perms}")
     system_prompt = "\n\n".join(system_parts)
 
     # Tool surface = whole registry. The LLM picks.
+    # MUST be after SKILLS.ensure_loaded() above so skill-provided
+    # tools (handler.py register) make it into the schema.
     registry = get_registry()
     tools_schema = registry.to_anthropic_list()
 
@@ -495,6 +554,45 @@ def run_unified(
         }
         if job_id:
             turn_record["job_id"] = job_id
+
+        # Persist the FULL turn artifact under workspace/turns/<id>.json
+        # so /api/turns/<id> can lazy-load the thinking_trace / tool
+        # outputs / verification details for any past turn — including
+        # Telegram and CLI turns. Pre-fix, only the WebUI path even
+        # mentioned `save_turn` was *defined* (workspace.py) but never
+        # called from anywhere; every turn carried `turn_id: None` and
+        # the WebUI's lazy-load endpoint always 404'd. Wire up the
+        # write here so all channels get it for free.
+        try:
+            from .workspace import get_workspace
+            import uuid as _uuid
+            turn_id = (
+                f"{_dt.now().strftime('%Y%m%d_%H%M%S')}_{_uuid.uuid4().hex[:8]}"
+            )
+            artifact = dict(turn_record)
+            artifact["turn_id"] = turn_id
+            artifact["thinking_trace"] = [
+                (s.model_dump() if hasattr(s, "model_dump") else dict(s))
+                for s in (agent._trace or [])
+            ]
+            artifact["llm_calls"] = [
+                (c.model_dump() if hasattr(c, "model_dump") else dict(c))
+                for c in (agent._llm_calls or [])
+            ]
+            artifact["verification"] = (
+                vr.model_dump() if hasattr(vr, "model_dump") else dict(vr)
+            )
+            get_workspace().save_turn(turn_id, artifact)
+            turn_record["turn_id"] = turn_id
+            # Stamp on the in-memory AgentAnswer so callers (WebUI
+            # SSE response) can deep-link without re-deriving.
+            try:
+                setattr(agent, "_last_turn_id", turn_id)
+            except Exception:
+                pass
+        except Exception as e:
+            log.debug("unified: save_turn failed (non-fatal): %s", e)
+
         SESSIONS.add_turn(
             turn_record,
             speaker_id=speaker_id,
@@ -527,4 +625,5 @@ def run_unified(
         token_usage=agent._get_token_usage(),
         thinking_trace=agent._trace,
         llm_calls=agent._llm_calls,
+        turn_id=getattr(agent, "_last_turn_id", "") or "",
     )

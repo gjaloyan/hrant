@@ -306,6 +306,101 @@ class _TgProgressStream:
         await self._edit(summary[:4000])
 
 
+# Telegram MEDIA: convention — agent writes `MEDIA:/abs/path/to/file`
+# on its own line and the bridge converts each one to a real
+# attachment. Path is required to be absolute (relative paths are
+# ambiguous across the agent process / bot process), and limited
+# to whitelisted parent dirs so a hallucinated `MEDIA:/etc/shadow`
+# can't leak host files.
+import re as _re_media
+_MEDIA_LINE_RE = _re_media.compile(r"^[ \t]*MEDIA:[ \t]*([^\r\n]+?)[ \t]*$", _re_media.MULTILINE)
+_MEDIA_VIDEO_EXTS = frozenset({".mp4", ".mov", ".webm", ".mkv", ".m4v"})
+_MEDIA_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
+_MEDIA_AUDIO_EXTS = frozenset({".mp3", ".m4a", ".ogg", ".oga", ".wav", ".flac"})
+
+
+def _media_path_is_safe(p: Path) -> bool:
+    """Allow paths under data_dir and the system /tmp only — guards
+    against `MEDIA:/etc/...` or other host-file leaks."""
+    try:
+        rp = p.resolve()
+    except Exception:
+        return False
+    if not rp.is_absolute() or not rp.exists() or not rp.is_file():
+        return False
+    try:
+        data_root = paths.data_dir(require=False).resolve()
+    except Exception:
+        data_root = None
+    tmp_roots = [Path("/tmp"), Path("/var/tmp")]
+    candidates = ([data_root] if data_root else []) + tmp_roots
+    for root in candidates:
+        try:
+            rp.relative_to(root)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+async def _strip_and_send_media(answer: str, update: "Any") -> tuple[str, int]:
+    """Scan `answer` for MEDIA: lines, send each referenced file as
+    a Telegram attachment, and return (cleaned_answer, sent_count).
+
+    Best-effort:
+      - missing file → keep the path in the textual answer so the
+        user sees the error, count NOT incremented
+      - send failure → log + leave path inline, count NOT incremented
+      - sent successfully → strip the line from the text
+    """
+    sent = 0
+    matches = list(_MEDIA_LINE_RE.finditer(answer))
+    if not matches:
+        return answer, 0
+    # Iterate in REVERSE so the slice indexes stay valid as we cut.
+    cleaned = answer
+    cuts: list[tuple[int, int]] = []
+    for m in matches:
+        raw_path = (m.group(1) or "").strip().strip('"').strip("'")
+        if not raw_path:
+            continue
+        p = Path(raw_path)
+        if not _media_path_is_safe(p):
+            log.info("MEDIA: refused unsafe path %r", raw_path)
+            continue
+        ext = p.suffix.lower()
+        ok = False
+        try:
+            if ext in _MEDIA_VIDEO_EXTS:
+                with p.open("rb") as fh:
+                    await update.message.reply_video(video=fh)
+                ok = True
+            elif ext in _MEDIA_IMAGE_EXTS:
+                with p.open("rb") as fh:
+                    await update.message.reply_photo(photo=fh)
+                ok = True
+            elif ext in _MEDIA_AUDIO_EXTS:
+                with p.open("rb") as fh:
+                    await update.message.reply_audio(audio=fh)
+                ok = True
+            else:
+                with p.open("rb") as fh:
+                    await update.message.reply_document(document=fh)
+                ok = True
+        except Exception as e:
+            log.warning("MEDIA: send failed for %s: %s", p, e)
+            ok = False
+        if ok:
+            sent += 1
+            cuts.append((m.start(), m.end()))
+    # Apply cuts in reverse order.
+    for start, end in reversed(cuts):
+        cleaned = cleaned[:start] + cleaned[end:]
+    # Tidy: collapse 3+ consecutive newlines we may have introduced.
+    cleaned = _re_media.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, sent
+
+
 def _format_trace_footer(result: Any) -> str:
     """Compact thinking + tools footer for Telegram replies.
 
@@ -605,6 +700,58 @@ class TelegramBot:
                 self._send_with_buttons(chat_id, text, markup)
             except Exception as e:
                 log.warning("self-mod notify(%s) failed: %s", chat_id, e)
+
+    def _on_skill_proposed(self, skill) -> None:
+        """Self-improvement loop notification — DM every owner-on-
+        Telegram about a freshly-proposed skill. Three inline buttons:
+        [✅ Activate], [👀 Show], [❌ Delete]. The skill is already on
+        disk but disabled; only the owner can switch it live."""
+        from . import roles as _roles
+        from . import contacts as _contacts
+        from . import tg_interactive as _tg
+
+        sname = getattr(skill, "name", "") or ""
+        if not sname:
+            return
+        try:
+            state = _roles._load()
+        except Exception:
+            return
+        owner_ids = [
+            sid for sid in (state.get("owner_speaker_ids") or [])
+            if isinstance(sid, str) and sid.startswith("telegram:")
+        ]
+        if not owner_ids:
+            return
+
+        triggers = ", ".join(skill.triggers or []) or "(none)"
+        text = (
+            f"🧠 <b>New skill proposed</b>\n\n"
+            f"<b>Name:</b> <code>{_tg.escape_html(sname)}</code>\n"
+            f"<b>Description:</b> {_tg.escape_html(skill.description or '')}\n"
+            f"<b>Triggers:</b> <i>{_tg.escape_html(triggers)}</i>\n\n"
+            f"<i>Disabled by default. Activate to make it live for "
+            f"future turns.</i>"
+        )
+        buttons = (
+            _tg.InlineButtonSet()
+            .row(
+                _tg.InlineButton("👀 Show", callback_data=f"skill:show:{sname}"),
+            )
+            .row(
+                _tg.InlineButton("✅ Activate", callback_data=f"skill:enable:{sname}"),
+                _tg.InlineButton("❌ Delete", callback_data=f"skill:delete:{sname}"),
+            )
+        )
+        markup = buttons.to_markup()
+        for owner_sid in owner_ids:
+            chat_id = _contacts.chat_id_for_speaker(owner_sid)
+            if chat_id is None:
+                continue
+            try:
+                self._send_with_buttons(chat_id, text, markup)
+            except Exception as e:
+                log.warning("skill-proposed DM(%s) failed: %s", chat_id, e)
 
     def _on_message_scheduled(self, row: dict) -> None:
         """Post-create preview DM for a scheduled message — Phase 4.
@@ -1328,6 +1475,25 @@ class TelegramBot:
                             stats_lines.append("📊 Stages: " + " · ".join(parts))
                         stats_block = "\n".join(stats_lines)
 
+                    # MEDIA: convention — agent can attach files to its
+                    # reply by writing a line of the form
+                    #   MEDIA:/absolute/path/to/file
+                    # anywhere in the answer. Each such path is sent
+                    # as a Telegram attachment (video / photo / audio /
+                    # document picked by extension) and the line is
+                    # stripped from the textual reply so the user
+                    # doesn't see the raw path. Mirrors the convention
+                    # used by other gateways so a skill written for
+                    # one bot ports directly to ours.
+                    answer, _media_sent = await _strip_and_send_media(
+                        answer or "", update,
+                    )
+                    if _media_sent:
+                        agent.progress(
+                            "media",
+                            f"sent {_media_sent} attachment(s) from MEDIA: lines",
+                        ) if hasattr(agent, "progress") else None
+
                     # Build the answer with footer + stats appended.
                     # When the combined message would exceed Telegram's
                     # 4096-char limit, the LAST chunk carries the
@@ -1572,15 +1738,15 @@ class TelegramBot:
 
             # Eager-import the modules that register
             # tg_interactive callback handlers at module-load time
-            # (`pair:` for access.py, `prop:` for self_modifier.py,
-            # `sched:` for scheduled_messages.py). Without this, the
-            # first time the user pressed a button on a pre-restart
-            # message we'd dispatch "no handler for 'pair'" because
-            # the import is otherwise lazy.
+            # (`pair:`, `prop:`, `sched:`, `skill:`). Without this,
+            # the first time the user pressed a button on a pre-
+            # restart message we'd dispatch "no handler for 'pair'"
+            # because the imports are otherwise lazy.
             try:
                 from . import access as _access_eager  # noqa: F401
+                from . import skills as _skills_eager  # noqa: F401
             except Exception as e:
-                log.warning("access eager-import failed: %s", e)
+                log.warning("callback module eager-import failed: %s", e)
 
             # Subscribe to self-mod proposal-created events so the
             # owner sees every new proposal as an inline-button DM.
@@ -1600,6 +1766,17 @@ class TelegramBot:
                 _sched.register_on_message_scheduled(self._on_message_scheduled)
             except Exception as e:
                 log.warning("scheduled_messages subscribe failed: %s", e)
+
+            # Self-improvement loop: when the agent proposes a new
+            # reusable skill, DM the owner with inline buttons —
+            # [✅ Activate] [👀 Show] [❌ Delete]. The skill is
+            # written disabled by default; only an owner press
+            # toggles it live.
+            try:
+                from . import skills as _skills_mod
+                _skills_mod.register_on_skill_proposed(self._on_skill_proposed)
+            except Exception as e:
+                log.warning("skills subscribe failed: %s", e)
 
             loop.run_until_complete(app.initialize())
             # Surface the slash-command list to the Telegram UI so

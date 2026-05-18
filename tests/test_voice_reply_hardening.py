@@ -40,14 +40,30 @@ def test_voice_reply_wraps_bytes_in_inputfile():
 def test_voice_reply_tries_reply_voice_first():
     """Native TG voice bubble (reply_voice) is preferred when
     available — it renders as the same kind of bubble the user
-    sent. reply_audio is the fallback for stricter PTB versions."""
+    sent. reply_audio is the fallback for stricter PTB versions.
+
+    Scoped to the voice-reply block (we anchor on the unique
+    `InputFile(voice_blob` marker that lives inside the TTS
+    fallback) so unrelated `reply_audio(` call sites elsewhere
+    in the file (e.g. the MEDIA: convention handler) don't fool
+    a substring search."""
     src = inspect.getsource(ch_mod)
-    voice_idx = src.find("reply_voice(")
-    audio_idx = src.find("reply_audio(")
-    assert voice_idx > 0, "reply_voice path must exist"
-    assert audio_idx > 0, "reply_audio fallback must exist"
+    anchor = "InputFile(voice_blob"
+    anchor_idx = src.find(anchor)
+    assert anchor_idx > 0, "voice-reply block anchor missing"
+    # Search a 4 KB window around the anchor — that's the
+    # TTS reply try/except block, large enough to contain both
+    # the reply_voice attempt and the reply_audio fallback.
+    window_start = max(0, anchor_idx - 1500)
+    window_end = min(len(src), anchor_idx + 2500)
+    window = src[window_start:window_end]
+    voice_idx = window.find("reply_voice(")
+    audio_idx = window.find("reply_audio(")
+    assert voice_idx > 0, "reply_voice path must exist in voice-reply block"
+    assert audio_idx > 0, "reply_audio fallback must exist in voice-reply block"
     assert voice_idx < audio_idx, (
-        "reply_voice should be tried BEFORE reply_audio"
+        "inside the voice-reply block, reply_voice should be "
+        "tried BEFORE reply_audio"
     )
 
 

@@ -256,6 +256,146 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
     return json.dumps({"ok": True, "query": query, "results": out}, ensure_ascii=False)
 
 
+def _list_skills_handler(tag: str = "", category: str = "") -> str:
+    """Enumerate every installed skill (name + description + tags +
+    category). Useful when the auto-injected AVAILABLE SKILLS catalog
+    doesn't show what you need and you want to scan the library
+    before calling `load_skill`.
+
+    Filters: `tag` matches when present in the skill's tags list;
+    `category` matches the directory category (media / domain / ...).
+    Pass empty strings to disable filtering."""
+    from .skills import SKILLS
+    SKILLS.ensure_loaded()
+    wanted_tag = (tag or "").strip().lower()
+    wanted_cat = (category or "").strip().lower()
+    out = []
+    for s in SKILLS.list():
+        if not s.enabled:
+            continue
+        if wanted_tag:
+            tags_lower = []
+            for t in (s.triggers or []):
+                tags_lower.append(str(t).lower())
+            if wanted_tag not in tags_lower:
+                continue
+        if wanted_cat:
+            sk_cat = ""
+            try:
+                rel = s.path.relative_to(SKILLS.dir) if s.source == "builtin" else s.path.relative_to(SKILLS.user_dir)
+                parts = rel.parts
+                if len(parts) >= 2:
+                    sk_cat = str(parts[0]).lower()
+            except Exception:
+                pass
+            if wanted_cat not in (sk_cat, ""):
+                continue
+        out.append({
+            "name": s.name,
+            "description": s.description,
+            "triggers": list(s.triggers or []),
+            "source": s.source,
+        })
+    return json.dumps({"ok": True, "count": len(out), "skills": out}, ensure_ascii=False)
+
+
+def _load_skill_handler(name: str) -> str:
+    """Fetch the full SKILL.md body for a named skill — use this
+    when the AVAILABLE SKILLS catalog hints a relevant skill but
+    the trigger didn't auto-fire. The body contains the step-by-step
+    instructions you should follow.
+
+    Returns `{ok, name, description, when_to_use, body}`. `ok=False`
+    when the skill is missing or disabled."""
+    from .skills import SKILLS
+    SKILLS.ensure_loaded()
+    sk = SKILLS.get(name or "")
+    if sk is None:
+        installed = [s.name for s in SKILLS.list()]
+        return json.dumps({
+            "ok": False,
+            "error": f"skill {name!r} not found",
+            "installed": installed,
+        }, ensure_ascii=False)
+    if not sk.enabled:
+        return json.dumps({
+            "ok": False,
+            "error": f"skill {name!r} is disabled — owner toggles in the Skills panel",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "name": sk.name,
+        "description": sk.description,
+        "when_to_use": sk.when_to_use,
+        "triggers": list(sk.triggers or []),
+        "body": sk.body,
+        "source": sk.source,
+    }, ensure_ascii=False)
+
+
+def _propose_skill_handler(
+    name: str,
+    description: str,
+    triggers: str = "",
+    when_to_use: str = "",
+    body: str = "",
+) -> str:
+    """Self-improvement loop: after completing a non-trivial workflow,
+    propose a reusable skill so future turns don't have to rediscover
+    the steps. OWNER-only invocation; the skill is written DISABLED
+    by default and only goes live after the owner taps 'Activate'
+    in Telegram (or enables it in the WebUI Skills panel).
+
+    `triggers` is a comma-separated list of keyword strings — when
+    a future task contains any of them, the skill auto-injects its
+    body into the system prompt for that turn.
+    """
+    from .roles import current_speaker, is_owner
+    from . import skills as _skills
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — propose_skill is owner-only",
+        }, ensure_ascii=False)
+    if not (name or "").strip():
+        return json.dumps({
+            "ok": False, "error": "name is required",
+        }, ensure_ascii=False)
+    if not (description or "").strip():
+        return json.dumps({
+            "ok": False, "error": "description is required",
+        }, ensure_ascii=False)
+    trig_list = [
+        t.strip() for t in (triggers or "").split(",") if t.strip()
+    ]
+    sk = _skills.propose(
+        name=name,
+        description=description,
+        triggers=trig_list,
+        when_to_use=when_to_use,
+        body=body,
+        requester=speaker_id or "webui:default",
+    )
+    if sk is None:
+        return json.dumps({
+            "ok": False,
+            "error": "skill could not be persisted (invalid name?)",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "name": sk.name,
+        "description": sk.description,
+        "triggers": list(sk.triggers or []),
+        "enabled": sk.enabled,
+        "note": (
+            f"Skill '{sk.name}' written to user-tier (disabled). "
+            "Owner must activate via Telegram inline button or "
+            "the WebUI Skills panel before it goes live."
+        ),
+    }, ensure_ascii=False)
+
+
 def _propose_self_modification_handler(
     description: str, files: str = "", rationale: str = "",
 ) -> str:
@@ -864,6 +1004,124 @@ def register_builtin_tools() -> None:
             "required": ["query"],
         },
         handler=_search_knowledge_handler,
+    )
+
+    reg.register_func(
+        name="list_skills",
+        description=(
+            "Enumerate every installed skill (reusable Markdown "
+            "workflow). Each entry has name + description + triggers. "
+            "Use BEFORE attempting tasks that look like they might "
+            "have a skill — `load_skill(name)` then pulls the full "
+            "step-by-step instructions. Skills capture pitfalls and "
+            "exact commands that ad-hoc tool loops re-derive painfully."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tag": {
+                    "type": "string",
+                    "description": "Filter to skills carrying this trigger word. Empty = all.",
+                    "default": "",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Filter to a directory category (media / domain / …). Empty = all.",
+                    "default": "",
+                },
+            },
+        },
+        handler=_list_skills_handler,
+    )
+
+    reg.register_func(
+        name="load_skill",
+        description=(
+            "Fetch the FULL SKILL.md body for a named skill. The "
+            "body is the authoritative instruction set for that "
+            "workflow — read carefully and act on it. Use when the "
+            "auto-injected AVAILABLE SKILLS catalog hints a relevant "
+            "skill but no trigger fired (e.g. user phrasing didn't "
+            "match the skill's keyword list)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Exact skill name from the catalog.",
+                },
+            },
+            "required": ["name"],
+        },
+        handler=_load_skill_handler,
+    )
+
+    reg.register_func(
+        name="propose_skill",
+        description=(
+            "Self-improvement loop. Owner-only. Propose a NEW "
+            "reusable skill (Markdown workflow) based on a process "
+            "you just completed successfully. The skill is written "
+            "DISABLED — the owner must tap 'Activate' in their "
+            "Telegram DM to make it live. Use AFTER you've shipped "
+            "a working result for a non-trivial multi-step task "
+            "that future turns are likely to encounter again. The "
+            "`body` should be a step-by-step Markdown procedure: "
+            "where to find inputs, exact commands, expected outputs, "
+            "common pitfalls. Future turns will see the body "
+            "auto-injected into their system prompt when any "
+            "`triggers` keyword appears in the user message."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": (
+                        "kebab-case identifier (e.g. 'video-overlay-removal'). "
+                        "Only alphanumerics, dashes, underscores."
+                    ),
+                },
+                "description": {
+                    "type": "string",
+                    "description": "One-line description shown in the catalog.",
+                },
+                "triggers": {
+                    "type": "string",
+                    "description": (
+                        "Comma-separated keywords. When ANY appears in a "
+                        "future user message the skill body is injected "
+                        "into the prompt. Pick distinctive words; common "
+                        "ones like 'help' or 'do' cause noise."
+                    ),
+                    "default": "",
+                },
+                "when_to_use": {
+                    "type": "string",
+                    "description": (
+                        "Free-form paragraph explaining WHEN the agent "
+                        "should reach for this skill (vs related skills "
+                        "or ad-hoc tool loops)."
+                    ),
+                    "default": "",
+                },
+                "body": {
+                    "type": "string",
+                    "description": (
+                        "Full step-by-step Markdown procedure. The "
+                        "workflow body is what future LLM turns see "
+                        "verbatim, so write it for an agent reader: "
+                        "exact commands, file paths, expected outputs, "
+                        "pitfalls. Don't recap context the catalog "
+                        "already has — go straight to the steps."
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["name", "description"],
+        },
+        handler=_propose_skill_handler,
     )
 
     reg.register_func(

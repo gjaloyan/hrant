@@ -40,16 +40,20 @@ def _build_answer_with_tool(args: object) -> AgentAnswer:
 
 
 def test_summarize_dict_renders_as_json_truncated():
+    from backend.job_runner import _ARGS_SUMMARY_CAP
     out = _summarize_tool_args({"query": "tomatoes in Yerevan", "limit": 5})
     assert isinstance(out, str)
     assert "tomatoes" in out
-    assert len(out) <= 200
+    assert len(out) <= _ARGS_SUMMARY_CAP
 
 
-def test_summarize_long_dict_truncates_to_200_chars():
-    big = {f"k{i}": "x" * 50 for i in range(20)}
+def test_summarize_long_dict_truncates_to_cap():
+    """Cap was raised from 200 → 1500 after the post-Phase-3 audit
+    found run_python invocations were recorded as empty strings."""
+    from backend.job_runner import _ARGS_SUMMARY_CAP
+    big = {f"k{i}": "x" * 100 for i in range(200)}
     out = _summarize_tool_args(big)
-    assert len(out) <= 200
+    assert len(out) <= _ARGS_SUMMARY_CAP
 
 
 def test_summarize_string_kept_as_is():
@@ -57,7 +61,8 @@ def test_summarize_string_kept_as_is():
 
 
 def test_summarize_long_string_truncated():
-    assert len(_summarize_tool_args("x" * 500)) == 200
+    from backend.job_runner import _ARGS_SUMMARY_CAP
+    assert len(_summarize_tool_args("x" * (_ARGS_SUMMARY_CAP * 2))) == _ARGS_SUMMARY_CAP
 
 
 def test_summarize_none_returns_empty():

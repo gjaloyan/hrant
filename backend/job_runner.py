@@ -27,6 +27,9 @@ from .agent import Agent, AgentAnswer
 log = logging.getLogger(__name__)
 
 
+_ARGS_SUMMARY_CAP = 1500
+
+
 def _summarize_tool_args(raw: object) -> str:
     """Render whatever the `args` field holds as a short string for
     storage. `ToolCallDetail.args` is typed as `dict`, so the natural
@@ -35,17 +38,24 @@ def _summarize_tool_args(raw: object) -> str:
     and crashed with `KeyError: slice(None, 200, None)` when args
     was a non-empty dict — `dict[:200]` does dict lookup, not string
     slicing. Caught in production via /api/chat + Telegram on every
-    tool-using turn (web_search, fetch_url, read_file)."""
+    tool-using turn (web_search, fetch_url, read_file).
+
+    Cap is 1500 bytes — enough to capture a full terminal_exec
+    command, a typical fetch_url, or the head of a long run_python
+    payload. The earlier 200-byte cap left every interesting
+    debugging case as the literal empty string in jobs.json, which
+    made the post-Phase-3 audit unable to reconstruct what the
+    agent actually tried during a failed video-processing turn."""
     if raw is None or raw == "" or raw == {}:
         return ""
     if isinstance(raw, str):
-        return raw[:200]
+        return raw[:_ARGS_SUMMARY_CAP]
     if isinstance(raw, (dict, list)):
         try:
-            return json.dumps(raw, ensure_ascii=False)[:200]
+            return json.dumps(raw, ensure_ascii=False)[:_ARGS_SUMMARY_CAP]
         except Exception:
-            return str(raw)[:200]
-    return str(raw)[:200]
+            return str(raw)[:_ARGS_SUMMARY_CAP]
+    return str(raw)[:_ARGS_SUMMARY_CAP]
 
 
 def _extract_tool_calls(answer: AgentAnswer) -> list[dict]:
