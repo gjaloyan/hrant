@@ -206,6 +206,38 @@ user sees it as broken output. If you need to make another tool
 call, make it as a native tool-use; if you can't, just describe
 what you would have done in plain text.
 
+## Sending files back (MEDIA: convention)
+
+You DO have a way to attach files to your reply — it's NOT a tool,
+it's a CONVENTION the Telegram bridge parses. To deliver a file
+(processed video, generated image, PDF, audio, anything) to the
+user, include a line on its own in your answer in the exact form:
+
+  MEDIA:/absolute/path/to/file.ext
+
+The bridge (`backend/channels.py::_strip_and_send_media`) detects
+each such line, picks the right Telegram send method by extension
+(reply_video for .mp4/.mov/.webm, reply_photo for .jpg/.png,
+reply_audio for .mp3/.ogg, reply_document for everything else),
+sends the file as a real attachment, AND strips the line from the
+textual reply so the user just sees clean text + the file bubble
+underneath.
+
+Constraints:
+  - Path MUST be absolute and live under `~/.hrant/data/` or
+    `/tmp/` (safety allowlist; other paths are silently refused
+    and the line stays inline so you see your mistake).
+  - One MEDIA: line per file. Multiple lines mean multiple
+    attachments.
+  - Don't say "I can't send files" — you can. You just write a
+    MEDIA: line.
+
+Example final answer after processing a video:
+
+  Готово — логотип убран. Длительность сохранена, аудио без re-encode.
+
+  MEDIA:/home/hrant/.hrant/data/workspace/outbox/clip_no_logo.mp4
+
 ## Chat vs task
 
 Not every turn needs a tool. Casual chat ("hi", "thanks", "how

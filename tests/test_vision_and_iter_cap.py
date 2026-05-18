@@ -178,37 +178,11 @@ def test_rewrite_empty_answer_passthrough():
     assert _rewrite_xml_tool_call_dump(None, agent) == ""  # type: ignore[arg-type]
 
 
-# ─── video_overlay_removal skill — discovery ─────────────────────────
-
-
-def test_video_overlay_removal_skill_loaded():
-    """The skill we put back in backend/skills/ must auto-load and
-    its triggers must match plain-English logo requests."""
-    from backend import skills
-    skills.SKILLS._loaded = False
-    skills.SKILLS.skills = []
-    skills.SKILLS.ensure_loaded()
-    sk = skills.SKILLS.get("video_overlay_removal")
-    assert sk is not None
-    matched = skills.SKILLS.match("remove the logo from this video")
-    assert any(s.name == "video_overlay_removal" for s in matched)
-    # And Russian.
-    matched_ru = skills.SKILLS.match("убери лого из видео")
-    assert any(s.name == "video_overlay_removal" for s in matched_ru)
-
-
-def test_video_overlay_removal_skill_mentions_analyze_image():
-    """The body must point the LLM at `analyze_image` for coord
-    detection — that's the whole reason we re-added the skill."""
-    from backend import skills
-    skills.SKILLS._loaded = False
-    skills.SKILLS.ensure_loaded()
-    sk = skills.SKILLS.get("video_overlay_removal")
-    assert sk is not None
-    assert "analyze_image" in sk.body
-
-
 # ─── max_iterations bumped to 20 ─────────────────────────────────────
+# (video_overlay_removal skill is intentionally NOT pinned — it was
+# removed deliberately so the self-improvement loop has to recreate
+# it via propose_skill. Pinning its existence would block that test.)
+
 
 
 def test_run_unified_max_iterations_is_20(monkeypatch):
@@ -219,3 +193,21 @@ def test_run_unified_max_iterations_is_20(monkeypatch):
     src = inspect.getsource(unified_agent)
     assert "max_iterations=20" in src
     assert "max_iterations=10" not in src
+
+
+def test_rules_document_media_convention():
+    """Post-mortem on the May 18 turn: agent said 'I can't send
+    files' because `_strip_and_send_media` was implemented but the
+    convention was only documented inside the (then-removed)
+    video-overlay-removal skill body. Every turn needs to know
+    about MEDIA: in the RULES."""
+    from backend.unified_agent import _UNIFIED_RULES
+    assert "MEDIA:" in _UNIFIED_RULES
+    assert "MEDIA:/absolute" in _UNIFIED_RULES or "MEDIA:/" in _UNIFIED_RULES
+    # Must say it's a convention, not a tool — distinguishes it from
+    # the `propose_skill` / `set_setting` shape and prevents the
+    # "I don't have a send_file tool" failure mode.
+    rules_lc = _UNIFIED_RULES.lower()
+    assert "convention" in rules_lc
+    # Pin allowlist hint so a refactor doesn't lose the safety note.
+    assert ".hrant/data" in _UNIFIED_RULES or "data_dir" in _UNIFIED_RULES.lower()
