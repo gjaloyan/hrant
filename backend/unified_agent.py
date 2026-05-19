@@ -971,6 +971,116 @@ _TRUNCATION_HINTS = {
 }
 
 
+# T7: structured digest headers per tool result.
+#
+# The original audit recommended a "context ledger" replacing prior
+# tool results with summary facts. The anthropic SDK's tool-use loop
+# doesn't allow mid-loop history rewriting, so we do the next-best
+# thing: every tool result gets a 1-3 line digest header PREPENDED
+# to the body before truncation. Across N iterations the LLM can
+# scroll the conversation and see at-a-glance what it has already
+# learned ("[read_file backend/channels.py] 47L 4234c — handle_callback_query,
+# CallbackQueryHandler") even after the body is truncated by T2 caps.
+#
+# Each digester is fast (no LLM call) — pure pattern extraction.
+
+_SYMBOL_PATTERN_RE = re.compile(
+    r"^\s*(def\s+\w+|class\s+\w+|async\s+def\s+\w+|#{1,6}\s+\S[^\n]*)",
+    re.MULTILINE,
+)
+
+
+def _digest_read_file(args: dict, result: str) -> str:
+    """Header for read_file / view_file results. Calls out path,
+    size, and top 5 symbol-like lines (def/class/headings)."""
+    path = (args or {}).get("path") or (args or {}).get("file") or "?"
+    n_lines = result.count("\n") + (1 if result and not result.endswith("\n") else 0)
+    chars = len(result)
+    symbols = [m.group(1).strip() for m in _SYMBOL_PATTERN_RE.finditer(result)][:5]
+    sym_str = "; ".join(s[:60] for s in symbols) if symbols else "no symbols"
+    return f"[read_file {path}] {n_lines}L {chars}c — {sym_str}"
+
+
+def _digest_terminal_exec(args: dict, result: str) -> str:
+    """Header for terminal_exec. Shows command head + outcome shape."""
+    cmd = ((args or {}).get("command") or (args or {}).get("cmd") or "").strip()
+    cmd_head = cmd[:80]
+    n_lines = result.count("\n")
+    low = result.lower()
+    if "traceback" in low or "error:" in low[:200] or "fatal:" in low[:200]:
+        outcome = "ERROR"
+    elif "permission denied" in low or "not found" in low[:200]:
+        outcome = "REFUSED"
+    elif n_lines == 0 and len(result) < 40:
+        outcome = "empty"
+    else:
+        outcome = "ok"
+    return f"[terminal_exec `{cmd_head}`] {outcome}, {n_lines}L {len(result)}c"
+
+
+def _digest_web_search(args: dict, result: str) -> str:
+    """Header for web_search. Counts hits + extracts first 2 result
+    titles if visible."""
+    query = (args or {}).get("query") or "?"
+    n_lines = result.count("\n")
+    # Heuristic: count "- " or " 1. " style hit markers.
+    hits = result.count("\n- ") + result.count("\n1. ") + result.count("\n2. ")
+    return f"[web_search '{query[:60]}'] {max(1, hits)} hits, {n_lines}L"
+
+
+def _digest_fetch_url(args: dict, result: str) -> str:
+    """Header for fetch_url. Shows URL + page size + likely title."""
+    url = (args or {}).get("url") or "?"
+    chars = len(result)
+    # Try to grab a <title> if present.
+    m_title = re.search(r"<title[^>]*>([^<]{1,120})</title>", result, re.IGNORECASE)
+    title = (m_title.group(1).strip() if m_title else "")[:80]
+    title_part = f" — '{title}'" if title else ""
+    return f"[fetch_url {url[:80]}] {chars}c{title_part}"
+
+
+def _digest_locate_symbol(args: dict, result: str) -> str:
+    """Header for locate_symbol. Reports symbol + path + hit count."""
+    sym = (args or {}).get("symbol") or "?"
+    path = (args or {}).get("path") or "?"
+    # locate_symbol returns JSON list — count entries.
+    hits = result.count('"start_line"')
+    return f"[locate_symbol {sym}@{path}] {hits} hit(s)"
+
+
+def _digest_search_knowledge(args: dict, result: str) -> str:
+    """Header for search_knowledge. Counts hits."""
+    query = (args or {}).get("query") or "?"
+    hits = result.count('"topic"') or result.count("\n- ")
+    return f"[search_knowledge '{query[:60]}'] {max(0, hits)} hit(s)"
+
+
+_DIGESTERS = {
+    "read_file": _digest_read_file,
+    "view_file": _digest_read_file,
+    "terminal_exec": _digest_terminal_exec,
+    "web_search": _digest_web_search,
+    "fetch_url": _digest_fetch_url,
+    "locate_symbol": _digest_locate_symbol,
+    "search_knowledge": _digest_search_knowledge,
+}
+
+
+def _digest_tool_result(name: str, args: dict, result: str) -> str:
+    """Return a one-line digest header for known tools, or empty
+    string for tools that don't need one (set_setting, propose_*,
+    etc. — those have short results already)."""
+    if not result:
+        return ""
+    digester = _DIGESTERS.get(name)
+    if digester is None:
+        return ""
+    try:
+        return digester(args or {}, result or "")
+    except Exception:
+        return ""
+
+
 def _truncation_hint(name: str) -> str:
     """T2: tell the LLM HOW to ask for less. Without a hint the LLM
     re-calls the same tool hoping for less data; with a hint it uses
@@ -1820,6 +1930,18 @@ def run_unified(
                 _recent_tool_hashes.clear()
         except Exception:
             pass
+        # T7: prepend the structured digest header. Gives the LLM a
+        # 1-line at-a-glance for what's in the result, surviving the
+        # T2 truncation that may chop the body. Across iterations,
+        # scrolling the conversation history surfaces a ledger of
+        # what's already known (path, symbols, exit codes, hit counts).
+        if raw_result and not is_error:
+            try:
+                digest = _digest_tool_result(name, args, raw_result)
+            except Exception:
+                digest = ""
+            if digest:
+                raw_result = f"{digest}\n\n{raw_result}"
         # T2: cap the tool result that GOES BACK to the LLM. The
         # truncation message now explicitly hints at the range tools
         # (start_line / end_line on read_file, grep for code search)
