@@ -1018,17 +1018,34 @@ class TelegramBot:
                     "message_id": query.message.message_id if query.message else None,
                     "callback_data": data,
                 }
+                # For long-running callbacks (notably install approvals),
+                # acknowledge the Telegram button BEFORE doing the work.
+                # Telegram expires unanswered callback queries after a few
+                # seconds; the old flow ran the install first, so the owner
+                # could tap Approve and see an endless spinner / no progress.
+                pre_answered = False
+                if data.startswith(("install:approve:", "prop:apply:")):
+                    try:
+                        await query.answer(text="Working…", show_alert=False)
+                        pre_answered = True
+                    except Exception as e:
+                        log.debug("callback_query early answer failed: %s", e)
+
                 result = _tg.dispatch_callback(data, ctx)
 
                 # Always answer the callback so the spinning UI on
                 # the user's button stops; pass `text=` for a toast.
-                try:
-                    await query.answer(
-                        text=(result.toast or "")[:200] or None,
-                        show_alert=False,
-                    )
-                except Exception as e:
-                    log.debug("callback_query answer failed: %s", e)
+                # If we already answered early, Telegram won't accept a
+                # second answer, but the message edit below will show the
+                # final outcome.
+                if not pre_answered:
+                    try:
+                        await query.answer(
+                            text=(result.toast or "")[:200] or None,
+                            show_alert=False,
+                        )
+                    except Exception as e:
+                        log.debug("callback_query answer failed: %s", e)
 
                 # Edit the original message OR clear its keyboard.
                 if query.message is not None:
