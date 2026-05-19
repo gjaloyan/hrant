@@ -194,73 +194,124 @@ _USER_VISIBLE_PROGRESS_EVENTS: dict[str, str] = {
 
 
 class _TgProgressStream:
-    """Streams agent progress events into a single Telegram message in
-    near-real-time, by repeatedly editing one placeholder.
+    """Streams agent progress as a Hermes-style RUNNING LIST of tool
+    calls in a single Telegram message, updated in near-real-time
+    by editing the placeholder.
 
-    Why a stream and not one message per event:
-      Telegram rate-limits edits to one chat at ~1/sec; sending one new
-      message per event would also clutter the chat. Editing one
-      placeholder gives a "live" feel without spamming.
+    Layout (matches Hermes screenshots):
 
-    Threading:
-      The agent runs sync inside `loop.run_in_executor(...)` so the
-      event loop stays responsive. Progress callbacks fire from the
-      executor thread; this class bridges with
-      `asyncio.run_coroutine_threadsafe(..., loop)` so the actual
-      `edit_message_text` calls execute on the bot's loop.
+        📚 skill_view: "polymarket-trading"
+        📚 skill_view: "polymarket"
+        🔍 search_files: "def best_bid_ask|edge|scan_and_trade|..."
+        📄 read_file: "/home/hrant/.hermes/scripts/polymarke..." (×2)
+        🔧 patch: "/home/hrant/.hermes/scripts/polymarke..." (×9)
+        ⌨️ terminal: "python3 /home/hrant/.hermes/scripts/p..."
 
-    Throttling:
-      An edit happens at most once per `EDIT_INTERVAL_SEC`. If another
-      event arrives mid-throttle, a single deferred edit is scheduled
-      to flush the latest snapshot — so the user always sees the most
-      recent state, but we don't burn rate-limit budget.
+    The block STAYS in chat after the final answer arrives — the
+    caller doesn't delete it. The user's push notification is
+    triggered by the SEPARATE final answer message (fresh reply,
+    not an edit of this block). That gives both visible thinking
+    trace AND a normal push notification.
 
-    Filtering:
-      Only events in `_USER_VISIBLE_PROGRESS_EVENTS` are rendered.
-      Internal pipeline trace (core, chat, strategy, solve, verify,
-      memory_save, cleanup, raw tool JSON results, …) stays out of
-      the chat — those went straight to the user before the filter
-      was added, producing a debug-log-in-Telegram UX bug.
+    Consecutive duplicate tool calls (same name + same preview text)
+    collapse to a single line with `(×N)` count.
+
+    Threading + throttling: same as before — edits are coalesced to
+    at most one per `EDIT_INTERVAL_SEC` to stay within Telegram's
+    rate limit; events arriving mid-throttle are reflected in the
+    next scheduled edit.
     """
 
     EDIT_INTERVAL_SEC = 1.2
-    MAX_LINE_LEN = 120
+    # Max entries shown in the block. Older calls collapse into an
+    # "… (+N earlier)" tail so the message stays under Telegram's
+    # 4096-char cap even on 50+ tool turns.
+    MAX_ENTRIES = 30
 
     def __init__(self, bot: Any, chat_id: int, message_id: int, loop: Any):
         self.bot = bot
         self.chat_id = chat_id
         self.message_id = message_id
         self.loop = loop
-        # Single "latest user-visible action" line, not an accumulating
-        # list. The placeholder is a status indicator, not a transcript.
-        self._latest_label: str = "🧠 Thinking…"
+        # Running list of tool entries: each {"icon", "name",
+        # "preview", "count"}. Last-write-wins consecutive dedup.
+        self._entries: list[dict] = []
+        # Latest non-tool stage label (rare; only when no tools
+        # have fired yet). Acts as the placeholder header when the
+        # entries list is still empty.
+        self._stage_label: str = "🧠 Thinking…"
         self._lock = threading.Lock()
         self._last_edit = 0.0
         self._pending = False
         self._closed = False
+        # Track total entries seen (incl. collapsed) for the
+        # "+ N earlier" tail line. Distinct from len(self._entries)
+        # which is what's currently displayed.
+        self._total_seen = 0
 
-    def push(self, event: str, message: str) -> None:
+    def push(self, event: str, message: str, tool_call: Any = None) -> None:
         """Sync entry point — called from the agent thread.
 
-        Events outside the user-visible whitelist are dropped. For
-        whitelisted events we render `<emoji label>: <short detail>`
-        and replace (not append to) the placeholder body, so the user
-        only ever sees the agent's CURRENT action, not its full
-        breadcrumb trail."""
+        Three signature variants are tolerated for legacy callers:
+            push(event, message)
+            push(event, message, tool_call=...)
+
+        Tool events (event in {"tool", "tool_starting", "tool_error"})
+        get a structured entry added to the running list. Non-tool
+        events fall back to the old stage-label header — only shown
+        when the entries list is empty.
+        """
         if self._closed:
             return
+        if event in ("tool", "tool_starting", "tool_error") and tool_call is not None:
+            # Pull name + args from either an attribute object or dict.
+            name = getattr(tool_call, "name", None) or (
+                tool_call.get("name") if isinstance(tool_call, dict) else None
+            )
+            args = getattr(tool_call, "args", None) or (
+                tool_call.get("args") if isinstance(tool_call, dict) else None
+            )
+            if not name:
+                return
+            from .tg_format import (
+                tool_icon as _tool_icon,
+                arg_preview as _arg_preview,
+            )
+            icon = _tool_icon(name)
+            # For tool errors, mark with a red dot so the user
+            # spots the failure immediately.
+            if event == "tool_error":
+                icon = "❌"
+            preview = _arg_preview(name, args)
+            with self._lock:
+                self._total_seen += 1
+                if (
+                    self._entries
+                    and self._entries[-1]["name"] == name
+                    and self._entries[-1]["preview"] == preview
+                    and self._entries[-1]["icon"] == icon
+                ):
+                    self._entries[-1]["count"] += 1
+                else:
+                    self._entries.append({
+                        "icon": icon, "name": name,
+                        "preview": preview, "count": 1,
+                    })
+            self._schedule_edit()
+            return
+
+        # Non-tool event — update the stage label IF this event is
+        # whitelisted for user-visible rendering. Internal pipeline
+        # noise (core, strategy, memory_save, …) stays out.
         label = _USER_VISIBLE_PROGRESS_EVENTS.get(event)
         if label is None:
             return
         detail = (message or "").strip()
-        if detail:
-            line = f"{label}: {detail}"
-        else:
-            line = label
-        if len(line) > self.MAX_LINE_LEN:
-            line = line[: self.MAX_LINE_LEN - 1] + "…"
+        line = f"{label}: {detail}" if detail else label
+        if len(line) > 120:
+            line = line[:119] + "…"
         with self._lock:
-            self._latest_label = line
+            self._stage_label = line
         self._schedule_edit()
 
     def _schedule_edit(self) -> None:
@@ -270,8 +321,33 @@ class _TgProgressStream:
             pass
 
     def _render(self) -> str:
+        """Compose the current snapshot for the placeholder message.
+
+        Layout:
+          (when no tool entries yet) → stage label, e.g. "🧠 Thinking…"
+          (with entries)             → one line per entry, with
+                                       "… (+N earlier)" tail when
+                                       capped.
+        """
         with self._lock:
-            return self._latest_label
+            entries = list(self._entries)
+            stage = self._stage_label
+            total_seen = self._total_seen
+        if not entries:
+            return stage
+        from .tg_format import format_tool_entry_line as _line
+        lines: list[str] = []
+        # If we ever capped older entries, surface that count at the
+        # top. Otherwise stage_label is implicit ("Thinking…" without
+        # any tools yet would have shown the stage line; once tools
+        # fire it's redundant noise).
+        if len(entries) > self.MAX_ENTRIES:
+            dropped = len(entries) - self.MAX_ENTRIES
+            lines.append(f"… (+{dropped} earlier)")
+            entries = entries[-self.MAX_ENTRIES:]
+        for e in entries:
+            lines.append(_line(e["icon"], e["name"], e["preview"], e["count"]))
+        return "\n".join(lines)
 
     async def _maybe_edit(self) -> None:
         now = time.time()
@@ -300,27 +376,32 @@ class _TgProgressStream:
             # or 429 on bursts; both are non-fatal for a progress stream.
             pass
 
-    async def finalize(self, summary: str) -> None:
-        """Replace placeholder with the final compact summary.
+    async def freeze(self) -> None:
+        """Stop accepting updates and flush ONE final edit so the
+        block reflects the complete tool trace. The placeholder STAYS
+        in chat — it's the Hermes-style thinking trace. The caller
+        sends the actual final answer as a fresh reply_text below
+        (that's what triggers the user's push notification)."""
+        self._closed = True
+        # One last flush — earlier edits may have been throttled.
+        try:
+            await self._edit(self._render())
+        except Exception:
+            pass
 
-        Used as a fallback when delete-and-resend (the preferred
-        path that triggers a push notification) fails. The
-        summary text is rendered as plain text (no HTML)
-        because the streamer doesn't pass parse_mode."""
+    async def finalize(self, summary: str) -> None:
+        """Legacy fallback — replace placeholder content entirely.
+        Used by call sites that want the old "edit-in-place final
+        answer" behaviour. The Hermes-style flow uses `freeze()`
+        instead so the thinking block stays as a record."""
         self._closed = True
         await self._edit(summary[:4000])
 
     async def delete_placeholder(self) -> bool:
-        """Delete the placeholder message so the caller can send the
-        final answer as a FRESH reply — that's what triggers a Telegram
-        push notification. Edits don't notify by design.
-
-        Returns True on success; False if Telegram refused (message
-        too old, missing permission). On failure the caller should
-        fall back to `finalize()` to overwrite the placeholder
-        with the final answer (still no notification, but at least
-        the user sees the answer).
-        """
+        """Legacy delete-and-resend flow. Kept for callers that
+        want to remove the placeholder before sending the final
+        answer. The Hermes-style flow prefers `freeze()` so the
+        trace stays visible."""
         self._closed = True
         try:
             await self.bot.delete_message(
@@ -1544,9 +1625,11 @@ class TelegramBot:
                         loop=running_loop,
                     )
 
-                    def _progress_cb(event: str, message: str) -> None:
+                    def _progress_cb(event: str, message: str, tool_call=None) -> None:
                         # Called from the executor thread where agent.run runs.
-                        stream.push(event, message)
+                        # 3-arg form so tool_call payload reaches the streamer
+                        # for the Hermes-style running tool-call list.
+                        stream.push(event, message, tool_call=tool_call)
 
                     agent = Agent(progress=_progress_cb)
                     # Job tracking — every Telegram turn gets a
@@ -1595,20 +1678,20 @@ class TelegramBot:
                         )
                     answer = result.answer or "(no answer)"
 
-                    # Hermes-style footer + stats — one compact line each,
-                    # HTML emphasis for labels, total_time on the thinking
-                    # line so the user sees both how long it took and what
-                    # the stages were.
+                    # Stats footer for the final answer. The trace
+                    # footer (thinking + tools list) is NOT included
+                    # here — the streaming block above (the now-frozen
+                    # Hermes-style running list) already carries that
+                    # information. Including it again here would be
+                    # noisy duplication.
                     from .tg_format import (
-                        format_trace_footer as _fmt_trace,
                         format_stats_block as _fmt_stats,
                     )
-                    trace_steps = getattr(result, "thinking_trace", None) or []
-                    last_ts = max(
-                        (getattr(s, "ts", 0) or 0) for s in trace_steps
-                    ) if trace_steps else 0.0
-                    trace_footer = _fmt_trace(trace_steps, total_time_s=last_ts)
                     stats_block = _fmt_stats(result.token_usage)
+                    # Legacy variable kept for the chunk-assembly code
+                    # below; trace info now lives in the streaming
+                    # block, so this is intentionally empty.
+                    trace_footer = ""
 
                     # MEDIA: convention — agent can attach files to its
                     # reply by writing a line of the form
@@ -1677,60 +1760,30 @@ class TelegramBot:
                         else:
                             final_chunks = body_chunks
 
-                    # CRITICAL: deliver the answer via FRESH reply_text
-                    # messages, NOT by editing the placeholder.
-                    # Edits don't trigger Telegram push notifications;
-                    # only new messages do. We:
-                    #   1. delete the "🧠 Thinking…" placeholder
-                    #      (best-effort — Telegram refuses on >48h old
-                    #      messages, very rare for an active turn);
-                    #   2. send the answer as fresh reply_text bubbles
-                    #      → push notification fires with the answer
-                    #      content (or a prefix of it).
-                    # Fallback: if delete fails, finalize-edit the
-                    # placeholder with the first chunk (no notification
-                    # but at least the answer is visible), then send the
-                    # rest as fresh replies.
-                    head, *rest = final_chunks
-                    delete_ok = False
+                    # Hermes-style finalisation: the streaming
+                    # placeholder STAYS in chat as the thinking trace
+                    # (running list of tool calls). We just freeze
+                    # it (one final edit to flush the latest state,
+                    # then stop accepting updates). The actual answer
+                    # is sent as a FRESH reply_text below — that's
+                    # what triggers the user's push notification AND
+                    # leaves the thinking trace visible above.
                     try:
-                        delete_ok = await stream.delete_placeholder()
-                    except Exception as e_del:
-                        log.debug("TG placeholder delete failed: %s", e_del)
-                    if delete_ok:
-                        try:
-                            await update.message.reply_text(
-                                head, parse_mode="HTML",
-                                disable_web_page_preview=True,
-                            )
-                        except Exception as e_send:
-                            # HTML parse error → retry as plain text
-                            # so the user gets the answer even if our
-                            # markup is malformed.
-                            log.warning(
-                                "TG reply HTML failed (%s); "
-                                "retrying as plain text", e_send,
-                            )
-                            await update.message.reply_text(answer or head)
-                    else:
-                        # Delete refused — fall back to edit-in-place
-                        # for the head, then send the rest fresh.
-                        try:
-                            await stream.finalize(head)
-                        except Exception as e_edit:
-                            log.warning(
-                                "TG placeholder edit fallback failed "
-                                "(%s); sending as fresh reply",
-                                e_edit,
-                            )
-                            await update.message.reply_text(head)
-                    for c in rest:
+                        await stream.freeze()
+                    except Exception as e_freeze:
+                        log.debug("TG placeholder freeze failed: %s", e_freeze)
+                    for c in final_chunks:
                         try:
                             await update.message.reply_text(
                                 c, parse_mode="HTML",
                                 disable_web_page_preview=True,
                             )
-                        except Exception:
+                        except Exception as e_send:
+                            # HTML parse error → retry as plain text.
+                            log.warning(
+                                "TG reply HTML failed (%s); "
+                                "retrying as plain text", e_send,
+                            )
                             await update.message.reply_text(c)
 
                     # Round D + voice-fix: voice reply. When the user

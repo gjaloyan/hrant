@@ -161,6 +161,170 @@ def escape_html(text: str) -> str:
     return _html.escape(text or "", quote=False)
 
 
+# ─── Tool-call icons + arg-preview (Hermes-style live trace) ──────
+
+
+# Hermes-like emoji per tool. Used in the streaming "thinking block"
+# so each line is instantly recognisable. Unknown tools fall back
+# to a neutral 🔹 — the row still appears, just without a custom
+# icon.
+TOOL_ICON: dict[str, str] = {
+    # File / code I/O
+    "read_file": "📄",
+    "view_file": "📄",
+    "write_file": "📝",
+    "edit_file": "📝",
+    "patch": "🔧",
+    "save_to_workspace": "💾",
+    # Search / navigation
+    "search_files": "🔍",
+    "grep": "🔍",
+    "search": "🔍",
+    "search_knowledge": "🔍",
+    "glob": "🔍",
+    "list_files": "📂",
+    "locate_symbol": "📍",
+    # Shell / process
+    "terminal_exec": "⌨️",
+    "execute_code": "🐍",
+    "run_python": "🐍",
+    "sandbox_exec": "🛡️",
+    "start_background_job": "⚙️",
+    "list_background_jobs": "⚙️",
+    "get_background_job": "⚙️",
+    # Network
+    "web_search": "🌐",
+    "fetch_url": "🔗",
+    "search_package": "📦",
+    # Skills + meta
+    "list_skills": "📚",
+    "load_skill": "📚",
+    "skill_view": "📚",
+    "skill_manage": "📚",
+    "propose_skill": "📚",
+    # Media
+    "analyze_image": "🖼️",
+    "preprocess_video": "🎬",
+    # Schedule / cron / messages
+    "schedule_message": "⏰",
+    "cronjob": "⏰",
+    # Install / config
+    "propose_install": "📦",
+    "set_setting": "⚙️",
+    "save_user_fact": "🗒️",
+    # Roles + access
+    "grant_telegram_access": "🔑",
+    "revoke_telegram_access": "🔒",
+    "approve_pairing": "🤝",
+    "list_pending_pairings": "🤝",
+    "list_telegram_access": "🤝",
+    # Self-mod / delegation
+    "propose_self_modification": "🛠️",
+    "delegate": "👥",
+}
+
+
+# Per-tool "primary argument" — the most informative one to show as
+# the preview after the tool name. Anything not in this map falls
+# back to the first non-empty arg value.
+_TOOL_PRIMARY_ARG: dict[str, str] = {
+    "read_file": "path",
+    "view_file": "path",
+    "write_file": "path",
+    "edit_file": "path",
+    "patch": "path",
+    "save_to_workspace": "filename",
+    "search_files": "pattern",
+    "grep": "pattern",
+    "search": "query",
+    "search_knowledge": "query",
+    "glob": "pattern",
+    "list_files": "path",
+    "locate_symbol": "symbol",
+    "terminal_exec": "command",
+    "execute_code": "code",
+    "run_python": "code",
+    "sandbox_exec": "command",
+    "start_background_job": "label",
+    "list_background_jobs": "status",
+    "get_background_job": "job_id",
+    "web_search": "query",
+    "fetch_url": "url",
+    "search_package": "name",
+    "list_skills": "tag",
+    "load_skill": "name",
+    "skill_view": "name",
+    "skill_manage": "name",
+    "propose_skill": "name",
+    "analyze_image": "question",
+    "preprocess_video": "sha",
+    "schedule_message": "when",
+    "cronjob": "action",
+    "propose_install": "packages",
+    "set_setting": "key",
+    "save_user_fact": "fact",
+    "grant_telegram_access": "user_id",
+    "revoke_telegram_access": "user_id",
+    "approve_pairing": "code_or_user_id",
+    "list_pending_pairings": "",
+    "list_telegram_access": "",
+    "propose_self_modification": "description",
+    "delegate": "role",
+}
+
+
+_TOOL_ARG_PREVIEW_MAX = 48  # chars, after which we ellipse
+
+
+def tool_icon(name: str) -> str:
+    """Return the emoji icon for a tool name. Falls back to 🔹 for
+    unknown tools."""
+    return TOOL_ICON.get(name or "", "🔹")
+
+
+def arg_preview(name: str, args: Any) -> str:
+    """Render a short preview of the tool's primary argument value
+    for the streaming "thinking block". Returns "" when args is
+    empty / missing — caller renders just `<icon> <name>` then.
+    """
+    if not args:
+        return ""
+    if not isinstance(args, dict):
+        # Some agents send args as a JSON string. Try to parse.
+        if isinstance(args, str):
+            v = args.strip()
+            if len(v) > _TOOL_ARG_PREVIEW_MAX:
+                v = v[:_TOOL_ARG_PREVIEW_MAX - 3] + "..."
+            return v
+        return ""
+    primary_key = _TOOL_PRIMARY_ARG.get(name or "", "")
+    val: Any = None
+    if primary_key:
+        val = args.get(primary_key)
+    if val is None or val == "":
+        # Fall back to the first non-empty arg value.
+        for k, v in args.items():
+            if v not in (None, "", [], {}):
+                val = v
+                break
+    if val is None:
+        return ""
+    s = str(val).strip()
+    # Collapse newlines to spaces — single-line preview only.
+    s = s.replace("\n", " ").replace("\r", " ")
+    if len(s) > _TOOL_ARG_PREVIEW_MAX:
+        s = s[:_TOOL_ARG_PREVIEW_MAX - 3] + "..."
+    return s
+
+
+def format_tool_entry_line(icon: str, name: str, preview: str, count: int = 1) -> str:
+    """Single line in the streaming thinking block. Plain text (no
+    HTML) because the streamer doesn't currently pass parse_mode."""
+    arg_part = f': "{preview}"' if preview else ""
+    suffix = f" (×{count})" if count > 1 else ""
+    return f"{icon} {name}{arg_part}{suffix}"
+
+
 # ─── Hermes-style answer + footer assembly ─────────────────────────
 
 

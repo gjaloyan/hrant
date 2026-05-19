@@ -130,7 +130,11 @@ async def test_finalize_replaces_placeholder():
 
 
 @pytest.mark.asyncio
-async def test_long_line_is_truncated():
+async def test_long_stage_message_is_truncated():
+    """A long non-tool stage message must be truncated so the
+    placeholder doesn't blow Telegram's 4096-char cap on a single
+    update. The Hermes-style refactor caps stage lines at ~120 chars
+    (inline constant in `push()`)."""
     bot = _FakeBot()
     loop = asyncio.get_running_loop()
     stream = _TgProgressStream(bot=bot, chat_id=1, message_id=42, loop=loop)
@@ -138,7 +142,7 @@ async def test_long_line_is_truncated():
     stream.push("learning", long)
     await asyncio.sleep(0.05)
     text = bot.edits[-1]["text"]
-    assert len(text) <= stream.MAX_LINE_LEN
+    assert len(text) <= 130  # ~120-char cap with the label prefix
     assert "…" in text
 
 
