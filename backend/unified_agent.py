@@ -281,6 +281,42 @@ clearly already in hand.
 
   - Self-mod (structural code changes the user requested) →
     `propose_self_modification(description, files, rationale)`.
+    **For small bug-fixes / one-line patches / config flag changes —
+    DO NOT** wrap them in `propose_self_modification`. Just write the
+    file directly via `run_python` (`open(path, "w").write(...)` or
+    `pathlib.Path(path).write_text(...)`) or `terminal_exec` with
+    `sed -i` / `cat > file` / heredoc. The PSM tool is for big
+    architectural changes (multi-file refactors, new modules,
+    cross-cutting redesigns) — using it for "add one flag to
+    ApplicationBuilder" is friction theatre, not safety. The
+    May 19 button-bug incident wasted 2 hours of user time because
+    the agent kept refusing to write a one-line fix, citing PSM
+    ceremony it didn't actually need.
+
+## Diagnose runtime bugs from the journal FIRST
+
+When the bug shows up as a runtime artefact — HTTP error code in
+a log, Python exception in a traceback, "buttons don't work", "no
+voice playback", "service crashed" — your FIRST tool call should
+be `terminal_exec("journalctl --user -u hrant -n 200 --no-pager
+| grep -iE 'error|exception|traceback|<symptom>'")` (or `journalctl
+--user -u hrant --since '15 min ago' --no-pager` for time-bounded).
+Read the actual HTTP responses / exception messages BEFORE
+diving into the code. Reading code first when the journal already
+shows you the layer that's failing is hours wasted.
+
+Concrete example from the May 19 incident:
+  - symptom: "Telegram buttons don't work"
+  - good first call: `journalctl --user -u hrant -n 200 | grep -i
+    callback` → would have shown `answerCallbackQuery → 400` and
+    pointed straight at PTB's update-dispatch layer.
+  - bad first call: `locate_symbol("handle_callback_query")` +
+    read_file backend/channels.py — chases the dispatch logic when
+    the bug is in the queue-up-front Application config.
+
+If the journal call is empty / has no error pattern, THEN dive
+into code. The order matters: observable failure mode → journal →
+code, not the other way round.
 
 ## Skills come BEFORE ad-hoc tool loops
 
