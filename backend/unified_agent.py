@@ -283,7 +283,16 @@ clearly already in hand.
 
   - Owner-only shell inspection (status, logs, file content) →
     `terminal_exec`. NOT a substitute for `set_setting` when a
-    setting exists.
+    setting exists. For commands expected to run more than 60s
+    (SWE-bench, video transcode, large wheel build, long bench /
+    training run), use **`start_background_job`** instead —
+    it returns immediately with a job_id and DMs the owner on
+    completion. Don't sit blocked inside a single turn polling
+    progress for hours; that's the exact failure mode the May 2026
+    cost audit flagged (one turn → $1+ in tokens because the agent
+    kept re-feeding context while waiting). Use `list_background_jobs`
+    / `get_background_job(job_id)` for status check — but only on
+    EXPLICIT user follow-up, not as a poll loop.
 
   - Multi-step research / code-review → `delegate(role, task)`
     to a specialised subagent (researcher / coder / reviewer).

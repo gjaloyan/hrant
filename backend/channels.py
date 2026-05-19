@@ -755,6 +755,79 @@ class TelegramBot:
             except Exception as e:
                 log.warning("install-proposed DM(%s) failed: %s", chat_id, e)
 
+    def _on_background_job_done(self, job) -> None:
+        """T6: background-job completion DM. Sends a single message
+        per owner-on-Telegram with the job status, exit code, and a
+        small tail of stdout/stderr. No inline buttons — just info.
+        The agent already has tools (get_background_job, list_) for
+        followups, so the DM stays as a status notification, not an
+        action prompt."""
+        from . import roles as _roles
+        from . import contacts as _contacts
+        from . import tg_interactive as _tg
+
+        job_id = getattr(job, "job_id", "") or ""
+        if not job_id:
+            return
+        try:
+            state = _roles._load()
+        except Exception:
+            return
+        owner_ids = [
+            sid for sid in (state.get("owner_speaker_ids") or [])
+            if isinstance(sid, str) and sid.startswith("telegram:")
+        ]
+        if not owner_ids:
+            return
+
+        label = getattr(job, "label", "") or job_id
+        status = getattr(job, "status", "?") or "?"
+        exit_code = getattr(job, "exit_code", None)
+        finished_at = getattr(job, "finished_at", None) or 0
+        started_at = getattr(job, "started_at", None) or 0
+        elapsed = max(0, int(finished_at - started_at)) if started_at else 0
+        # Choose icon by status.
+        icon = {
+            "done": "✅",
+            "error": "❌",
+            "killed": "🛑",
+            "interrupted": "⚠️",
+        }.get(status, "ℹ️")
+        # Cap the tails on the DM side — Telegram message limit is
+        # 4096 chars; full logs live in ~/.hrant/data/jobs/<id>/.
+        stdout_tail = (getattr(job, "stdout_tail", "") or "")[-800:]
+        stderr_tail = (getattr(job, "stderr_tail", "") or "")[-800:]
+        parts = [
+            f"{icon} <b>Background job {_tg.escape_html(status)}</b>",
+            f"<b>id:</b> <code>{_tg.escape_html(job_id)}</code>",
+            f"<b>label:</b> {_tg.escape_html(label[:120])}",
+            f"<b>exit:</b> <code>{exit_code}</code>  <b>elapsed:</b> {elapsed}s",
+        ]
+        if stdout_tail.strip():
+            parts.append(
+                f"\n<b>stdout (tail):</b>\n<pre>"
+                f"{_tg.escape_html(stdout_tail)}</pre>"
+            )
+        if stderr_tail.strip() and status != "done":
+            parts.append(
+                f"\n<b>stderr (tail):</b>\n<pre>"
+                f"{_tg.escape_html(stderr_tail)}</pre>"
+            )
+        text = "\n".join(parts)
+        # Trim if message accidentally went over 4000 chars.
+        if len(text) > 4000:
+            text = text[:3900] + "\n…[truncated]"
+        for owner_sid in owner_ids:
+            chat_id = _contacts.chat_id_for_speaker(owner_sid)
+            if chat_id is None:
+                continue
+            try:
+                # No buttons — pass markup=None. `_send_with_buttons`
+                # already accepts None and skips the keyboard.
+                self._send_with_buttons(chat_id, text, None)
+            except Exception as e:
+                log.warning("background-job done DM(%s) failed: %s", chat_id, e)
+
     def _on_skill_proposed(self, skill) -> None:
         """Self-improvement loop notification — DM every owner-on-
         Telegram about a freshly-proposed skill. Three inline buttons:
@@ -1893,6 +1966,18 @@ class TelegramBot:
                 _installer.register_on_install_proposed(self._on_install_proposed)
             except Exception as e:
                 log.warning("installer subscribe failed: %s", e)
+
+            # T6: subscribe to background-job completion. When a
+            # long-running subprocess (SWE-bench, video transcode,
+            # benchmark) finishes, every owner-on-Telegram gets a
+            # status DM. The agent thread doesn't sit blocked
+            # waiting on the subprocess — turn returns immediately
+            # after start_background_job.
+            try:
+                from .tools import background_jobs as _bg
+                _bg.register_on_done(self._on_background_job_done)
+            except Exception as e:
+                log.warning("background-jobs subscribe failed: %s", e)
 
             loop.run_until_complete(app.initialize())
             # Surface the slash-command list to the Telegram UI so

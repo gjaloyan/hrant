@@ -93,6 +93,20 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("access migration error: %s", e)
 
+    # T6: any background job left in 'running' state must have died
+    # when the service stopped (subprocess child of the previous pid).
+    # Flip those to 'interrupted' so the registry doesn't lie.
+    try:
+        from .tools import background_jobs as _bg
+        n_interrupted = _bg.STORE.mark_interrupted_on_startup()
+        if n_interrupted:
+            log.info(
+                "background-jobs: marked %d running-on-shutdown job(s) "
+                "as interrupted", n_interrupted,
+            )
+    except Exception as e:
+        log.warning("background-jobs interrupted-sweep error: %s", e)
+
     log.info("Server starting — auto-starting channels...")
     try:
         channels_list = get_channels()

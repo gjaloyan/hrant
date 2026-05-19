@@ -355,6 +355,105 @@ def _load_skill_handler(name: str) -> str:
     }, ensure_ascii=False)
 
 
+# ─── T6: background-job tool handlers ──────────────────────────────
+
+
+def _start_background_job_handler(
+    command: str,
+    label: str = "",
+    cwd: str = "",
+    timeout_seconds: float = 10800.0,
+) -> str:
+    """Spawn `command` in a background thread and return the job_id
+    immediately. OWNER-only. Use this INSTEAD of `terminal_exec` for
+    any command expected to run more than ~60 seconds (SWE-bench,
+    long bench runs, large video transcodes, multi-minute pip wheel
+    builds). Owner gets a Telegram DM on completion."""
+    from .roles import current_speaker, is_owner
+    from .tools import background_jobs as _bg
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — start_background_job is owner-only",
+        }, ensure_ascii=False)
+    try:
+        job = _bg.start_job(
+            command=command,
+            label=label,
+            cwd=cwd or None,
+            requester=speaker_id or "",
+            timeout_seconds=float(timeout_seconds),
+        )
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"start_background_job error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "job_id": job.job_id,
+        "label": job.label,
+        "status": job.status,
+        "note": (
+            f"Job {job.job_id} started in the background. Tell the "
+            f"user they'll get a Telegram DM when it finishes. Don't "
+            f"poll status in this same turn — that defeats the point."
+        ),
+    }, ensure_ascii=False)
+
+
+def _list_background_jobs_handler(status: str = "", limit: int = 20) -> str:
+    """List background jobs, optionally filtered by status
+    ('running' / 'done' / 'error' / 'interrupted' / 'killed').
+    OWNER-only."""
+    from .roles import current_speaker, is_owner
+    from .tools import background_jobs as _bg
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — list_background_jobs is owner-only",
+        }, ensure_ascii=False)
+    try:
+        items = _bg.list_jobs(
+            status=(status or None),
+            limit=int(limit) if limit else 20,
+        )
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"list_background_jobs error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({"ok": True, "jobs": items}, ensure_ascii=False)
+
+
+def _get_background_job_handler(job_id: str) -> str:
+    """Fetch one job's full record (status, exit_code, stdout_tail,
+    stderr_tail, etc.). OWNER-only."""
+    from .roles import current_speaker, is_owner
+    from .tools import background_jobs as _bg
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — get_background_job is owner-only",
+        }, ensure_ascii=False)
+    try:
+        j = _bg.get_job(job_id)
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"get_background_job error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    if j is None:
+        return json.dumps({
+            "ok": False,
+            "error": f"no job with id {job_id!r}",
+        }, ensure_ascii=False)
+    return json.dumps({"ok": True, "job": j}, ensure_ascii=False)
+
+
 def _search_package_handler(name: str, manager: str = "pip") -> str:
     """Look up a package in its registry (PyPI / crates.io / npm).
     Returns JSON with existence + latest version + summary +
@@ -1649,6 +1748,117 @@ def register_builtin_tools() -> None:
             "required": ["command"],
         },
         handler=_sandbox_exec_handler,
+    )
+
+    # T6: resumable background jobs. For long-running tasks
+    # (SWE-bench, big benchmarks, video transcode) — spawns the
+    # subprocess in a background thread, returns immediately with a
+    # job_id, DMs owner on completion. Replaces the "blocking
+    # terminal_exec inside one 2-hour turn" anti-pattern that the
+    # May 2026 cost audit caught.
+    reg.register_func(
+        name="start_background_job",
+        description=(
+            "Spawn a shell command in the BACKGROUND. Returns "
+            "immediately with a job_id. Owner gets a Telegram DM "
+            "when the subprocess finishes (success or failure). USE "
+            "INSTEAD of `terminal_exec` for anything expected to run "
+            "more than ~60 seconds: SWE-bench, video transcode, large "
+            "wheel builds, long pip/apt installs (combined with the "
+            "install gate), trainings. Don't poll status in the same "
+            "turn — the whole point is to free the turn. The agent "
+            "will notify you via DM on completion. OWNER-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "The shell command to run. Shell semantics "
+                        "(pipes, redirects, env-var expansion) work."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "Short human-readable label for the job "
+                        "(shows in list_background_jobs and the "
+                        "completion DM). E.g. 'SWE-bench Lite 300'."
+                    ),
+                    "default": "",
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Working directory. Empty = inherit from the "
+                        "agent service."
+                    ),
+                    "default": "",
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "description": (
+                        "Watchdog cap. Default 10800 (3h); pass a "
+                        "larger number for training jobs."
+                    ),
+                    "default": 10800.0,
+                },
+            },
+            "required": ["command"],
+        },
+        handler=_start_background_job_handler,
+    )
+
+    reg.register_func(
+        name="list_background_jobs",
+        description=(
+            "List the recent background jobs. Use this AFTER you've "
+            "started a job to confirm its status, or before starting "
+            "a new one to see what's still running. OWNER-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "description": (
+                        "Filter by status. Empty = all. Valid values: "
+                        "'running', 'done', 'error', 'interrupted', "
+                        "'killed'."
+                    ),
+                    "default": "",
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Max results (default 20).",
+                    "default": 20,
+                },
+            },
+            "required": [],
+        },
+        handler=_list_background_jobs_handler,
+    )
+
+    reg.register_func(
+        name="get_background_job",
+        description=(
+            "Fetch one job's full record by job_id — status, "
+            "exit_code, stdout_tail, stderr_tail, finished_at. Use "
+            "after a 'done' DM to read the result, or while debugging "
+            "an 'error' result. OWNER-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": "The job_id from start_background_job.",
+                },
+            },
+            "required": ["job_id"],
+        },
+        handler=_get_background_job_handler,
     )
 
     reg.register_func(
