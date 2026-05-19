@@ -115,6 +115,21 @@ def test_pyproject_uses_package_discovery():
     assert 'include = ["backend*"]' in pp_src or "include=['backend*']" in pp_src
 
 
+def test_kill_switch_default_anchored_under_knowledge_dir(monkeypatch, tmp_path):
+    """Follow-up to P1 #3: kill_switch had the same cwd-relative bug
+    as the rest of the autonomic defaults. After fix, the ENABLED
+    flag-file path must also live under paths.knowledge_dir()."""
+    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path))
+    from backend.autonomic.kill_switch import _default_enabled_path
+    from backend import paths as _paths
+    expected = _paths.knowledge_dir() / "autonomic" / "ENABLED"
+    actual = _default_enabled_path()
+    assert actual == expected, (
+        f"kill_switch ENABLED file should anchor under {expected}; got {actual}"
+    )
+    assert actual.is_absolute()
+
+
 def test_pyproject_skills_package_data():
     """Skill markdown files must be bundled as package-data so the
     wheel includes them (handler.py is Python, picked up by find;
