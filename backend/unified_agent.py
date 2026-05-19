@@ -699,6 +699,70 @@ _REFLECTION_TOOL_ALLOWLIST = frozenset({
 AUTO_PROPOSE_CAP = 5
 
 
+# Audit T1+T4: token budget thresholds (SIGNAL, not enforcement).
+#
+# The May 2026 cost audit found the agent burns ~$40/month largely on
+# re-feeding context to the model (input:output ratio 40:1, median
+# 110k tokens/turn). Hard refuse-caps would regress "agent is smart" —
+# the user explicitly wants signal-not-enforcement so the LLM sees
+# the cost and chooses to wrap up, the same way TSP gates work.
+#
+# Mechanism: after each tool call, the cumulative token usage for the
+# turn gets formatted into a tiny marker and APPENDED to the tool
+# result that goes back to the LLM. The LLM sees it as part of the
+# tool feedback ("...your output. 🟡 BUDGET: 12000/10000 used —
+# wrap up.") and reacts. No raise, no enforcement — just visibility.
+#
+# Numbers are aggressive on purpose (audit recommended "less is
+# better"). Env overrides — HRANT_TOKEN_SOFT_PER_TURN and
+# HRANT_TOKEN_HARD_PER_TURN — let an operator widen for benchmark
+# runs without a redeploy. Setting either to 0 disables the marker.
+import os as _os_for_token_budget
+
+TOKEN_SOFT_PER_TURN = int(
+    _os_for_token_budget.environ.get("HRANT_TOKEN_SOFT_PER_TURN", "10000")
+)
+TOKEN_HARD_PER_TURN = int(
+    _os_for_token_budget.environ.get("HRANT_TOKEN_HARD_PER_TURN", "30000")
+)
+
+
+def _format_token_budget_marker(used: int) -> str:
+    """Return the marker text to append to a tool result, based on
+    cumulative tokens used in the current turn.
+
+    Returns:
+        "" when below soft, no need to disturb the LLM with bookkeeping.
+        "🟡 BUDGET ..." when soft <= used < hard. Nudges the LLM to
+            consider wrapping up the current investigation.
+        "🔴 BUDGET ..." when used >= hard. Tells the LLM to stop
+            probing and issue a partial report.
+
+    Both thresholds are env-overridable. Setting either to 0 disables
+    the marker (useful for benchmark / explicit long-run modes).
+    """
+    if not used:
+        return ""
+    if TOKEN_HARD_PER_TURN > 0 and used >= TOKEN_HARD_PER_TURN:
+        return (
+            f"\n\n🔴 **TOKEN BUDGET EXCEEDED** "
+            f"({used:,} tokens consumed this turn; hard limit "
+            f"{TOKEN_HARD_PER_TURN:,}). Stop probing, write a partial "
+            f"report with what you have, and end the turn. Do not call "
+            f"more tools unless absolutely required to deliver. The "
+            f"user pays per token — this turn is now expensive."
+        )
+    if TOKEN_SOFT_PER_TURN > 0 and used >= TOKEN_SOFT_PER_TURN:
+        return (
+            f"\n\n🟡 **TOKEN BUDGET WARNING** "
+            f"({used:,} tokens used; soft limit "
+            f"{TOKEN_SOFT_PER_TURN:,}). Consider wrapping up: one or "
+            f"two more focused tool calls and a delivery, not "
+            f"open-ended exploration."
+        )
+    return ""
+
+
 def _rewrite_refusal_without_attempts(answer: str, agent) -> str:
     """If the final answer opens with a refusal pattern AND the trace
     shows fewer than `REFUSAL_ATTEMPT_BAR` distinct tool calls,
@@ -1403,7 +1467,23 @@ def run_unified(
                 is_error=False,
             ),
         )
-        return registry.execute(name, args)
+        raw_result, is_error = registry.execute(name, args)
+        # T1+T4: append the token-budget marker to what the LLM sees.
+        # This is the runtime signal that turns telemetry into agent
+        # behaviour change. Markers only appear past the soft/hard
+        # threshold; under that, tool results stay clean. The marker
+        # piggybacks on the tool feedback the LLM was already going
+        # to read, so it costs ~50-100 tokens per crossing (not per
+        # iteration).
+        try:
+            used = TOKENS.request_usage().get("total_tokens", 0)
+            marker = _format_token_budget_marker(used)
+            if marker:
+                raw_result = (raw_result or "") + marker
+        except Exception:
+            # Marker is best-effort — never break a tool result.
+            pass
+        return raw_result, is_error
 
     # The big call. max_iterations: legacy solve used 6; unified
     # turns can do more work in one loop (research + apply +

@@ -1553,7 +1553,10 @@ class TelegramBot:
                             stats_lines.append(f"💾 Cache read: {tu.cache_read_tokens:,}")
                         if tu.cache_creation_tokens > 0:
                             stats_lines.append(f"📝 Cache created: {tu.cache_creation_tokens:,}")
-                        stats_lines.append(f"💰 Cost: ${tu.cost_usd:.4f}")
+                        # Audit T4: USD line removed per owner directive
+                        # ("user need to see token usage only"). The
+                        # cost is still in the turn artifact for backend
+                        # audits; user-facing display is tokens-first.
                         stats_lines.append(f"🔄 LLM calls: {tu.llm_calls}")
                         # Per-stage breakdown — top 3 by input tokens. Lets
                         # the user see at a glance which stage owned the

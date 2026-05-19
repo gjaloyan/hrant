@@ -937,14 +937,18 @@ const Chat = forwardRef<ChatHandle, {
                 </div>
               )}
 
-              {/* Token usage */}
+              {/* Token usage — audit T4: tokens-first display.
+                  USD removed from this per-message footer per owner
+                  directive ("user need to see token usage only").
+                  Cost is still in the API payload + UsagePage for
+                  longer-term analytics. */}
               {m.role === "agent" && m.meta?.token_usage && m.meta.token_usage.total_tokens > 0 && (
                 <div className="mt-1 text-[10px] opacity-50 flex gap-3 flex-wrap">
                   <span>tokens: {m.meta.token_usage.input_tokens.toLocaleString()} in / {m.meta.token_usage.output_tokens.toLocaleString()} out</span>
                   {m.meta.token_usage.cache_read_tokens > 0 && (
                     <span>cache: {m.meta.token_usage.cache_read_tokens.toLocaleString()} read</span>
                   )}
-                  <span>${m.meta.token_usage.cost_usd.toFixed(4)}</span>
+                  <span>{m.meta.token_usage.total_tokens.toLocaleString()} total</span>
                   <span>{m.meta.token_usage.llm_calls} calls</span>
                 </div>
               )}
