@@ -34,6 +34,38 @@ def _env_path(key: str, default: str) -> Path:
     return Path(os.environ.get(key, default))
 
 
+def _autonomic_default_paths() -> dict[str, Path]:
+    """Audit P1 #3 fix: anchor every default path under the user
+    data_dir, not the cwd-relative `knowledge/...` literal.
+
+    Before this, autonomic logs (`tick_log.jsonl`, `lever_log.jsonl`,
+    etc.) wrote into `<repo>/knowledge/autonomic/` because `Path("knowledge")`
+    resolves relative to cwd (the engine repo directory under systemd).
+    Meanwhile `backend/api/health.py` looks under `paths.knowledge_dir()`
+    (which is `~/.hrant/data/knowledge` on prod). Result: prod logs
+    grew to 10 MB+ in the engine repo while `/api/health` reported
+    autonomic 'down' because the dir it checked was empty.
+
+    Env overrides (AUTONOMIC_KNOWLEDGE_ROOT, AUTONOMIC_LEVER_LOG_PATH,
+    etc.) still win — this only changes the default fallback when
+    no override is set.
+    """
+    try:
+        from ..paths import knowledge_dir
+        kdir = knowledge_dir()
+    except Exception:
+        # paths module not initialised (e.g. very early import in
+        # tests) — fall back to the legacy cwd-relative default.
+        kdir = Path("knowledge")
+    return {
+        "knowledge_root": kdir,
+        "error_log": kdir / "error_log.jsonl",
+        "lever_log": kdir / "autonomic" / "lever_log.jsonl",
+        "pending": kdir / "autonomic" / "pending_approvals.jsonl",
+        "tick_log": kdir / "autonomic" / "tick_log.jsonl",
+    }
+
+
 @dataclass
 class SchedulerBundle:
     scheduler: AutonomicScheduler
@@ -53,11 +85,15 @@ def build_scheduler() -> SchedulerBundle:
     # see backend.api.autonomic.put_autonomic_settings.
     from .settings import resolve_tick_interval
     interval = resolve_tick_interval()
-    knowledge_root = _env_path("AUTONOMIC_KNOWLEDGE_ROOT", "knowledge")
-    error_log = _env_path("AUTONOMIC_ERROR_LOG_PATH", "knowledge/error_log.jsonl")
-    lever_log = _env_path("AUTONOMIC_LEVER_LOG_PATH", "knowledge/autonomic/lever_log.jsonl")
-    pending = _env_path("AUTONOMIC_PENDING_PATH", "knowledge/autonomic/pending_approvals.jsonl")
-    tick_log = _env_path("AUTONOMIC_TICK_LOG_PATH", "knowledge/autonomic/tick_log.jsonl")
+    # Audit P1 #3 fix: defaults anchor under paths.knowledge_dir()
+    # (~/.hrant/data/knowledge on prod), not cwd-relative "knowledge".
+    # Env overrides still win.
+    _defaults = _autonomic_default_paths()
+    knowledge_root = _env_path("AUTONOMIC_KNOWLEDGE_ROOT", str(_defaults["knowledge_root"]))
+    error_log = _env_path("AUTONOMIC_ERROR_LOG_PATH", str(_defaults["error_log"]))
+    lever_log = _env_path("AUTONOMIC_LEVER_LOG_PATH", str(_defaults["lever_log"]))
+    pending = _env_path("AUTONOMIC_PENDING_PATH", str(_defaults["pending"]))
+    tick_log = _env_path("AUTONOMIC_TICK_LOG_PATH", str(_defaults["tick_log"]))
 
     clear_registry()
     register_default_immune_levers()

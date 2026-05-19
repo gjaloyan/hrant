@@ -62,10 +62,25 @@ hrant = "backend.cli:main"
 Repository = "https://github.com/gjaloyan/hrant"
 
 [tool.setuptools]
-# We ship only the backend package; frontend dist is loaded at runtime
-# from frontend/dist via FastAPI static-files mount, not bundled into
-# the wheel.
-packages = ["backend", "backend.api", "backend.pipeline", "backend.tools"]
+# Audit P1 #4 fix: previously the wheel only shipped four hand-picked
+# packages ("backend", "backend.api", "backend.pipeline", "backend.tools")
+# and silently omitted the rest (backend.autonomic, backend.graph,
+# backend.skills, backend.consolidation, backend.subagents, ...).
+# Editable install (`pip install -e .`) masks the gap because `.pth`
+# files reach the whole source tree. A real wheel install was broken.
+#
+# Auto-discover every `backend*` subpackage so new additions land in
+# the wheel automatically.
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+# `frontend/` is built separately and served as static files at
+# runtime — keep it out of the wheel.
+exclude = ["frontend*", "tests*", "docs*", "deploy*"]
+
+[tool.setuptools.package-data]
+"backend.skills" = ["**/SKILL.md", "**/handler.py"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
