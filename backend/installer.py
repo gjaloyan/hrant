@@ -46,9 +46,7 @@ from . import paths
 log = logging.getLogger(__name__)
 
 
-# Supported package managers + how to invoke each. Add cautiously —
-# anything that needs sudo (apt) requires policy decisions the owner
-# should make manually, so we leave it out.
+# Supported package managers + how to invoke each.
 _MANAGERS = {
     "pip": {
         "cmd": [sys.executable, "-m", "pip", "install", "--no-input"],
@@ -61,6 +59,15 @@ _MANAGERS = {
         # polluting the system site.
         "cmd": ["pipx", "inject", "agi-agent"],
         "label": "Python (pipx inject into agi-agent)",
+    },
+    "apt": {
+        # `sudo -n` = non-interactive: fail fast if there's no
+        # passwordless sudo entry for the hrant user, instead of
+        # blocking on a password prompt the bridge can't answer.
+        # `apt-get` (not `apt`) has the stable scripting interface.
+        # `-y` accepts package questions without prompting.
+        "cmd": ["sudo", "-n", "apt-get", "install", "-y"],
+        "label": "System packages (apt-get; requires passwordless sudo)",
     },
 }
 
@@ -181,6 +188,66 @@ class InstallStore:
 
 
 STORE = InstallStore()
+
+
+# H1-rev: name-to-manager hints for the auto-propose path.
+#
+# When a skill declares `required_tools: [ffmpeg]` (string form) and
+# ffmpeg is missing, the auto-propose layer in unified_agent needs to
+# guess which manager handles it. Known system binaries go through
+# apt; everything else defaults to pip. Skill authors can override
+# with the dict form `{name: ffmpeg, manager: apt}` — this map is
+# only the fallback when the hint is absent.
+#
+# Keep the list short and obvious. Anything unusual should be
+# declared explicitly in SKILL.md frontmatter, not added here.
+_KNOWN_APT_BINARIES: frozenset = frozenset({
+    "ffmpeg", "ffprobe",
+    "libreoffice", "soffice",
+    "imagemagick", "convert", "magick",
+    "qpdf", "pdftk",
+    "pdfinfo", "pdftotext", "pdftoppm",  # poppler-utils
+    "tesseract",
+    "exiftool",
+    "rsvg-convert",
+    "ghostscript", "gs",
+    "unrar", "7z",
+    "bubblewrap", "bwrap",
+    "firejail",
+})
+
+
+def resolve_manager_for(name: str) -> str:
+    """Best-effort guess for which package manager installs `name`.
+
+    Returns 'apt' for known system binaries, 'pip' otherwise. Skill
+    authors who need a different mapping should use the dict form of
+    `required_tools` in SKILL.md frontmatter.
+    """
+    if not name:
+        return "pip"
+    return "apt" if name.lower() in _KNOWN_APT_BINARIES else "pip"
+
+
+def has_pending(packages: list[str], manager: str) -> bool:
+    """True if there's already a pending request for the same
+    (manager, package-set). The auto-propose layer uses this to avoid
+    spamming the owner with duplicate DMs on every turn that hits a
+    skill with the same missing dep.
+
+    Order-independent comparison — `[a, b]` and `[b, a]` are the same
+    request shape from a "have I asked for this already" standpoint.
+    """
+    target = sorted((p or "").strip() for p in (packages or []) if (p or "").strip())
+    if not target:
+        return False
+    for req in STORE.list_pending():
+        if (req.manager or "").lower() != (manager or "").lower():
+            continue
+        existing = sorted((p or "").strip() for p in (req.packages or []) if (p or "").strip())
+        if existing == target:
+            return True
+    return False
 
 
 # ─── on-propose subscribers ─────────────────────────────────────────

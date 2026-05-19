@@ -124,6 +124,83 @@ That is the single most common failure mode the production audit
 caught — repeated 4 times in one conversation. An acknowledgement
 without a corresponding tool call is a LIE; never produce one.
 
+## Task Solver Process — execution first, explanation last
+
+Treat every user task as an **execution request**, not a discussion
+request. Do NOT lead with "I can't do this" / "tools are not
+available" / "you need X library" — that's a limitation, and
+limitations are reported AFTER attempting, never as the first reply.
+
+**Bad opening:** "I cannot remove the logo because I don't have
+video editing tools."
+
+**Good opening:** "Я обработаю видео — извлеку кадр, найду рамку
+логотипа, прогоню delogo через ffmpeg, проверю результат." (then
+execute, then report.)
+
+Walk these phases in order. Skip a phase only when its inputs are
+clearly already in hand.
+
+1. **Identify the final result.** What does the user want as
+   output — edited file, extracted text, generated PDF, fixed code,
+   completed analysis? Focus on producing it, not theorising about
+   it.
+
+2. **Check available inputs.** Did the user attach a file? Is the
+   sha256 visible in the message context? Did an earlier turn save
+   anything to `outbox/`? Don't say "no file received" before
+   walking AttachmentStore (sha refs in the current turn) and the
+   recent conversation context. If a file is genuinely missing and
+   the answer depends on it, then ask — not before.
+
+3. **Try existing skills first.** Walk AVAILABLE SKILLS (the
+   catalog block already in this prompt). Match by name /
+   description / triggers / tags / `when_to_use`. If a skill fits,
+   either let its auto-injected `## SKILL: <name>` block guide you
+   or call `load_skill(name)` to pull a non-matched one. SEMANTIC
+   SUGGESTIONS (if present) are second-pass candidates — load them
+   if the trigger-matched ones don't fit.
+
+4. **Universal fallback for unknowns.** If no skill applies and the
+   task is non-trivial, call `load_skill("universal_resolver")` and
+   walk its 7-phase workflow (understand → inventory → identify
+   gaps → research → choose tools safely → test on a copy → solve
+   and deliver). Don't reinvent.
+
+5. **Execute, don't lecture.** When the path is clear, ACT. For a
+   video-logo task: inspect the video → extract a frame → identify
+   the logo region → run ffmpeg `delogo` / `boxblur` → re-probe the
+   output → return the file via `MEDIA:/path`. Don't reply with
+   "you could use ffmpeg" — DO use ffmpeg.
+
+6. **Tools missing? Auto-install via the gate.** If a skill matches
+   but requires a tool the host doesn't have, the AUTO-PROPOSED
+   INSTALLS block in this prompt has already fired `propose_install`
+   for it — tell the user to tap Approve in Telegram. If no AUTO-
+   PROPOSED block is shown but you discover a gap during execution,
+   call `propose_install(packages, manager, reason)` yourself. apt
+   binaries are now supported (sudo -n apt-get install -y); pip /
+   pipx / apt are all valid managers.
+
+7. **Ask only when truly blocked.** Acceptable reasons to ask:
+   (a) required file genuinely missing, (b) user's goal is ambiguous
+   with multiple defensible interpretations, (c) action is
+   destructive (delete / overwrite uncommitted / push to main),
+   (d) needs credentials / external account access. Anything else —
+   make the reasonable call and proceed.
+
+8. **If you must report failure, show your work.** Format:
+   - what you tried (tool names + arguments);
+   - what failed (exit code / error message / verifier output);
+   - what would unblock the next attempt (specific user input,
+     install approval, scope narrowing).
+
+   Bad: "I can't do this."
+   Good: "I tried to open the .dwg with `read_file` (no DWG
+   reader registered) and ran `search_package('libdwg')` — no
+   official PyPI distro. Workaround: export to DXF on your side
+   or approve `propose_install(['ezdxf'], 'pip')` and I'll convert."
+
 ## Pick the right tool
 
   - System / config change (voice, model, language, rate, …) →
@@ -200,9 +277,13 @@ terminal_exec. Both are guarded structurally:
     `cargo install` etc. with a hint pointing at `propose_install`.
 
 When you finish a non-trivial task that involved a sequence of
-tool calls and produced a working result, consider proposing a
-reusable workflow via `propose_skill(...)`. The owner reviews it
-in Telegram and one tap activates it for future turns.
+tool calls and produced a working result, do a post-task review:
+call `load_skill("skill_creator")` and follow its 3-gate checklist
+(non-trivial + verified-good + recurring shape). If all three
+gates pass, call `propose_skill(...)`; otherwise reply "no skill
+needed" and end. This keeps the catalogue clean — one-shot tasks
+and recall don't pollute it, but real composed workflows get
+captured for future reuse.
 
 ## Refusals must be honest
 
@@ -489,6 +570,102 @@ def run_unified(
             "active skills: " + ", ".join(s.name for s in matched_skills),
         )
 
+    # H4: semantic fallback. Only fires when trigger/tag match got
+    # nothing — explicit match always wins over fuzzy match. We surface
+    # the top candidates as a tiny hint, NOT by inlining their bodies,
+    # so the model still has to call `load_skill(name)` to actually
+    # pull the instructions. That preserves the "index first → load
+    # on demand" budget the user designed for.
+    semantic_suggestions: list = []
+    if not matched_skills:
+        try:
+            semantic_suggestions = _SKILLS.semantic_match(task, limit=2) or []
+        except Exception:
+            semantic_suggestions = []
+        if semantic_suggestions:
+            agent.progress(
+                "skill",
+                "semantic suggestions: " + ", ".join(s.name for s in semantic_suggestions),
+            )
+
+    # H1-rev: auto-propose installs for missing required_tools.
+    #
+    # When a matched skill declares dependencies that aren't on this
+    # host, fire `installer.propose` automatically — the owner gets a
+    # Telegram DM with [Show][Approve][Reject] for each missing tool.
+    # The LLM doesn't have to remember to call propose_install itself,
+    # and once the owner taps Approve the install runs and the NEXT
+    # turn will see the tool available.
+    #
+    # Dedup: within a turn, only propose each (name, manager) once.
+    # Across turns, `installer.has_pending` skips if there's already a
+    # pending request waiting for the owner — no spam DMs.
+    #
+    # Only fires on `matched_skills` (trigger/tag hit). Semantic
+    # suggestions don't auto-propose — fuzzy match isn't strong enough
+    # signal to commit the owner to an install.
+    auto_proposed: list[dict] = []
+    if matched_skills:
+        from . import installer as _installer
+        seen_pairs: set[tuple[str, str]] = set()
+        for sk in matched_skills:
+            try:
+                missing = _SKILLS.missing_tools_with_manager_for(sk)
+            except Exception:
+                missing = []
+            for m in missing:
+                pkg_name = m.get("name") or ""
+                mgr = m.get("manager") or "pip"
+                key = (mgr, pkg_name)
+                if not pkg_name or key in seen_pairs:
+                    continue
+                seen_pairs.add(key)
+                if _installer.has_pending([pkg_name], mgr):
+                    auto_proposed.append({
+                        "name": pkg_name, "manager": mgr,
+                        "skill": sk.name, "code": None,
+                        "status": "already-pending",
+                    })
+                    continue
+                try:
+                    req = _installer.propose(
+                        packages=[pkg_name],
+                        manager=mgr,
+                        reason=f"auto-proposed: required by skill {sk.name}",
+                        requester=speaker_id or "auto:skill-match",
+                    )
+                except Exception as e:
+                    log.warning(
+                        "auto-propose install failed for %s (%s): %s",
+                        pkg_name, mgr, e,
+                    )
+                    auto_proposed.append({
+                        "name": pkg_name, "manager": mgr,
+                        "skill": sk.name, "code": None,
+                        "status": f"propose-error: {type(e).__name__}",
+                    })
+                    continue
+                if req is None:
+                    auto_proposed.append({
+                        "name": pkg_name, "manager": mgr,
+                        "skill": sk.name, "code": None,
+                        "status": "propose-returned-none",
+                    })
+                else:
+                    auto_proposed.append({
+                        "name": pkg_name, "manager": mgr,
+                        "skill": sk.name, "code": req.code,
+                        "status": "proposed",
+                    })
+        if auto_proposed:
+            agent.progress(
+                "install",
+                "auto-proposed: " + ", ".join(
+                    f"{p['name']}({p['manager']}/{p['status']})"
+                    for p in auto_proposed
+                ),
+            )
+
     # System prompt assembly.
     perms = _roles.permissions_block(speaker_id)
     try:
@@ -523,9 +700,44 @@ def run_unified(
         system_parts.append(f"---\n\n{convo}")
     if catalog:
         system_parts.append(f"---\n\n{catalog}")
+    if semantic_suggestions:
+        hint_lines = [
+            "# SEMANTIC SUGGESTIONS",
+            "(No trigger/tag fired, but these skills look topically close. "
+            "If one fits, call `load_skill(name)` to pull its body before "
+            "starting the work.)",
+        ]
+        for sk in semantic_suggestions:
+            hint_lines.append(f"- **{sk.name}** — {sk.description}")
+        system_parts.append("---\n\n" + "\n".join(hint_lines))
+    if auto_proposed:
+        # H1-rev: tell the LLM what auto-installs are in flight. This
+        # is a hint, not a command — the model decides whether to call
+        # the dependent skill anyway (might pivot) and whether to tell
+        # the user to tap Approve in Telegram.
+        ap_lines = [
+            "# AUTO-PROPOSED INSTALLS",
+            "(Skills matched this turn need tools that aren't installed. "
+            "I've auto-fired `propose_install` for each one — the owner "
+            "gets a Telegram DM with [Show][Approve][Reject] per request. "
+            "Those tools will NOT be available this turn — either tell "
+            "the user to tap Approve and retry next turn, or pivot to an "
+            "approach that doesn't need them.)",
+        ]
+        for p in auto_proposed:
+            tag = p.get("status") or "?"
+            line = f"- `{p['name']}` via `{p['manager']}` (skill `{p['skill']}`) — {tag}"
+            if p.get("code"):
+                line += f" — request code `{p['code']}`"
+            ap_lines.append(line)
+        system_parts.append("---\n\n" + "\n".join(ap_lines))
     for sk in matched_skills:
         try:
-            system_parts.append(f"---\n\n{sk.system_block()}")
+            missing = _SKILLS.missing_tools_for(sk)
+        except Exception:
+            missing = []
+        try:
+            system_parts.append(f"---\n\n{sk.system_block(missing_tools=missing)}")
         except Exception as e:
             log.debug("skill %s system_block failed: %s", sk.name, e)
     system_parts.append(f"---\n\n{_UNIFIED_RULES}")

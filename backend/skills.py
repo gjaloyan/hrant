@@ -14,6 +14,7 @@
   triggers: [pdf, summarize, документ, конспект]
   when_to_use: |
     User asks to summarize, extract, or analyze a local PDF/DOCX file.
+  required_tools: [pdfinfo, pypdf]   # optional, see H1
   ---
 
   # PDF Summary
@@ -27,6 +28,10 @@
 """
 from __future__ import annotations
 import importlib.util
+import math as _math
+import re as _re
+import shutil as _shutil
+from collections import Counter as _Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -50,17 +55,60 @@ class Skill:
     # survives `hrant update`.
     source: str = "builtin"
     enabled: bool = True
+    # H1: dependencies the skill expects to be available before it
+    # can run. Resolved against (ToolRegistry name) | (binary on PATH)
+    # | (importable Python module), in that order. Skills with
+    # missing tools are still listed in the catalog but marked
+    # `[NEEDS: ...]` so the LLM sees the gap and can propose_install
+    # rather than blindly invoke a missing binary.
+    #
+    # H1-rev: stored as list of dicts `{"name": str, "manager": str|None}`.
+    # Strings in YAML are normalised into `{"name": "...", "manager": None}`
+    # so the dict form is the only shape callers ever see.
+    required_tools: list[dict] = field(default_factory=list)
+    # H2: broader topical keywords, complementary to triggers.
+    # Matched with WORD-BOUNDARY semantics (`\bvideo\b`) so they don't
+    # false-fire on substrings the way triggers do. Triggers stay for
+    # narrow intentional phrases; tags are for the topic shape.
+    tags: list[str] = field(default_factory=list)
 
     def matches(self, text: str) -> bool:
-        """Грубая эвристика: триггер встречается в тексте (case-insensitive)."""
-        if not self.triggers:
+        """Triggers (substring, legacy) + tags (word-boundary).
+
+        Triggers match like before — `pdf` fires on `pdf_summary`. Tags
+        require a word boundary — `video` fires on `video editor` but
+        NOT on `subdivide`. This keeps trigger semantics stable while
+        letting tags be broader topical keywords without false-firing.
+        """
+        if not text:
             return False
         low = text.lower()
-        return any(t.lower() in low for t in self.triggers)
+        if self.triggers and any(t.lower() in low for t in self.triggers):
+            return True
+        if self.tags:
+            for tag in self.tags:
+                tag_low = tag.lower().strip()
+                if not tag_low:
+                    continue
+                if _re.search(rf"\b{_re.escape(tag_low)}\b", low):
+                    return True
+        return False
 
-    def system_block(self) -> str:
-        """Блок, который подмешивается в system prompt при активации."""
+    def system_block(self, missing_tools: Optional[list[str]] = None) -> str:
+        """Блок, который подмешивается в system prompt при активации.
+
+        `missing_tools`, если передан и непустой, добавляет видимое
+        предупреждение сверху — модель должна либо `propose_install`,
+        либо пивотнуться, а не звать заведомо отсутствующий бинарь.
+        """
         parts = [f"## SKILL: {self.name}", self.description.strip()]
+        if missing_tools:
+            parts.append(
+                f"\n⚠️ **MISSING TOOLS:** {', '.join(missing_tools)} — "
+                f"this skill requires them but they are not available. "
+                f"Either call `propose_install` to add them, or pivot to "
+                f"a different approach."
+            )
         if self.when_to_use:
             parts.append(f"\n*When to use:* {self.when_to_use.strip()}")
         if self.body.strip():
@@ -92,7 +140,217 @@ def _parse_skill_md(path: Path) -> Optional[Skill]:
         when_to_use=str(meta.get("when_to_use", "")).strip(),
         body=body,
         path=path.parent,
+        required_tools=_normalize_required_tools(meta.get("required_tools")),
+        tags=[str(t) for t in (meta.get("tags") or [])],
     )
+
+
+def _normalize_required_tools(raw) -> list[dict]:
+    """Accept the two YAML shapes for `required_tools` and emit a
+    uniform list of `{"name": str, "manager": str|None}` dicts.
+
+    Shape A — plain strings:
+        required_tools: [ffmpeg, pypdf]
+    Shape B — dicts with explicit manager:
+        required_tools:
+          - name: ffmpeg
+            manager: apt
+          - name: pypdf
+            manager: pip
+    Shape C — mixed (allowed):
+        required_tools:
+          - pypdf
+          - {name: ffmpeg, manager: apt}
+
+    Anything malformed (no `name`, empty) is silently dropped — a
+    bad entry shouldn't break loading the whole skill.
+    """
+    out: list[dict] = []
+    for entry in (raw or []):
+        if isinstance(entry, str):
+            n = entry.strip()
+            if n:
+                out.append({"name": n, "manager": None})
+            continue
+        if isinstance(entry, dict):
+            n = str(entry.get("name", "")).strip()
+            if not n:
+                continue
+            m = entry.get("manager")
+            m = str(m).strip() if m else None
+            out.append({"name": n, "manager": m or None})
+            continue
+        # Anything else (None, int, list-of-list) is silently skipped.
+    return out
+
+
+# H1: tool availability probe. Public so unified_agent / WebUI can
+# call it without recreating the resolution logic.
+
+def _tool_is_available(name: str, registry: Optional[ToolRegistry] = None) -> bool:
+    """Probe whether `name` is reachable.
+
+    Resolution order:
+      1. Registered tool in the ToolRegistry (e.g. 'read_file').
+      2. Binary on PATH (e.g. 'ffmpeg', 'libreoffice').
+      3. Importable Python module (e.g. 'PIL', 'pypdf').
+
+    Returns False on any miss — no exceptions propagate.
+    """
+    if not name:
+        return False
+    reg = registry if registry is not None else get_registry()
+    if name in reg.tools:
+        return True
+    if _shutil.which(name):
+        return True
+    try:
+        spec = importlib.util.find_spec(name)
+        if spec is not None:
+            return True
+    except Exception:
+        return False
+    return False
+
+
+# ─── H4: lightweight semantic match (TF-IDF cosine) ──────────────────
+#
+# Goal: when triggers + tags miss, fall back to a fuzzy match over the
+# skill's metadata bag (name + description + tags + triggers +
+# when_to_use). Implemented as TF-IDF cosine — no new dependencies,
+# no embeddings, no model download, no API call. It catches paraphrases
+# that share vocabulary with the skill metadata (e.g. user types "слить
+# логотип на видео" and the skill body mentions "logo" + "video" +
+# "delogo"), but NOT pure synonym pairs ("movie" ↔ "video") — that
+# requires real embeddings, which we'd add only once the catalogue
+# grows past ~30 skills and the keyword approach starts missing.
+
+_SEMANTIC_STOPWORDS = frozenset({
+    # English
+    "a", "an", "the", "and", "or", "but", "of", "in", "on", "to", "from",
+    "with", "for", "by", "at", "is", "are", "was", "were", "be", "been",
+    "this", "that", "these", "those", "it", "its", "as", "if", "do", "does",
+    "did", "have", "has", "had", "will", "would", "can", "could", "should",
+    "i", "you", "he", "she", "we", "they", "me", "my", "your", "our", "their",
+    # Russian
+    "и", "в", "на", "с", "со", "по", "до", "от", "у", "о", "об", "за",
+    "из", "к", "не", "что", "как", "это", "тот", "так", "вот", "там",
+    "то", "я", "ты", "он", "она", "мы", "вы", "они", "мне", "тебе",
+    "мой", "твой", "наш", "ваш", "их", "его", "её", "ну", "же", "ли",
+    "бы", "был", "была", "было", "был", "есть", "быть",
+})
+
+
+def _semantic_tokenize(text: str) -> list[str]:
+    """Tokenize for the semantic index.
+
+    Steps:
+      1. Lowercase.
+      2. Replace underscores and hyphens with spaces (so
+         `video_overlay_remove` yields three tokens, not one).
+      3. Extract alphanumeric runs as tokens (Unicode-aware).
+      4. Drop tokens shorter than 2 chars or in the stopword list.
+
+    No stemming — added cost > marginal recall for our catalogue size.
+    """
+    if not text:
+        return []
+    text = text.lower()
+    text = _re.sub(r"[_\-]+", " ", text)
+    return [
+        tok
+        for tok in _re.findall(r"\w+", text)
+        if len(tok) >= 2 and tok not in _SEMANTIC_STOPWORDS
+    ]
+
+
+class _SemanticIndex:
+    """TF-IDF cosine index over the skill catalogue.
+
+    Per skill, we concatenate (name, description, tags, triggers,
+    when_to_use) into a bag of tokens. The index is rebuilt on every
+    `SkillsManager.load()` so renames / new skills / disabled flags
+    take effect on the next turn.
+
+    For our catalogue size (≤50 skills) the math is so cheap there's
+    no benefit to caching beyond the per-process build.
+    """
+
+    def __init__(self) -> None:
+        self._docs: dict[str, list[str]] = {}     # name -> tokens
+        self._df: _Counter = _Counter()           # term -> doc-freq
+        self._N: int = 0
+        self._vectors: dict[str, dict[str, float]] = {}
+
+    def build(self, skills: list[Skill]) -> None:
+        self._docs.clear()
+        self._df.clear()
+        self._vectors.clear()
+        for sk in skills:
+            text = " ".join([
+                sk.name or "",
+                sk.description or "",
+                " ".join(sk.tags or []),
+                " ".join(sk.triggers or []),
+                sk.when_to_use or "",
+            ])
+            tokens = _semantic_tokenize(text)
+            self._docs[sk.name] = tokens
+            for term in set(tokens):
+                self._df[term] += 1
+        self._N = len(self._docs)
+        for name, tokens in self._docs.items():
+            self._vectors[name] = self._tf_idf(tokens)
+
+    def _tf_idf(self, tokens: list[str]) -> dict[str, float]:
+        if not tokens:
+            return {}
+        counts = _Counter(tokens)
+        max_tf = max(counts.values())
+        vec: dict[str, float] = {}
+        for term, tf in counts.items():
+            df = self._df.get(term, 0)
+            if df == 0:
+                # Query-only term not in any doc — gets no weight
+                # against the corpus, but smoothing keeps it useful
+                # for the query-vector norm.
+                df = 0
+            tf_norm = tf / max_tf
+            # Smoothed IDF: log((N+1)/(df+1)) + 1, classic sklearn formula.
+            idf = _math.log((1 + self._N) / (1 + df)) + 1.0
+            vec[term] = tf_norm * idf
+        return vec
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int = 3,
+        min_score: float = 0.15,
+    ) -> list[tuple[str, float]]:
+        """Top-K skills by cosine similarity, filtered by min_score."""
+        if not self._docs:
+            return []
+        q_tokens = _semantic_tokenize(query)
+        if not q_tokens:
+            return []
+        q_vec = self._tf_idf(q_tokens)
+        if not q_vec:
+            return []
+        q_norm = _math.sqrt(sum(v * v for v in q_vec.values()))
+        if q_norm == 0:
+            return []
+        results: list[tuple[str, float]] = []
+        for name, doc_vec in self._vectors.items():
+            d_norm = _math.sqrt(sum(v * v for v in doc_vec.values()))
+            if d_norm == 0:
+                continue
+            dot = sum(q_vec.get(t, 0.0) * w for t, w in doc_vec.items())
+            score = dot / (q_norm * d_norm)
+            if score >= min_score:
+                results.append((name, score))
+        results.sort(key=lambda x: -x[1])
+        return results[:limit]
 
 
 def _load_handler(skill_dir: Path, registry: ToolRegistry) -> None:
@@ -189,6 +447,8 @@ class SkillsManager:
         self._user_dir_override = user_skills_dir
         self.skills: list[Skill] = []
         self._loaded = False
+        # H4: TF-IDF semantic-match fallback. Rebuilt on every load().
+        self._semantic_index = _SemanticIndex()
 
     @property
     def user_dir(self) -> Path:
@@ -238,6 +498,15 @@ class SkillsManager:
         for s in user:
             by_name[s.name] = s
         self.skills = sorted(by_name.values(), key=lambda s: s.name)
+        # H4: rebuild semantic index over the enabled set. Building over
+        # all skills would let disabled ones rank against the query and
+        # produce ghost suggestions; better to only index what's actually
+        # callable.
+        try:
+            self._semantic_index.build([s for s in self.skills if s.enabled])
+        except Exception:
+            # Index failure is non-fatal — keyword match still works.
+            self._semantic_index = _SemanticIndex()
         self._loaded = True
         return self.skills
 
@@ -260,6 +529,51 @@ class SkillsManager:
         self.ensure_loaded()
         return [s for s in self.skills if s.enabled and s.matches(text)]
 
+    def semantic_match(
+        self,
+        text: str,
+        *,
+        limit: int = 3,
+        min_score: float = 0.15,
+    ) -> list[Skill]:
+        """TF-IDF fallback over (name + description + tags + triggers
+        + when_to_use). Used when `match()` returns empty but the
+        request might still be topical. Returns at most `limit`
+        ENABLED skills above `min_score`, ranked by cosine similarity.
+
+        H4 caveat: this is fuzzy keyword match, NOT real semantic
+        similarity. It won't bridge pure synonyms ('movie' ↔ 'video')
+        — for that you'd need embeddings. It's good enough at our
+        catalogue size (≤50 skills) and avoids the model-download +
+        per-turn API-call cost embeddings would carry.
+        """
+        self.ensure_loaded()
+        hits = self._semantic_index.search(text, limit=limit, min_score=min_score)
+        out: list[Skill] = []
+        for name, _score in hits:
+            sk = self.get(name)
+            if sk is not None and sk.enabled:
+                out.append(sk)
+        return out
+
+    def semantic_match_scored(
+        self,
+        text: str,
+        *,
+        limit: int = 3,
+        min_score: float = 0.15,
+    ) -> list[tuple[Skill, float]]:
+        """Same as `semantic_match()` but returns (skill, score) pairs
+        so callers (and tests) can inspect the ranking signal."""
+        self.ensure_loaded()
+        hits = self._semantic_index.search(text, limit=limit, min_score=min_score)
+        out: list[tuple[Skill, float]] = []
+        for name, score in hits:
+            sk = self.get(name)
+            if sk is not None and sk.enabled:
+                out.append((sk, score))
+        return out
+
     def get(self, name: str) -> Optional[Skill]:
         self.ensure_loaded()
         for s in self.skills:
@@ -267,8 +581,75 @@ class SkillsManager:
                 return s
         return None
 
-    def catalog_block(self) -> str:
-        """Catalog of ENABLED skills only."""
+    def missing_tools_for(
+        self,
+        skill: Skill,
+        registry: Optional[ToolRegistry] = None,
+    ) -> list[str]:
+        """Return the subset of `skill.required_tools` not currently
+        resolvable on this host, as a list of names. Empty list =
+        ready to run.
+
+        Walks the normalised dict shape (`{"name": ..., "manager": ...}`)
+        but returns just the names, since the existing surfaces
+        (catalog NEEDS marker, system_block warning) care only about
+        what's missing, not which manager will install it.
+        """
+        if not skill.required_tools:
+            return []
+        reg = registry if registry is not None else get_registry()
+        out: list[str] = []
+        for entry in skill.required_tools:
+            name = (entry.get("name") if isinstance(entry, dict) else str(entry)).strip()
+            if not name:
+                continue
+            if not _tool_is_available(name, reg):
+                out.append(name)
+        return out
+
+    def missing_tools_with_manager_for(
+        self,
+        skill: Skill,
+        registry: Optional[ToolRegistry] = None,
+    ) -> list[dict]:
+        """Same as `missing_tools_for` but returns dicts with the
+        resolved manager: `[{"name": "ffmpeg", "manager": "apt"}, ...]`.
+
+        Manager resolution: explicit hint on the frontmatter wins;
+        otherwise `installer.resolve_manager_for(name)` guesses based
+        on the known-binary list (apt for ffmpeg/libreoffice/qpdf/...,
+        pip for everything else).
+
+        Used by the auto-propose path in unified_agent to fire
+        `installer.propose` per missing tool with the right manager.
+        """
+        from . import installer as _installer
+
+        if not skill.required_tools:
+            return []
+        reg = registry if registry is not None else get_registry()
+        out: list[dict] = []
+        for entry in skill.required_tools:
+            if isinstance(entry, dict):
+                name = (entry.get("name") or "").strip()
+                manager = (entry.get("manager") or "").strip() or None
+            else:
+                name = str(entry).strip()
+                manager = None
+            if not name:
+                continue
+            if _tool_is_available(name, reg):
+                continue
+            if not manager:
+                manager = _installer.resolve_manager_for(name)
+            out.append({"name": name, "manager": manager})
+        return out
+
+    def catalog_block(self, registry: Optional[ToolRegistry] = None) -> str:
+        """Catalog of ENABLED skills only. Skills with `required_tools`
+        that aren't resolvable on this host are marked `[NEEDS: ...]`
+        so the LLM can `propose_install` or pivot rather than silently
+        try to call a missing binary."""
         self.ensure_loaded()
         active = [s for s in self.skills if s.enabled]
         if not active:
@@ -279,7 +660,14 @@ class SkillsManager:
         ]
         for s in active:
             triggers = ", ".join(s.triggers) if s.triggers else "—"
-            lines.append(f"- **{s.name}**: {s.description}  _(triggers: {triggers})_")
+            meta_parts = [f"triggers: {triggers}"]
+            if s.tags:
+                meta_parts.append(f"tags: {', '.join(s.tags)}")
+            line = f"- **{s.name}**: {s.description}  _({'; '.join(meta_parts)})_"
+            missing = self.missing_tools_for(s, registry=registry)
+            if missing:
+                line += f"  ⚠️ **[NEEDS: {', '.join(missing)}]**"
+            lines.append(line)
         return "\n".join(lines)
 
     # ---- write paths (used by the API) ----

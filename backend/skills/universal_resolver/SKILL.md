@@ -226,31 +226,17 @@ When the workflow holds:
 
 ### 8. Save the workflow as a reusable skill (the closing step)
 
-ONLY when:
-- the task was non-trivial (real research and / or composed tool
-  sequence — not just `read_file` on a known format),
-- the result is verified-good,
-- the same shape of task is plausibly going to recur (logo
-  removal: yes; "open this very specific spreadsheet": no).
+After delivering the result, call `load_skill("skill_creator")` and
+follow its 3-gate checklist (non-trivial + verified-good + recurring
+shape). If all three gates pass, `propose_skill(...)` writes a
+DISABLED user-tier skill and DMs the owner the activation buttons —
+one tap to make it live for future turns.
 
-Then call:
-
-```
-propose_skill(
-  name="kebab-case-name",
-  description="One sentence — what this skill does.",
-  triggers="comma,separated,distinctive,keywords",
-  when_to_use="When to reach for this vs related skills.",
-  body="# Step-by-step Markdown. Be explicit about file paths,
-        exact commands, expected outputs, and pitfalls. Future
-        turns READ THIS VERBATIM."
-)
-```
-
-The skill is written DISABLED. The owner sees a Telegram DM with
-inline buttons `[👀 Show] [✅ Activate] [❌ Delete]`. Don't
-expect it to be live this turn — that's correct, and it's what
-makes the auto-create safe.
+Don't try to remember the gates here; `skill_creator` is the
+authoritative version. It also covers the proposal field shape
+(`name`, `description`, `triggers`, `tags`, `when_to_use`, `body`,
+`required_tools`) so future turns reading THIS skill don't drift
+out of sync with the meta-skill.
 
 ## Pitfalls (real failures from the audit logs)
 

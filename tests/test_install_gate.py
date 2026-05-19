@@ -105,9 +105,12 @@ def test_propose_rejects_shell_metacharacters(isolated_installer):
 
 
 def test_propose_rejects_unsupported_manager(isolated_installer):
+    """`apt` is now a supported manager (H1-rev). Pick something
+    genuinely out of scope (rubygems) to check the validator still
+    rejects truly unknown managers."""
     inst = isolated_installer
     with pytest.raises(ValueError, match="unsupported manager"):
-        inst.propose(packages=["x"], manager="apt", reason="", requester="")
+        inst.propose(packages=["x"], manager="rubygems", reason="", requester="")
 
 
 def test_propose_rejects_empty_packages(isolated_installer):
