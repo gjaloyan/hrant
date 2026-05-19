@@ -889,7 +889,23 @@ class TelegramBot:
             asyncio.set_event_loop(loop)
             self._loop = loop
 
-            app = ApplicationBuilder().token(self.token).build()
+            # concurrent_updates(True) is critical for callback queries.
+            # PTB defaults to sequential update processing — if the agent
+            # is mid-tool-call when an inline button tap arrives, the
+            # callback update queues behind the chat handler. By the
+            # time `handle_callback_query` runs, the callback query has
+            # already expired (~15s server-side limit) and Telegram
+            # returns HTTP 400 on every `answerCallbackQuery`. Symptom:
+            # buttons "don't work" — spinner never goes away. Setting
+            # concurrent_updates=True spawns a separate task per update
+            # so callbacks can be answered immediately even while a
+            # chat handler is busy.
+            app = (
+                ApplicationBuilder()
+                .token(self.token)
+                .concurrent_updates(True)
+                .build()
+            )
             self._app = app
 
             allowed = self.allowed_users
