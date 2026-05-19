@@ -104,7 +104,16 @@ def unified_enabled() -> bool:
 # ─── RULES block (the single biggest difference from legacy) ──────
 
 
-_UNIFIED_RULES = """# UNIFIED AGENT RULES
+# Audit T5: the rules used to be a single ~14KB monolith that got
+# injected on every turn — including trivial "2+2" chats. After the
+# May 2026 cost audit (input:output = 40:1), we split this into a
+# core always-on block + four scenario blocks loaded on signal.
+# `_build_rules_for_turn` composes the right subset for each turn.
+# `_UNIFIED_RULES` (below) is the full concatenation, preserved
+# unchanged for backward-compat with tests and for any caller that
+# wants the complete surface.
+
+_UNIFIED_RULES_CORE = """# UNIFIED AGENT RULES
 
 You are a single-loop agent. Every turn you receive: the user's
 message + your identity / state snapshot / permissions / recent
@@ -293,31 +302,6 @@ clearly already in hand.
     the agent kept refusing to write a one-line fix, citing PSM
     ceremony it didn't actually need.
 
-## Diagnose runtime bugs from the journal FIRST
-
-When the bug shows up as a runtime artefact — HTTP error code in
-a log, Python exception in a traceback, "buttons don't work", "no
-voice playback", "service crashed" — your FIRST tool call should
-be `terminal_exec("journalctl --user -u hrant -n 200 --no-pager
-| grep -iE 'error|exception|traceback|<symptom>'")` (or `journalctl
---user -u hrant --since '15 min ago' --no-pager` for time-bounded).
-Read the actual HTTP responses / exception messages BEFORE
-diving into the code. Reading code first when the journal already
-shows you the layer that's failing is hours wasted.
-
-Concrete example from the May 19 incident:
-  - symptom: "Telegram buttons don't work"
-  - good first call: `journalctl --user -u hrant -n 200 | grep -i
-    callback` → would have shown `answerCallbackQuery → 400` and
-    pointed straight at PTB's update-dispatch layer.
-  - bad first call: `locate_symbol("handle_callback_query")` +
-    read_file backend/channels.py — chases the dispatch logic when
-    the bug is in the queue-up-front Application config.
-
-If the journal call is empty / has no error pattern, THEN dive
-into code. The order matters: observable failure mode → journal →
-code, not the other way round.
-
 ## Skills come BEFORE ad-hoc tool loops
 
 If the AVAILABLE SKILLS block lists a skill whose `description` /
@@ -384,7 +368,55 @@ user sees it as broken output. If you need to make another tool
 call, make it as a native tool-use; if you can't, just describe
 what you would have done in plain text.
 
-## Sending files back (MEDIA: convention)
+## Chat vs task
+
+Not every turn needs a tool. Casual chat ("hi", "thanks", "how
+are you"), recall ("what is my name?", "what voice are you
+using?"), and small acknowledgements answer directly from
+context. Use the STATE SNAPSHOT for recall answers — don't guess.
+
+But: any message that looks like a directive, a request to
+change state, a question about external facts you don't already
+know, or a multi-step problem — USE TOOLS.
+
+"""
+
+
+# ─── Scenario blocks — loaded on demand by `_build_rules_for_turn` ─
+
+# Loaded when the user's message looks like a runtime-bug report
+# (keywords: error, exception, "не работает", "buttons don't work",
+# etc.). Avoids paying for ~1KB on every chat / settings turn.
+_RULES_JOURNAL_FIRST = """## Diagnose runtime bugs from the journal FIRST
+
+When the bug shows up as a runtime artefact — HTTP error code in
+a log, Python exception in a traceback, "buttons don't work", "no
+voice playback", "service crashed" — your FIRST tool call should
+be `terminal_exec("journalctl --user -u hrant -n 200 --no-pager
+| grep -iE 'error|exception|traceback|<symptom>'")` (or `journalctl
+--user -u hrant --since '15 min ago' --no-pager` for time-bounded).
+Read the actual HTTP responses / exception messages BEFORE
+diving into the code. Reading code first when the journal already
+shows you the layer that's failing is hours wasted.
+
+Concrete example from the May 19 incident:
+  - symptom: "Telegram buttons don't work"
+  - good first call: `journalctl --user -u hrant -n 200 | grep -i
+    callback` → would have shown `answerCallbackQuery → 400` and
+    pointed straight at PTB's update-dispatch layer.
+  - bad first call: `locate_symbol("handle_callback_query")` +
+    read_file backend/channels.py — chases the dispatch logic when
+    the bug is in the queue-up-front Application config.
+
+If the journal call is empty / has no error pattern, THEN dive
+into code. The order matters: observable failure mode → journal →
+code, not the other way round."""
+
+
+# Loaded when an attachment is in play OR when this turn is likely
+# to produce a file the user should receive. Both signals point at
+# the MEDIA: convention being relevant.
+_RULES_MEDIA_CONVENTION = """## Sending files back (MEDIA: convention)
 
 You DO have a way to attach files to your reply — it's NOT a tool,
 it's a CONVENTION the Telegram bridge parses. To deliver a file
@@ -414,9 +446,12 @@ Example final answer after processing a video:
 
   Готово — логотип убран. Длительность сохранена, аудио без re-encode.
 
-  MEDIA:/home/hrant/.hrant/data/workspace/outbox/clip_no_logo.mp4
+  MEDIA:/home/hrant/.hrant/data/workspace/outbox/clip_no_logo.mp4"""
 
-## File types — which path handles which
+
+# Loaded when attachments are in play. Tells the agent which inspection
+# tool matches which file shape.
+_RULES_FILE_TYPES = """## File types — which path handles which
 
 When a file attachment is in play (sha256 reference from the user
 or a file you saved to `outbox/`), pick the right inspection path.
@@ -443,23 +478,13 @@ DON'T invent a tool — these are the actual capabilities:
   - **Unknown binary**: use `run_python` to probe (head bytes, file
     magic) before deciding how to process.
 
-To DELIVER any file back to the user, write a MEDIA: line — that
-section above covers it. The right Telegram bubble (video / photo /
-audio / document) is picked from the extension; everything else
-falls back to a document attachment.
+To DELIVER any file back to the user, write a MEDIA: line — see
+the "Sending files back" block above."""
 
-## Chat vs task
 
-Not every turn needs a tool. Casual chat ("hi", "thanks", "how
-are you"), recall ("what is my name?", "what voice are you
-using?"), and small acknowledgements answer directly from
-context. Use the STATE SNAPSHOT for recall answers — don't guess.
-
-But: any message that looks like a directive, a request to
-change state, a question about external facts you don't already
-know, or a multi-step problem — USE TOOLS.
-
-## Repeated request → escalate
+# Loaded only when the sticky-request detector fires (STICKY REQUEST
+# DETECTED block in the prompt). Otherwise this rule is dead weight.
+_RULES_REPEATED_REQUEST = """## Repeated request → escalate
 
 When the conversation history shows the user has raised the
 same topic 2+ times and your prior replies were short
@@ -468,6 +493,182 @@ when it fires), you have ALREADY failed once or twice. Don't
 fail again: pick the most aggressive tool that could apply
 the change (set_setting / terminal_exec / propose_self_modification)
 and use it this turn."""
+
+
+# Full surface — kept as the concat of core + every scenario block.
+# Tests that grep `_UNIFIED_RULES` for any sentence still pass. At
+# runtime, `run_unified` uses `_build_rules_for_turn(...)` to assemble
+# the trimmed per-turn version.
+_UNIFIED_RULES = "\n\n".join([
+    _UNIFIED_RULES_CORE,
+    _RULES_JOURNAL_FIRST,
+    _RULES_MEDIA_CONVENTION,
+    _RULES_FILE_TYPES,
+    _RULES_REPEATED_REQUEST,
+])
+
+
+# Bug-report detector for the journal-first block. Heuristic: keywords
+# that mean "something is broken at runtime". Returns True for any of
+# them in the first 500 chars of the user's message.
+_BUG_REPORT_KEYWORDS_RE = re.compile(
+    r"(?:"
+    # Russian
+    r"не\s+работает|"
+    r"не\s+запускается|"
+    r"не\s+отвечает|"
+    r"не\s+обновля|"
+    r"падает|"
+    r"крашится|"
+    r"крашнул|"
+    r"ошибк|"
+    r"эксепш|"
+    r"трейсбэк|"
+    r"исключени|"
+    r"\bбаг\b|"
+    r"сломал|"
+    r"завис|"
+    r"глюч|"
+    # English
+    r"\bdoes(?:n['’]t|\s+not)\s+work|"
+    r"\b(?:is|are|was|were)(?:n['’]t|\s+not)\s+working|"
+    r"\bnot\s+working|"
+    r"\bbroken|"
+    r"\bcrash|"
+    r"\bexception|"
+    r"\btraceback|"
+    r"\berror\b|"
+    r"\bbug\b|"
+    r"\bfix\b|"
+    r"\bfails?\s+(?:to|with)|"
+    r"\bhttp\s*\d{3}|"
+    r"\b\d{3}\s+(?:bad\s+request|internal|forbidden|unauthorized|not\s+found)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _looks_like_bug_report(task: str) -> bool:
+    """T5: detect if the user's message is a bug / runtime-failure
+    report. If yes, the journal-first scenario block is loaded so
+    the agent's first tool call is `journalctl ...` not `read_file`."""
+    if not task:
+        return False
+    return bool(_BUG_REPORT_KEYWORDS_RE.search(task[:500]))
+
+
+# T8 turn classifier — separates "chat" turns (greetings, recall,
+# acknowledgements) from "task" turns (directives, problems, debug
+# requests). Chat turns get a minimal prompt that drops the skill
+# catalog and most of _UNIFIED_RULES — typical save: 7-10 KB.
+_ACTION_VERBS = (
+    # English imperatives we know we route into tools
+    "set ", "change", "fix ", "run ", "start ", "stop", "kill ",
+    "create", "make ", "add ", "remove", "delete", "update", "send ",
+    "save ", "download", "upload", "convert", "extract", "translate",
+    "compile", "build ", "test ", "deploy", "install", "search ",
+    "find ", "open ", "read ", "write ", "edit ", "show ", "list ",
+    "tell me ", "explain", "summari", "compose", "generate", "fetch",
+    "process", "analyse", "analyze", "debug", "trace", "audit",
+    # Russian imperatives
+    "измени", "поменяй", "запусти", "запус", "останови", "создай",
+    "добавь", "удали", "обнови", "пришли", "сохрани", "скачай",
+    "загрузи", "конвертируй", "извлеки", "переведи", "собери",
+    "протестируй", "задеплой", "установи", "найди", "открой",
+    "прочитай", "напиши", "покажи", "перечисли", "расскажи",
+    "объясни", "обработай", "проанализируй", "помоги ",
+    "посмотри", "отправь", "поставь", "выключи", "включи",
+)
+
+
+def _is_trivial_chat(
+    task: str,
+    *,
+    has_attachments: bool,
+    matched_skills_count: int,
+) -> bool:
+    """T8: detect cheap chat / recall turns that don't need the full
+    14 KB rules + skill catalog. Conservative — false negatives are
+    fine (we just pay the full prompt cost), false positives are bad
+    (LLM might miss a rule it needed).
+
+    Heuristic:
+      - no attachments (file delivery needs MEDIA + file-types rules);
+      - no matched skill (a skill matched = real task);
+      - short message (≤ 80 chars — long messages are usually directives);
+      - not a bug report (those have their own journal-first scenario);
+      - no recognised action verb in the message.
+    """
+    if has_attachments or matched_skills_count > 0:
+        return False
+    if not task:
+        return True  # empty message — minimal makes sense
+    body = task.strip()
+    if len(body) > 80:
+        return False
+    if _looks_like_bug_report(body):
+        return False
+    low = body.lower()
+    if any(v in low for v in _ACTION_VERBS):
+        return False
+    return True
+
+
+_MINIMAL_CHAT_RULES = """# AGENT — CHAT-ONLY TURN
+
+This turn was classified as casual / recall / acknowledgement (short
+message, no attachment, no matched skill, no action verb). The full
+agent rules + skill catalog have been omitted to save tokens.
+
+Be brief.
+
+For recall ("what voice / model / settings"), read the value from the
+STATE SNAPSHOT above — don't guess, don't run tools.
+
+If you've been misclassified and this actually IS a task:
+  - the full tool registry is still callable;
+  - call `list_skills` to see available skills;
+  - your usual rules (apply-don't-acknowledge, refusals-must-be-honest,
+    iteration-ceiling) still hold even though they're not spelled out
+    here.
+"""
+
+
+def _build_rules_for_turn(
+    *,
+    task: str = "",
+    has_attachments: bool = False,
+    sticky_fired: bool = False,
+) -> str:
+    """T5: compose the rules string for this specific turn. Core block
+    is always on (~5KB); scenario blocks (~3KB total) load only when
+    their signal fires.
+
+    Signals:
+      - `has_attachments`: file/sha refs in the turn → load MEDIA +
+        file-types blocks (the LLM needs the inspection cheatsheet
+        and the delivery convention).
+      - `_looks_like_bug_report(task)`: keywords like "не работает" /
+        "error" / "crash" / "fix" → load journal-first block.
+      - `sticky_fired`: STICKY REQUEST DETECTED → load
+        repeated-request escalation block.
+
+    Conservative defaults: an unrecognised turn shape gets ONLY the
+    core block. The LLM can `load_skill` to pull more context if it
+    needs the cheatsheet for a specific scenario.
+    """
+    parts = [_UNIFIED_RULES_CORE]
+    if _looks_like_bug_report(task):
+        parts.append(_RULES_JOURNAL_FIRST)
+    if has_attachments:
+        parts.append(_RULES_FILE_TYPES)
+        # MEDIA convention is most useful alongside an inbound
+        # attachment (likely to produce a delivered file) but we add
+        # it on attachment presence as a proxy.
+        parts.append(_RULES_MEDIA_CONVENTION)
+    if sticky_fired:
+        parts.append(_RULES_REPEATED_REQUEST)
+    return "\n\n".join(parts)
 
 
 # ─── Auto-recall ───────────────────────────────────────────────────
@@ -690,6 +891,13 @@ _REFLECTION_TOOL_ALLOWLIST = frozenset({
 })
 
 
+# T3 (no-progress detector): consecutive identical tool-result hashes
+# this many in a row → append the 🔄 NO PROGRESS marker. 3 is a
+# sweet spot: 2 catches an intentional re-read (false fire), 4+
+# misses the 20-iteration probe loops the May 2026 audit caught.
+_NOPROGRESS_WINDOW = 3
+
+
 # I2: cap on the number of auto-fired install proposals per turn.
 # Without this, a skill with N missing required_tools would generate
 # N separate Telegram DMs to the owner in a single burst. Five is the
@@ -725,6 +933,43 @@ TOKEN_SOFT_PER_TURN = int(
 TOKEN_HARD_PER_TURN = int(
     _os_for_token_budget.environ.get("HRANT_TOKEN_HARD_PER_TURN", "30000")
 )
+
+
+_TRUNCATION_HINTS = {
+    "read_file": (
+        "Call again with `start_line=N` / `end_line=M` to read the "
+        "specific range you actually need, or use `grep` to find "
+        "the line(s) before reading."
+    ),
+    "view_file": (
+        "Call again with `start_line=N` / `end_line=M` to read just "
+        "the relevant range."
+    ),
+    "terminal_exec": (
+        "Pipe through `head -100` / `tail -100` / `grep -n PATTERN` "
+        "next time, or write to a file and read with start_line/"
+        "end_line."
+    ),
+    "web_search": (
+        "Narrow the query (add the year, a specific error code, the "
+        "library name) so fewer results match."
+    ),
+    "fetch_url": (
+        "Use `read_file` on a saved excerpt, or fetch a deeper URL "
+        "that's already filtered (e.g. the API endpoint, not the "
+        "human-readable index page)."
+    ),
+}
+
+
+def _truncation_hint(name: str) -> str:
+    """T2: tell the LLM HOW to ask for less. Without a hint the LLM
+    re-calls the same tool hoping for less data; with a hint it uses
+    the parameterised version (range, grep, narrower query)."""
+    return _TRUNCATION_HINTS.get(
+        name,
+        "Call again with a narrower scope or use a more specific tool.",
+    )
 
 
 def _format_token_budget_marker(used: int) -> str:
@@ -1329,12 +1574,34 @@ def run_unified(
     # though both have the same speaker_id.
     convo = CONVERSATION.context_block(n=6, session_key=skey)
 
+    # T8: classify the turn shape. Trivial chats (short, no attachment,
+    # no matched skill, no action verb) get a minimal prompt — drops
+    # the skill catalog (~2-4 KB depending on N skills), semantic
+    # suggestions block, auto-propose block, and full _UNIFIED_RULES
+    # in favour of a tiny chat-only rules block.
+    _trivial_turn = _is_trivial_chat(
+        task,
+        has_attachments=bool(attachments),
+        matched_skills_count=len(matched_skills),
+    )
+    try:
+        agent.progress(
+            "turn_shape",
+            "trivial-chat" if _trivial_turn else "task",
+        )
+    except Exception:
+        pass
+
     # Skill catalog (cheap, ~one line per skill) + full body of each
     # auto-matched skill (richer, but only on actual trigger hits).
-    try:
-        catalog = _SKILLS.catalog_block()
-    except Exception:
+    # Trivial turns skip the catalog entirely.
+    if _trivial_turn:
         catalog = ""
+    else:
+        try:
+            catalog = _SKILLS.catalog_block()
+        except Exception:
+            catalog = ""
 
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
@@ -1349,7 +1616,9 @@ def run_unified(
         system_parts.append(f"---\n\n{convo}")
     if catalog:
         system_parts.append(f"---\n\n{catalog}")
-    if semantic_suggestions:
+    # T8: skip semantic-suggestions on trivial turns — they would
+    # nudge the LLM to load a skill we already know isn't relevant.
+    if semantic_suggestions and not _trivial_turn:
         hint_lines = [
             "# SEMANTIC SUGGESTIONS",
             "(No trigger/tag fired, but these skills look topically close. "
@@ -1399,7 +1668,19 @@ def run_unified(
             system_parts.append(f"---\n\n{sk.system_block(missing_tools=missing)}")
         except Exception as e:
             log.debug("skill %s system_block failed: %s", sk.name, e)
-    system_parts.append(f"---\n\n{_UNIFIED_RULES}")
+    # T5+T8: per-turn rules. Trivial-chat turns get the ~500-char
+    # `_MINIMAL_CHAT_RULES` instead of the full 13+KB unified rules.
+    # Non-trivial turns get the composed `_build_rules_for_turn`
+    # output (core always-on + scenario blocks on signal).
+    if _trivial_turn:
+        _rules_for_turn = _MINIMAL_CHAT_RULES
+    else:
+        _rules_for_turn = _build_rules_for_turn(
+            task=task,
+            has_attachments=bool(attachments),
+            sticky_fired=bool(sticky_block),
+        )
+    system_parts.append(f"---\n\n{_rules_for_turn}")
     system_parts.append(f"---\n\n{perms}")
     system_prompt = "\n\n".join(system_parts)
 
@@ -1413,17 +1694,33 @@ def run_unified(
     # `_on_tool_call` shape so the dev panel + SSE event stream
     # gets the same events the legacy pipeline emits.
     tool_outputs: list[str] = []
+    # T2 (audit cost-reduction): tighten per-tool token caps. Old
+    # caps (e.g. read_file at 20000) fed huge file bodies back to
+    # the LLM on every iteration — the May 2026 cost audit traced
+    # the 40:1 input:output ratio largely to this. New caps cut the
+    # default by 4-5x; the LLM is now expected to use start_line /
+    # end_line on read_file (it already supports them) or `grep`
+    # for targeted lookups. Errors get a smaller cap because they
+    # rarely need full traceback context.
     _DEFAULT_CAP = 1500
     _tool_cap = {
-        "read_file": 20000,
-        "view_file": 20000,
-        "read_note": 8000,
-        "list_files": 4000,
-        "glob": 4000,
+        "read_file": 4000,
+        "view_file": 4000,
+        "read_note": 4000,
+        "list_files": 2000,
+        "glob": 2000,
         "grep": 4000,
         "search": 4000,
         "search_knowledge": 4000,
     }
+    # T3 (no-progress detector): tracks the last `_NOPROGRESS_WINDOW`
+    # tool-result hashes. If the LAST `_NOPROGRESS_WINDOW` tool calls
+    # produced identical hashes, the LLM is in a probing loop —
+    # rereading the same file, re-running the same grep, etc. We
+    # append a 🔄 marker telling it to stop and write the partial
+    # report. Same shape as the token budget marker. Window constant
+    # is module-level for tests + audit visibility.
+    _recent_tool_hashes: list[str] = []
 
     def _on_tool_call(name: str, args: dict, result: str, is_error: bool) -> None:
         preview = (result or "").strip().splitlines()[0][:80] if result else ""
@@ -1483,6 +1780,50 @@ def run_unified(
         except Exception:
             # Marker is best-effort — never break a tool result.
             pass
+        # T3: no-progress detector. Hash the (name, result_head) and
+        # check if the last N tool calls all produced the same hash —
+        # i.e. the LLM is rereading the same file or re-running the
+        # same probe without making progress. Append a 🔄 marker so
+        # the LLM realises and switches strategy / writes partial
+        # report.
+        try:
+            import hashlib as _hl
+            head = (raw_result or "")[:500]
+            h = _hl.sha1(f"{name}:{head}".encode("utf-8", "replace")).hexdigest()[:16]
+            _recent_tool_hashes.append(h)
+            # Keep the buffer at exactly the window size.
+            if len(_recent_tool_hashes) > _NOPROGRESS_WINDOW:
+                _recent_tool_hashes.pop(0)
+            if (
+                len(_recent_tool_hashes) == _NOPROGRESS_WINDOW
+                and len(set(_recent_tool_hashes)) == 1
+            ):
+                raw_result = (raw_result or "") + (
+                    f"\n\n🔄 **NO PROGRESS DETECTED** — the last "
+                    f"{_NOPROGRESS_WINDOW} tool calls produced identical "
+                    f"output (same hash {h}). You're in a probing loop. "
+                    f"Stop re-reading / re-running the same probe. Either "
+                    f"switch to a different tool / strategy, or write the "
+                    f"partial report with what you have and end the turn."
+                )
+                # Clear so the marker doesn't keep firing on every
+                # subsequent call until variation appears naturally.
+                _recent_tool_hashes.clear()
+        except Exception:
+            pass
+        # T2: cap the tool result that GOES BACK to the LLM. The
+        # truncation message now explicitly hints at the range tools
+        # (start_line / end_line on read_file, grep for code search)
+        # so the LLM has a concrete next-step instead of giving up.
+        if raw_result and not is_error:
+            cap = _tool_cap.get(name, _DEFAULT_CAP)
+            if len(raw_result) > cap:
+                hint = _truncation_hint(name)
+                raw_result = (
+                    raw_result[:cap]
+                    + f"\n\n…[+{len(raw_result) - cap:,} more chars truncated. "
+                    + hint + "]"
+                )
         return raw_result, is_error
 
     # The big call. max_iterations: legacy solve used 6; unified

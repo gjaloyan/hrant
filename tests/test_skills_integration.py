@@ -156,9 +156,14 @@ def test_run_unified_injects_catalog_and_matched_skill(isolated_skills, monkeypa
     assert "probe workflow" in sys_prompt
 
 
-def test_run_unified_catalog_present_even_without_match(isolated_skills, monkeypatch):
-    """Catalog block is unconditional when any skill exists; only
-    the `## SKILL: …` block is gated by a trigger match."""
+def test_run_unified_catalog_present_on_task_turn_without_match(isolated_skills, monkeypatch):
+    """Catalog block IS injected when the turn looks like a task
+    (action verb present), even if no skill triggers. The matched-
+    skill body is only added on actual trigger hits.
+
+    After T8 (turn classifier), trivial chat turns ("hi", "thanks")
+    skip the catalog to save tokens. So this test uses a task-shaped
+    message — an action verb that doesn't match any skill trigger."""
     from backend import unified_agent as ua
     from backend import llm as _llm
     from backend.models import VerificationResult
@@ -186,7 +191,9 @@ def test_run_unified_catalog_present_even_without_match(isolated_skills, monkeyp
 
     from backend.agent import Agent
     agent = Agent()
-    agent.run("how's the weather today",
+    # "find me a poem about clouds" — has "find " action verb so
+    # classifier marks it task. No skill triggers on it though.
+    agent.run("find me a poem about clouds",
               channel="webui", speaker_id="webui:default")
 
     sys_prompt = captured.get("system") or ""
