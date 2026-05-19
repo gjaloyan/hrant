@@ -517,158 +517,68 @@ _UNIFIED_RULES = "\n\n".join([
 ])
 
 
-# Bug-report detector for the journal-first block. Heuristic: keywords
-# that mean "something is broken at runtime". Returns True for any of
-# them in the first 500 chars of the user's message.
-_BUG_REPORT_KEYWORDS_RE = re.compile(
-    r"(?:"
-    # Russian
-    r"не\s+работает|"
-    r"не\s+запускается|"
-    r"не\s+отвечает|"
-    r"не\s+обновля|"
-    r"падает|"
-    r"крашится|"
-    r"крашнул|"
-    r"ошибк|"
-    r"эксепш|"
-    r"трейсбэк|"
-    r"исключени|"
-    r"\bбаг\b|"
-    r"сломал|"
-    r"завис|"
-    r"глюч|"
-    # English
-    r"\bdoes(?:n['’]t|\s+not)\s+work|"
-    r"\b(?:is|are|was|were)(?:n['’]t|\s+not)\s+working|"
-    r"\bnot\s+working|"
-    r"\bbroken|"
-    r"\bcrash|"
-    r"\bexception|"
-    r"\btraceback|"
-    r"\berror\b|"
-    r"\bbug\b|"
-    r"\bfix\b|"
-    r"\bfails?\s+(?:to|with)|"
-    r"\bhttp\s*\d{3}|"
-    r"\b\d{3}\s+(?:bad\s+request|internal|forbidden|unauthorized|not\s+found)"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
-
-
-def _looks_like_bug_report(task: str) -> bool:
-    """T5: detect if the user's message is a bug / runtime-failure
-    report. If yes, the journal-first scenario block is loaded so
-    the agent's first tool call is `journalctl ...` not `read_file`."""
-    if not task:
-        return False
-    return bool(_BUG_REPORT_KEYWORDS_RE.search(task[:500]))
-
-
-# T8 turn classifier — separates "chat" turns (greetings, recall,
-# acknowledgements) from "task" turns (directives, problems, debug
-# requests). Chat turns get a minimal prompt that drops the skill
-# catalog and most of _UNIFIED_RULES — typical save: 7-10 KB.
-_ACTION_VERBS = (
-    # English imperatives we know we route into tools
-    "set ", "change", "fix ", "run ", "start ", "stop", "kill ",
-    "create", "make ", "add ", "remove", "delete", "update", "send ",
-    "save ", "download", "upload", "convert", "extract", "translate",
-    "compile", "build ", "test ", "deploy", "install", "search ",
-    "find ", "open ", "read ", "write ", "edit ", "show ", "list ",
-    "tell me ", "explain", "summari", "compose", "generate", "fetch",
-    "process", "analyse", "analyze", "debug", "trace", "audit",
-    # Russian imperatives
-    "измени", "поменяй", "запусти", "запус", "останови", "создай",
-    "добавь", "удали", "обнови", "пришли", "сохрани", "скачай",
-    "загрузи", "конвертируй", "извлеки", "переведи", "собери",
-    "протестируй", "задеплой", "установи", "найди", "открой",
-    "прочитай", "напиши", "покажи", "перечисли", "расскажи",
-    "объясни", "обработай", "проанализируй", "помоги ",
-    "посмотри", "отправь", "поставь", "выключи", "включи",
-)
-
-
-def _is_trivial_chat(
-    task: str,
-    *,
-    has_attachments: bool,
-    matched_skills_count: int,
-) -> bool:
-    """T8: detect cheap chat / recall turns that don't need the full
-    14 KB rules + skill catalog. Conservative — false negatives are
-    fine (we just pay the full prompt cost), false positives are bad
-    (LLM might miss a rule it needed).
-
-    Heuristic:
-      - no attachments (file delivery needs MEDIA + file-types rules);
-      - no matched skill (a skill matched = real task);
-      - short message (≤ 80 chars — long messages are usually directives);
-      - not a bug report (those have their own journal-first scenario);
-      - no recognised action verb in the message.
-    """
-    if has_attachments or matched_skills_count > 0:
-        return False
-    if not task:
-        return True  # empty message — minimal makes sense
-    body = task.strip()
-    if len(body) > 80:
-        return False
-    if _looks_like_bug_report(body):
-        return False
-    low = body.lower()
-    if any(v in low for v in _ACTION_VERBS):
-        return False
-    return True
-
-
-_MINIMAL_CHAT_RULES = """# AGENT — CHAT-ONLY TURN
-
-This turn was classified as casual / recall / acknowledgement (short
-message, no attachment, no matched skill, no action verb). The full
-agent rules + skill catalog have been omitted to save tokens.
-
-Be brief.
-
-For recall ("what voice / model / settings"), read the value from the
-STATE SNAPSHOT above — don't guess, don't run tools.
-
-If you've been misclassified and this actually IS a task:
-  - the full tool registry is still callable;
-  - call `list_skills` to see available skills;
-  - your usual rules (apply-don't-acknowledge, refusals-must-be-honest,
-    iteration-ceiling) still hold even though they're not spelled out
-    here.
-"""
+# Audit follow-up — "this is an LLM agent, we don't need keywords in
+# code". The previous version of this section had two keyword-based
+# classifiers:
+#
+#   - `_BUG_REPORT_KEYWORDS_RE` / `_looks_like_bug_report(task)`:
+#     ~25-keyword regex (Russian + English) to decide whether to
+#     inject the journal-first scenario block.
+#   - `_ACTION_VERBS` / `_is_trivial_chat(task, ...)`: ~60-verb list
+#     to decide whether the turn is "casual chat" and gets a
+#     minimal prompt vs the full preamble.
+#
+# Both REMOVED. Reasoning: when an LLM is in the loop, the CORRECT
+# place for fuzzy classification (chat vs task, bug vs not) is in
+# the LLM's reasoning, guided by prompt instructions — not a hand-
+# curated keyword list that misses every dialect, slang, and new
+# verb that isn't pre-listed. Brittle by construction; the LLM is
+# already paid for, let it think.
+#
+# What replaced them:
+#   - Bug-report → journal-first rule is now ALWAYS included in
+#     `_RULES_JOURNAL_FIRST` (loaded by default; 1.2 KB cost on every
+#     turn is cheaper than a misclassification). LLM reads the rule
+#     and applies it when its judgement says "this is a runtime bug".
+#   - Chat-vs-task → the "Chat vs task" rule already in CORE tells
+#     the LLM "not every turn needs a tool — casual chat / recall /
+#     small acks answer from context, but directives / state changes
+#     / multi-step problems USE TOOLS". LLM decides; full preamble
+#     always.
+#
+# Kept structural signals (NOT keyword-based) in `_build_rules_for_turn`:
+#   - `has_attachments` — direct attribute of the request (file/sha
+#     refs present). No NLP needed.
+#   - `sticky_fired` — comes from the dedicated sticky-request
+#     detector that watches the conversation buffer.
 
 
 def _build_rules_for_turn(
     *,
-    task: str = "",
     has_attachments: bool = False,
     sticky_fired: bool = False,
 ) -> str:
     """T5: compose the rules string for this specific turn. Core block
-    is always on (~5KB); scenario blocks (~3KB total) load only when
-    their signal fires.
+    is always on (~13 KB); structural-signal scenario blocks load
+    when their attribute is set.
+
+    No keyword-based classification. The LLM gets the same preamble
+    every turn (modulo structural signals) and decides for itself
+    when each rule applies.
 
     Signals:
       - `has_attachments`: file/sha refs in the turn → load MEDIA +
         file-types blocks (the LLM needs the inspection cheatsheet
         and the delivery convention).
-      - `_looks_like_bug_report(task)`: keywords like "не работает" /
-        "error" / "crash" / "fix" → load journal-first block.
       - `sticky_fired`: STICKY REQUEST DETECTED → load
         repeated-request escalation block.
 
-    Conservative defaults: an unrecognised turn shape gets ONLY the
-    core block. The LLM can `load_skill` to pull more context if it
-    needs the cheatsheet for a specific scenario.
+    Journal-first (for bug reports) is always present — the rule is
+    in the prompt every turn, applied by the LLM when its judgement
+    triggers it. We trust the LLM more than a Russian-plus-English
+    bug-keyword regex.
     """
-    parts = [_UNIFIED_RULES_CORE]
-    if _looks_like_bug_report(task):
-        parts.append(_RULES_JOURNAL_FIRST)
+    parts = [_UNIFIED_RULES_CORE, _RULES_JOURNAL_FIRST]
     if has_attachments:
         parts.append(_RULES_FILE_TYPES)
         # MEDIA convention is most useful alongside an inbound
@@ -1693,34 +1603,14 @@ def run_unified(
     # though both have the same speaker_id.
     convo = CONVERSATION.context_block(n=6, session_key=skey)
 
-    # T8: classify the turn shape. Trivial chats (short, no attachment,
-    # no matched skill, no action verb) get a minimal prompt — drops
-    # the skill catalog (~2-4 KB depending on N skills), semantic
-    # suggestions block, auto-propose block, and full _UNIFIED_RULES
-    # in favour of a tiny chat-only rules block.
-    _trivial_turn = _is_trivial_chat(
-        task,
-        has_attachments=bool(attachments),
-        matched_skills_count=len(matched_skills),
-    )
+    # Audit follow-up: the T8 keyword-based "trivial chat" classifier
+    # was removed (see comment above `_build_rules_for_turn`). Full
+    # preamble + catalog go to every turn; the LLM uses the "Chat vs
+    # task" rule in core to decide brevity.
     try:
-        agent.progress(
-            "turn_shape",
-            "trivial-chat" if _trivial_turn else "task",
-        )
+        catalog = _SKILLS.catalog_block()
     except Exception:
-        pass
-
-    # Skill catalog (cheap, ~one line per skill) + full body of each
-    # auto-matched skill (richer, but only on actual trigger hits).
-    # Trivial turns skip the catalog entirely.
-    if _trivial_turn:
         catalog = ""
-    else:
-        try:
-            catalog = _SKILLS.catalog_block()
-        except Exception:
-            catalog = ""
 
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
@@ -1735,9 +1625,7 @@ def run_unified(
         system_parts.append(f"---\n\n{convo}")
     if catalog:
         system_parts.append(f"---\n\n{catalog}")
-    # T8: skip semantic-suggestions on trivial turns — they would
-    # nudge the LLM to load a skill we already know isn't relevant.
-    if semantic_suggestions and not _trivial_turn:
+    if semantic_suggestions:
         hint_lines = [
             "# SEMANTIC SUGGESTIONS",
             "(No trigger/tag fired, but these skills look topically close. "
@@ -1787,18 +1675,15 @@ def run_unified(
             system_parts.append(f"---\n\n{sk.system_block(missing_tools=missing)}")
         except Exception as e:
             log.debug("skill %s system_block failed: %s", sk.name, e)
-    # T5+T8: per-turn rules. Trivial-chat turns get the ~500-char
-    # `_MINIMAL_CHAT_RULES` instead of the full 13+KB unified rules.
-    # Non-trivial turns get the composed `_build_rules_for_turn`
-    # output (core always-on + scenario blocks on signal).
-    if _trivial_turn:
-        _rules_for_turn = _MINIMAL_CHAT_RULES
-    else:
-        _rules_for_turn = _build_rules_for_turn(
-            task=task,
-            has_attachments=bool(attachments),
-            sticky_fired=bool(sticky_block),
-        )
+    # Audit follow-up: keyword-based trivial-chat / bug-report
+    # classifiers removed. Rules are composed from structural signals
+    # only (attachments, sticky-request flag). The LLM uses the
+    # "Chat vs task" + "Diagnose runtime bugs from journal" rules
+    # always present in the preamble to decide its own behaviour.
+    _rules_for_turn = _build_rules_for_turn(
+        has_attachments=bool(attachments),
+        sticky_fired=bool(sticky_block),
+    )
     system_parts.append(f"---\n\n{_rules_for_turn}")
     system_parts.append(f"---\n\n{perms}")
     system_prompt = "\n\n".join(system_parts)
