@@ -669,6 +669,27 @@ def _count_distinct_tools_called(agent) -> tuple[int, set[str]]:
 REFUSAL_ATTEMPT_BAR = 2
 
 
+# Post-turn skill_creator reflection — settings.
+#
+# Background: H3 added the `skill_creator` builtin skill that the
+# agent is supposed to load on its own after a non-trivial workflow.
+# A May 2026 audit of 110 prod turns showed the agent NEVER fires it:
+# 41 non-trivial turns (≥3 distinct tools), 0 `load_skill('skill_creator')`
+# calls, 0 `propose_skill` calls. A rule paragraph in _UNIFIED_RULES
+# isn't enough — the LLM just ignores it.
+#
+# Fix: a structural out-of-band LLM call after the user-visible answer.
+# It runs the 3-gate checklist on the just-finished turn and either
+# calls propose_skill or returns "no skill needed". Cost ~$0.01 per
+# qualifying turn; latency hidden from user (runs after answer ships).
+
+SKILL_REFLECTION_TOOL_BAR = 3
+SKILL_REFLECTION_MAX_ITERATIONS = 4
+_REFLECTION_TOOL_ALLOWLIST = frozenset({
+    "list_skills", "load_skill", "propose_skill",
+})
+
+
 # I2: cap on the number of auto-fired install proposals per turn.
 # Without this, a skill with N missing required_tools would generate
 # N separate Telegram DMs to the owner in a single burst. Five is the
@@ -769,6 +790,225 @@ def _rewrite_refusal_without_attempts(answer: str, agent) -> str:
         f"choice between outputs).\n\n"
         f"_(Original refusal: \"{excerpt}…\")_"
     )
+
+
+# ─── Post-turn skill_creator reflection (Option C from H3 audit) ───
+
+
+def _should_reflect_for_skill(agent, answer: str) -> tuple[bool, str]:
+    """Decide whether to run the post-turn skill-creator reflection.
+
+    Returns (should_run, reason) — the reason string is for telemetry
+    so the owner can audit why most turns skip reflection (most do).
+
+    Gates:
+      1. Answer is a non-empty string.
+      2. Answer doesn't open with a refusal pattern (failed turns
+         don't yield reusable workflows).
+      3. Answer isn't a rewriter output (iteration-ceiling rewrite,
+         refusal-rewrite) — those are recovery messages, not solutions.
+      4. The trace shows at least `SKILL_REFLECTION_TOOL_BAR` distinct
+         tool calls — a real composed workflow, not a one-tool answer.
+      5. The turn didn't already call propose_skill or
+         load_skill('skill_creator') — no double-firing.
+      6. The skill_creator skill itself is loaded (couldn't run the
+         reflection without its body anyway).
+    """
+    if not answer or not isinstance(answer, str):
+        return False, "empty-or-nonstring-answer"
+    head = answer[:300]
+    if _REFUSAL_OPENER_RE.search(head):
+        return False, "refusal-opener"
+    rewriter_marker_starts = (
+        "⚠️ I hit the iteration ceiling",
+        "⚠️ Я открыл ответ отказом",
+        "⚠️ I opened with a refusal",
+    )
+    for marker in rewriter_marker_starts:
+        if head.startswith(marker):
+            return False, "rewriter-output"
+    n_distinct, names = _count_distinct_tools_called(agent)
+    if n_distinct < SKILL_REFLECTION_TOOL_BAR:
+        return False, f"only-{n_distinct}-distinct-tools"
+    for step in (getattr(agent, "_trace", None) or []):
+        ev = getattr(step, "event", "") or ""
+        if ev not in ("tool", "tool_error"):
+            continue
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        nm = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None
+        )
+        if nm == "propose_skill":
+            return False, "already-proposed"
+        if nm == "load_skill":
+            args = (
+                getattr(tc, "args", None)
+                or (tc.get("args") if isinstance(tc, dict) else None)
+                or {}
+            )
+            if isinstance(args, dict) and args.get("name") == "skill_creator":
+                return False, "skill_creator-already-loaded"
+    from .skills import SKILLS as _SKILLS
+    if _SKILLS.get("skill_creator") is None:
+        return False, "skill_creator-skill-not-loaded"
+    return True, "ok"
+
+
+def _post_turn_skill_reflection(
+    agent,
+    task: str,
+    answer: str,
+    speaker_id: str,
+) -> None:
+    """Out-of-band reflection: after a non-trivial turn finishes,
+    spawn a small LLM call to decide whether to propose_skill.
+
+    Fires only when `_should_reflect_for_skill` says yes. Reuses
+    the global tool registry's execute path so a `propose_skill`
+    call here actually creates the user-tier draft + fires the
+    on_skill_proposed callback (owner gets Telegram DM as usual).
+
+    Tool surface is filtered to: list_skills, load_skill, propose_skill.
+    The reflection cannot accidentally trigger another nested turn of
+    work — no read_file, terminal_exec, run_python, etc.
+
+    Failures are swallowed — reflection is best-effort and must NEVER
+    affect the user-visible turn outcome.
+
+    Merge-existing-skill behaviour: when the catalog (passed in the
+    system prompt) shows a near-match, the reflection LLM can call
+    `load_skill(name)` to read its body, then call
+    `propose_skill(name=<same>, ...)` to overwrite the user-tier
+    skill with a merged version (preserving useful old parts, adding
+    new patterns from this turn). The `upsert_user_skill` path writes
+    by name, so propose_skill with an existing name replaces it
+    (and the new version is still DISABLED until owner approves).
+    """
+    should, reason = _should_reflect_for_skill(agent, answer)
+    if not should:
+        try:
+            agent.progress("skill_reflection", f"skipped: {reason}")
+        except Exception:
+            pass
+        return
+
+    n_distinct, names = _count_distinct_tools_called(agent)
+    try:
+        agent.progress(
+            "skill_reflection",
+            f"starting (distinct_tools={n_distinct})",
+        )
+    except Exception:
+        pass
+
+    try:
+        from .skills import SKILLS as _SKILLS
+        from .llm import router, TaskType
+        from .tool_registry import get_registry
+
+        sk = _SKILLS.get("skill_creator")
+        if sk is None:  # defensive — gate should have caught it
+            return
+
+        registry = get_registry()
+        full_schema = registry.to_anthropic_list()
+        filtered = [
+            t for t in full_schema
+            if t.get("name") in _REFLECTION_TOOL_ALLOWLIST
+        ]
+        if not filtered:
+            log.warning("skill_reflection: no allowlisted tools in registry")
+            return
+
+        # Catalog block — names + descriptions + tags + source. Not
+        # full bodies (those are heavy; reflection can `load_skill`
+        # the one it actually wants to merge).
+        cat_lines = ["# CURRENT SKILL CATALOG (for dedup / merge check)"]
+        for s in _SKILLS.list():
+            if not s.enabled:
+                continue
+            trig = ", ".join(s.triggers) if s.triggers else "—"
+            tags = ", ".join(s.tags) if s.tags else "—"
+            cat_lines.append(
+                f"- **{s.name}** ({s.source}): {s.description} "
+                f"_(triggers: {trig}; tags: {tags})_"
+            )
+        catalog_block = "\n".join(cat_lines)
+
+        reflection_system = (
+            "You are running the post-turn skill_creator reflection. "
+            "A non-trivial workflow just completed. Decide whether it "
+            "should become a reusable skill — or whether an EXISTING "
+            "skill should be IMPROVED with what this turn taught.\n\n"
+            "Constraints:\n"
+            "  - Make at most one `propose_skill(...)` call total.\n"
+            "  - If a near-match appears in the catalog below, call "
+            "`load_skill(name)` first to read its body, then call "
+            "`propose_skill(name=<same>, ...)` to OVERWRITE the user-"
+            "tier skill with a merged version (preserve useful old "
+            "parts, add new patterns from this turn). Skills upsert "
+            "by name — same name = replace.\n"
+            "  - If no skill is warranted (Gate 1/2/3 failure), do "
+            "NOT call any tool; reply with one plain-text line "
+            "starting `no skill needed — <reason>`.\n"
+            "  - Do not chain unrelated work; this is reflection, "
+            "not execution.\n\n"
+            + (sk.body or "")
+            + "\n\n---\n\n"
+            + catalog_block
+        )
+
+        tool_summary = ", ".join(sorted(names))
+        reflection_user = (
+            f"=== USER ASKED ===\n{(task or '')[:1500]}\n\n"
+            f"=== DISTINCT TOOLS USED THIS TURN ===\n"
+            f"{tool_summary}  (count: {n_distinct})\n\n"
+            f"=== AGENT'S FINAL ANSWER (first 2500 chars) ===\n"
+            f"{(answer or '')[:2500]}\n\n"
+            f"Walk skill_creator's 3 gates. Then either call "
+            f"`propose_skill(...)` once (with merge if a near-match "
+            f"exists in the catalog) or reply 'no skill needed' as "
+            f"plain text. Do not chain multiple tools."
+        )
+
+        def _exec(name, args):
+            return registry.execute(name, args)
+
+        def _on_tool(name, args, result, is_error):
+            try:
+                preview = (result or "").strip().splitlines()[0][:80] if result else ""
+                tag = "skill_reflection_tool_error" if is_error else "skill_reflection_tool"
+                agent.progress(
+                    tag, f"{name}({', '.join((args or {}).keys())}) -> {preview}",
+                )
+            except Exception:
+                pass
+
+        out = router().call_with_tools(
+            TaskType.COMPLEX_SOLVING,
+            reflection_system,
+            reflection_user,
+            tools=filtered,
+            execute_tool=_exec,
+            max_tokens=2000,
+            temperature=0.2,
+            max_iterations=SKILL_REFLECTION_MAX_ITERATIONS,
+            on_tool_call=_on_tool,
+        )
+        try:
+            preview = (out or "").strip()[:300]
+            agent.progress("skill_reflection", f"done: {preview}")
+        except Exception:
+            pass
+    except Exception as e:
+        # Best-effort — never break the user-visible turn.
+        log.warning("post-turn skill reflection failed: %s", e)
+        try:
+            agent.progress("skill_reflection", f"error: {type(e).__name__}: {e}")
+        except Exception:
+            pass
 
 
 def _auto_recall_block(task: str, *, limit: int = 3) -> str:
@@ -1214,6 +1454,18 @@ def run_unified(
     # plain language with a recovery prompt instead of letting a
     # bare refusal reach the user.
     answer = _rewrite_refusal_without_attempts(answer, agent)
+
+    # H3 enforcement: post-turn skill_creator reflection. Out-of-band
+    # LLM call that walks skill_creator's 3 gates against this turn's
+    # trace, then optionally fires propose_skill (with merge-existing
+    # support when a near-match is in the catalog). Gated tightly so
+    # most turns skip — only fires when ≥3 distinct tools ran AND
+    # the answer isn't a refusal/rewriter output AND no propose_skill
+    # was already called this turn. See `_should_reflect_for_skill`.
+    try:
+        _post_turn_skill_reflection(agent, task, answer, speaker_id)
+    except Exception as _e:
+        log.warning("skill reflection top-level swallow: %s", _e)
 
     # Record the (super) LLM call for the dev panel. We treat the
     # whole tool loop as one labelled call — per-iteration detail

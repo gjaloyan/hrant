@@ -78,7 +78,33 @@ specifics) would benefit from this exact workflow:
 
 If NO — STOP. Reply with "no skill needed — task is one-off".
 
-## All three gates passed → write the proposal
+## All three gates passed → check for an EXISTING near-match first
+
+Before composing a new skill, scan the CURRENT SKILL CATALOG (which
+the post-turn reflection always includes in its system prompt).
+Look for an existing skill whose `description` / `triggers` / `tags`
+cover the same problem shape as the one you just solved.
+
+If a near-match exists:
+  1. Call `load_skill(name)` to read its body.
+  2. Decide if the new turn taught a **better** approach (a tool
+     sequence that's cleaner, a workflow step the old body missed,
+     a pitfall the old body didn't warn about, a corrected command).
+  3. If yes, compose a **merged** body that:
+     - keeps the useful parts of the old body (don't throw away
+       working steps just because they aren't yours),
+     - adds the new patterns / pitfalls,
+     - drops only what's genuinely wrong or superseded.
+  4. Call `propose_skill(name=<same_name>, ...)` with the merged
+     content. `upsert_user_skill` writes by name, so a propose with
+     the SAME name OVERWRITES the user-tier copy. The new version
+     is DISABLED until the owner explicitly approves the replacement.
+  5. The DM the owner gets references the existing skill so they
+     understand this is an improvement, not a fresh skill.
+
+If no near-match exists, write a fresh skill as below.
+
+## Writing the proposal
 
 Call `propose_skill(name, description, triggers, when_to_use, body)`
 with these constraints:
