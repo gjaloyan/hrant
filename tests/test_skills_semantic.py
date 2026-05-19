@@ -307,3 +307,75 @@ def test_bundled_summarize_pdf_surfaces_for_summary_phrase():
     )
     names = [s.name for s, _ in pairs]
     assert "summarize_pdf" in names
+
+
+# ─── I1: concurrent rebuild vs search must not crash ───────────────
+
+
+def test_concurrent_rebuild_vs_search_does_not_crash():
+    """Stress: thread A repeatedly searches, thread B repeatedly
+    rebuilds the index. Before I1, this raised
+    `RuntimeError: dictionary changed size during iteration` from
+    inside search() when build() mid-cleared `_vectors`.
+    Now build() swaps atomically under a lock and search() snapshots
+    before iterating."""
+    import threading
+    from backend.skills import _SemanticIndex, Skill
+
+    idx = _SemanticIndex()
+
+    def make_skills(n):
+        return [
+            Skill(name=f"s{i}", description=f"video processing skill {i}",
+                  tags=["video", "ffmpeg"])
+            for i in range(n)
+        ]
+
+    # Initial population so search has something to find.
+    idx.build(make_skills(10))
+
+    errors: list = []
+    stop = threading.Event()
+
+    def reader():
+        try:
+            for _ in range(200):
+                if stop.is_set():
+                    return
+                idx.search("video processing")
+        except Exception as e:  # pragma: no cover — failure marker
+            errors.append(("reader", type(e).__name__, str(e)))
+
+    def writer():
+        try:
+            for i in range(50):
+                if stop.is_set():
+                    return
+                idx.build(make_skills(10 + (i % 5)))
+        except Exception as e:  # pragma: no cover — failure marker
+            errors.append(("writer", type(e).__name__, str(e)))
+
+    threads = [
+        threading.Thread(target=reader) for _ in range(3)
+    ] + [threading.Thread(target=writer) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    stop.set()
+
+    assert not errors, f"concurrent rebuild/search raised: {errors}"
+
+
+def test_semantic_index_exposes_lock():
+    """Pin the API surface — `_SemanticIndex` has a `_lock` attribute
+    that's an RLock (re-entrancy lets build use it without
+    deadlocking on internal calls)."""
+    from backend.skills import _SemanticIndex
+    idx = _SemanticIndex()
+    assert hasattr(idx, "_lock")
+    # RLock instances expose `.acquire()` / `.release()` and support
+    # nested with-blocks from the same thread.
+    with idx._lock:
+        with idx._lock:
+            pass  # nested acquire works → it's a RLock

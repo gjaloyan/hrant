@@ -31,6 +31,7 @@ import importlib.util
 import math as _math
 import re as _re
 import shutil as _shutil
+import threading as _threading
 from collections import Counter as _Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -281,11 +282,19 @@ class _SemanticIndex:
         self._df: _Counter = _Counter()           # term -> doc-freq
         self._N: int = 0
         self._vectors: dict[str, dict[str, float]] = {}
+        # I1: protect read/write of the index from cross-thread races.
+        # `SkillsManager.load()` (writer) and `run_unified` → semantic_match
+        # (reader) can run on different threads — without this, a
+        # Telegram callback that toggles a skill mid-search can clear
+        # `_vectors` while `search()` is iterating it and raise
+        # RuntimeError: dictionary changed size during iteration.
+        self._lock = _threading.RLock()
 
     def build(self, skills: list[Skill]) -> None:
-        self._docs.clear()
-        self._df.clear()
-        self._vectors.clear()
+        # I1: assemble the new state in locals first, then swap atomically
+        # under the lock. That way readers never see a half-built index.
+        new_docs: dict[str, list[str]] = {}
+        new_df: _Counter = _Counter()
         for sk in skills:
             text = " ".join([
                 sk.name or "",
@@ -295,29 +304,38 @@ class _SemanticIndex:
                 sk.when_to_use or "",
             ])
             tokens = _semantic_tokenize(text)
-            self._docs[sk.name] = tokens
+            new_docs[sk.name] = tokens
             for term in set(tokens):
-                self._df[term] += 1
-        self._N = len(self._docs)
-        for name, tokens in self._docs.items():
-            self._vectors[name] = self._tf_idf(tokens)
+                new_df[term] += 1
+        new_N = len(new_docs)
+        # Compute the vectors with the new corpus before swapping in.
+        new_vectors: dict[str, dict[str, float]] = {}
+        for name, tokens in new_docs.items():
+            new_vectors[name] = self._tf_idf_with_corpus(tokens, new_df, new_N)
+        with self._lock:
+            self._docs = new_docs
+            self._df = new_df
+            self._N = new_N
+            self._vectors = new_vectors
 
-    def _tf_idf(self, tokens: list[str]) -> dict[str, float]:
+    @staticmethod
+    def _tf_idf_with_corpus(
+        tokens: list[str],
+        df: _Counter,
+        N: int,
+    ) -> dict[str, float]:
+        """Pure helper — same math as `_tf_idf` but takes the corpus
+        DF + N as args so `build` can compute vectors against a fresh
+        corpus before publishing it via the lock."""
         if not tokens:
             return {}
         counts = _Counter(tokens)
         max_tf = max(counts.values())
         vec: dict[str, float] = {}
         for term, tf in counts.items():
-            df = self._df.get(term, 0)
-            if df == 0:
-                # Query-only term not in any doc — gets no weight
-                # against the corpus, but smoothing keeps it useful
-                # for the query-vector norm.
-                df = 0
+            d = df.get(term, 0)
             tf_norm = tf / max_tf
-            # Smoothed IDF: log((N+1)/(df+1)) + 1, classic sklearn formula.
-            idf = _math.log((1 + self._N) / (1 + df)) + 1.0
+            idf = _math.log((1 + N) / (1 + d)) + 1.0
             vec[term] = tf_norm * idf
         return vec
 
@@ -329,19 +347,26 @@ class _SemanticIndex:
         min_score: float = 0.15,
     ) -> list[tuple[str, float]]:
         """Top-K skills by cosine similarity, filtered by min_score."""
-        if not self._docs:
-            return []
+        # I1: snapshot the index under the lock. After this point we
+        # iterate the local references — even if `build()` runs on
+        # another thread it can't mutate what we're walking.
+        with self._lock:
+            if not self._docs:
+                return []
+            df_snap = self._df
+            N_snap = self._N
+            vectors_snap = list(self._vectors.items())
         q_tokens = _semantic_tokenize(query)
         if not q_tokens:
             return []
-        q_vec = self._tf_idf(q_tokens)
+        q_vec = self._tf_idf_with_corpus(q_tokens, df_snap, N_snap)
         if not q_vec:
             return []
         q_norm = _math.sqrt(sum(v * v for v in q_vec.values()))
         if q_norm == 0:
             return []
         results: list[tuple[str, float]] = []
-        for name, doc_vec in self._vectors.items():
+        for name, doc_vec in vectors_snap:
             d_norm = _math.sqrt(sum(v * v for v in doc_vec.values()))
             if d_norm == 0:
                 continue
@@ -397,15 +422,55 @@ def _disabled_path() -> Path:
 
 
 def _load_disabled() -> set[str]:
+    """Read `skills_disabled.json`. M2: tolerate stale or malformed
+    files but log them — a stale `vid` entry from an old propose_skill
+    smoke shouldn't silently disable a real skill named `vid` years
+    later, and a corrupted JSON shouldn't pass as "nothing disabled"
+    without a warning.
+    """
     import json
+    import logging as _l
+    log = _l.getLogger(__name__)
     p = _disabled_path()
     if not p.exists():
         return set()
     try:
         raw = json.loads(p.read_text(encoding="utf-8"))
-        return set(raw.get("disabled") or [])
-    except Exception:
+    except json.JSONDecodeError as e:
+        log.warning(
+            "skills_disabled.json is corrupted (%s); treating as empty. "
+            "Owner: edit %s manually or delete it.", e, p,
+        )
         return set()
+    except Exception as e:
+        log.warning("skills_disabled.json read failed: %s", e)
+        return set()
+    if not isinstance(raw, dict):
+        log.warning(
+            "skills_disabled.json: expected JSON object, got %s; "
+            "treating as empty. Owner: edit %s.", type(raw).__name__, p,
+        )
+        return set()
+    disabled_raw = raw.get("disabled")
+    if disabled_raw is None:
+        return set()
+    if not isinstance(disabled_raw, list):
+        log.warning(
+            "skills_disabled.json: 'disabled' must be a list, got %s; "
+            "treating as empty. Owner: edit %s.",
+            type(disabled_raw).__name__, p,
+        )
+        return set()
+    # Filter to non-empty strings only.
+    out: set[str] = set()
+    for entry in disabled_raw:
+        if isinstance(entry, str) and entry.strip():
+            out.add(entry.strip())
+        else:
+            log.debug(
+                "skills_disabled.json: ignoring non-string entry %r", entry,
+            )
+    return out
 
 
 def _save_disabled(disabled: set[str]) -> None:
@@ -485,6 +550,8 @@ class SkillsManager:
     def load(self, registry: Optional[ToolRegistry] = None) -> list[Skill]:
         """Scan both built-in and user dirs. User overrides built-in
         by name. Idempotent — safe to re-call after edits."""
+        import logging as _l
+        log = _l.getLogger(__name__)
         registry = registry or get_registry()
         disabled = _load_disabled()
         builtin = self._scan_dir(self.dir, "builtin", disabled, registry)
@@ -498,6 +565,23 @@ class SkillsManager:
         for s in user:
             by_name[s.name] = s
         self.skills = sorted(by_name.values(), key=lambda s: s.name)
+        # M2: detect stale entries in skills_disabled.json — names
+        # listed as disabled but with no matching skill on disk.
+        # Common cause: an old propose_skill smoke test left a name
+        # behind and the user-tier skill dir got cleaned up later,
+        # leaving the disabled flag dangling. Warn so the owner can
+        # clean it up; do NOT auto-remove (might be a legitimate
+        # placeholder for a soon-to-be-added skill).
+        if disabled:
+            known = set(by_name.keys())
+            stale = sorted(disabled - known)
+            if stale:
+                log.warning(
+                    "skills_disabled.json has %d stale entr%s (no matching "
+                    "skill on disk): %s. Owner: edit %s to clean them up.",
+                    len(stale), "y" if len(stale) == 1 else "ies",
+                    ", ".join(stale), _disabled_path(),
+                )
         # H4: rebuild semantic index over the enabled set. Building over
         # all skills would let disabled ones rank against the query and
         # produce ghost suggestions; better to only index what's actually
@@ -591,16 +675,24 @@ class SkillsManager:
         ready to run.
 
         Walks the normalised dict shape (`{"name": ..., "manager": ...}`)
-        but returns just the names, since the existing surfaces
-        (catalog NEEDS marker, system_block warning) care only about
-        what's missing, not which manager will install it.
+        — `_normalize_required_tools` guarantees this layout at parse
+        time, so callers always see dicts here. Returns just the
+        names, since the existing surfaces (catalog NEEDS marker,
+        system_block warning) care only about what's missing, not
+        which manager will install it.
         """
         if not skill.required_tools:
             return []
         reg = registry if registry is not None else get_registry()
         out: list[str] = []
         for entry in skill.required_tools:
-            name = (entry.get("name") if isinstance(entry, dict) else str(entry)).strip()
+            # Schema invariant: every entry is a dict after parse-time
+            # normalisation. Anything else is a parser bug; surface it
+            # rather than silently coercing.
+            assert isinstance(entry, dict), (
+                f"required_tools entry not dict (schema bug): {entry!r}"
+            )
+            name = (entry.get("name") or "").strip()
             if not name:
                 continue
             if not _tool_is_available(name, reg):
@@ -630,12 +722,14 @@ class SkillsManager:
         reg = registry if registry is not None else get_registry()
         out: list[dict] = []
         for entry in skill.required_tools:
-            if isinstance(entry, dict):
-                name = (entry.get("name") or "").strip()
-                manager = (entry.get("manager") or "").strip() or None
-            else:
-                name = str(entry).strip()
-                manager = None
+            # Schema invariant — see missing_tools_for. After H1-rev,
+            # entries are always dicts; the legacy `list[str]` shape
+            # is dead code post-parse.
+            assert isinstance(entry, dict), (
+                f"required_tools entry not dict (schema bug): {entry!r}"
+            )
+            name = (entry.get("name") or "").strip()
+            manager = (entry.get("manager") or "").strip() or None
             if not name:
                 continue
             if _tool_is_available(name, reg):

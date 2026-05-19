@@ -73,6 +73,76 @@ def test_apt_install_uses_sudo_n_apt_get(isolated_installer):
     assert "-y" in cmd
 
 
+# ─── C2: per-manager whitelist ──────────────────────────────────────
+
+
+def test_apt_rejects_bracket_in_package_name(isolated_installer):
+    """apt-get sees `[` `]` as shell-glob characters. The whitelist
+    for apt must reject them. C2 fix."""
+    inst = isolated_installer
+    with pytest.raises(ValueError, match="disallowed characters"):
+        inst.propose(
+            packages=["foo[bar]"], manager="apt",
+            reason="C2 probe", requester="w",
+        )
+
+
+def test_apt_rejects_glob_metacharacter(isolated_installer):
+    """The exact attack shape — `foo[*]` would shell-expand to match
+    filenames in CWD. Whitelist must refuse."""
+    inst = isolated_installer
+    with pytest.raises(ValueError, match="disallowed characters"):
+        inst.propose(
+            packages=["foo[*]"], manager="apt",
+            reason="C2 probe", requester="w",
+        )
+
+
+def test_pip_still_accepts_bracket_extras(isolated_installer):
+    """pip extras syntax `requests[security]` is legal — the per-
+    manager whitelist must keep allowing it for pip / pipx."""
+    inst = isolated_installer
+    req = inst.propose(
+        packages=["requests[security]"], manager="pip",
+        reason="C2 probe", requester="w",
+    )
+    assert req is not None
+    assert req.packages == ["requests[security]"]
+
+
+def test_pipx_still_accepts_bracket_extras(isolated_installer):
+    inst = isolated_installer
+    req = inst.propose(
+        packages=["foo[bar]"], manager="pipx",
+        reason="C2 probe", requester="w",
+    )
+    assert req is not None
+    assert req.packages == ["foo[bar]"]
+
+
+def test_apt_accepts_normal_package_name(isolated_installer):
+    """Sanity — apt with a plain alphanumeric name still works."""
+    inst = isolated_installer
+    req = inst.propose(
+        packages=["ffmpeg"], manager="apt",
+        reason="C2 probe", requester="w",
+    )
+    assert req is not None
+    assert req.packages == ["ffmpeg"]
+
+
+def test_apt_accepts_dash_dot_plus_in_name(isolated_installer):
+    """Real apt names like `libreoffice-core`, `g++`, `python3.12-dev`
+    must still validate."""
+    inst = isolated_installer
+    for ok_name in ["libreoffice-core", "g++", "python3.12-dev", "lib_foo.bar"]:
+        req = inst.propose(
+            packages=[ok_name], manager="apt",
+            reason="C2 probe", requester="w",
+        )
+        assert req is not None, f"{ok_name!r} should be accepted by apt"
+
+
 def test_apt_install_runs_subprocess(isolated_installer, monkeypatch):
     """approve(code) for an apt request runs sudo -n apt-get install
     via subprocess.run and journals the result."""
@@ -407,6 +477,150 @@ def test_run_unified_dedups_auto_propose_across_turns(
     matching = [r for r in pending
                 if r.packages == ["definitely-not-real-xyz-789"]]
     assert len(matching) == 1
+
+
+# ─── I2: per-turn cap on auto-propose ──────────────────────────────
+
+
+@pytest.fixture
+def isolated_skill_with_many_missing(tmp_path, monkeypatch):
+    """Skill with MORE than AUTO_PROPOSE_CAP missing required_tools.
+    Triggers on 'manymissing'."""
+    from backend.config import CONFIG
+    monkeypatch.setitem(
+        CONFIG._data,
+        "knowledge",
+        {**CONFIG._data["knowledge"], "base_dir": str(tmp_path)},
+    )
+    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path))
+
+    fake_disabled = tmp_path / "skills_disabled.json"
+    monkeypatch.setattr(
+        "backend.skills._disabled_path", lambda: fake_disabled,
+    )
+
+    # 8 missing tools — more than the cap (5).
+    skill_dir = tmp_path / "skills" / "manymissing-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: manymissing\n"
+        "description: skill with many missing deps\n"
+        "triggers: [manymissing]\n"
+        "required_tools:\n"
+        + "\n".join(
+            f"  - not-real-pkg-{i:02d}" for i in range(8)
+        ) + "\n"
+        "---\n\nbody\n",
+        encoding="utf-8",
+    )
+    from backend import skills as sk_mod
+    sk_mod.SKILLS._user_dir_override = tmp_path / "skills"
+    sk_mod.SKILLS._loaded = False
+    sk_mod.SKILLS.skills = []
+
+    from backend import installer
+    installer.STORE._root_override = tmp_path
+    saved = list(installer._ON_INSTALL_PROPOSED)
+    installer._ON_INSTALL_PROPOSED.clear()
+
+    yield (sk_mod.SKILLS, installer)
+
+    installer._ON_INSTALL_PROPOSED.clear()
+    installer._ON_INSTALL_PROPOSED.extend(saved)
+    installer.STORE._root_override = None
+    sk_mod.SKILLS._user_dir_override = None
+    sk_mod.SKILLS._loaded = False
+    sk_mod.SKILLS.skills = []
+
+
+def test_auto_propose_caps_at_AUTO_PROPOSE_CAP(
+    isolated_skill_with_many_missing, monkeypatch,
+):
+    """A skill with 8 missing tools must produce only AUTO_PROPOSE_CAP
+    (=5) actual propose calls, not 8. The remaining 3 surface as a
+    deferred line in the system prompt."""
+    from backend.unified_agent import AUTO_PROPOSE_CAP
+    skills, installer = isolated_skill_with_many_missing
+    from backend import llm as _llm
+    from backend.models import VerificationResult
+
+    captured = {}
+    fake_router = MagicMock()
+
+    def fake_call(task_type, system, user, **kwargs):
+        captured["system"] = system
+        return "ack"
+
+    fake_router.call_with_tools.side_effect = fake_call
+    monkeypatch.setattr(_llm, "router", lambda: fake_router)
+
+    from backend import verifier as _v
+    monkeypatch.setattr(
+        _v, "verify", lambda *a, **kw: VerificationResult(confidence=90),
+    )
+
+    pending_before = len(installer.STORE.list_pending())
+
+    from backend.agent import Agent
+    agent = Agent()
+    agent.run("manymissing please go",
+              channel="webui", speaker_id="webui:default")
+
+    new_pending = installer.STORE.list_pending()[pending_before:]
+    # Exactly AUTO_PROPOSE_CAP DMs were fired, not 8.
+    assert len(new_pending) == AUTO_PROPOSE_CAP, (
+        f"expected {AUTO_PROPOSE_CAP} propose calls, got {len(new_pending)}"
+    )
+    # The deferred line shows up in the system prompt with the
+    # remaining count (8 - 5 = 3).
+    sys_prompt = captured.get("system") or ""
+    assert "AUTO-PROPOSED INSTALLS" in sys_prompt
+    assert "deferred" in sys_prompt
+    assert "3 more" in sys_prompt or "3 mo" in sys_prompt or " 3 " in sys_prompt
+
+
+def test_auto_propose_cap_constant_is_five():
+    """Pin the cap at 5. Bumping it would re-admit DM-flood risk."""
+    from backend.unified_agent import AUTO_PROPOSE_CAP
+    assert AUTO_PROPOSE_CAP == 5
+
+
+# ─── I3: requester labeling for auto-propose ───────────────────────
+
+
+def test_auto_propose_requester_carries_auto_skill_match_suffix(
+    isolated_skills_with_missing_dep, monkeypatch,
+):
+    """When run_unified auto-fires propose, the journal/pending entry
+    must show the speaker_id WITH '(auto-skill-match)' suffix so it
+    can be distinguished from an explicit propose_install call by
+    the user."""
+    skills, installer = isolated_skills_with_missing_dep
+    from backend import llm as _llm
+    from backend.models import VerificationResult
+
+    fake_router = MagicMock()
+    fake_router.call_with_tools.side_effect = lambda *a, **kw: "ack"
+    monkeypatch.setattr(_llm, "router", lambda: fake_router)
+    from backend import verifier as _v
+    monkeypatch.setattr(
+        _v, "verify", lambda *a, **kw: VerificationResult(confidence=90),
+    )
+
+    from backend.agent import Agent
+    agent = Agent()
+    agent.run("autoinstallprobe please",
+              channel="telegram", speaker_id="telegram:649231423")
+
+    pending = installer.STORE.list_pending()
+    matching = [r for r in pending
+                if r.packages == ["definitely-not-real-xyz-789"]]
+    assert matching, "auto-propose must have fired"
+    requester = matching[0].requester
+    # Speaker id stays for audit, suffix marks it as auto-fired.
+    assert "telegram:649231423" in requester
+    assert "auto-skill-match" in requester
 
 
 def test_run_unified_no_auto_propose_without_trigger_match(

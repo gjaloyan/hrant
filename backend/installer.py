@@ -274,14 +274,38 @@ def _fire_install_proposed(req: InstallRequest) -> None:
 # ─── public API ─────────────────────────────────────────────────────
 
 
-_PKG_NAME_OK = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.+[]"
+# C2: per-manager allowed-character whitelist.
+#
+# pip extras syntax (`requests[security]`) needs `[` and `]`. apt-get
+# does NOT — those characters in an apt package name are a shell glob
+# (`foo[*]` expands to filenames in $PWD). Use the tightest whitelist
+# per manager, not a one-size-fits-all set.
+_PKG_NAME_BASE = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.+"
+_PKG_NAME_OK_PER_MANAGER: dict[str, str] = {
+    # pip / pipx: pip-extras syntax needs `[` and `]`. Plus `+` for
+    # `package+extras` style.
+    "pip": _PKG_NAME_BASE + "[]",
+    "pipx": _PKG_NAME_BASE + "[]",
+    # apt: no `[` `]` — those are shell-glob characters. Just the
+    # base set (letters / digits / -_.+).
+    "apt": _PKG_NAME_BASE,
+}
+# Kept as backward-compat for any callers reading the legacy name;
+# the per-manager dict is the source of truth from H1-rev forward.
+_PKG_NAME_OK = _PKG_NAME_BASE + "[]"
 
 
-def _sanitise_packages(packages: list[str]) -> list[str]:
-    """Strip + filter incoming package names. We reject anything
-    that wouldn't be a valid pip/pipx/npm identifier — no spaces,
-    no shell metacharacters, no urls (those would let the agent
-    install from arbitrary URLs, which defeats the gate)."""
+def _sanitise_packages(packages: list[str], manager: str = "pip") -> list[str]:
+    """Strip + filter incoming package names. Rejects anything that
+    isn't a valid identifier for the given manager — no spaces, no
+    shell metacharacters, no URLs (URL installs would defeat the gate).
+
+    C2: the allowed character set depends on the manager. pip permits
+    `[ ]` for extras (`requests[security]`); apt-get does not, and a
+    name like `foo[*]` would shell-expand against $PWD. Use the
+    tightest whitelist that still accepts legal names.
+    """
+    allowed = _PKG_NAME_OK_PER_MANAGER.get(manager.lower(), _PKG_NAME_BASE)
     out: list[str] = []
     for raw in packages or []:
         name = (raw or "").strip()
@@ -295,10 +319,11 @@ def _sanitise_packages(packages: list[str]) -> list[str]:
                 f"package name {name!r} looks like a URL; the install gate "
                 f"refuses URL installs — name only"
             )
-        if any(ch not in _PKG_NAME_OK for ch in name):
+        if any(ch not in allowed for ch in name):
+            extra = " (apt forbids [ and ])" if manager.lower() == "apt" else ""
             raise ValueError(
                 f"package name {name!r} contains disallowed characters "
-                f"(only letters / digits / -_.[]+= allowed)"
+                f"for manager {manager!r}{extra}"
             )
         out.append(name)
     return out
@@ -318,7 +343,7 @@ def propose(
         raise ValueError(
             f"unsupported manager {manager!r}; allowed: {sorted(_MANAGERS)}"
         )
-    pkgs = _sanitise_packages(packages)
+    pkgs = _sanitise_packages(packages, manager=manager)
     if not pkgs:
         raise ValueError("packages list is empty after sanitisation")
     code = "".join(

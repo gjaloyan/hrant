@@ -1,7 +1,19 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+
+def _fresh_session_ts(days_old: int = 5) -> str:
+    """Return a timestamp `days_old` days before now in the
+    `YYYY-MM-DD HH:MM:SS` format the session writer uses. Used so
+    tests describing 'a recent session' stay within the staleness
+    threshold (default 30 days) regardless of when they run.
+    I4 fix: previously hardcoded to 2026-04-17/18 which broke
+    once system clock rolled past the threshold."""
+    return (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_old)
+    ).strftime("%Y-%m-%d %H:%M:%S")
 
 from backend.autonomic.levers.model_eval import FIRE_MODEL_EVAL
 from backend.autonomic.types import LeverCategory, LeverSafety, LeverStatus, StateSnapshot
@@ -150,7 +162,7 @@ def test_session_archive_metadata():
 def test_session_archive_skips_when_no_candidates(tmp_path: Path):
     sessions_path = tmp_path / "sessions.json"
     history_dir = tmp_path / "_history"
-    _write_sessions(sessions_path, [_session("fresh", "2026-04-17 12:00:00", consolidated=True)])
+    _write_sessions(sessions_path, [_session("fresh", _fresh_session_ts(), consolidated=True)])
 
     lever = FIRE_SESSION_ARCHIVE()
     report = lever.run({
@@ -167,7 +179,7 @@ def test_session_archive_moves_old_consolidated_sessions(tmp_path: Path):
     _write_sessions(sessions_path, [
         _session("old1", "2024-01-01 00:00:00", consolidated=True),
         _session("old2", "2024-06-01 00:00:00", consolidated=True),
-        _session("fresh", "2026-04-17 12:00:00", consolidated=True),
+        _session("fresh", _fresh_session_ts(), consolidated=True),
     ])
 
     lever = FIRE_SESSION_ARCHIVE()

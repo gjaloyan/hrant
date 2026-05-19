@@ -71,6 +71,46 @@ def _print_err(msg: str) -> None:
     sys.stderr.write(f"  err   {msg}\n")
 
 
+def _fetch_runtime_channel_state() -> dict:
+    """M4: ask the live daemon for the runtime status of each channel.
+
+    `hrant status` is a separate process — it cannot read in-process
+    state from the daemon. The daemon serves the truth at
+    `GET /api/channels`, which includes per-channel `runtime_status`
+    ('running' / 'stopped'). On any HTTP failure (timeout / refused /
+    non-200) returns a dict with `__error__` set so the caller can
+    fall back gracefully.
+
+    Bind port: same default the gateway uses (3333), overridable via
+    `HRANT_API_PORT` for non-default deployments.
+    """
+    import os
+    import urllib.request
+    import urllib.error
+    import json as _json
+
+    port = int(os.environ.get("HRANT_API_PORT", "3333"))
+    url = f"http://127.0.0.1:{port}/api/channels"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            if resp.status != 200:
+                return {"__error__": f"HTTP {resp.status} from {url}"}
+            data = _json.loads(resp.read().decode("utf-8"))
+    except urllib.error.URLError as e:
+        return {"__error__": f"daemon not reachable ({e.reason})"}
+    except (TimeoutError, OSError) as e:
+        return {"__error__": f"daemon not reachable ({e})"}
+    except Exception as e:
+        return {"__error__": f"{type(e).__name__}: {e}"}
+    out: dict = {}
+    for ch in (data.get("channels") or []):
+        cid = ch.get("id")
+        if cid:
+            out[cid] = ch.get("runtime_status") or "?"
+    return out
+
+
 def _read_input(prompt: str, default: Optional[str] = None) -> str:
     """Robust input helper that handles non-interactive runs by
     falling back to the default."""
@@ -401,14 +441,30 @@ def cmd_status(args: argparse.Namespace) -> int:
     print()
 
     # --- channels
+    #
+    # M4: `hrant status` runs in a SEPARATE process from the live
+    # daemon, so `CHANNELS._bots` is always empty here — every channel
+    # would falsely report `state=stopped` regardless of what the
+    # daemon is actually polling. Query the daemon's HTTP API instead;
+    # fall back to "?" if the API is unreachable (= daemon really is
+    # down or bound to a different port).
     print("channels:")
     try:
-        from .channels import CHANNELS, get_channels
-        running = CHANNELS.status_all()
+        from .channels import get_channels
+        runtime = _fetch_runtime_channel_state()
         for ch in get_channels():
             cid = ch.get("id", "?")
-            state = running.get(cid, "stopped")
-            print(f"  {cid}: type={ch.get('type', '?')}, state={state}, enabled={ch.get('enabled', False)}")
+            state = runtime.get(cid, "?")
+            if state == "?" and runtime.get("__error__"):
+                # Show the underlying error once at the end instead of
+                # repeating it per channel.
+                state = "unknown"
+            print(
+                f"  {cid}: type={ch.get('type', '?')}, "
+                f"state={state}, enabled={ch.get('enabled', False)}"
+            )
+        if runtime.get("__error__"):
+            print(f"  (runtime state unavailable: {runtime['__error__']})")
     except Exception as e:
         _print_err(f"channels: {e}")
     print()

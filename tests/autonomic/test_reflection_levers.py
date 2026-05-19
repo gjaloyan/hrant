@@ -1,7 +1,16 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+
+def _fresh_gap_ts(days_old: int = 5) -> str:
+    """`YYYY-MM-DD HH:MM` formatted timestamp `days_old` days before
+    now. Used so gap-detection 'actionable vs stale' tests stay
+    valid across system-clock drift. I4 fix."""
+    return (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_old)
+    ).strftime("%Y-%m-%d %H:%M")
 
 from backend.autonomic.levers.self_reflection import FIRE_SELF_REFLECTION
 from backend.autonomic.types import LeverCategory, LeverSafety, LeverStatus, StateSnapshot
@@ -316,9 +325,10 @@ def test_gap_detection_skips_when_empty(tmp_path: Path):
 
 def test_gap_detection_counts_actionable_and_stale(tmp_path: Path):
     gaps = tmp_path / "gaps.json"
+    fresh = _fresh_gap_ts()
     gaps.write_text(json.dumps({
-        "rust": {"topic": "rust", "count": 3, "last": "2026-04-18 12:00"},
-        "elixir": {"topic": "elixir", "count": 1, "last": "2026-04-18 12:00"},
+        "rust": {"topic": "rust", "count": 3, "last": fresh},
+        "elixir": {"topic": "elixir", "count": 1, "last": fresh},
         "cobol": {"topic": "cobol", "count": 5, "last": "2024-01-01 00:00"},
         "pascal": {"topic": "pascal", "count": 1, "last": "2024-02-01 00:00"},
     }), encoding="utf-8")

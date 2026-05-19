@@ -1,7 +1,16 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
+
+
+def _fresh_index_ts(days_old: int = 5) -> str:
+    """Timestamp in `YYYY-MM-DD HH:MM` format `days_old` days before
+    now. Used so curation tests stay within freshness window across
+    system-clock drift. I4 fix."""
+    return (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days_old)
+    ).strftime("%Y-%m-%d %H:%M")
 
 from backend.autonomic.levers.graph_maintenance import FIRE_GRAPH_MAINTENANCE
 from backend.autonomic.types import LeverCategory, LeverSafety, LeverStatus, StateSnapshot
@@ -212,7 +221,7 @@ def test_note_curation_picks_stale_hot_notes(tmp_path: Path):
         "hot_old": _index_entry("hot_old", "profession", "verified",
                                 updated="2024-01-01 00:00", access_count=10),
         "hot_fresh": _index_entry("hot_fresh", "profession", "verified",
-                                  updated="2026-04-18 12:00", access_count=10),
+                                  updated=_fresh_index_ts(), access_count=10),
     }
     (tmp_path / "index.json").write_text(json.dumps(idx), encoding="utf-8")
 

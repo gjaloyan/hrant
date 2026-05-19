@@ -23,6 +23,7 @@ import pytest
 
 from backend.unified_agent import (
     _REFUSAL_OPENER_RE,
+    _is_policy_refusal,
     _is_russian_dominant,
     _count_distinct_tools_called,
     _rewrite_refusal_without_attempts,
@@ -275,3 +276,99 @@ def test_attempt_bar_is_two():
     re-admit "called read_file then refused" as acceptable — that's
     the failure mode we're closing."""
     assert REFUSAL_ATTEMPT_BAR == 2
+
+
+# ─── C1: policy refusals must NOT be rewritten ──────────────────────
+
+
+@pytest.mark.parametrize("policy_refusal", [
+    # Real prod samples (workspace/turns/) — these would have been
+    # rewritten before C1 was added, which would have been a lie.
+    "Я не могу показать файл `user.md` гостевому пользователю: "
+    "доступ к локальным файлам вне публичного workspace я могу давать "
+    "только trusted-пользователям.",
+
+    "Alice, I can't help find or provide a private person's phone "
+    "number.\n\nI don't have verified public information about Mike's "
+    "current number.",
+
+    "I don't have verified information about a 'Vorondesh protocol' "
+    "in my memory or notes.\n\nAlso, the stated invention year "
+    "(2031) is in the future.",
+
+    # Other policy / privacy variants
+    "Я не могу поделиться личными данными третьих лиц.",
+    "I can't share personal information about that user.",
+    "Я не могу — это работа с конфиденциальной информацией.",
+    "Sorry, I can't help with stalking or harassment.",
+])
+def test_policy_refusals_not_rewritten(policy_refusal):
+    """The rewriter MUST leave policy / privacy / recall refusals
+    alone — they're honest non-capability refusals, not TSP violations.
+    Rewriting them would convert legitimate stances into lies."""
+    from types import SimpleNamespace
+    agent = SimpleNamespace(_trace=[])
+    out = _rewrite_refusal_without_attempts(policy_refusal, agent)
+    assert out == policy_refusal, (
+        f"policy refusal was wrongly rewritten:\n"
+        f"  in:  {policy_refusal[:120]!r}\n"
+        f"  out: {out[:120]!r}"
+    )
+
+
+@pytest.mark.parametrize("capability_refusal", [
+    # These DO indicate capability gaps and should still be rewritten
+    # when <2 tools were called.
+    "Я не могу обработать это видео — нет ffmpeg на сервере.",
+    "У меня нет инструмента для конвертации DWG файлов.",
+    "Среди доступных мне сейчас инструментов нет Telegram send_voice.",
+    "I can't do this without the ffmpeg binary.",
+    "Tools are not available for this conversion.",
+    "Sorry, I can't process this file type.",
+])
+def test_capability_refusals_still_rewritten(capability_refusal):
+    """The exclude must NOT swallow legitimate capability refusals —
+    those are the whole point of the rewriter."""
+    from types import SimpleNamespace
+    agent = SimpleNamespace(_trace=[])
+    out = _rewrite_refusal_without_attempts(capability_refusal, agent)
+    assert out != capability_refusal
+    assert "Task Solver Process" in out
+
+
+def test_is_policy_refusal_directly():
+    """The helper is the single source of truth for the exclude."""
+    # Policy markers (Russian)
+    assert _is_policy_refusal("это приватные данные") is True
+    assert _is_policy_refusal("конфиденциальная информация") is True
+    assert _is_policy_refusal("гостю не положено") is True
+    assert _is_policy_refusal("чужой телефон я не могу") is True
+    # Policy markers (English)
+    assert _is_policy_refusal("private phone number") is True
+    assert _is_policy_refusal("personal data") is True
+    assert _is_policy_refusal("someone's email") is True
+    assert _is_policy_refusal("third-party data") is True
+    assert _is_policy_refusal("confidential") is True
+    # Capability — NOT policy
+    assert _is_policy_refusal("no ffmpeg installed") is False
+    assert _is_policy_refusal("у меня нет тула") is False
+    assert _is_policy_refusal("") is False
+
+
+# ─── M1: language-detection tie-breaking goes to Russian ───────────
+
+
+def test_russian_dominant_resolves_tie_to_russian():
+    """Equal-count text → Russian. Pure symbols → Russian. This is
+    the M1 fix: Hrant's owner is Russian-speaking, so a tie or
+    symbol-heavy answer should pick the Russian rewrite, not the
+    English one."""
+    # Exactly tied (5 cyr / 5 lat)
+    assert _is_russian_dominant("aaabb привет") is True
+    # Pure symbols / digits — no letters at all
+    assert _is_russian_dominant("🚀 100% ✓ !!!") is True
+    assert _is_russian_dominant("12345") is True
+    # Russian dominant (unchanged)
+    assert _is_russian_dominant("совсем по-русски") is True
+    # English dominant (unchanged)
+    assert _is_russian_dominant("entirely in english here") is False

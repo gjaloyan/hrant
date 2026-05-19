@@ -531,10 +531,65 @@ _REFUSAL_OPENER_RE = re.compile(
 )
 
 
+# C1: policy / privacy / recall refusals are LEGITIMATE — they're not
+# capability gaps and the rewriter must not touch them. Without this
+# exclude the rewriter would mangle "I can't share private phone
+# numbers" or "не могу показать user.md гостю" into "you didn't try
+# the TSP" messages, which would be a lie. If any of these keywords
+# appears in the same window where the refusal opener fires, leave
+# the answer alone.
+_POLICY_REFUSAL_KEYWORDS_RE = re.compile(
+    r"(?:"
+    # Russian — privacy / policy / recall / guest gating
+    r"приват|конфиденциальн|"
+    r"личн\w+\s+данн|"
+    r"персональн\w+\s+данн|"
+    r"чужи\w*\s+данн|"
+    r"чужо\w*\s+(?:телефон|почт|email|номер|адрес)|"
+    r"посторонн|"
+    r"гостев|гостю|гостям|гостях|"
+    r"закрыт(?:ый|ая|ое|ые)\s+(?:доступ|канал|чат|инфо)|"
+    r"раскрыт(?:ь|ие)\s+(?:личн|персональн|конфиденц)|"
+    r"в\s+моей\s+(?:памяти|базе|notes)\s+нет|"
+    r"у\s+меня\s+нет\s+(?:верифицированн|проверенн|подтвержденн)|"
+    # English — same axis
+    r"\bprivate\s+(?:phone|number|email|address|data|info|details)|"
+    r"\bpersonal\s+(?:data|info|details|information)|"
+    r"\bsomeone(?:'s|s)?\s+(?:phone|number|email|address)|"
+    r"\bthird(?:[\s-]+)party(?:'s)?\s+(?:phone|number|email|data|info)|"
+    r"\bsensitive\s+(?:data|info|information)|"
+    r"\bconfidential|"
+    r"\bguest\s+(?:user|account|access)|"
+    r"\bi\s+(?:don'?t|do\s+not)\s+have\s+(?:verified|reliable|trustworthy)|"
+    r"\bno\s+verified\s+(?:public\s+)?(?:info|information)|"
+    # Safety / abuse refusals
+    r"\b(?:abuse|harassment|stalking|doxx?ing)\b"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_policy_refusal(text: str) -> bool:
+    """Return True if the refusal-opener window also contains a
+    policy / privacy / recall keyword that marks the refusal as
+    legitimate (not a capability gap). Used by the rewriter to
+    exclude refusals it should leave alone."""
+    if not text:
+        return False
+    return bool(_POLICY_REFUSAL_KEYWORDS_RE.search(text))
+
+
 def _is_russian_dominant(text: str) -> bool:
     """Naive script detection — count cyrillic vs latin letters. Used
     by the refusal rewriter to pick a response language that matches
-    what the agent (and presumably the user) was already speaking."""
+    what the agent (and presumably the user) was already speaking.
+
+    M1: ties resolve to Russian, not English. Hrant's owner speaks
+    Russian; an English rewrite on a mixed/balanced answer feels
+    worse than the inverse. Equal-count text is far more likely to
+    be a Russian answer that quoted a few English tool names than
+    the other way round.
+    """
     if not text:
         return False
     cyr = 0
@@ -545,7 +600,12 @@ def _is_russian_dominant(text: str) -> bool:
             cyr += 1
         elif "a" <= lc <= "z":
             lat += 1
-    return cyr > lat
+    if cyr == 0 and lat == 0:
+        # Pure symbols / digits / emoji — default to Russian for this
+        # bot (the owner speaks Russian; English rewrite on a symbol
+        # answer would be a sudden language switch).
+        return True
+    return cyr >= lat
 
 
 def _count_distinct_tools_called(agent) -> tuple[int, set[str]]:
@@ -573,6 +633,15 @@ def _count_distinct_tools_called(agent) -> tuple[int, set[str]]:
 REFUSAL_ATTEMPT_BAR = 2
 
 
+# I2: cap on the number of auto-fired install proposals per turn.
+# Without this, a skill with N missing required_tools would generate
+# N separate Telegram DMs to the owner in a single burst. Five is the
+# pragmatic ceiling: enough for any one skill's reasonable dep set,
+# small enough not to be a DM-flood. Remaining missing tools surface
+# as a "deferred" line so the LLM and the user still see them.
+AUTO_PROPOSE_CAP = 5
+
+
 def _rewrite_refusal_without_attempts(answer: str, agent) -> str:
     """If the final answer opens with a refusal pattern AND the trace
     shows fewer than `REFUSAL_ATTEMPT_BAR` distinct tool calls,
@@ -598,6 +667,18 @@ def _rewrite_refusal_without_attempts(answer: str, agent) -> str:
     # status reports that quote a refusal example.
     head = answer[:300]
     if not _REFUSAL_OPENER_RE.search(head):
+        return answer
+
+    # C1: policy / privacy / recall refusals are NOT capability gaps
+    # and must not be rewritten. Examples from real prod turns that
+    # this guard protects:
+    #   - "не могу показать `user.md` гостевому пользователю" (privacy)
+    #   - "I can't help find or provide a private person's phone" (privacy)
+    #   - "I don't have verified information about X" (recall)
+    # We widen the window to 500 chars here because policy markers
+    # often follow the opener (e.g. "Я не могу выполнить — это работа
+    # с персональными данными").
+    if _is_policy_refusal(answer[:500]):
         return answer
 
     n_distinct, names = _count_distinct_tools_called(agent)
@@ -799,13 +880,32 @@ def run_unified(
     # Across turns, `installer.has_pending` skips if there's already a
     # pending request waiting for the owner — no spam DMs.
     #
+    # I2: cap at AUTO_PROPOSE_CAP per turn. Without this, a skill with
+    # 10 missing tools would fire 10 separate Telegram DMs in a single
+    # message burst. After the cap, remaining tools surface as a
+    # "deferred" line in the system block so the LLM still knows
+    # they're needed.
+    #
+    # I3: the `requester` field always carries an "(auto-skill-match)"
+    # suffix so journal readers can tell auto-fired requests from
+    # explicit `propose_install` calls. The owner-only approval gate
+    # is still in installer.py — this is just journal hygiene so a
+    # guest who triggers a skill match doesn't end up "owning" a
+    # request in the audit trail.
+    #
     # Only fires on `matched_skills` (trigger/tag hit). Semantic
     # suggestions don't auto-propose — fuzzy match isn't strong enough
     # signal to commit the owner to an install.
     auto_proposed: list[dict] = []
+    auto_propose_deferred: int = 0
     if matched_skills:
         from . import installer as _installer
         seen_pairs: set[tuple[str, str]] = set()
+        proposes_fired = 0
+        requester_label = (
+            f"{speaker_id} (auto-skill-match)"
+            if speaker_id else "auto:skill-match"
+        )
         for sk in matched_skills:
             try:
                 missing = _SKILLS.missing_tools_with_manager_for(sk)
@@ -818,7 +918,14 @@ def run_unified(
                 if not pkg_name or key in seen_pairs:
                     continue
                 seen_pairs.add(key)
-                if _installer.has_pending([pkg_name], mgr):
+                # I2 cap: stop firing new propose calls past the limit.
+                # Already-pending entries still get listed (no DM is
+                # sent for those) so the LLM sees the full state.
+                already_pending = _installer.has_pending([pkg_name], mgr)
+                if not already_pending and proposes_fired >= AUTO_PROPOSE_CAP:
+                    auto_propose_deferred += 1
+                    continue
+                if already_pending:
                     auto_proposed.append({
                         "name": pkg_name, "manager": mgr,
                         "skill": sk.name, "code": None,
@@ -830,7 +937,7 @@ def run_unified(
                         packages=[pkg_name],
                         manager=mgr,
                         reason=f"auto-proposed: required by skill {sk.name}",
-                        requester=speaker_id or "auto:skill-match",
+                        requester=requester_label,
                     )
                 except Exception as e:
                     log.warning(
@@ -843,6 +950,7 @@ def run_unified(
                         "status": f"propose-error: {type(e).__name__}",
                     })
                     continue
+                proposes_fired += 1
                 if req is None:
                     auto_proposed.append({
                         "name": pkg_name, "manager": mgr,
@@ -855,12 +963,15 @@ def run_unified(
                         "skill": sk.name, "code": req.code,
                         "status": "proposed",
                     })
-        if auto_proposed:
+        if auto_proposed or auto_propose_deferred:
             agent.progress(
                 "install",
                 "auto-proposed: " + ", ".join(
                     f"{p['name']}({p['manager']}/{p['status']})"
                     for p in auto_proposed
+                ) + (
+                    f"; deferred={auto_propose_deferred} (cap={AUTO_PROPOSE_CAP})"
+                    if auto_propose_deferred else ""
                 ),
             )
 
@@ -908,7 +1019,7 @@ def run_unified(
         for sk in semantic_suggestions:
             hint_lines.append(f"- **{sk.name}** — {sk.description}")
         system_parts.append("---\n\n" + "\n".join(hint_lines))
-    if auto_proposed:
+    if auto_proposed or auto_propose_deferred:
         # H1-rev: tell the LLM what auto-installs are in flight. This
         # is a hint, not a command — the model decides whether to call
         # the dependent skill anyway (might pivot) and whether to tell
@@ -928,6 +1039,16 @@ def run_unified(
             if p.get("code"):
                 line += f" — request code `{p['code']}`"
             ap_lines.append(line)
+        if auto_propose_deferred:
+            # I2: per-turn cap exceeded — tell the LLM how many tools
+            # still need attention so it can ask the user about a
+            # batched approval instead of expecting all of them.
+            ap_lines.append(
+                f"- _…and {auto_propose_deferred} more missing tool(s) "
+                f"deferred (per-turn cap = {AUTO_PROPOSE_CAP}). Ask the "
+                f"user to approve the first batch in Telegram, then "
+                f"trigger the skill again to surface the rest._"
+            )
         system_parts.append("---\n\n" + "\n".join(ap_lines))
     for sk in matched_skills:
         try:
