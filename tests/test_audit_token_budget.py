@@ -162,14 +162,19 @@ def test_zero_threshold_disables_marker(monkeypatch):
 def test_telegram_footer_omits_usd_line():
     """Audit T4 directive: 'user need to see token usage only'. The
     Telegram per-turn footer (~/.../channels.py) must NOT include
-    a $ Cost line anymore."""
+    a $ Cost line anymore. The footer was later moved into
+    backend/tg_format.py (Hermes-style refactor) — check both."""
     import inspect
-    from backend import channels
-    src = inspect.getsource(channels)
+    from backend import channels, tg_format
+    src_chan = inspect.getsource(channels)
+    src_fmt = inspect.getsource(tg_format)
     # The exact old line that printed USD per turn.
-    assert "💰 Cost: $" not in src, (
-        "Telegram footer must not emit '💰 Cost: $X.XXXX' anymore "
-        "(audit T4: tokens-only user display)"
+    assert "💰 Cost: $" not in src_chan, (
+        "Telegram channels handler must not emit '💰 Cost: $X.XXXX'"
     )
-    # Sanity: the token line is still there.
-    assert "🔢 Tokens:" in src
+    assert "💰 Cost: $" not in src_fmt, (
+        "Telegram tg_format helper must not emit '💰 Cost: $X.XXXX'"
+    )
+    # Sanity: the token line is still in the Hermes-style helper.
+    # New format: "🔢 <b>NNN</b> tok ..."
+    assert "🔢" in src_fmt and "tok" in src_fmt

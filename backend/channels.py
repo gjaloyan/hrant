@@ -301,9 +301,35 @@ class _TgProgressStream:
             pass
 
     async def finalize(self, summary: str) -> None:
-        """Replace placeholder with the final compact summary."""
+        """Replace placeholder with the final compact summary.
+
+        Used as a fallback when delete-and-resend (the preferred
+        path that triggers a push notification) fails. The
+        summary text is rendered as plain text (no HTML)
+        because the streamer doesn't pass parse_mode."""
         self._closed = True
         await self._edit(summary[:4000])
+
+    async def delete_placeholder(self) -> bool:
+        """Delete the placeholder message so the caller can send the
+        final answer as a FRESH reply — that's what triggers a Telegram
+        push notification. Edits don't notify by design.
+
+        Returns True on success; False if Telegram refused (message
+        too old, missing permission). On failure the caller should
+        fall back to `finalize()` to overwrite the placeholder
+        with the final answer (still no notification, but at least
+        the user sees the answer).
+        """
+        self._closed = True
+        try:
+            await self.bot.delete_message(
+                chat_id=self.chat_id,
+                message_id=self.message_id,
+            )
+            return True
+        except Exception:
+            return False
 
 
 # Telegram MEDIA: convention — agent writes `MEDIA:/abs/path/to/file`
@@ -401,49 +427,12 @@ async def _strip_and_send_media(answer: str, update: "Any") -> tuple[str, int]:
     return cleaned, sent
 
 
-def _format_trace_footer(result: Any) -> str:
-    """Compact thinking + tools footer for Telegram replies.
-
-    Telegram has no `<details>` collapsible UI, so we keep this tight:
-      - 🧠 Thinking line: stage names from the trace, joined by →,
-        plus total step count and elapsed seconds. Tool events are
-        excluded so the line stays readable.
-      - 🔧 Tools line: counts of each distinct tool used, e.g.
-        `read_file(2), web_search(1)`. Omitted when no tools ran.
-
-    Returns "" when there's no trace at all (chat-fast-path replies).
-    """
-    trace = getattr(result, "thinking_trace", None) or []
-    if not trace:
-        return ""
-    # Stage chain — drop tool events, drop spammy `found:` repeats.
-    seen: set[str] = set()
-    stages: list[str] = []
-    for s in trace:
-        ev = s.event or ""
-        if ev.startswith("tool"):
-            continue
-        if ev in seen:
-            continue
-        seen.add(ev)
-        stages.append(ev)
-    # Tool tally
-    tool_counts: dict[str, int] = {}
-    last_ts = 0.0
-    for s in trace:
-        last_ts = max(last_ts, s.ts or 0.0)
-        if s.event in ("tool", "tool_error") and s.tool_call:
-            tool_counts[s.tool_call.name] = tool_counts.get(s.tool_call.name, 0) + 1
-    lines: list[str] = []
-    if stages:
-        chain = " → ".join(stages[:8])
-        if len(stages) > 8:
-            chain += f" → … (+{len(stages) - 8})"
-        lines.append(f"🧠 Thinking: {chain}  ({len(trace)} steps · {last_ts:.1f}s)")
-    if tool_counts:
-        tools = ", ".join(f"{n}({c})" for n, c in sorted(tool_counts.items()))
-        lines.append(f"🔧 Tools: {tools}")
-    return "\n".join(lines)
+# `_format_trace_footer` removed — its functionality moved into the
+# Hermes-style `format_trace_footer` / `format_stats_block` /
+# `render_answer_with_footer` helpers in `backend/tg_format.py`. The
+# new helpers emit HTML emphasis (which renders cleanly in Telegram)
+# and are reusable across the chat handler, the background-job DM,
+# the install-proposed DM, etc.
 
 
 # Audit fix: cap concurrent agent.run calls from a single Telegram
@@ -1606,51 +1595,20 @@ class TelegramBot:
                         )
                     answer = result.answer or "(no answer)"
 
-                    # Compact thinking + tools footer (between answer and stats).
-                    trace_footer = _format_trace_footer(result)
-
-                    # Token usage statistics — appended to the END of
-                    # the main answer (not the placeholder summary)
-                    # because that's where the user expects to find
-                    # them: at the bottom of the message they're
-                    # actually reading. Placeholder gets a minimal
-                    # `✅ Done` so it's clear the work finished.
-                    stats_block = ""
-                    if result.token_usage:
-                        tu = result.token_usage
-                        stats_lines = [
-                            "━━━━━━━━━━━━━━━━━━━━━━",
-                            f"🔢 Tokens: {tu.total_tokens:,} (in: {tu.input_tokens:,}, out: {tu.output_tokens:,})",
-                        ]
-                        if tu.cache_read_tokens > 0:
-                            stats_lines.append(f"💾 Cache read: {tu.cache_read_tokens:,}")
-                        if tu.cache_creation_tokens > 0:
-                            stats_lines.append(f"📝 Cache created: {tu.cache_creation_tokens:,}")
-                        # Audit T4: USD line removed per owner directive
-                        # ("user need to see token usage only"). The
-                        # cost is still in the turn artifact for backend
-                        # audits; user-facing display is tokens-first.
-                        stats_lines.append(f"🔄 LLM calls: {tu.llm_calls}")
-                        # Per-stage breakdown — top 3 by input tokens. Lets
-                        # the user see at a glance which stage owned the
-                        # bill ("solve: 220k in" vs "verify: 8k in") so
-                        # the next optimisation isn't a guess. Skip when
-                        # there's only one stage or all stages are tiny.
-                        stages = tu.by_stage or {}
-                        if len(stages) > 1 and tu.input_tokens >= 5_000:
-                            top = list(stages.items())[:3]
-                            parts = []
-                            for name, s in top:
-                                pct = (
-                                    s.get("input_tokens", 0) / tu.input_tokens * 100
-                                    if tu.input_tokens else 0
-                                )
-                                parts.append(
-                                    f"{name} {int(s.get('input_tokens', 0)):,}"
-                                    f" ({pct:.0f}%)"
-                                )
-                            stats_lines.append("📊 Stages: " + " · ".join(parts))
-                        stats_block = "\n".join(stats_lines)
+                    # Hermes-style footer + stats — one compact line each,
+                    # HTML emphasis for labels, total_time on the thinking
+                    # line so the user sees both how long it took and what
+                    # the stages were.
+                    from .tg_format import (
+                        format_trace_footer as _fmt_trace,
+                        format_stats_block as _fmt_stats,
+                    )
+                    trace_steps = getattr(result, "thinking_trace", None) or []
+                    last_ts = max(
+                        (getattr(s, "ts", 0) or 0) for s in trace_steps
+                    ) if trace_steps else 0.0
+                    trace_footer = _fmt_trace(trace_steps, total_time_s=last_ts)
+                    stats_block = _fmt_stats(result.token_usage)
 
                     # MEDIA: convention — agent can attach files to its
                     # reply by writing a line of the form
@@ -1671,83 +1629,109 @@ class TelegramBot:
                             f"sent {_media_sent} attachment(s) from MEDIA: lines",
                         ) if hasattr(agent, "progress") else None
 
-                    # Build the answer with footer + stats appended.
-                    # When the combined message would exceed Telegram's
-                    # 4096-char limit, the LAST chunk carries the
-                    # footer/stats so the bottom of the conversation
-                    # always shows totals — no chunk in the middle.
-                    answer_parts: list[str] = [answer]
-                    if trace_footer:
-                        answer_parts.append(trace_footer)
-                    if stats_block:
-                        answer_parts.append(stats_block)
-                    answer_with_stats = "\n\n".join(answer_parts)
+                    # Hermes-style assembly: markdown→Telegram HTML on
+                    # the answer body, render under a clean divider
+                    # with the trace + stats footer.
+                    from .tg_format import (
+                        markdown_to_telegram_html as _md_to_html,
+                        render_answer_with_footer as _render_msg,
+                    )
+                    answer_html = _md_to_html(answer or "")
+                    full_message = _render_msg(
+                        answer_html=answer_html,
+                        trace_footer=trace_footer,
+                        stats_block=stats_block,
+                    )
 
-                    # Replace the placeholder IN-PLACE with the final
-                    # answer instead of leaving a stale `✅ Done` line
-                    # next to a separate answer bubble. The user's
-                    # mental model is: one message in, one message
-                    # out. The placeholder becomes the answer.
-                    #
-                    # Smart chunking: keep the trace_footer + stats
-                    # block whole in the LAST message. Naive 4000-char
-                    # slicing would split the stats block at byte 4000
-                    # of the answer body, which looks broken on
-                    # Telegram. Strategy:
-                    #   - separate the answer body from the tail
-                    #     (tail = trace + stats)
-                    #   - chunk only the body
-                    #   - append the tail to whichever chunk has room,
-                    #     otherwise send it as a fresh final message
-                    tail_parts: list[str] = []
-                    if trace_footer:
-                        tail_parts.append(trace_footer)
-                    if stats_block:
-                        tail_parts.append(stats_block)
-                    tail = "\n\n".join(tail_parts)
-
+                    # Smart chunking — Telegram cap is 4096 chars
+                    # including HTML tags. Keep the footer block whole
+                    # in the last message so the user always sees the
+                    # full thinking/stats summary at the bottom.
                     LIMIT = 4000
-                    if not tail or len(answer) + len(tail) + 2 <= LIMIT:
-                        final_chunks = [
-                            answer if not tail else f"{answer}\n\n{tail}"
-                        ]
+                    if len(full_message) <= LIMIT:
+                        final_chunks = [full_message]
                     else:
+                        # Separate body from footer for clean chunking.
+                        tail_parts: list[str] = []
+                        if trace_footer:
+                            tail_parts.append(trace_footer)
+                        if stats_block:
+                            tail_parts.append(stats_block)
+                        from .tg_format import _DIVIDER as _DIV
+                        tail = (
+                            f"<i>{_DIV}</i>\n\n" + "\n\n".join(tail_parts)
+                            if tail_parts else ""
+                        )
                         body_chunks: list[str] = []
                         i = 0
-                        while i < len(answer):
-                            body_chunks.append(answer[i:i + LIMIT])
+                        while i < len(answer_html):
+                            body_chunks.append(answer_html[i:i + LIMIT])
                             i += LIMIT
-                        if (
-                            body_chunks
-                            and len(body_chunks[-1]) + len(tail) + 2 <= LIMIT
+                        if tail and body_chunks and (
+                            len(body_chunks[-1]) + len(tail) + 2 <= LIMIT
                         ):
                             body_chunks[-1] = f"{body_chunks[-1]}\n\n{tail}"
                             final_chunks = body_chunks
-                        else:
+                        elif tail:
                             final_chunks = body_chunks + [tail]
+                        else:
+                            final_chunks = body_chunks
 
-                    # The placeholder carries the FIRST chunk so the
-                    # user sees their answer appear where the "🧠
-                    # Thinking…" bubble was. The rest (if any) is
-                    # appended as fresh reply_text bubbles. Falls back
-                    # to a regular reply if the edit fails (message
-                    # too old, etc.) — better to ship two messages
-                    # than to drop the answer.
+                    # CRITICAL: deliver the answer via FRESH reply_text
+                    # messages, NOT by editing the placeholder.
+                    # Edits don't trigger Telegram push notifications;
+                    # only new messages do. We:
+                    #   1. delete the "🧠 Thinking…" placeholder
+                    #      (best-effort — Telegram refuses on >48h old
+                    #      messages, very rare for an active turn);
+                    #   2. send the answer as fresh reply_text bubbles
+                    #      → push notification fires with the answer
+                    #      content (or a prefix of it).
+                    # Fallback: if delete fails, finalize-edit the
+                    # placeholder with the first chunk (no notification
+                    # but at least the answer is visible), then send the
+                    # rest as fresh replies.
                     head, *rest = final_chunks
-                    edit_ok = False
+                    delete_ok = False
                     try:
-                        await stream.finalize(head)
-                        edit_ok = True
-                    except Exception as e_edit:
-                        log.warning(
-                            "TG placeholder finalize failed (%s); "
-                            "falling back to reply_text",
-                            e_edit,
-                        )
-                    if not edit_ok:
-                        await update.message.reply_text(head)
+                        delete_ok = await stream.delete_placeholder()
+                    except Exception as e_del:
+                        log.debug("TG placeholder delete failed: %s", e_del)
+                    if delete_ok:
+                        try:
+                            await update.message.reply_text(
+                                head, parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                        except Exception as e_send:
+                            # HTML parse error → retry as plain text
+                            # so the user gets the answer even if our
+                            # markup is malformed.
+                            log.warning(
+                                "TG reply HTML failed (%s); "
+                                "retrying as plain text", e_send,
+                            )
+                            await update.message.reply_text(answer or head)
+                    else:
+                        # Delete refused — fall back to edit-in-place
+                        # for the head, then send the rest fresh.
+                        try:
+                            await stream.finalize(head)
+                        except Exception as e_edit:
+                            log.warning(
+                                "TG placeholder edit fallback failed "
+                                "(%s); sending as fresh reply",
+                                e_edit,
+                            )
+                            await update.message.reply_text(head)
                     for c in rest:
-                        await update.message.reply_text(c)
+                        try:
+                            await update.message.reply_text(
+                                c, parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                        except Exception:
+                            await update.message.reply_text(c)
 
                     # Round D + voice-fix: voice reply. When the user
                     # sent a voice message AND TTS is configured +
