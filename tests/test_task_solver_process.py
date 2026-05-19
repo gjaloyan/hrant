@@ -94,3 +94,80 @@ def test_task_solver_process_failure_format():
     assert "tried" in low or "tools" in low
     assert "failed" in low or "exit" in low or "error" in low
     assert "unblock" in low or "next attempt" in low
+
+
+# ─── TSP-3: phase 1 requires a plan sentence ────────────────────────
+
+
+def test_phase_1_requires_plan_sentence():
+    """Hermes-like behavior — declare the plan before the first tool
+    call so mid-execution drift is rare. Pin the rule's existence."""
+    from backend.unified_agent import _UNIFIED_RULES
+    body = _UNIFIED_RULES
+    low = body.lower()
+    # The plan-sentence requirement.
+    assert "plan" in low
+    assert "one-sentence" in low or "one sentence" in low or "одну строк" in low
+    # The example string must be present so the LLM sees the shape.
+    assert "Я обработаю видео" in body or "preprocess_video" in body
+
+
+# ─── TSP-1: enforced operating limits ───────────────────────────────
+
+
+def test_operating_limits_section_present():
+    from backend.unified_agent import _UNIFIED_RULES
+    assert "TSP operating limits" in _UNIFIED_RULES or \
+           "operating limits" in _UNIFIED_RULES.lower()
+
+
+def test_attempt_bar_pinned_in_rules():
+    """The rule that says '<2 distinct tools = automatic rewrite'
+    must be in the rules so the LLM understands the structural
+    backstop, not just have it as runtime behavior."""
+    from backend.unified_agent import _UNIFIED_RULES
+    low = _UNIFIED_RULES.lower()
+    assert "attempt bar" in low
+    # The 2-distinct-tools threshold.
+    assert "2 distinct" in low or "minimum 2" in low or "at least 2" in low
+    # The rewrite mention.
+    assert "rewrit" in low or "automat" in low
+
+
+def test_iteration_budget_30_50_20_present():
+    """The 30/50/20 phased budget is the planning heuristic — pin
+    its presence so a future edit doesn't quietly drop it."""
+    from backend.unified_agent import _UNIFIED_RULES
+    body = _UNIFIED_RULES
+    # Either as percentages or as phases.
+    assert "30/50/20" in body or "30%" in body and "50%" in body
+
+
+def test_iteration_budget_names_explore_execute_verify_phases():
+    from backend.unified_agent import _UNIFIED_RULES
+    low = _UNIFIED_RULES.lower()
+    # The three phases the budget allocates.
+    assert "inspect" in low or "identify" in low
+    assert "execute" in low
+    assert "verify" in low or "deliver" in low
+
+
+def test_inspection_cheatsheet_in_tsp_section():
+    """Phase 2 inspection cheatsheet — quick lookup so the agent
+    doesn't reinvent inspection per turn."""
+    from backend.unified_agent import _UNIFIED_RULES
+    body = _UNIFIED_RULES
+    assert "Inspection cheatsheet" in body or "cheatsheet" in body.lower()
+    # The file-type → tool mappings must be visible.
+    for tool in ("preprocess_video", "analyze_image", "read_file", "run_python"):
+        assert tool in body, f"cheatsheet should name {tool!r}"
+
+
+def test_attempt_bar_constant_matches_rules():
+    """The REFUSAL_ATTEMPT_BAR runtime constant and the rules text
+    must agree on the threshold. If you change one, change both."""
+    from backend.unified_agent import REFUSAL_ATTEMPT_BAR, _UNIFIED_RULES
+    assert REFUSAL_ATTEMPT_BAR == 2
+    # Mention of '2' as the threshold must appear in the rules.
+    low = _UNIFIED_RULES.lower()
+    assert "2 distinct" in low or "minimum 2" in low or "at least 2" in low

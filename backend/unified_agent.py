@@ -141,10 +141,16 @@ execute, then report.)
 Walk these phases in order. Skip a phase only when its inputs are
 clearly already in hand.
 
-1. **Identify the final result.** What does the user want as
-   output — edited file, extracted text, generated PDF, fixed code,
-   completed analysis? Focus on producing it, not theorising about
-   it.
+1. **Identify the final result + commit to a plan.** What does the
+   user want as output — edited file, extracted text, generated PDF,
+   fixed code, completed analysis? Before your first tool call this
+   turn, commit to a ONE-SENTENCE plan stating WHAT you'll produce
+   and HOW. Example: "Я обработаю видео — `preprocess_video` для
+   кадра, найду рамку логотипа через `analyze_image`, прогоню ffmpeg
+   `delogo` через `run_python`, верну файл через `MEDIA:`." The plan
+   sentence is your own scaffolding — keep it short, make it visible,
+   then execute. Hermes does this naturally; Hrant tends to skip it
+   and drift mid-execution — make the plan explicit.
 
 2. **Check available inputs.** Did the user attach a file? Is the
    sha256 visible in the message context? Did an earlier turn save
@@ -200,6 +206,40 @@ clearly already in hand.
    reader registered) and ran `search_package('libdwg')` — no
    official PyPI distro. Workaround: export to DXF on your side
    or approve `propose_install(['ezdxf'], 'pip')` and I'll convert."
+
+### TSP operating limits (enforced — not guidelines)
+
+- **Attempt bar — minimum 2 distinct tools before any refusal.**
+  Before any "I can't do this" / "у меня нет тула" / "this isn't
+  supported" / "среди инструментов нет" phrasing, your trace MUST
+  show at least 2 *distinct* tool names (not two `read_file` calls
+  on the same path) and at least one must be a real execution
+  attempt, not just a state probe. A refusal-opener with <2 distinct
+  tools is **automatically rewritten** by the bridge into a "what I
+  tried / what's still needed" status — the user sees the rewrite,
+  not your draft. That backstop exists so you recover gracefully;
+  the safer path is to clear the attempt bar yourself.
+
+- **Iteration budget — 30/50/20 split.** You have ~20 tool-call
+  iterations per turn. Spend them:
+  - first ~30% (≈ iterations 1–6): identify result + inspect inputs
+    + skill match. If the path is clear after this, commit to it.
+  - next ~50% (≈ iterations 7–16): execute the chosen path.
+  - last ~20% (≈ iterations 17–20): verify the output + deliver
+    via `MEDIA:`. Or, if execution stalled, write the structured
+    failure report from phase 8.
+  Past 70% of budget without execution progress → STOP probing and
+  write the status report. The iteration-ceiling section below kicks
+  in structurally if you ignore this.
+
+- **Inspection cheatsheet — use the typed path, don't reinvent.**
+  Phase 2 inspection has explicit per-file-type tools — see the
+  "File types — which path handles which" section below. Quick
+  index: video → `preprocess_video(sha)` (gives frame_shas +
+  transcript); image → `analyze_image(sha, question)`; PDF / DOCX /
+  text-like → `read_file(path)`; spreadsheet / archive → `run_python`
+  with pandas / openpyxl / zipfile; unknown binary → `run_python`
+  for head-bytes + file-magic probe before deciding the path.
 
 ## Pick the right tool
 
@@ -453,6 +493,164 @@ def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
         f"iteration budget.\n\n"
         f"_(Never emit `&lt;tool_call …&gt;` XML as the final answer "
         f"again — that's a runtime artefact, not a tool I support.)_"
+    )
+
+
+# TSP-2: detect refusal-without-attempts.
+#
+# Patterns harvested from real production turns (workspace/turns/),
+# e.g. "Gor, я не могу выполнить этот запрос", "среди доступных мне
+# сейчас инструментов нет Telegram send_voice", "Я не могу здесь
+# реально 'услышать' отправленное аудио". Each of those answers opened
+# with a refusal phrase AND made <2 distinct tool calls. The TSP rule
+# says: do not refuse before walking inspect → skill-match → universal
+# fallback → at least one real execution attempt. This regex is the
+# tripwire that fires the rewriter when the rule is violated.
+_REFUSAL_OPENER_RE = re.compile(
+    r"(?:"
+    # Russian opens
+    r"я\s+не\s+могу|"
+    r"не\s+могу\s+(?:выполнить|сделать|обработать|помочь|это|такое)|"
+    r"у\s+меня\s+нет\s+(?:доступа|инструмент|возможност|тул)|"
+    r"среди\s+(?:доступных\s+(?:мне\s+)?)?(?:сейчас\s+)?инструмент\w*\s+нет|"
+    r"инструмент\w*\s+(?:не\s+)?(?:отключ|недоступ|отсутству)|"
+    r"невозможно\s+(?:выполнить|сделать|обработать)|"
+    r"я\s+не\s+поддержива|"
+    r"это\s+не\s+поддержива|"
+    r"к\s+сожалени[юе],?\s+(?:я\s+)?не\s+мог|"
+    # English opens
+    r"\bi\s+(?:can(?:not|'?t)|am\s+(?:not\s+able|unable))\b|"
+    r"\bi'?m\s+(?:not\s+able|unable)\b|"
+    r"\bi\s+(?:don'?t|do\s+not)\s+have\s+(?:access|the\s+tool|a\s+tool)|"
+    r"tools?\s+(?:are\s+)?(?:not\s+available|disabled|off|unavailable)|"
+    r"this\s+(?:isn'?t|is\s+not)\s+supported|"
+    r"unable\s+to\s+(?:do|perform|execute|complete)|"
+    r"sorry,?\s+(?:i\s+)?(?:can(?:not|'?t)|don'?t\s+have)"
+    r")",
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _is_russian_dominant(text: str) -> bool:
+    """Naive script detection — count cyrillic vs latin letters. Used
+    by the refusal rewriter to pick a response language that matches
+    what the agent (and presumably the user) was already speaking."""
+    if not text:
+        return False
+    cyr = 0
+    lat = 0
+    for c in text:
+        lc = c.lower()
+        if "а" <= lc <= "я" or lc == "ё":
+            cyr += 1
+        elif "a" <= lc <= "z":
+            lat += 1
+    return cyr > lat
+
+
+def _count_distinct_tools_called(agent) -> tuple[int, set[str]]:
+    """Walk the agent trace; return (count, names) of distinct tools
+    that were called this turn (whether they succeeded or errored)."""
+    names: set[str] = set()
+    for step in (getattr(agent, "_trace", None) or []):
+        ev = getattr(step, "event", "") or ""
+        if ev not in ("tool", "tool_error"):
+            continue
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        n = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None
+        )
+        if n:
+            names.add(n)
+    return len(names), names
+
+
+# The minimum "I actually tried" bar before a refusal is allowed.
+# Two distinct tool names — not two `read_file` calls on the same
+# missing file, but two genuinely different probes / attempts.
+REFUSAL_ATTEMPT_BAR = 2
+
+
+def _rewrite_refusal_without_attempts(answer: str, agent) -> str:
+    """If the final answer opens with a refusal pattern AND the trace
+    shows fewer than `REFUSAL_ATTEMPT_BAR` distinct tool calls,
+    rewrite into a 'what I tried / what's still needed' status with
+    a TSP-anchored reset.
+
+    Conservative on purpose: only fires when the agent literally
+    refused without trying. A refusal AFTER 2+ distinct tools
+    counts as a TSP-compliant honest report and is left untouched.
+
+    Skips:
+      - empty / non-string answers,
+      - answers that don't open with a known refusal pattern,
+      - answers where ≥ `REFUSAL_ATTEMPT_BAR` distinct tools ran.
+    """
+    if not isinstance(answer, str):
+        return ""
+    if not answer:
+        return ""
+
+    # Detect on the first 300 chars — refusals lead with the pattern;
+    # checking the whole answer risks false positives in proper
+    # status reports that quote a refusal example.
+    head = answer[:300]
+    if not _REFUSAL_OPENER_RE.search(head):
+        return answer
+
+    n_distinct, names = _count_distinct_tools_called(agent)
+    if n_distinct >= REFUSAL_ATTEMPT_BAR:
+        return answer
+
+    tools_str = ", ".join(sorted(names)) or "(none)"
+    excerpt = head.strip().replace("\n", " ")[:160]
+    if _is_russian_dominant(answer):
+        return (
+            f"⚠️ Я открыл ответ отказом, не пройдя Task Solver Process. "
+            f"Перезапускаю.\n\n"
+            f"Что я реально попробовал в этом турне: **{tools_str}** "
+            f"(порог по TSP — минимум {REFUSAL_ATTEMPT_BAR} разных тулов "
+            f"до фразы «не могу»).\n\n"
+            f"По TSP до отказа я должен был:\n"
+            f"  1. Определить конкретный output, который ты ждёшь.\n"
+            f"  2. Проверить attachments / sha-ссылки / workspace.\n"
+            f"  3. Пройти AVAILABLE SKILLS + SEMANTIC SUGGESTIONS, "
+            f"`load_skill(name)` для подходящего.\n"
+            f"  4. Если ничего не подошло — `load_skill(\"universal_resolver\")` "
+            f"и его 7 фаз.\n"
+            f"  5. И только тогда отчитаться форматом «что попробовал / "
+            f"что упало / что нужно дальше».\n\n"
+            f"Чтобы продолжить, выбери одно:\n"
+            f"  • повтори запрос — я попробую execute сразу;\n"
+            f"  • или скажи «посоветуй» / «объясни» — отвечу теорией "
+            f"без выполнения;\n"
+            f"  • или укажи что именно блокирует (отсутствует файл, "
+            f"нужен пароль, выбор между вариантами).\n\n"
+            f"_(Мой исходный отказ: «{excerpt}…»)_"
+        )
+    return (
+        f"⚠️ I opened with a refusal without walking the Task Solver "
+        f"Process. Resetting.\n\n"
+        f"Tools I actually called this turn: **{tools_str}** "
+        f"(TSP bar — at least {REFUSAL_ATTEMPT_BAR} distinct tools "
+        f"before any \"I can't\").\n\n"
+        f"Per TSP, before refusing I should have:\n"
+        f"  1. Identified the concrete output you want.\n"
+        f"  2. Inspected attachments / sha refs / workspace state.\n"
+        f"  3. Walked AVAILABLE SKILLS + SEMANTIC SUGGESTIONS and "
+        f"`load_skill(name)` for the best fit.\n"
+        f"  4. Fallen back to `load_skill(\"universal_resolver\")` if "
+        f"nothing matched.\n"
+        f"  5. Only then reported \"tried X, failed at Y, need Z\".\n\n"
+        f"To unblock me:\n"
+        f"  • repeat the request — I'll execute on this next turn;\n"
+        f"  • or say \"explain\" / \"advise\" — I'll answer with "
+        f"theory and skip execution;\n"
+        f"  • or name the specific blocker (missing file, password, "
+        f"choice between outputs).\n\n"
+        f"_(Original refusal: \"{excerpt}…\")_"
     )
 
 
@@ -853,6 +1051,12 @@ def run_unified(
     # status report so the human knows what was tried and what
     # input is missing.
     answer = _rewrite_xml_tool_call_dump(answer, agent)
+    # TSP-2: catch the "I can't do this" / "у меня нет инструмента"
+    # opener when the agent literally didn't try (< 2 distinct tools).
+    # Same shape as the XML-dump rewriter — surface the violation in
+    # plain language with a recovery prompt instead of letting a
+    # bare refusal reach the user.
+    answer = _rewrite_refusal_without_attempts(answer, agent)
 
     # Record the (super) LLM call for the dev panel. We treat the
     # whole tool loop as one labelled call — per-iteration detail
