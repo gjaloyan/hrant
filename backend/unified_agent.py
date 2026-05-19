@@ -553,6 +553,117 @@ _UNIFIED_RULES = "\n\n".join([
 #     detector that watches the conversation buffer.
 
 
+# Audit follow-up — `_try_chat_path`: LLM-based fast lane for
+# casual chats. Replaces the T8 keyword classifier that was
+# removed earlier (Russian + English action-verb lists were
+# brittle). Instead of deciding "chat vs task" via Python regex,
+# we let the LLM decide ITSELF — it gets a tiny prompt with no
+# tools and either answers directly OR emits `ESCALATE: <reason>`
+# and we route through the full agent.
+#
+# Cost:
+#   - chat-shaped turn that LLM handles directly: ~1-2 k tokens
+#     (vs ~15-17 k on the full unified path).
+#   - false-positive escalate: ~1.5 k extra tokens for the chat
+#     attempt + full path runs afterwards.
+# Net: huge win on real chats, small loss on misclassified tasks.
+# The decider is the LLM, not a hand-curated list.
+
+_CHAT_FAST_PATH_RULES = """# AGENT — CHAT FAST PATH
+
+You are running in a single-call chat lane. You have NO tools this
+turn. The user's message is short and looks casual.
+
+Goal: if you can answer directly (greeting, acknowledgement,
+recall like "what voice / model / settings am I on", brief
+opinion), do so. Use the STATE SNAPSHOT above for any recall —
+don't guess settings.
+
+If you actually NEED tools (file operations, settings changes,
+external lookups, running code, multi-step problems, file
+delivery) — do NOT try to answer. Respond with EXACTLY one line:
+
+  ESCALATE: <one-sentence reason>
+
+The system will then route the same message through the full
+agent with all tools available. Don't apologise, don't explain
+how the routing works, don't promise "I'll do it next turn" —
+just `ESCALATE: ...` and stop.
+
+Match the user's language. Be brief.
+"""
+
+
+def _try_chat_path(
+    *,
+    task: str,
+    agent,
+    speaker_id: str,
+    snapshot: str,
+    convo: str,
+) -> str | None:
+    """Try a single-call chat lane. Returns the answer if the LLM
+    chose to answer directly, or `None` if it emitted ESCALATE: /
+    looks like it needs tools (caller falls back to the full
+    unified path).
+
+    The decision is the LLM's — no keyword list, no regex over the
+    user message. We just provide a minimal prompt + zero tools
+    and trust the model to pick the cheaper option.
+
+    Fail-safe: any exception (router down, parse failure, weird
+    output) returns None so the full path runs unchanged. Fast
+    path failure must not break a turn.
+    """
+    try:
+        from .llm import router as _router, TaskType as _TT
+        from .identity import IDENTITY
+        sys_parts = [IDENTITY.preamble(speaker_id=speaker_id)]
+        if snapshot:
+            sys_parts.append(f"---\n\n{snapshot}")
+        if convo:
+            sys_parts.append(f"---\n\n{convo}")
+        sys_parts.append(f"---\n\n{_CHAT_FAST_PATH_RULES}")
+        sys_prompt = "\n\n".join(sys_parts)
+
+        answer = _router().call_with_tools(
+            _TT.QUICK_ANSWER,
+            sys_prompt,
+            task,
+            tools=[],
+            execute_tool=lambda n, a: ("", False),
+            max_tokens=600,
+            temperature=0.4,
+            max_iterations=1,
+            on_tool_call=None,
+        )
+    except Exception as e:
+        log.debug("chat fast path failed (exception): %s", e)
+        return None
+
+    if not answer or not isinstance(answer, str):
+        return None
+    head = answer.lstrip()
+    if head.upper().startswith("ESCALATE:"):
+        try:
+            agent.progress("chat_fast_path", f"escalating: {head[9:120].strip()}")
+        except Exception:
+            pass
+        return None
+    if "<tool_call" in head[:300]:
+        # LLM emitted a tool-call XML dump — definitely wanted tools.
+        try:
+            agent.progress("chat_fast_path", "escalating: tool-call XML in output")
+        except Exception:
+            pass
+        return None
+    try:
+        agent.progress("chat_fast_path", "answered directly")
+    except Exception:
+        pass
+    return answer
+
+
 def _build_rules_for_turn(
     *,
     has_attachments: bool = False,
@@ -1603,6 +1714,92 @@ def run_unified(
     # though both have the same speaker_id.
     convo = CONVERSATION.context_block(n=6, session_key=skey)
 
+    # Audit follow-up — LLM-based fast chat path. Cheap turns
+    # (greetings, recall, acknowledgements) shouldn't pay the full
+    # ~15 KB preamble + tool-loop overhead. Structural gate: try the
+    # fast lane only when:
+    #   - no attachments (file delivery needs the full preamble),
+    #   - no matched skill (skill match = real task by definition),
+    #   - message is reasonably short (≤500 chars; long is task-shaped).
+    # The decision IS the LLM's: it gets a tiny prompt with no tools
+    # and either answers directly or emits `ESCALATE: <reason>` to
+    # fall through to the full path. No keyword regex.
+    if (
+        not attachments
+        and not matched_skills
+        and len(task or "") <= 500
+    ):
+        chat_answer = _try_chat_path(
+            task=task,
+            agent=agent,
+            speaker_id=speaker_id,
+            snapshot=snapshot,
+            convo=convo,
+        )
+        if chat_answer is not None:
+            # Fast-path turn — still write a minimal artifact under
+            # workspace/turns/<id>.json so every turn has an audit
+            # trace and /api/turns/<id> resolves. Skipping the
+            # artifact would silently lose ~30-40% of turns (the
+            # chat-shaped ones) from the dev panel + audits.
+            turn_id = ""
+            try:
+                from .workspace import get_workspace
+                from datetime import datetime as _dt_fp
+                import uuid as _uuid
+                turn_id = (
+                    f"{_dt_fp.now().strftime('%Y%m%d_%H%M%S')}_"
+                    f"{_uuid.uuid4().hex[:8]}"
+                )
+                tu_now = TOKENS.request_usage()
+                artifact = {
+                    "turn_id": turn_id,
+                    "ts": _dt_fp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "user": task,
+                    "answer": chat_answer,
+                    "intent": "chat",
+                    "is_chat": True,
+                    "confidence": 85,
+                    "topics": [],
+                    "channel": channel,
+                    "speaker_id": speaker_id,
+                    "session_key": skey,
+                    "mode": "fast_chat",
+                    "token_usage": tu_now,
+                    "n_tool_calls": 0,
+                    "n_llm_calls": tu_now.get("llm_calls", 1) if isinstance(tu_now, dict) else 1,
+                    "thinking_trace": [],
+                    "llm_calls": [],
+                    "verification": {
+                        "confidence": 85,
+                        "verified_claims": [],
+                        "unverified_claims": [],
+                        "contradictions": [],
+                        "notes_used": [],
+                    },
+                }
+                if job_id:
+                    artifact["job_id"] = job_id
+                get_workspace().save_turn(turn_id, artifact)
+                try:
+                    setattr(agent, "_last_turn_id", turn_id)
+                except Exception:
+                    pass
+            except Exception as e:
+                log.debug("unified fast-path: save_turn failed: %s", e)
+
+            # The inner `call_with_tools` already pushed token usage
+            # through TokenTracker.record so per-day counters and
+            # request_usage() are up-to-date for the parent turn.
+            from .models import VerificationResult as _VR
+            return AgentAnswer(
+                answer=chat_answer,
+                verification=_VR(confidence=85),
+                is_chat=True,
+                mode="fast_chat",
+                turn_id=turn_id,
+            )
+
     # Audit follow-up: the T8 keyword-based "trivial chat" classifier
     # was removed (see comment above `_build_rules_for_turn`). Full
     # preamble + catalog go to every turn; the LLM uses the "Chat vs
@@ -1769,40 +1966,64 @@ def run_unified(
             ),
         )
         raw_result, is_error = registry.execute(name, args)
-        # T1+T4: append the token-budget marker to what the LLM sees.
-        # This is the runtime signal that turns telemetry into agent
-        # behaviour change. Markers only appear past the soft/hard
-        # threshold; under that, tool results stay clean. The marker
-        # piggybacks on the tool feedback the LLM was already going
-        # to read, so it costs ~50-100 tokens per crossing (not per
-        # iteration).
+        # Audit follow-up: the previous order (markers appended →
+        # truncation at end) clipped the markers exactly when they
+        # were most needed (long tool outputs). New order:
+        #   1. compute T7 digest header (from FULL raw_result)
+        #   2. T2 truncation cuts the BODY only
+        #   3. assemble: digest + truncated_body + budget/no-progress markers
+        # That keeps markers visible regardless of body size.
+
+        # T7: digest header from the full result.
+        digest = ""
+        if raw_result and not is_error:
+            try:
+                digest = _digest_tool_result(name, args, raw_result)
+            except Exception:
+                digest = ""
+
+        # T2: truncate the BODY only — markers go outside this.
+        body = raw_result or ""
+        if body and not is_error:
+            cap = _tool_cap.get(name, _DEFAULT_CAP)
+            if len(body) > cap:
+                hint = _truncation_hint(name)
+                body = (
+                    body[:cap]
+                    + f"\n\n…[+{len(raw_result) - cap:,} more chars truncated. "
+                    + hint + "]"
+                )
+
+        # T1+T4: token-budget marker. Audit follow-up: count
+        # `input_tokens` not `total_tokens` — output is ~2.5% of input,
+        # the bloat we're trying to surface is input replay across
+        # iterations. A 30 k input cap on a turn that emitted 5 k of
+        # output is the warning the LLM needs to see; total-token-
+        # based markers fire too late.
+        marker_budget = ""
         try:
-            used = TOKENS.request_usage().get("total_tokens", 0)
-            marker = _format_token_budget_marker(used)
-            if marker:
-                raw_result = (raw_result or "") + marker
+            usage = TOKENS.request_usage()
+            input_so_far = usage.get("input_tokens", 0)
+            marker_budget = _format_token_budget_marker(input_so_far)
         except Exception:
-            # Marker is best-effort — never break a tool result.
-            pass
-        # T3: no-progress detector. Hash the (name, result_head) and
-        # check if the last N tool calls all produced the same hash —
-        # i.e. the LLM is rereading the same file or re-running the
-        # same probe without making progress. Append a 🔄 marker so
-        # the LLM realises and switches strategy / writes partial
-        # report.
+            marker_budget = ""
+
+        # T3: no-progress detector — hash the FULL raw_result head
+        # (before truncation) so identical-with-noise outputs still
+        # match. Marker appended OUTSIDE truncation so it survives.
+        marker_nopr = ""
         try:
             import hashlib as _hl
             head = (raw_result or "")[:500]
             h = _hl.sha1(f"{name}:{head}".encode("utf-8", "replace")).hexdigest()[:16]
             _recent_tool_hashes.append(h)
-            # Keep the buffer at exactly the window size.
             if len(_recent_tool_hashes) > _NOPROGRESS_WINDOW:
                 _recent_tool_hashes.pop(0)
             if (
                 len(_recent_tool_hashes) == _NOPROGRESS_WINDOW
                 and len(set(_recent_tool_hashes)) == 1
             ):
-                raw_result = (raw_result or "") + (
+                marker_nopr = (
                     f"\n\n🔄 **NO PROGRESS DETECTED** — the last "
                     f"{_NOPROGRESS_WINDOW} tool calls produced identical "
                     f"output (same hash {h}). You're in a probing loop. "
@@ -1810,37 +2031,23 @@ def run_unified(
                     f"switch to a different tool / strategy, or write the "
                     f"partial report with what you have and end the turn."
                 )
-                # Clear so the marker doesn't keep firing on every
-                # subsequent call until variation appears naturally.
                 _recent_tool_hashes.clear()
         except Exception:
-            pass
-        # T7: prepend the structured digest header. Gives the LLM a
-        # 1-line at-a-glance for what's in the result, surviving the
-        # T2 truncation that may chop the body. Across iterations,
-        # scrolling the conversation history surfaces a ledger of
-        # what's already known (path, symbols, exit codes, hit counts).
-        if raw_result and not is_error:
-            try:
-                digest = _digest_tool_result(name, args, raw_result)
-            except Exception:
-                digest = ""
-            if digest:
-                raw_result = f"{digest}\n\n{raw_result}"
-        # T2: cap the tool result that GOES BACK to the LLM. The
-        # truncation message now explicitly hints at the range tools
-        # (start_line / end_line on read_file, grep for code search)
-        # so the LLM has a concrete next-step instead of giving up.
-        if raw_result and not is_error:
-            cap = _tool_cap.get(name, _DEFAULT_CAP)
-            if len(raw_result) > cap:
-                hint = _truncation_hint(name)
-                raw_result = (
-                    raw_result[:cap]
-                    + f"\n\n…[+{len(raw_result) - cap:,} more chars truncated. "
-                    + hint + "]"
-                )
-        return raw_result, is_error
+            marker_nopr = ""
+
+        # Assemble: digest (top, never clipped) + truncated body +
+        # markers (bottom, never clipped). The body is the only part
+        # that may shrink.
+        out_parts = []
+        if digest:
+            out_parts.append(digest)
+        out_parts.append(body)
+        if marker_budget:
+            out_parts.append(marker_budget.lstrip())
+        if marker_nopr:
+            out_parts.append(marker_nopr.lstrip())
+        final = "\n\n".join(p for p in out_parts if p)
+        return final, is_error
 
     # The big call. max_iterations: legacy solve used 6; unified
     # turns can do more work in one loop (research + apply +
@@ -1990,7 +2197,16 @@ def run_unified(
             "session_key": skey,
             "token_usage": tu.model_dump() if tu else None,
             "n_tool_calls": n_tools,
-            "n_llm_calls": len(agent._llm_calls or []),
+            # Audit follow-up — `len(agent._llm_calls)` lied: the
+            # unified turn records ONE super-call but the underlying
+            # `call_with_tools` may have done 5-15 actual LLM
+            # requests. Take the truth from TokenTracker which is
+            # incremented on every API call. Fall back to the old
+            # value only if usage wasn't reported (legacy path).
+            "n_llm_calls": (
+                (tu.llm_calls if tu and getattr(tu, "llm_calls", 0) else None)
+                or len(agent._llm_calls or [])
+            ),
         }
         if job_id:
             turn_record["job_id"] = job_id

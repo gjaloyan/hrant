@@ -191,10 +191,26 @@ def test_run_unified_catalog_present_on_task_turn_without_match(isolated_skills,
 
     from backend.agent import Agent
     agent = Agent()
-    # "find me a poem about clouds" — has "find " action verb so
-    # classifier marks it task. No skill triggers on it though.
-    agent.run("find me a poem about clouds",
-              channel="webui", speaker_id="webui:default")
+    # Audit follow-up: after _try_chat_path was added, short
+    # messages with no attachment + no skill match get routed
+    # through the LLM-based fast path (which mocks here as a
+    # generic "ack" answer, bypassing the full preamble assembly).
+    # Use a message > 500 chars to force the task path so we can
+    # verify the catalog injection.
+    long_task = (
+        "I have a long-form question about how the agent's "
+        "internal architecture handles non-trivial workflows "
+        "that span multiple tools — could you walk me through "
+        "the tool-loop iteration budget, the verifier pass, "
+        "and how the unified router decides when to fail over "
+        "to model B versus retrying with model A on a transient "
+        "network error, plus any rate-limiting that applies, "
+        "and on top of that I would also like to know how the "
+        "memory extraction step persists facts and how the "
+        "skill matcher prioritises triggers vs tags? "
+    )
+    assert len(long_task) > 500, f"need >500 chars, got {len(long_task)}"
+    agent.run(long_task, channel="webui", speaker_id="webui:default")
 
     sys_prompt = captured.get("system") or ""
     assert "AVAILABLE SKILLS" in sys_prompt

@@ -163,6 +163,21 @@ def usage_stats():
     return TOKENS.stats()
 
 
+@router.get("/api/tokens/today")
+def tokens_today():
+    """Audit follow-up — token-first daily aggregate.
+
+    Replaces the cost-first `api_calls_today` / `api_cost_today` view
+    on the StatusBar and UsagePage. Returns input/output/total token
+    counts, input:output ratio (the audit's main bloat lens), and
+    cost as a derived secondary.
+
+    The ratio is what to watch: 40:1 means "agent re-feeds context
+    every iteration"; healthy is 5-10:1.
+    """
+    return TOKENS.stats_today()
+
+
 @router.get("/api/usage/calls")
 def usage_calls(limit: int = 50):
     return {"calls": TOKENS.recent_calls(limit=limit)}

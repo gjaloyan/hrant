@@ -121,6 +121,17 @@ class TokenTracker:
         self._total_output = 0
         self._total_cost = 0.0
         self._total_calls = 0
+        # Audit follow-up — daily counters (token-first telemetry).
+        # router_state.json keeps `api_cost_today` based on a fixed
+        # per-call estimate; the codex audit flagged that as
+        # cost-first thinking. These counters are TOKEN-first +
+        # cost as a derived secondary. UI reads `stats_today()`
+        # via the new /api/tokens/today endpoint.
+        self._today_date = date.today().isoformat()
+        self._today_input = 0
+        self._today_output = 0
+        self._today_cost = 0.0
+        self._today_calls = 0
 
     def record(
         self,
@@ -182,6 +193,20 @@ class TokenTracker:
             self._total_output += output_tok
             self._total_cost += cost
             self._total_calls += 1
+            # Audit follow-up — daily counters. Reset on date change
+            # (UTC). The first call after midnight zeroes the buckets
+            # so /api/tokens/today reflects the new day cleanly.
+            today = date.today().isoformat()
+            if today != self._today_date:
+                self._today_date = today
+                self._today_input = 0
+                self._today_output = 0
+                self._today_cost = 0.0
+                self._today_calls = 0
+            self._today_input += input_tok
+            self._today_output += output_tok
+            self._today_cost += cost
+            self._today_calls += 1
 
         return rec
 
@@ -299,6 +324,46 @@ class TokenTracker:
         with self._lock:
             calls = self._log[-limit:]
         return [r.to_dict() for r in reversed(calls)]
+
+    def stats_today(self) -> dict:
+        """Token-first daily aggregate. Replaces the cost-first
+        `api_cost_today` view the codex audit flagged: tokens are
+        the primary metric, cost is derived. The router's per-call
+        $0.01 estimate becomes a secondary signal; this method
+        returns the truth from every recorded API call.
+
+        On date change (UTC), buckets auto-reset on the next
+        `record()` call. Reading the method on a fresh day before
+        any record happens returns zeros under today's date.
+        """
+        with self._lock:
+            today = date.today().isoformat()
+            if today != self._today_date:
+                # No records yet today — return clean zeros under
+                # today's date (don't lie about it being yesterday).
+                return {
+                    "date": today,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "total_tokens": 0,
+                    "input_output_ratio": 0.0,
+                    "cost_usd": 0.0,
+                    "llm_calls": 0,
+                }
+            in_ = self._today_input
+            out = self._today_output
+            # Ratio is the audit's main lens — input:output. 40:1
+            # means re-feeding context; ~5:1 means healthy.
+            ratio = round(in_ / max(1, out), 2) if out > 0 else float(in_)
+            return {
+                "date": self._today_date,
+                "input_tokens": in_,
+                "output_tokens": out,
+                "total_tokens": in_ + out,
+                "input_output_ratio": ratio,
+                "cost_usd": round(self._today_cost, 6),
+                "llm_calls": self._today_calls,
+            }
 
     def stats(self) -> dict:
         """Overall statistics."""
