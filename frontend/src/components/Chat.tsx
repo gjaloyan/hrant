@@ -7,6 +7,7 @@ import {
   type AttachmentMeta, uploadAttachment, transcribeAudio, attachmentUrl,
   type ThinkingStep, type TurnArtifact, type TokenUsage,
 } from "../api";
+import { Markdown } from "../markdown";
 
 type Msg =
   | { role: "user"; text: string; attachments?: AttachmentMeta[] }
@@ -15,6 +16,11 @@ type Msg =
       text: string;
       meta?: AgentAnswer;
       progress?: string[];
+      // Phase 2: SSE-level error (LLM dropped, transport error,
+      // unhandled exception in the runner). When present, an
+      // ErrorCard replaces the answer body. Separate from
+      // verification.contradictions which are content-level.
+      error?: string;
       // Round A: when the message was restored from session/conversation
       // history without its full thinking_trace, turn_id points at the
       // on-disk TurnWorkspace artefact. The first time the user expands
@@ -278,6 +284,255 @@ function ToolResultBody({ text }: { text: string }) {
     </pre>
   );
 }
+
+// ─── Phase 2 card primitives ──────────────────────────────────────
+//
+// Each agent-message renders a stack of cards: AnswerCard,
+// optional ToolTrace details, optional AskUserCard (Phase 1),
+// optional TaskStatusCard (live bg-job polling), optional
+// ErrorCard. Shared visual conventions:
+//   • rounded-lg border + dark-but-not-black background
+//   • header strip with icon + uppercase tracking-wide title +
+//     status pill on the right
+//   • body padded, scrollable when content overflows
+//   • color signal: emerald=ok, amber=running, rose=error,
+//     violet=question, slate=neutral/info
+//
+// Cards are intentionally siblings (not nested in one
+// AnswerCard) so each can be styled / collapsed independently
+// and the existing thinking-trace / token-usage footers under
+// the message stay where users expect them.
+
+
+// AnswerCard — renders the agent's final answer text with the
+// markdown renderer (code fences with copy buttons, inline code
+// highlights, bold/italic, lists, headings). For chat answers
+// (short, often single-line) the card chrome is intentionally
+// minimal — just the markdown body so quick replies don't look
+// over-decorated. For task-mode answers (longer, multi-paragraph)
+// we wrap in a card with a subtle header so the user can tell
+// "this is the final answer" apart from intermediate trace.
+function AnswerCard({
+  text,
+  is_chat,
+}: {
+  text: string;
+  is_chat: boolean;
+}) {
+  if (!text) return null;
+  // Chat-fast-path: render inline, no card chrome.
+  if (is_chat) {
+    return (
+      <div className="text-slate-100">
+        <Markdown source={text} />
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-lg overflow-hidden border border-slate-700/40 bg-slate-900/40">
+      <div className="px-3 py-1.5 border-b border-slate-700/40 bg-slate-900/30 flex items-center gap-2">
+        <span className="text-emerald-400 leading-none" aria-hidden>💬</span>
+        <span className="text-[10px] uppercase tracking-[0.08em] text-slate-400 font-medium">
+          Answer
+        </span>
+      </div>
+      <div className="px-3 py-2 text-[13px]">
+        <Markdown source={text} />
+      </div>
+    </div>
+  );
+}
+
+
+// TaskStatusCard — live status for a background job the agent
+// spawned via `start_background_job`. Polls /api/background-jobs/<id>
+// every 5s while the job is running; shows progress bar when the
+// job set `total_units` + `progress_probe_cmd`. On terminal status
+// the polling stops + the card flips colour (emerald=done,
+// rose=error/killed/vanished, amber=interrupted/stale).
+function TaskStatusCard({ jobId }: { jobId: string }) {
+  const [job, setJob] = useState<any | null>(null);
+  const [progress, setProgress] = useState<{ done: number | null; total: number | null; pct: number | null } | null>(null);
+  const [error, setError] = useState<string>("");
+  const [open, setOpen] = useState(false);
+  const [logTail, setLogTail] = useState<string>("");
+  useEffect(() => {
+    let cancelled = false;
+    const fetchAll = async () => {
+      try {
+        const jr = await fetch(`/api/background-jobs/${encodeURIComponent(jobId)}`);
+        if (!jr.ok) {
+          if (!cancelled) setError(`${jr.status} ${jr.statusText}`);
+          return;
+        }
+        const jdata = await jr.json();
+        if (cancelled) return;
+        setJob(jdata);
+        if (jdata.progress_probe_cmd && jdata.total_units) {
+          try {
+            const pr = await fetch(`/api/background-jobs/${encodeURIComponent(jobId)}/progress`);
+            if (pr.ok && !cancelled) {
+              setProgress(await pr.json());
+            }
+          } catch { /* probe failures are non-fatal */ }
+        }
+      } catch (e: any) {
+        if (!cancelled) setError(e?.message || String(e));
+      }
+    };
+    fetchAll();
+    const iv = setInterval(() => {
+      if (cancelled) return;
+      const status = job?.status || "";
+      if (status === "running" || status === "" || !status) {
+        fetchAll();
+      }
+    }, 5_000);
+    return () => { cancelled = true; clearInterval(iv); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jobId, job?.status]);
+
+  const loadLog = async () => {
+    try {
+      const r = await fetch(
+        `/api/background-jobs/${encodeURIComponent(jobId)}/log?stream=stdout&tail=4000`,
+      );
+      if (r.ok) {
+        const d = await r.json();
+        setLogTail(d.tail || "");
+      }
+    } catch { /* swallow */ }
+  };
+
+  if (!job) {
+    return (
+      <div className="rounded-lg border border-slate-700/40 bg-slate-900/30 px-3 py-2 text-[11px] text-slate-400">
+        📊 loading background job <code className="font-mono">{jobId}</code>
+        {error && <span className="text-rose-400 ml-2">· {error}</span>}
+      </div>
+    );
+  }
+  const status: string = job.status || "?";
+  const isTerminal = !(status === "running" || status === "" || status === "stale");
+  const accent = status === "done"
+    ? "border-emerald-700/40 bg-emerald-950/20"
+    : ["error", "killed", "vanished"].includes(status)
+      ? "border-rose-700/40 bg-rose-950/20"
+      : ["interrupted", "stale"].includes(status)
+        ? "border-amber-700/40 bg-amber-950/20"
+        : "border-sky-700/40 bg-sky-950/20";
+  const statusIcon = status === "done"
+    ? "✅"
+    : ["error", "killed", "vanished"].includes(status)
+      ? "❌"
+      : ["interrupted", "stale"].includes(status)
+        ? "⚠️"
+        : "📊";
+  const elapsed = (() => {
+    const started = job.started_at || 0;
+    const finished = job.finished_at || Math.floor(Date.now() / 1000);
+    const total = Math.max(0, Math.floor(finished - started));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${s}s` : `${s}s`;
+  })();
+  const pct = progress?.pct ?? null;
+  const done = progress?.done ?? null;
+  const total = progress?.total ?? job.total_units ?? null;
+  const pctInt = pct !== null ? Math.round(pct * 100) : null;
+
+  return (
+    <div className={`rounded-lg overflow-hidden border ${accent}`}>
+      <div className="px-3 py-1.5 flex items-center gap-2 border-b border-white/[0.04]">
+        <span className="leading-none" aria-hidden>{statusIcon}</span>
+        <span className="text-[10px] uppercase tracking-[0.08em] text-slate-300 font-medium">
+          Background job
+        </span>
+        <span className="text-xs text-slate-200">{job.label || job.job_id}</span>
+        <span className="ml-auto text-[10px] uppercase font-mono text-slate-400">
+          {status}{job.exit_code !== null && job.exit_code !== undefined ? ` · exit ${job.exit_code}` : ""}
+        </span>
+      </div>
+      <div className="px-3 py-2 text-[11px] text-slate-300 space-y-2">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span><span className="text-slate-500">id:</span> <code className="font-mono text-slate-300">{job.job_id}</code></span>
+          <span><span className="text-slate-500">elapsed:</span> {elapsed}</span>
+          {job.retry_count > 0 && <span><span className="text-slate-500">retry:</span> {job.retry_count}</span>}
+          {job.pid && <span><span className="text-slate-500">pid:</span> {job.pid}</span>}
+        </div>
+        {pctInt !== null && total !== null && (
+          <div>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="text-slate-400">progress</span>
+              <span className="text-slate-200 tabular-nums">{pctInt}%</span>
+              <span className="text-slate-500">({done}/{total})</span>
+            </div>
+            <div className="h-1.5 rounded bg-slate-800 overflow-hidden">
+              <div
+                className={`h-full ${isTerminal ? "bg-emerald-500" : "bg-sky-500"} transition-all`}
+                style={{ width: `${Math.min(100, Math.max(0, pctInt))}%` }}
+              />
+            </div>
+          </div>
+        )}
+        {job.command && (
+          <div className="text-[10px] text-slate-500 truncate" title={job.command}>
+            <span className="text-slate-600">$</span> <span className="font-mono">{job.command}</span>
+          </div>
+        )}
+        <details
+          open={open}
+          onToggle={(e: React.SyntheticEvent<HTMLDetailsElement>) => {
+            const o = e.currentTarget.open;
+            setOpen(o);
+            if (o && !logTail) void loadLog();
+          }}
+        >
+          <summary className="cursor-pointer text-[10px] text-slate-500 hover:text-slate-300">
+            stdout (tail)
+          </summary>
+          <pre className="mt-1 max-h-48 overflow-auto bg-black/40 rounded p-2 text-[10px] leading-snug font-mono whitespace-pre-wrap break-words">
+            {logTail || (
+              <span className="text-slate-600">loading…</span>
+            )}
+          </pre>
+        </details>
+        {isTerminal && job.stderr_tail && (
+          <div>
+            <div className="text-[10px] text-rose-400 mb-1">stderr (tail)</div>
+            <pre className="max-h-32 overflow-auto bg-rose-950/30 rounded p-2 text-[10px] leading-snug font-mono whitespace-pre-wrap break-words text-rose-200">
+              {job.stderr_tail}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
+// ErrorCard — surface SSE / tool-loop errors as a structured card
+// rather than dropping them into the answer text. Pre-Phase-2 the
+// chat would show "ERROR: { type: error, ... }" inline as if it
+// were the agent's answer, which read like the agent was confused.
+// Now it's a clean rose-themed card the user can spot at a glance.
+function ErrorCard({ message }: { message: string }) {
+  return (
+    <div className="rounded-lg overflow-hidden border border-rose-700/40 bg-rose-950/30">
+      <div className="px-3 py-1.5 border-b border-rose-800/40 bg-rose-900/30 flex items-center gap-2">
+        <span className="text-rose-400 leading-none" aria-hidden>❌</span>
+        <span className="text-[10px] uppercase tracking-[0.08em] text-rose-300 font-medium">
+          Error
+        </span>
+      </div>
+      <div className="px-3 py-2 text-[12px] text-rose-100 whitespace-pre-wrap break-words leading-snug">
+        {message}
+      </div>
+    </div>
+  );
+}
+
 
 // AskUserCard — structured question prompt analogous to Claude
 // Code's AskUserQuestion. Rendered when an agent turn ends with a
@@ -790,7 +1045,10 @@ const Chat = forwardRef<ChatHandle, {
           const last = m[lastIdx];
           if (last.role !== "agent") return m;
           const copy = [...m];
-          copy[lastIdx] = { ...last, text: "Error: " + ev.message };
+          // Phase 2: surface via ErrorCard instead of stuffing into
+          // the answer text. Keeping `text` empty so the AnswerCard
+          // doesn't double-render.
+          copy[lastIdx] = { ...last, text: "", error: ev.message };
           return copy;
         });
       }
@@ -1045,11 +1303,50 @@ const Chat = forwardRef<ChatHandle, {
                   />
                 </div>
               )}
+              {/* Task-status cards — live polling for background
+                  jobs the agent spawned this turn. The check looks
+                  through tool_starting / tool events for any
+                  start_background_job invocation and surfaces the
+                  resulting job_id. Each job_id renders once;
+                  duplicates (e.g. supervisor retry chains) skip. */}
+              {m.role === "agent" && (() => {
+                if (!m.meta?.thinking_trace) return null;
+                const jobIds: string[] = [];
+                const seen = new Set<string>();
+                for (const s of m.meta.thinking_trace) {
+                  const tc = s.tool_call;
+                  if (!tc || tc.name !== "start_background_job") continue;
+                  // job_id lives in the JSON result body.
+                  const resultText = tc.result || "";
+                  const m1 = /"job_id"\s*:\s*"(bg-[a-f0-9]+)"/i.exec(resultText);
+                  if (m1 && !seen.has(m1[1])) {
+                    seen.add(m1[1]);
+                    jobIds.push(m1[1]);
+                  }
+                }
+                if (jobIds.length === 0) return null;
+                return (
+                  <div className="mb-2 space-y-2">
+                    {jobIds.map((jid) => (
+                      <TaskStatusCard key={jid} jobId={jid} />
+                    ))}
+                  </div>
+                );
+              })()}
               {/* When there's no question card, render the answer
-                  text normally. The card's "❓ {question}" placeholder
-                  in meta.answer would be redundant with the card
-                  itself, so we skip it. */}
-              {!(m.role === "agent" && m.meta?.question) && m.text}
+                  text via the Markdown card. The "❓ {question}"
+                  placeholder in meta.answer would be redundant with
+                  the AskUserCard, so we skip it. User messages stay
+                  plain (no markdown — user input is literal). */}
+              {m.role === "user" && (
+                <span className="whitespace-pre-wrap">{m.text}</span>
+              )}
+              {m.role === "agent" && !m.meta?.question && m.text && (
+                <AnswerCard text={m.text} is_chat={Boolean(m.meta?.is_chat)} />
+              )}
+              {m.role === "agent" && m.error && (
+                <ErrorCard message={m.error} />
+              )}
 
               {/* Verification footer */}
               {m.role === "agent" && m.meta && !m.meta.is_chat && (

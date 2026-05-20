@@ -162,7 +162,22 @@ def test_background_py_is_deleted():
     assert not bg.exists(), "backend/background.py must be deleted in D-05"
 
 
-def test_app_has_no_background_routes():
+def test_app_has_no_legacy_background_routes():
+    """D-05 cleanup pin: the LEGACY `backend/background.py` module
+    (autonomic prototype) is gone, so any `/api/background-*` route
+    it used to mount must also be gone. Audit T6 introduced a
+    different concept — `/api/background-jobs/*` for the long-
+    running subprocess registry — which is explicitly allowed."""
     from backend.main import app
     paths = [r.path for r in app.routes if hasattr(r, "path")]
-    assert not any(p.startswith("/api/background") for p in paths)
+    # Allow only the audit T6 `background-jobs` family. Anything
+    # else under /api/background-* would be a regression to the
+    # deleted prototype.
+    bad = [
+        p for p in paths
+        if p.startswith("/api/background")
+        and not p.startswith("/api/background-jobs")
+    ]
+    assert bad == [], (
+        f"legacy background routes still mounted: {bad}"
+    )
