@@ -295,6 +295,44 @@ clearly already in hand.
     / `get_background_job(job_id)` for status check — but only on
     EXPLICIT user follow-up, not as a poll loop.
 
+  ## Task Endpoint Rule (Phase 3)
+
+  Before launching ANY long-running / non-trivial task via
+  `start_background_job` (benchmark, build, training, eval, large
+  transcode), FIRST call `define_task_endpoint(task_summary,
+  user_goal_verbatim, success_criteria)`. Crystallise what 'done'
+  means as a list of CHECKABLE criteria — prefer `check_cmd` shell
+  verifiers (exit 0 = met) over LLM-judged ones because the
+  supervisor turn will run them automatically and REFUSE to mark
+  the chain 'done' while critical criteria are unmet.
+
+  Example for "run publishable SWE-bench Lite 300":
+    1. `define_task_endpoint(
+         task_summary="Publishable SWE-bench Lite 300",
+         user_goal_verbatim="<user's message>",
+         success_criteria='[
+           {"id":"reports_300","description":"report.json with >=300 entries",
+            "check_cmd":"python -c \"import json; assert len(json.load(open(\\\"report.json\\\"))) >= 300\""},
+           {"id":"non_gold","description":"predictions are non-gold",
+            "check_cmd":"grep -q -v gold predictions.jsonl"}
+         ]',
+         failure_recovery='[
+           {"trigger":"ModuleNotFoundError","suggested_action":"propose_install missing package"},
+           {"trigger":"python: not found","suggested_action":"retry with python3"}
+         ]')`
+    2. `start_background_job(command="...", endpoint_id="te-...",
+        original_user_request="<user msg>", total_units=300,
+        progress_probe_cmd="find logs -name report.json | wc -l")`
+
+  The endpoint is the contract: code WILL refuse 'done' until the
+  criteria are met. This prevents the "exit 0, must be done!"
+  failure mode where the LLM rubber-stamps a no-op baseline run.
+
+  Skip `define_task_endpoint` for trivial things (single read_file,
+  one calc) — the overhead isn't worth it. Use the rule: if you'd
+  reach for `start_background_job` for a multi-step / multi-minute
+  task, define the endpoint first.
+
   - Multi-step research / code-review → `delegate(role, task)`
     to a specialised subagent (researcher / coder / reviewer).
 
@@ -1956,7 +1994,28 @@ def run_unified(
             "Past that, ESCALATE with diagnostic.\n"
             "  - Final DMs are Russian (default user language) and "
             "follow this shape: short status, what problems hit, "
-            "what fixed them, final result or blocker."
+            "what fixed them, final result or blocker.\n\n"
+            "TASK ENDPOINT GATE (Phase 3):\n"
+            "If a `=== TASK ENDPOINT EVALUATION ===` block appears "
+            "in this turn's input, it is the AUTHORITATIVE checklist "
+            "for what counts as DONE. Each critical criterion marked "
+            "❌ (unmet) BLOCKS `complete_supervisor(decision='done')` "
+            "at the code level — the tool will refuse and tell you "
+            "which criteria are blocking. Your options when criteria "
+            "are unmet:\n"
+            "  (a) RETRY — patch the command/inputs to satisfy the "
+            "criterion and call start_background_job again with "
+            "endpoint_id inherited from this job.\n"
+            "  (b) ESCALATE — write a final_message naming the "
+            "criteria you couldn't meet + what you tried + what the "
+            "user needs to clarify.\n"
+            "  (c) OVERRIDE (rare, escape hatch) — call "
+            "complete_supervisor with `criteria_overrides={\"<id>\": "
+            "\"<concrete evidence the criterion IS met despite "
+            "check_cmd>\"}` if you've verified from logs/output "
+            "that the check_cmd has a bug or path issue. Each "
+            "override needs a real explanation; bare 'looks fine' "
+            "is not acceptable."
         )
         system_parts.append(f"---\n\n{sup_block}")
     system_prompt = "\n\n".join(system_parts)

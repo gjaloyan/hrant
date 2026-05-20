@@ -372,6 +372,7 @@ def _start_background_job_handler(
     expected_outcome: str = "",
     total_units: int = 0,
     progress_probe_cmd: str = "",
+    endpoint_id: str = "",
 ) -> str:
     """Spawn `command` in a background thread and return the job_id
     immediately. OWNER-only. Use this INSTEAD of `terminal_exec` for
@@ -410,6 +411,7 @@ def _start_background_job_handler(
     inherit_expected = expected_outcome
     inherit_total_units = int(total_units) if total_units else None
     inherit_probe_cmd = progress_probe_cmd
+    inherit_endpoint = (endpoint_id or "").strip()
     if effective_parent:
         parent = _bg.STORE.get(effective_parent)
         if parent is not None:
@@ -426,6 +428,11 @@ def _start_background_job_handler(
             if inherit_total_units is None:
                 inherit_total_units = parent.total_units
             inherit_probe_cmd = inherit_probe_cmd or parent.progress_probe_cmd
+            # TaskEndpoint chains across retries — the whole point of
+            # the endpoint is "this is the goal for THIS user request",
+            # which doesn't change just because we re-attempted the
+            # job with a fixed command.
+            inherit_endpoint = inherit_endpoint or (parent.endpoint_id or "")
     # If we still don't know the original chat, try to resolve from
     # the current speaker — first-time launches outside a supervisor
     # context route DMs back to the user who triggered the tool call.
@@ -446,6 +453,7 @@ def _start_background_job_handler(
             retry_count=retry_count,
             total_units=inherit_total_units,
             progress_probe_cmd=inherit_probe_cmd,
+            endpoint_id=inherit_endpoint,
         )
     except Exception as e:
         return json.dumps({
@@ -464,6 +472,117 @@ def _start_background_job_handler(
             f"turn will re-engage on completion (success or failure) "
             f"and either deliver the final DM or retry. Don't poll "
             f"status in this same turn."
+        ),
+    }, ensure_ascii=False)
+
+
+def _define_task_endpoint_handler(
+    task_summary: str,
+    user_goal_verbatim: str,
+    success_criteria: str,
+    failure_recovery: str = "",
+) -> str:
+    """Crystallise what 'done' means for a non-trivial task BEFORE
+    launching it. Returns an `endpoint_id` you pass to
+    `start_background_job(..., endpoint_id=...)`. The supervisor
+    turn loads the endpoint on job completion, runs each criterion's
+    `check_cmd`, and REFUSES to mark `done` while critical criteria
+    are unmet.
+
+    Call this whenever the user asks for a multi-step / long-running
+    task ("run benchmark", "train model", "build the wheel"). For
+    trivial commands (single grep, one file read) skip it — the
+    overhead isn't worth it.
+
+    `success_criteria` is a JSON-encoded list of:
+      {
+        "id": "report_300",                 # short slug, optional
+        "description": "report.json contains ≥300 entries",
+        "check_cmd": "python -c '...'",     # optional auto-verifier
+        "check_cwd": "/path/to/workspace",  # optional, defaults to job cwd
+        "critical": true                    # default true; false = informational
+      }
+
+    `failure_recovery` is a JSON-encoded list of:
+      {
+        "trigger": "ModuleNotFoundError",   # substring match in stderr/stdout
+        "suggested_action": "propose_install <module>"
+      }
+    """
+    from . import task_endpoint as _te
+    from .roles import current_speaker
+    crit_parsed: list[dict] = []
+    if isinstance(success_criteria, str) and success_criteria.strip():
+        try:
+            crit_parsed = json.loads(success_criteria)
+        except Exception:
+            try:
+                crit_parsed = json.loads(success_criteria.replace("'", '"'))
+            except Exception as e:
+                return json.dumps({
+                    "ok": False,
+                    "error": (
+                        f"define_task_endpoint: success_criteria must be "
+                        f"valid JSON list ({e})"
+                    ),
+                }, ensure_ascii=False)
+    elif isinstance(success_criteria, list):
+        crit_parsed = success_criteria
+    if not isinstance(crit_parsed, list):
+        return json.dumps({
+            "ok": False,
+            "error": "success_criteria must be a list",
+        }, ensure_ascii=False)
+    rec_parsed: list[dict] = []
+    if failure_recovery and isinstance(failure_recovery, str):
+        try:
+            rec_parsed = json.loads(failure_recovery)
+        except Exception:
+            try:
+                rec_parsed = json.loads(failure_recovery.replace("'", '"'))
+            except Exception:
+                rec_parsed = []
+    speaker_id = current_speaker() or ""
+    chat_id: int | None = None
+    channel = ""
+    if speaker_id.startswith("telegram:"):
+        try:
+            from . import contacts as _contacts
+            chat_id = _contacts.chat_id_for_speaker(speaker_id)
+            channel = "telegram"
+        except Exception:
+            pass
+    elif speaker_id.startswith("webui:"):
+        channel = "webui"
+    elif speaker_id:
+        channel = speaker_id.split(":")[0]
+    try:
+        ep = _te.create_endpoint(
+            task_summary=task_summary,
+            user_goal_verbatim=user_goal_verbatim,
+            success_criteria=crit_parsed,
+            failure_recovery=rec_parsed,
+            speaker_id=speaker_id,
+            chat_id=chat_id,
+            channel=channel,
+        )
+    except ValueError as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"define_task_endpoint: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "endpoint_id": ep.endpoint_id,
+        "task_summary": ep.task_summary,
+        "criteria_count": len(ep.success_criteria),
+        "recovery_hints_count": len(ep.failure_recovery),
+        "note": (
+            f"Endpoint {ep.endpoint_id} created with "
+            f"{len(ep.success_criteria)} criteria. Pass "
+            f"endpoint_id='{ep.endpoint_id}' to start_background_job. "
+            f"The supervisor will auto-evaluate criteria on completion "
+            f"and refuse 'done' until critical ones are met."
         ),
     }, ensure_ascii=False)
 
@@ -567,6 +686,7 @@ def _complete_supervisor_handler(
     decision: str,
     final_message: str = "",
     reason: str = "",
+    criteria_overrides: str = "",
 ) -> str:
     """Supervisor-mode terminal action. Call this from inside a
     supervisor turn when the job chain is DONE (success) or needs to
@@ -577,12 +697,19 @@ def _complete_supervisor_handler(
     message, Russian by default, covering: what happened, what
     problems hit, what fixed them, final result OR what blocks.
     `reason` is a short internal note for the supervisor history.
+    `criteria_overrides` (Phase 3 escape hatch): JSON-encoded dict
+      mapping criterion_id → explanation when `decision='done'` and
+      a check_cmd reports unmet but you have evidence it's actually
+      met (check_cmd has a bug, or the criterion was 'needs_llm_judgment'
+      and you verified from logs). E.g.:
+        '{"reports_300": "wc -l report.json shows 300 lines; check_cmd is brittle on this path"}'
 
     For RETRY decisions DON'T call this — just call
     `start_background_job` with the corrected command and
     `parent_job_id` set; the supervisor will re-engage when the
     child completes."""
     from . import job_supervisor as _jsup
+    from . import task_endpoint as _te
     from .tools import background_jobs as _bg
     job_id = _jsup.active_supervisor_job_id()
     if not job_id:
@@ -606,6 +733,50 @@ def _complete_supervisor_handler(
             "ok": False,
             "error": f"job {job_id} not found in registry",
         }, ensure_ascii=False)
+
+    # Phase 3 endpoint gate. If the job carries a TaskEndpoint id,
+    # re-evaluate the criteria and REFUSE decision='done' while
+    # critical ones are unmet UNLESS the LLM provided explicit
+    # `criteria_overrides` justifying the override. The escape
+    # hatch exists because check_cmd can be buggy (a typo'd path
+    # would report unmet even when the goal is met) — but the LLM
+    # has to write an explanation per override so the audit log
+    # has the reasoning.
+    overrides: dict = {}
+    if criteria_overrides:
+        try:
+            overrides = json.loads(criteria_overrides) or {}
+        except Exception:
+            try:
+                overrides = json.loads(criteria_overrides.replace("'", '"')) or {}
+            except Exception:
+                overrides = {}
+    if decision_norm == "done" and (job.endpoint_id or ""):
+        ep = _te.STORE.get(job.endpoint_id)
+        if ep is not None:
+            results = _te.evaluate_endpoint(ep, cwd=job.cwd or "")
+            unmet = _te.unmet_critical(results)
+            # Filter out criteria the LLM explicitly justified.
+            blocking = [
+                r for r in unmet
+                if r.criterion_id not in overrides
+            ]
+            if blocking:
+                return json.dumps({
+                    "ok": False,
+                    "error": "endpoint_criteria_unmet",
+                    "detail": (
+                        "Cannot mark done — these critical criteria "
+                        "are unmet and you didn't provide overrides "
+                        "for them. Either RETRY (call "
+                        "start_background_job with a fix), ESCALATE, "
+                        "or call complete_supervisor again with "
+                        "`criteria_overrides={\"<id>\": \"<why "
+                        "check_cmd is wrong>\"}` for each."
+                    ),
+                    "unmet": [r.to_dict() for r in blocking],
+                    "endpoint_id": job.endpoint_id,
+                }, ensure_ascii=False)
     # Send the final DM to the user via the Telegram channel.
     # Fail-soft: if DM can't be sent (no chat_id, transport down) we
     # still mark terminal so the chain doesn't loop.
@@ -2146,10 +2317,101 @@ def register_builtin_tools() -> None:
                     ),
                     "default": "",
                 },
+                "endpoint_id": {
+                    "type": "string",
+                    "description": (
+                        "TaskEndpoint id from `define_task_endpoint`. "
+                        "STRONGLY RECOMMENDED for non-trivial jobs. "
+                        "When set, the supervisor turn auto-evaluates "
+                        "each criterion's check_cmd on completion "
+                        "and REFUSES `complete_supervisor(decision="
+                        "'done')` while critical criteria are unmet "
+                        "— prevents 'job exit 0, must be done!' on "
+                        "runs that didn't actually meet the goal. "
+                        "Inherited from `parent_job_id` if not set."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["command"],
         },
         handler=_start_background_job_handler,
+    )
+
+    reg.register_func(
+        name="define_task_endpoint",
+        description=(
+            "Crystallise the user's goal into checkable success "
+            "criteria BEFORE launching a long-running task. Returns "
+            "an `endpoint_id` you pass to `start_background_job`.\n\n"
+            "Call this whenever the user asks for a multi-step or "
+            "long-running task — benchmarks, builds, trainings, "
+            "transcodes, evaluations. Don't call it for trivial "
+            "things (single grep, one read_file, chat reply).\n\n"
+            "Why this matters: on job completion the supervisor "
+            "loads the endpoint, auto-runs each criterion's "
+            "check_cmd, and REFUSES to mark the chain 'done' while "
+            "any critical criterion is unmet. This is what prevents "
+            "the agent from reporting 'job exited 0, must be done!' "
+            "when the real goal (publishable result, ≥300 instances, "
+            "report.json with real predictions) wasn't actually met."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "task_summary": {
+                    "type": "string",
+                    "description": (
+                        "Short label for the task. E.g. "
+                        "'Publishable SWE-bench Lite 300 real eval'."
+                    ),
+                },
+                "user_goal_verbatim": {
+                    "type": "string",
+                    "description": (
+                        "The user's request (paraphrased if needed). "
+                        "Used by the supervisor to remember 'this is "
+                        "what the user actually wanted' across "
+                        "fix-and-retry chains."
+                    ),
+                },
+                "success_criteria": {
+                    "type": "string",
+                    "description": (
+                        "JSON-encoded list of checkable criteria. "
+                        "Each: {\"id\": \"...\", \"description\": "
+                        "\"...\", \"check_cmd\": \"...\", \"critical\": true}. "
+                        "Prefer `check_cmd` (shell, exit 0 = met) "
+                        "over LLM-judged criteria — auto-checks "
+                        "prevent the supervisor from rubber-stamping "
+                        "an unmet goal. Example for SWE-bench:\n"
+                        "[{\"id\":\"reports_300\","
+                        "\"description\":\"report.json with >=300 entries\","
+                        "\"check_cmd\":\"python -c 'import json; "
+                        "assert len(json.load(open(\\\"report.json\\\"))) >= 300'\"},"
+                        "{\"id\":\"non_gold\","
+                        "\"description\":\"predictions are real (non-gold)\","
+                        "\"check_cmd\":\"grep -q -v gold predictions.jsonl\"}]"
+                    ),
+                },
+                "failure_recovery": {
+                    "type": "string",
+                    "description": (
+                        "Optional JSON-encoded list of recovery "
+                        "hints. Each: {\"trigger\": \"<substring>\", "
+                        "\"suggested_action\": \"<plan>\"}. Surfaced "
+                        "in the supervisor's synthetic message when "
+                        "the trigger appears in the job's "
+                        "stderr/stdout. Example:\n"
+                        "[{\"trigger\":\"ModuleNotFoundError\","
+                        "\"suggested_action\":\"propose_install the missing package\"}]"
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["task_summary", "user_goal_verbatim", "success_criteria"],
+        },
+        handler=_define_task_endpoint_handler,
     )
 
     reg.register_func(
@@ -2288,6 +2550,23 @@ def register_builtin_tools() -> None:
                         "history (e.g. '297/299 resolved, 2 failed "
                         "are upstream SWE-bench flakes'). Visible "
                         "in get_background_job; NOT sent to user."
+                    ),
+                    "default": "",
+                },
+                "criteria_overrides": {
+                    "type": "string",
+                    "description": (
+                        "Phase 3 escape hatch. JSON-encoded dict "
+                        "mapping criterion_id → explanation. Use ONLY "
+                        "when `decision='done'` and a check_cmd "
+                        "reports unmet but you have verified from "
+                        "logs/output it's actually met. Each override "
+                        "requires a concrete explanation that lands "
+                        "in the supervisor history. Empty = no "
+                        "overrides; the gate uses check_cmd results "
+                        "verbatim. Example:\n"
+                        "'{\"reports_300\":\"wc -l shows 300 lines; "
+                        "check_cmd path was relative to wrong cwd\"}'"
                     ),
                     "default": "",
                 },

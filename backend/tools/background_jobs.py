@@ -137,6 +137,12 @@ class BackgroundJob:
     # don't re-fire the same supervisor while the previous one is
     # still deciding.
     stale_supervisor_opened: bool = False
+    # Phase 3: TaskEndpoint id. When non-empty, the supervisor turn
+    # loads the endpoint, auto-runs each criterion's check_cmd, and
+    # `complete_supervisor(decision='done')` is REFUSED while
+    # critical criteria are unmet. Inherited from parent on retry —
+    # the chain shares one endpoint definition.
+    endpoint_id: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -319,6 +325,7 @@ def start_job(
     retry_count: int = 0,
     total_units: Optional[int] = None,
     progress_probe_cmd: str = "",
+    endpoint_id: str = "",
 ) -> BackgroundJob:
     """Spawn `command` in a background thread; return immediately
     with the BackgroundJob record (status='running'). On completion
@@ -368,6 +375,7 @@ def start_job(
         retry_count=int(retry_count or 0),
         total_units=int(total_units) if total_units else None,
         progress_probe_cmd=(progress_probe_cmd or "").strip(),
+        endpoint_id=(endpoint_id or "").strip(),
     )
     STORE.add(job)
 

@@ -148,6 +148,34 @@ def _format_completion_message(job: BackgroundJob) -> str:
     if job.finished_at and job.started_at:
         elapsed = max(0, int(job.finished_at - job.started_at))
 
+    # Phase 3: load + evaluate the TaskEndpoint if the job has one.
+    # The evaluation block goes RIGHT BEFORE the decision-rules so
+    # the LLM sees a concrete checklist of what's met vs. unmet
+    # before it picks DONE / RETRY / ESCALATE.
+    endpoint_block = ""
+    if job.endpoint_id:
+        try:
+            from . import task_endpoint as _te
+            ep = _te.STORE.get(job.endpoint_id)
+            if ep is not None:
+                results = _te.evaluate_endpoint(ep, cwd=job.cwd or "")
+                hints = _te.match_recovery_hints(
+                    ep, stderr_tail=stderr_tail, stdout_tail=stdout_tail,
+                )
+                endpoint_block = _te.format_evaluation_block(
+                    ep, results, hints,
+                )
+        except Exception as e:
+            log.warning(
+                "supervisor: endpoint evaluation for %s failed: %s",
+                job.endpoint_id, e,
+            )
+            endpoint_block = (
+                f"=== TASK ENDPOINT (evaluation FAILED — {type(e).__name__}) ===\n"
+                f"endpoint_id={job.endpoint_id} could not be evaluated. "
+                f"Judge the goal manually from the logs below."
+            )
+
     parts = [
         f"BACKGROUND_JOB_COMPLETED: {job.job_id}",
         f"label: {job.label}",
@@ -164,6 +192,8 @@ def _format_completion_message(job: BackgroundJob) -> str:
         stdout_tail or "(empty)",
         "=== STDERR (tail) ===",
         stderr_tail or "(empty)",
+        "",
+        endpoint_block.rstrip(),
         "",
         "You are in supervisor mode. Decide ONE of:",
         "  • DONE — the job met the user's goal. Compose and send "
