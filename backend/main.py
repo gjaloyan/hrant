@@ -107,6 +107,27 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("background-jobs interrupted-sweep error: %s", e)
 
+    # Audit follow-up: tighten file modes on sensitive configs that may
+    # exist from before write_secret_json() landed. Best-effort; failures
+    # never block startup. POSIX-only — Windows ignores os.chmod for mode
+    # bits and relies on user-profile ACLs instead.
+    try:
+        from . import paths as _paths
+        kd = _paths.knowledge_dir()
+        for _fname in (
+            "providers.json",
+            "telegram_chat_ids.json",
+            "pairing.json",
+            "tts_config.json",
+            "transcriber_config.json",
+            "active_model.json",
+            "access_log.json",
+            "oauth_tokens.json",
+        ):
+            _paths.secure_existing_file(kd / _fname)
+    except Exception as e:
+        log.warning("sensitive-file chmod sweep skipped: %s", e)
+
     log.info("Server starting — auto-starting channels...")
     try:
         channels_list = get_channels()

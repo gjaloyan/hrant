@@ -3,9 +3,9 @@
 Two distinct buckets, deliberately separate so `hrant update` can
 refresh the engine without touching the user's data:
 
-  1. ENGINE — the git checkout: backend/, frontend/, deploy/,
-     knowledge_templates/, pyproject.toml. Read-only at runtime;
-     replaced by `hrant update`.
+  1. ENGINE — the git checkout: backend/ (which now contains
+     backend/knowledge_templates/), frontend/, deploy/, pyproject.toml.
+     Read-only at runtime; replaced by `hrant update`.
 
   2. DATA — the user's stuff: config.yaml, .env, knowledge/,
      workspace/, runtime_overrides.json, autonomic_settings.json,
@@ -41,7 +41,9 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 def repo_root() -> Path:
     """The git checkout's root (where pyproject.toml lives). Engine
-    code, deploy/ templates, and knowledge_templates/ live here."""
+    code and deploy/ templates live here. Knowledge templates now
+    live under `backend/knowledge_templates/` so the wheel includes
+    them — see `templates_dir()`."""
     return _REPO_ROOT
 
 
@@ -134,8 +136,18 @@ def history_path() -> Path:
 
 
 def templates_dir() -> Path:
-    """Repo-side starter content the init wizard copies into a fresh
-    data_dir. Engine-side, so updates ship newer templates."""
+    """Starter content the init wizard copies into a fresh data_dir.
+    Engine-side, so updates ship newer templates.
+
+    Audit P1 #4 fix: templates ship INSIDE the `backend/` package now
+    (`backend/knowledge_templates/`), so `pip install` from a wheel
+    actually includes them. The legacy repo-root location (`<repo>/
+    knowledge_templates/`) is checked as a fallback for any editable
+    install that still has the old layout.
+    """
+    pkg_side = Path(__file__).resolve().parent / "knowledge_templates"
+    if pkg_side.exists():
+        return pkg_side
     return _REPO_ROOT / "knowledge_templates"
 
 
@@ -147,3 +159,85 @@ def ensure_data_dir() -> Path:
     (d / "knowledge").mkdir(exist_ok=True)
     (d / "workspace").mkdir(exist_ok=True)
     return d
+
+
+# ─── Sensitive-file write helper ───────────────────────────────────
+#
+# Audit follow-up: configs containing API keys, OAuth tokens, paired-
+# device secrets and chat IDs must land on disk as 0600 (owner-only),
+# not the world-readable default umask. The old write sites used
+# `path.write_text(json.dumps(...))` which inherits the umask and on
+# most Linux distros yields 0644. Anyone with shell access to the box
+# could `cat ~/.hrant/data/knowledge/providers.json` and walk away
+# with every API key.
+#
+# This helper:
+#   • Encodes a dict to JSON (UTF-8, indented by default).
+#   • Writes atomically via `.tmp` + rename so a crash mid-write never
+#     leaves the file truncated.
+#   • Chmods the tempfile to 0o600 BEFORE the rename so the rename
+#     atomically swaps in a file that was never world-readable.
+#   • On Windows, `os.chmod` is largely a no-op (ACLs aren't POSIX
+#     bits) — we still call it for consistency, but on Windows the
+#     real protection is the user-profile ACL on `~\.hrant\data\`.
+#
+# Use this for ANY file that may contain secrets. Public, non-secret
+# data (e.g. cached embeddings, public manifests) stays on `write_text`.
+
+
+def write_secret_json(
+    path: Path,
+    payload,
+    *,
+    indent: int = 2,
+    ensure_ascii: bool = False,
+) -> None:
+    """Atomically write `payload` (dict / list / str) as JSON to
+    `path`, with mode 0600.
+
+    Audit-driven contract: the file MUST end up at 0o600 on POSIX,
+    even if a previous version was world-readable. We chmod the
+    tempfile pre-rename so the swap is atomic in both content and
+    mode.
+    """
+    import json as _json
+    import os as _os
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(payload, (str, bytes)):
+        data = payload if isinstance(payload, str) else payload.decode("utf-8")
+    else:
+        data = _json.dumps(payload, indent=indent, ensure_ascii=ensure_ascii)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(data, encoding="utf-8")
+    try:
+        _os.chmod(tmp, 0o600)
+    except Exception:
+        # Best-effort on platforms where POSIX mode bits don't apply.
+        pass
+    _os.replace(tmp, path)
+    # Some filesystems / replace implementations carry the mode of the
+    # destination, not the source. Re-chmod the final path to be safe.
+    try:
+        _os.chmod(path, 0o600)
+    except Exception:
+        pass
+
+
+def secure_existing_file(path: Path) -> None:
+    """Tighten an existing file's mode to 0o600 if it isn't already.
+    Used on boot to fix files that were created by older versions
+    before `write_secret_json` existed. Silent on Windows."""
+    import os as _os
+    import stat as _stat
+
+    p = Path(path)
+    try:
+        if not p.exists():
+            return
+        cur = _stat.S_IMODE(p.stat().st_mode)
+        if cur != 0o600:
+            _os.chmod(p, 0o600)
+    except Exception:
+        pass

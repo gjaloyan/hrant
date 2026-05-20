@@ -626,16 +626,24 @@ def _try_chat_path(
         sys_parts.append(f"---\n\n{_CHAT_FAST_PATH_RULES}")
         sys_prompt = "\n\n".join(sys_parts)
 
-        answer = _router().call_with_tools(
+        # Audit P0 fix: the previous version called
+        # `router().call_with_tools(..., tools=[])`. Router's
+        # `_supports_tools()` returns False for `tools=[]` (line 2710
+        # of llm.py: `if not tools: return False`), so `call_with_tools`
+        # rejected the call and the try/except swallowed the exception
+        # — fast-chat NEVER fired in production. A "2+2" turn that
+        # should have cost ~1-2 k tokens was hitting the full unified
+        # path (12 k+ tokens) silently.
+        #
+        # The correct primitive for a no-tool single-shot LLM call
+        # is `router.call(task_type, system, user, ...)` — same
+        # provider chain + failover, no tool-loop infrastructure.
+        answer = _router().call(
             _TT.QUICK_ANSWER,
             sys_prompt,
             task,
-            tools=[],
-            execute_tool=lambda n, a: ("", False),
             max_tokens=600,
             temperature=0.4,
-            max_iterations=1,
-            on_tool_call=None,
         )
     except Exception as e:
         log.debug("chat fast path failed (exception): %s", e)

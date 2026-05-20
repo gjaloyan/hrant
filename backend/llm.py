@@ -127,11 +127,19 @@ class TokenTracker:
         # cost-first thinking. These counters are TOKEN-first +
         # cost as a derived secondary. UI reads `stats_today()`
         # via the new /api/tokens/today endpoint.
+        #
+        # Audit follow-up #2: counters PERSIST to disk so a service
+        # restart doesn't lie about "today" usage. The file lives at
+        # `~/.hrant/data/knowledge/tokens_today.json` and is touched
+        # on every record() call (cheap: ~one tiny JSON write per
+        # API call, ≪ 1 ms). Auto-restored on __init__.
         self._today_date = date.today().isoformat()
         self._today_input = 0
         self._today_output = 0
         self._today_cost = 0.0
         self._today_calls = 0
+        self._today_path = self._daily_counter_path()
+        self._load_today_from_disk()
 
     def record(
         self,
@@ -207,6 +215,10 @@ class TokenTracker:
             self._today_output += output_tok
             self._today_cost += cost
             self._today_calls += 1
+            # Persist to disk so /api/tokens/today survives service
+            # restarts. Best-effort — disk failure must not break
+            # the record path.
+            self._flush_today_to_disk()
 
         return rec
 
@@ -325,24 +337,119 @@ class TokenTracker:
             calls = self._log[-limit:]
         return [r.to_dict() for r in reversed(calls)]
 
-    def stats_today(self) -> dict:
-        """Token-first daily aggregate. Replaces the cost-first
-        `api_cost_today` view the codex audit flagged: tokens are
-        the primary metric, cost is derived. The router's per-call
-        $0.01 estimate becomes a secondary signal; this method
-        returns the truth from every recorded API call.
+    # --- Daily-counter persistence (audit follow-up) ------------------
+
+    @staticmethod
+    def _daily_counter_path():
+        """Path to the on-disk daily counter file. Lives under the
+        user data_dir so it survives `hrant update` (engine repo gets
+        wiped on update) but doesn't follow per-process state into
+        random tmp dirs. Fails gracefully when data_dir isn't yet
+        resolvable (early init in tests)."""
+        from pathlib import Path
+        try:
+            from .paths import knowledge_dir
+            return knowledge_dir() / "tokens_today.json"
+        except Exception:
+            # Pre-init: return an in-memory-only sentinel so the load
+            # is a no-op. Tests that don't have data_dir wired stay
+            # working.
+            return Path("/tmp/_hrant_tokens_today_devstub.json")
+
+    def _load_today_from_disk(self) -> None:
+        """Restore today's counters from disk on tracker init.
+        If the file's date doesn't match today, the counters start
+        fresh (file gets rewritten on first record)."""
+        import json
+        try:
+            if not self._today_path.exists():
+                return
+            raw = json.loads(self._today_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        # Only restore if the file is for the SAME date we're booting
+        # under. Stale file gets overwritten on the next record().
+        if raw.get("date") == self._today_date:
+            self._today_input = int(raw.get("input_tokens") or 0)
+            self._today_output = int(raw.get("output_tokens") or 0)
+            self._today_cost = float(raw.get("cost_usd") or 0.0)
+            self._today_calls = int(raw.get("llm_calls") or 0)
+
+    def _flush_today_to_disk(self) -> None:
+        """Write the current daily counters to disk. Best-effort —
+        a write failure (disk full, race) doesn't break the record
+        path. Atomic via .tmp rename."""
+        import json
+        try:
+            p = self._today_path
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(p.suffix + ".tmp")
+            payload = {
+                "date": self._today_date,
+                "input_tokens": self._today_input,
+                "output_tokens": self._today_output,
+                "cost_usd": round(self._today_cost, 6),
+                "llm_calls": self._today_calls,
+            }
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            tmp.replace(p)
+        except Exception:
+            pass
+
+    def stats_today(self, *, tz: str | None = None) -> dict:
+        """Token-first daily aggregate.
 
         On date change (UTC), buckets auto-reset on the next
-        `record()` call. Reading the method on a fresh day before
-        any record happens returns zeros under today's date.
+        `record()` call. The on-disk daily-counter file
+        (`tokens_today.json`) survives service restarts so the
+        "today" view stays honest after a redeploy.
+
+        Audit follow-up — timezone parameter. Server lives in UTC
+        but operators may be in a different zone (e.g. Asia/Yerevan
+        is UTC+4 so at 02:00 local it's still 22:00 UTC the previous
+        day). Pass `tz="Asia/Yerevan"` and the returned `date` field
+        reflects the local calendar day. If the local-day boundary
+        is on the OTHER side of the UTC boundary, the counters are
+        zero (we don't have historical counter snapshots to retro-
+        fit). Defaults to no-tz which returns UTC's view, same as
+        the original behaviour.
         """
         with self._lock:
-            today = date.today().isoformat()
-            if today != self._today_date:
-                # No records yet today — return clean zeros under
-                # today's date (don't lie about it being yesterday).
+            # Determine "today" under the requested tz, if any.
+            if tz:
+                try:
+                    import datetime as _dt
+                    try:
+                        from zoneinfo import ZoneInfo
+                        local_now = _dt.datetime.now(ZoneInfo(tz))
+                    except Exception:
+                        # zoneinfo missing or invalid tz — fall back
+                        # to UTC silently.
+                        local_now = _dt.datetime.now(_dt.timezone.utc)
+                    today_view = local_now.date().isoformat()
+                except Exception:
+                    today_view = date.today().isoformat()
+            else:
+                today_view = date.today().isoformat()
+            in_ = self._today_input
+            out = self._today_output
+            cost = self._today_cost
+            calls = self._today_calls
+            counter_date = self._today_date
+            if today_view != counter_date:
+                # Counter holds a different date than the requested
+                # tz-local one. We don't lie about totals — return
+                # zeros under the requested date and surface the
+                # mismatch via the `counter_date` field so the UI
+                # can show "since UTC midnight" if it cares.
                 return {
-                    "date": today,
+                    "date": today_view,
+                    "counter_date": counter_date,
                     "input_tokens": 0,
                     "output_tokens": 0,
                     "total_tokens": 0,
@@ -350,19 +457,15 @@ class TokenTracker:
                     "cost_usd": 0.0,
                     "llm_calls": 0,
                 }
-            in_ = self._today_input
-            out = self._today_output
-            # Ratio is the audit's main lens — input:output. 40:1
-            # means re-feeding context; ~5:1 means healthy.
             ratio = round(in_ / max(1, out), 2) if out > 0 else float(in_)
             return {
-                "date": self._today_date,
+                "date": counter_date,
                 "input_tokens": in_,
                 "output_tokens": out,
                 "total_tokens": in_ + out,
                 "input_output_ratio": ratio,
-                "cost_usd": round(self._today_cost, 6),
-                "llm_calls": self._today_calls,
+                "cost_usd": round(cost, 6),
+                "llm_calls": calls,
             }
 
     def stats(self) -> dict:

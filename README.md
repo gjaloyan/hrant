@@ -25,7 +25,7 @@ hrant run
 ```
 
 **Что произойдёт:**
-- `hrant init` создаст `~/.hrant/data/` (или туда, куда указывает `HRANT_DATA_DIR`), скопирует стартовые шаблоны из `knowledge_templates/`, сделает `config.yaml` из `config.example.yaml`, и спросит про API-ключи (Anthropic, OpenAI) + опциональные URL сервисов.
+- `hrant init` создаст `~/.hrant/data/` (или туда, куда указывает `HRANT_DATA_DIR`), скопирует стартовые шаблоны из `backend/knowledge_templates/`, сделает `config.yaml` из `config.example.yaml`, и спросит про API-ключи (Anthropic, OpenAI) + опциональные URL сервисов.
 - `hrant run` поднимет FastAPI на `127.0.0.1:3333` (WebUI там же) и автоматически запустит сконфигурированные channels.
 
 Любую важную настройку потом можно поменять через `hrant config`:
@@ -42,7 +42,7 @@ hrant config set whisper.url http://...   # пример: указать STT-с�
 ## Engine vs Data
 
 ```
-<repo>/                  ← engine: backend/ frontend/ deploy/ knowledge_templates/
+<repo>/                  ← engine: backend/ (incl. knowledge_templates/) frontend/ deploy/
 ~/.hrant/data/           ← user data: config.yaml, knowledge/, workspace/, .env
 ~/.hrant/data/update_history.json   ← ledger for `hrant rollback`
 ```

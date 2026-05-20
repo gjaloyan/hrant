@@ -57,9 +57,8 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> dict:
-    p = _config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    from .paths import write_secret_json
+    write_secret_json(_config_path(), cfg)
     return cfg
 
 

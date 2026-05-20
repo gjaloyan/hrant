@@ -1,4 +1,25 @@
+import { useEffect, useState } from "react";
 import { StatusPayload } from "../../api";
+
+// Audit follow-up: Settings StatusTab was showing "Cost today" in
+// USD as the headline daily metric. USD is a derived number based on
+// per-model pricing that drifts; tokens are the source of truth.
+// Token-first display matches the StatusBar refactor.
+type TokensToday = {
+  date: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  input_output_ratio: number;
+  cost_usd: number;
+  llm_calls: number;
+};
+
+function fmtTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(n);
+}
 
 type Props = {
   status: StatusPayload;
@@ -9,6 +30,27 @@ type Props = {
 export default function StatusTab({ status, onCompare, onRefresh }: Props) {
   const r = status.router as any;
   const hasRouter = r && !("error" in r);
+
+  const [tokensToday, setTokensToday] = useState<TokensToday | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const fetchTokens = () => {
+      fetch("/api/tokens/today")
+        .then((res) => (res.ok ? res.json() : null))
+        .then((d) => {
+          if (!cancelled && d) setTokensToday(d as TokensToday);
+        })
+        .catch(() => {
+          /* leave previous value */
+        });
+    };
+    fetchTokens();
+    const id = setInterval(fetchTokens, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
 
   return (
     <div className="space-y-4">
@@ -75,9 +117,14 @@ export default function StatusTab({ status, onCompare, onRefresh }: Props) {
             <div>
               B calls today: <b>{r.model_b_calls_today}</b>
             </div>
-            <div>
-              Cost today: <b>${r.api_cost_today?.toFixed(3)}</b>
-              {r.budget_usd ? `/${r.budget_usd}` : ""}
+            <div title={tokensToday ? `input ${tokensToday.input_tokens.toLocaleString()} / output ${tokensToday.output_tokens.toLocaleString()} · ratio ${tokensToday.input_output_ratio.toFixed(1)}:1` : ""}>
+              Tokens today: <b className="text-emerald-300">{tokensToday ? fmtTokens(tokensToday.total_tokens) : "—"}</b>
+              {tokensToday && (
+                <span className="opacity-60 ml-1">
+                  ({tokensToday.llm_calls} calls
+                  {tokensToday.cost_usd > 0 ? ` · $${tokensToday.cost_usd.toFixed(3)}` : ""})
+                </span>
+              )}
             </div>
             <div>
               Total: A={r.total_a_calls} / B={r.total_b_calls}

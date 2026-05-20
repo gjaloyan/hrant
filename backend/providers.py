@@ -536,11 +536,7 @@ def _load_providers() -> list[dict]:
 
 
 def _save_providers(providers: list[dict]) -> None:
-    PROVIDERS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    PROVIDERS_PATH.write_text(
-        json.dumps({"providers": providers}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    paths.write_secret_json(PROVIDERS_PATH, {"providers": providers})
 
 
 def get_providers() -> list[dict]:
@@ -715,11 +711,7 @@ class OAuthTokenManager:
 
     def _save(self) -> None:
         try:
-            OAUTH_TOKENS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            OAUTH_TOKENS_PATH.write_text(
-                json.dumps({"tokens": self._tokens}, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            paths.write_secret_json(OAUTH_TOKENS_PATH, {"tokens": self._tokens})
         except Exception as e:
             log.error("Failed to save OAuth tokens: %s", e)
 
@@ -1083,11 +1075,8 @@ class CodexAuthManager:
             raise RuntimeError(f"Codex token refresh returned non-JSON: {e}") from e
 
     def _write_atomic(self, raw: dict) -> None:
-        """Atomic write: temp file in same dir + os.replace."""
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.write_text(json.dumps(raw, indent=2), encoding="utf-8")
-        os.replace(tmp, self.path)
+        """Atomic write: temp file in same dir + os.replace + 0o600."""
+        paths.write_secret_json(self.path, raw, ensure_ascii=True)
 
     # ----- model list (per-account, lives next to auth.json) -----
 
@@ -1342,11 +1331,7 @@ class ActiveModelManager:
 
     def _save(self) -> None:
         try:
-            ACTIVE_MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-            ACTIVE_MODEL_PATH.write_text(
-                json.dumps(self._data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            paths.write_secret_json(ACTIVE_MODEL_PATH, self._data)
         except Exception:
             log.warning("Failed to save active model selection")
 

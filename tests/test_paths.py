@@ -134,8 +134,19 @@ def test_history_path_under_data_dir(tmp_path, monkeypatch):
 
 def test_templates_dir_lives_in_engine_repo():
     """Templates are part of the engine — shipped with an update,
-    NOT preserved across updates (that would defeat the point)."""
-    assert paths.templates_dir().parent == paths.repo_root()
+    NOT preserved across updates (that would defeat the point).
+
+    Audit P1 #4 fix: templates moved from `<repo>/knowledge_templates/`
+    to `<repo>/backend/knowledge_templates/` so they bundle in the
+    wheel. Both layouts qualify as "engine-side"."""
+    td = paths.templates_dir()
+    repo = paths.repo_root()
+    # Either the legacy repo-root layout or the new package-side layout
+    # both descend from the engine repo. The new layout is preferred
+    # because it actually ships in the wheel.
+    assert td.is_relative_to(repo), (
+        f"templates_dir() {td} must live under the engine repo {repo}"
+    )
 
 
 def test_ensure_data_dir_creates_subtrees(tmp_path, monkeypatch):

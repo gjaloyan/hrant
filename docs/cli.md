@@ -20,7 +20,7 @@ hrant init [--reset]
 
 On a fresh install (`data_dir` empty):
 1. Creates `~/.hrant/data/` (or `$HRANT_DATA_DIR` if set).
-2. Copies `knowledge_templates/` → `data_dir/knowledge/`.
+2. Copies `backend/knowledge_templates/` → `data_dir/knowledge/`.
 3. Copies `config.example.yaml` → `data_dir/config.yaml`.
 4. Asks for API keys (Anthropic, OpenAI) and optional service URLs (Tailscale host, Whisper, Piper) and writes `.env`.
 

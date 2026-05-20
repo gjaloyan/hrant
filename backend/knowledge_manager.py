@@ -128,7 +128,10 @@ class KnowledgeManager:
         )
 
     def _write_json(self, p: Path, data) -> None:
-        p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        # access_log.json contains topic-access counts (operator-private
+        # analytics). Audit follow-up: write as 0o600 owner-only.
+        from .paths import write_secret_json
+        write_secret_json(p, data)
 
     # ---------- note CRUD ----------
     def note_path(self, category: Category, topic: str, project: str | None = None) -> Path:

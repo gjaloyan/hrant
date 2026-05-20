@@ -138,3 +138,68 @@ def test_pyproject_skills_package_data():
     pp_src = (root / "pyproject.toml").read_text(encoding="utf-8")
     assert "package-data" in pp_src or "package_data" in pp_src
     assert "SKILL.md" in pp_src
+
+
+# ─── Audit follow-up #4: knowledge_templates must ship in wheel ──
+
+
+def test_knowledge_templates_live_under_backend():
+    """Audit P1 #4: starter content moved from repo-root
+    `knowledge_templates/` to `backend/knowledge_templates/` so the
+    wheel includes them. The old location must be gone — a stray
+    copy at the root would make `hrant init` non-deterministic
+    (which one wins on dev vs. wheel install?)."""
+    root = Path(__file__).resolve().parents[1]
+    pkg_side = root / "backend" / "knowledge_templates"
+    repo_side = root / "knowledge_templates"
+    assert pkg_side.is_dir(), (
+        "starter templates must live at backend/knowledge_templates/"
+    )
+    assert not repo_side.exists(), (
+        "stale repo-root knowledge_templates/ must be removed — "
+        "two locations confuse the resolver and the wheel build"
+    )
+    # The core starter files the init wizard copies.
+    for required in (
+        "identity/identity.md",
+        "identity/soul.md",
+        "core_memory.md",
+        "goals.json",
+        "self/architecture.md",
+    ):
+        assert (pkg_side / required).is_file(), (
+            f"missing starter file: {required}"
+        )
+
+
+def test_pyproject_bundles_knowledge_templates_in_wheel():
+    """The wheel must explicitly include backend/knowledge_templates/**
+    as package-data — without this, `pip install` from a wheel lands
+    a backend/ directory without templates and `hrant init` finds
+    nothing to copy."""
+    root = Path(__file__).resolve().parents[1]
+    pp_src = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert "knowledge_templates/" in pp_src, (
+        "pyproject must reference knowledge_templates in package-data"
+    )
+    # Either glob form is fine, but the entry must be tied to the
+    # backend package (not a separate top-level package).
+    assert '"backend"' in pp_src
+    assert "knowledge_templates/**" in pp_src or "knowledge_templates/*" in pp_src
+
+
+def test_templates_dir_resolves_to_package_side():
+    """`paths.templates_dir()` must prefer the package-side path
+    over the legacy repo-root location. Hard-coded behavior pinned
+    so a future refactor doesn't silently flip it back."""
+    from backend import paths as _paths
+    td = _paths.templates_dir()
+    # The returned path must exist and contain at least the identity
+    # starter (the most-load-bearing piece).
+    assert td.is_dir(), f"templates_dir() must point at a real dir: {td}"
+    assert (td / "identity" / "identity.md").is_file()
+    # And it must be the package-side path, not the repo root.
+    assert td.name == "knowledge_templates"
+    assert td.parent.name == "backend", (
+        f"templates_dir() should resolve under backend/, got parent={td.parent}"
+    )

@@ -164,18 +164,20 @@ def usage_stats():
 
 
 @router.get("/api/tokens/today")
-def tokens_today():
+def tokens_today(tz: str | None = None):
     """Audit follow-up — token-first daily aggregate.
 
-    Replaces the cost-first `api_calls_today` / `api_cost_today` view
-    on the StatusBar and UsagePage. Returns input/output/total token
-    counts, input:output ratio (the audit's main bloat lens), and
+    Returns input/output/total token counts, input:output ratio
+    (the bloat lens — 40:1 = context-replay; ~5:1 = healthy), and
     cost as a derived secondary.
 
-    The ratio is what to watch: 40:1 means "agent re-feeds context
-    every iteration"; healthy is 5-10:1.
+    Audit follow-up #2 — `?tz=` query param. Server runs in UTC but
+    the operator may be in a different timezone; without `tz` the
+    UI shows "yesterday's date" for several hours after local
+    midnight. Pass `?tz=Asia/Yerevan` (or any valid IANA tz) to get
+    the local calendar day.
     """
-    return TOKENS.stats_today()
+    return TOKENS.stats_today(tz=tz)
 
 
 @router.get("/api/usage/calls")

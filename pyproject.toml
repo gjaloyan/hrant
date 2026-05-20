@@ -81,6 +81,13 @@ exclude = ["frontend*", "tests*", "docs*", "deploy*"]
 
 [tool.setuptools.package-data]
 "backend.skills" = ["**/SKILL.md", "**/handler.py"]
+# Audit P1 #4 fix: starter identity / soul / self-docs MUST ship in
+# the wheel so a fresh `pip install` lands an agent that the init
+# wizard can populate. Previously `knowledge_templates/` lived at
+# the repo root and was silently dropped by the wheel build, leaving
+# clean installs with no starter content. Templates moved under
+# `backend/knowledge_templates/` and bundled here.
+"backend" = ["knowledge_templates/**/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

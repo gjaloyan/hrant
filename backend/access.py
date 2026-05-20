@@ -133,12 +133,9 @@ class PairingStore:
             return {"requests": []}
 
     def _save(self, state: dict) -> None:
-        p = self.path
         try:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_suffix(".tmp")
-            tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(p)
+            from . import paths as _paths
+            _paths.write_secret_json(self.path, state)
         except Exception as e:
             log.warning("pairing store save failed: %s", e)
 

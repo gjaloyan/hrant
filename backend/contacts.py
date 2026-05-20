@@ -60,12 +60,12 @@ def load_relationships() -> dict[str, str]:
 
 def save_relationships(mapping: dict[str, str]) -> None:
     p = _relationships_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     cleaned = {
         k.strip().lower(): normalize_speaker(v)
         for k, v in (mapping or {}).items() if v
     }
-    p.write_text(json.dumps(cleaned, ensure_ascii=False, indent=2), encoding="utf-8")
+    from .paths import write_secret_json
+    write_secret_json(p, cleaned)
 
 
 def resolve(alias_or_speaker: str) -> Optional[str]:
@@ -99,8 +99,8 @@ def load_chat_ids() -> dict[str, dict]:
 
 def save_chat_ids(state: dict) -> None:
     p = _chat_ids_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    from .paths import write_secret_json
+    write_secret_json(p, state)
 
 
 def remember_telegram_user(
