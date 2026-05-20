@@ -265,6 +265,12 @@ class AgentAnswer(BaseModel):
     # and retry loop; deep_agent is the full cycle. Empty string
     # on legacy paths that don't yet stamp it.
     mode: str = ""
+    # AskUserQuestion follow-up. When the agent called the `ask_user`
+    # tool, the turn ends with this field populated and `answer`
+    # carries a short placeholder. The frontend renders a structured
+    # AskUserCard from the payload; Telegram renders inline-keyboard
+    # buttons. None means "no pending question — answer is final".
+    question: Optional[dict] = None
 
 
 class ChatRequest(BaseModel):

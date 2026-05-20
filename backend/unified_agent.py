@@ -68,6 +68,7 @@ tools are unavailable".
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1998,6 +1999,17 @@ def run_unified(
     # is module-level for tests + audit visibility.
     _recent_tool_hashes: list[str] = []
 
+    # AskUserQuestion follow-up: when the agent calls the `ask_user`
+    # tool, the handler persists a PendingQuestion and returns a
+    # sentinel JSON with `awaiting_input=True`. We detect that in
+    # `_execute_with_progress`, stash the question_id here, and after
+    # the tool loop ends we attach the structured question payload to
+    # the AgentAnswer so the SSE / Telegram / WebUI rendering layer
+    # can surface it as a clean card. The mutable dict pattern is
+    # used because Python <3.10 / lint targets don't let us reassign
+    # `nonlocal` from a nested def cleanly.
+    _pending_question_id = {"v": ""}
+
     def _on_tool_call(name: str, args: dict, result: str, is_error: bool) -> None:
         preview = (result or "").strip().splitlines()[0][:80] if result else ""
         tag = "tool_error" if is_error else "tool"
@@ -2041,6 +2053,41 @@ def run_unified(
             ),
         )
         raw_result, is_error = registry.execute(name, args)
+        # AskUserQuestion sentinel detection. The `ask_user` tool
+        # returns a JSON payload that includes `awaiting_input=True`
+        # + a `question_id`. When we see it, stash the id and
+        # rewrite the tool result with a strong instruction so the
+        # LLM ends the turn cleanly instead of trying to compose
+        # more text on top of "I asked the user X".
+        if (
+            name == "ask_user"
+            and raw_result
+            and not is_error
+            and not _pending_question_id["v"]
+        ):
+            try:
+                _parsed = json.loads(raw_result)
+            except Exception:
+                _parsed = None
+            if (
+                isinstance(_parsed, dict)
+                and _parsed.get("ok")
+                and _parsed.get("awaiting_input")
+                and _parsed.get("question_id")
+            ):
+                _pending_question_id["v"] = str(_parsed["question_id"])
+                # Replace the tool result with a directive — short and
+                # unambiguous. The outer turn will overwrite `answer`
+                # anyway, but if the LLM still tries to compose a
+                # final paragraph here we don't want it to confuse
+                # itself with the full tool JSON.
+                raw_result = (
+                    "QUESTION_SHOWN_TO_USER. The user is now seeing "
+                    "a structured question card with the options "
+                    "you provided. END THE TURN immediately — reply "
+                    "with an empty string or a one-line "
+                    "acknowledgement. Do NOT call any more tools."
+                )
         # Audit follow-up: the previous order (markers appended →
         # truncation at end) clipped the markers exactly when they
         # were most needed (long tool outputs). New order:
@@ -2357,6 +2404,28 @@ def run_unified(
     except Exception:
         pass
 
+    # AskUserQuestion attachment: if `ask_user` was called during
+    # this turn, the question payload supersedes the answer body
+    # for client rendering. The frontend / Telegram renderer reads
+    # `.question` and shows the structured card; `.answer` carries
+    # a short placeholder so the conversation log isn't empty.
+    question_payload: Optional[dict] = None
+    if _pending_question_id["v"]:
+        try:
+            from .tools import ask_user as _aq
+            q = _aq.STORE.get(_pending_question_id["v"])
+            if q is not None:
+                question_payload = q.to_dict()
+                # Overwrite the LLM's final paragraph with a short
+                # placeholder so the rendered conversation row has
+                # something readable even if the client doesn't yet
+                # know how to render the question card. Telegram /
+                # WebUI both prefer `.question` when present.
+                preview_q = q.question or "(no text)"
+                answer = f"❓ {preview_q}"
+        except Exception as e:
+            log.warning("ask_user payload attach failed: %s", e)
+
     return AgentAnswer(
         answer=answer or "",
         verification=vr,
@@ -2369,4 +2438,5 @@ def run_unified(
         thinking_trace=agent._trace,
         llm_calls=agent._llm_calls,
         turn_id=getattr(agent, "_last_turn_id", "") or "",
+        question=question_payload,
     )

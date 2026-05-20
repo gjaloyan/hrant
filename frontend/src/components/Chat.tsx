@@ -279,6 +279,127 @@ function ToolResultBody({ text }: { text: string }) {
   );
 }
 
+// AskUserCard — structured question prompt analogous to Claude
+// Code's AskUserQuestion. Rendered when an agent turn ends with a
+// `meta.question` payload. Cleaner than free-form "should I X or
+// Y?" prose: a tagged header, the question, a "why" subtitle, and
+// clickable options. After the user picks, the card disables and
+// shows "✓ You picked: …".
+function AskUserCard({
+  question,
+  onAnswered,
+}: {
+  question: import("../api").PendingQuestion;
+  onAnswered: (
+    res: import("../api").AgentAnswer & {
+      answered_question_id?: string;
+      answer_choice?: string;
+      answer_text?: string;
+    },
+  ) => void;
+}) {
+  const [picking, setPicking] = useState<string | null>(null);
+  const [error, setError] = useState<string>("");
+  // Track local picked-choice state in case the parent doesn't
+  // refresh meta — gives instant feedback.
+  const [localPicked, setLocalPicked] = useState<string>(
+    question.answered ? (question.answer_choice || "") : "",
+  );
+  const isAnswered = question.answered || Boolean(localPicked);
+  const pickedLabel =
+    question.options.find((o) => o.id === (question.answer_choice || localPicked))
+      ?.label || "";
+
+  const handlePick = async (optionId: string) => {
+    if (picking || isAnswered) return;
+    setPicking(optionId);
+    setError("");
+    try {
+      const { answerPendingQuestion } = await import("../api");
+      const res = await answerPendingQuestion(question.question_id, optionId);
+      setLocalPicked(optionId);
+      onAnswered(res);
+    } catch (e: any) {
+      setError(e?.message || String(e));
+    } finally {
+      setPicking(null);
+    }
+  };
+
+  return (
+    <div className="rounded-lg overflow-hidden border border-violet-700/40 bg-violet-950/30">
+      <div className="px-3 py-2 flex items-center gap-2 border-b border-violet-700/30 bg-violet-900/20">
+        <span className="text-violet-300 leading-none" aria-hidden>
+          ❓
+        </span>
+        <span className="text-[10px] uppercase tracking-[0.08em] text-violet-300 font-medium">
+          {question.header || "Question"}
+        </span>
+        <span className="ml-auto text-[10px] text-violet-400/60 font-mono">
+          {question.question_id}
+        </span>
+      </div>
+      <div className="px-3 py-3 space-y-3">
+        <div className="text-sm leading-snug text-slate-100">
+          {question.question}
+        </div>
+        {question.why && (
+          <div className="text-xs italic text-violet-300/80 leading-snug">
+            {question.why}
+          </div>
+        )}
+        <div className="space-y-1.5">
+          {question.options.map((opt) => {
+            const isPicked = picking === opt.id || localPicked === opt.id;
+            const isDefault =
+              opt.id === question.default_option_id && !isAnswered;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                disabled={isAnswered || picking !== null}
+                onClick={() => handlePick(opt.id)}
+                className={`w-full text-left rounded border px-3 py-2 transition-colors text-sm ${
+                  isPicked
+                    ? "border-emerald-600/60 bg-emerald-900/30"
+                    : isDefault
+                      ? "border-violet-500/40 bg-violet-900/20 hover:bg-violet-900/40"
+                      : "border-violet-700/30 bg-slate-900/40 hover:bg-violet-900/30"
+                } ${isAnswered ? "opacity-60 cursor-default" : "cursor-pointer"}`}
+              >
+                <div className="flex items-center gap-2 flex-wrap">
+                  {isDefault && (
+                    <span className="text-amber-400" title="Recommended">
+                      ⭐
+                    </span>
+                  )}
+                  <span className="font-medium">{opt.label}</span>
+                  {isPicked && <span className="ml-auto text-emerald-400">✓</span>}
+                </div>
+                {opt.description && (
+                  <div className="text-xs text-slate-400 mt-1 leading-snug">
+                    {opt.description}
+                  </div>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {isAnswered && (
+          <div className="text-xs text-emerald-400">
+            ✓ You picked: <span className="font-medium">{pickedLabel || localPicked}</span>
+            {" · "}
+            <span className="text-slate-400">agent working…</span>
+          </div>
+        )}
+        {error && (
+          <div className="text-xs text-rose-400">⚠ {error}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 const Chat = forwardRef<ChatHandle, {
   onRefreshStatus: () => void;
   project: string | null;
@@ -896,7 +1017,39 @@ const Chat = forwardRef<ChatHandle, {
                   </div>
                 </details>
               )}
-              {m.text}
+              {/* AskUserQuestion card — when the agent turn ended
+                  with a structured question, show clickable options
+                  instead of (or alongside) the plain answer body.
+                  Once the user picks, the resume turn's answer is
+                  appended as a fresh agent message below. */}
+              {m.role === "agent" && m.meta?.question && (
+                <div className="mb-2">
+                  <AskUserCard
+                    question={m.meta.question}
+                    onAnswered={(res) => {
+                      // Append the resume turn's answer as a new
+                      // agent message. The "user picked X" message
+                      // doesn't get an explicit row — the AskUserCard
+                      // itself shows "✓ You picked: X" so the trail
+                      // is visible without extra clutter.
+                      setMsgs((prev) => [
+                        ...prev,
+                        {
+                          role: "agent",
+                          text: res.answer || "",
+                          meta: res,
+                          turn_id: res.turn_id || undefined,
+                        },
+                      ]);
+                    }}
+                  />
+                </div>
+              )}
+              {/* When there's no question card, render the answer
+                  text normally. The card's "❓ {question}" placeholder
+                  in meta.answer would be redundant with the card
+                  itself, so we skip it. */}
+              {!(m.role === "agent" && m.meta?.question) && m.text}
 
               {/* Verification footer */}
               {m.role === "agent" && m.meta && !m.meta.is_chat && (

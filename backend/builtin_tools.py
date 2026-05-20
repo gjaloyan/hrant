@@ -468,6 +468,101 @@ def _start_background_job_handler(
     }, ensure_ascii=False)
 
 
+def _ask_user_handler(
+    question: str,
+    options: str,
+    why: str = "",
+    header: str = "",
+    multi_select: bool = False,
+    default_option_id: str = "",
+) -> str:
+    """Ask the user a structured question with N labelled choices.
+    Returns immediately with a `question_id` sentinel — the turn
+    ends with the question card displayed to the user. When the
+    user picks a choice, a NEW agent turn fires with the choice as
+    the user message; this tool does NOT block.
+
+    `options` is a JSON-encoded list of `{label, description, id?}`
+    objects (2-6 entries). Stringified for tool-call portability.
+    Example payload:
+      options=`[{"label":"Yes (Recommended)","description":"…","id":"yes"},
+                {"label":"No","description":"…","id":"no"}]`
+    """
+    from .tools import ask_user as _aq
+    from .roles import current_speaker
+    # Parse options JSON. Tolerant to single-quoted Python-repr
+    # in case some providers escape funny.
+    parsed_opts: list[dict] = []
+    if isinstance(options, str) and options.strip():
+        try:
+            parsed_opts = json.loads(options)
+        except Exception:
+            try:
+                # Last-chance: replace single quotes (some models emit
+                # Python-style dict literals) and re-parse.
+                parsed_opts = json.loads(options.replace("'", '"'))
+            except Exception as e:
+                return json.dumps({
+                    "ok": False,
+                    "error": f"ask_user: options must be valid JSON list ({e})",
+                }, ensure_ascii=False)
+    elif isinstance(options, list):
+        parsed_opts = options
+    if not isinstance(parsed_opts, list):
+        return json.dumps({
+            "ok": False,
+            "error": "ask_user: options must be a list",
+        }, ensure_ascii=False)
+    speaker_id = current_speaker() or ""
+    # Look up the original chat_id from the speaker so the answer
+    # can route back via the same channel. For Telegram speakers
+    # the `contacts` mapping has it; for webui:default the chat_id
+    # is irrelevant (the WebUI talks via HTTP, not chat-id).
+    chat_id: int | None = None
+    channel = ""
+    if speaker_id.startswith("telegram:"):
+        try:
+            from . import contacts as _contacts
+            chat_id = _contacts.chat_id_for_speaker(speaker_id)
+            channel = "telegram"
+        except Exception:
+            pass
+    elif speaker_id.startswith("webui:"):
+        channel = "webui"
+    elif speaker_id:
+        channel = speaker_id.split(":")[0]
+    try:
+        q = _aq.create_question(
+            question=question,
+            options=parsed_opts,
+            why=why,
+            header=header,
+            multi_select=bool(multi_select),
+            default_option_id=default_option_id,
+            asker_speaker_id=speaker_id,
+            asker_chat_id=chat_id,
+            channel=channel,
+        )
+    except ValueError as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"ask_user: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        _aq.AWAITING_INPUT_KEY: True,
+        "question_id": q.question_id,
+        "question": q.question,
+        "options": q.options,
+        "note": (
+            f"Question {q.question_id} created. The turn ends here; "
+            f"the user sees the question card and a new turn will "
+            f"fire when they pick a choice. Do NOT call this tool "
+            f"twice in the same turn."
+        ),
+    }, ensure_ascii=False)
+
+
 def _complete_supervisor_handler(
     decision: str,
     final_message: str = "",
@@ -2055,6 +2150,98 @@ def register_builtin_tools() -> None:
             "required": ["command"],
         },
         handler=_start_background_job_handler,
+    )
+
+    reg.register_func(
+        name="ask_user",
+        description=(
+            "Ask the user a STRUCTURED multiple-choice question. Use "
+            "this INSTEAD of free-form 'should I X or Y?' prose when "
+            "you need a clear decision and have 2-6 concrete options. "
+            "The question card is shown to the user as a clean block "
+            "with the question, an optional 'why' explanation, and "
+            "clickable option buttons. The turn ENDS as soon as you "
+            "call this tool — do NOT compose additional answer text "
+            "after calling. A new agent turn fires when the user "
+            "picks a choice; you'll see their answer as the next "
+            "user message.\n\n"
+            "When NOT to use:\n"
+            "  • For trivial follow-ups inside a chat ('how are you "
+            "today?') — just write the prose.\n"
+            "  • When you can apply a trivial fix without asking "
+            "(typo, missing flag, retry on transient error).\n"
+            "  • When you're in supervisor mode — call "
+            "`complete_supervisor(decision='escalate', ...)` instead "
+            "so the chain seals cleanly."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "The complete question text. Clear, specific, "
+                        "ending with '?'. The user sees this as the "
+                        "main heading of the card."
+                    ),
+                },
+                "options": {
+                    "type": "string",
+                    "description": (
+                        "JSON-encoded list of 2-6 options. Each "
+                        "option: {\"label\":\"...\",\"description\":\"...\",\"id\":\"...\"}. "
+                        "`description` and `id` are optional. If you "
+                        "have a recommended option put it FIRST and "
+                        "append '(Recommended)' to its label.\n"
+                        "Example: '[{\"label\":\"3 retries (Recommended)\","
+                        "\"description\":\"Covers transient errors.\"},"
+                        "{\"label\":\"5 retries\",\"description\":\"More forgiving.\"}]'"
+                    ),
+                },
+                "why": {
+                    "type": "string",
+                    "description": (
+                        "Short explanation of WHY you need this "
+                        "answer (1-2 sentences). Shown as secondary "
+                        "text under the question. Optional but "
+                        "strongly encouraged — without it the user "
+                        "has to guess what the tradeoff is."
+                    ),
+                    "default": "",
+                },
+                "header": {
+                    "type": "string",
+                    "description": (
+                        "Very short chip/tag for the card header "
+                        "(<=12 chars). E.g. 'Retry budget', 'Library', "
+                        "'Approach'. Optional — defaults to the first "
+                        "few words of the question."
+                    ),
+                    "default": "",
+                },
+                "multi_select": {
+                    "type": "boolean",
+                    "description": (
+                        "Allow multiple options to be selected. "
+                        "Defaults to single-select. Use when choices "
+                        "are not mutually exclusive (e.g. 'which "
+                        "features to enable')."
+                    ),
+                    "default": False,
+                },
+                "default_option_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional id of the recommended/default "
+                        "option. The WebUI / Telegram card highlights "
+                        "this one for the user."
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["question", "options"],
+        },
+        handler=_ask_user_handler,
     )
 
     reg.register_func(

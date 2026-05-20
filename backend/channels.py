@@ -1727,6 +1727,71 @@ class TelegramBot:
                         )
                     answer = result.answer or "(no answer)"
 
+                    # AskUserQuestion follow-up: if the agent called
+                    # the `ask_user` tool, `result.question` is
+                    # populated with the structured payload. Render
+                    # it as an inline-keyboard card INSTEAD of the
+                    # plain answer text — buttons are how the user
+                    # picks. The `q:` callback handler (registered
+                    # in `tools/ask_user.py`) catches the click and
+                    # fires the resume turn.
+                    if getattr(result, "question", None):
+                        try:
+                            await stream.freeze()
+                        except Exception as e_freeze:
+                            log.debug(
+                                "TG placeholder freeze failed: %s", e_freeze,
+                            )
+                        try:
+                            from . import tg_interactive as _tg
+                            from .tg_format import escape_html as _esc
+                            q = result.question
+                            header = (q.get("header") or "Question").strip()
+                            question_text = (q.get("question") or "").strip()
+                            why = (q.get("why") or "").strip()
+                            options = q.get("options") or []
+                            default_id = q.get("default_option_id") or ""
+                            qid = q.get("question_id") or ""
+                            lines = [f"❓ <b>{_esc(header)}</b>", ""]
+                            lines.append(_esc(question_text))
+                            if why:
+                                lines.extend(["", f"<i>{_esc(why)}</i>"])
+                            text_msg = "\n".join(lines)
+                            buttons = _tg.InlineButtonSet()
+                            for opt in options:
+                                opt_id = opt.get("id") or ""
+                                label = opt.get("label") or opt_id
+                                if (
+                                    default_id and opt_id == default_id
+                                    and "(Recommended)" not in label
+                                    and "✓" not in label
+                                ):
+                                    label = f"⭐ {label}"
+                                buttons.row(
+                                    _tg.InlineButton(
+                                        label[:64],
+                                        callback_data=f"q:{qid}:{opt_id}",
+                                    ),
+                                )
+                            await update.message.reply_text(
+                                text_msg,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                                reply_markup=buttons.to_markup(),
+                            )
+                        except Exception as e_q:
+                            log.warning(
+                                "TG question card render failed: %s",
+                                e_q,
+                            )
+                            # Fall through to plain-text answer so
+                            # the user at least sees the question
+                            # body even if the keyboard layer broke.
+                        else:
+                            # Question card was sent — skip the
+                            # normal answer rendering below.
+                            return
+
                     # Stats footer for the final answer. The trace
                     # footer (thinking + tools list) is NOT included
                     # here — the streaming block above (the now-frozen

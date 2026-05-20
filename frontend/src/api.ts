@@ -81,7 +81,57 @@ export type AgentAnswer = {
   // so the WebUI can deep-link a streamed answer to its Jobs-tab
   // entry without cross-referencing by timestamp.
   job_id?: string;
+  // AskUserQuestion follow-up: when the agent called the `ask_user`
+  // tool, the turn ends with this populated. The chat UI renders
+  // an AskUserCard with clickable options instead of the plain
+  // answer body.
+  question?: PendingQuestion | null;
 };
+
+export type QuestionOption = {
+  id: string;
+  label: string;
+  description?: string;
+};
+
+export type PendingQuestion = {
+  question_id: string;
+  asked_at: number;
+  question: string;
+  why: string;
+  header: string;
+  options: QuestionOption[];
+  multi_select: boolean;
+  default_option_id: string;
+  asker_speaker_id: string;
+  asker_chat_id: number | null;
+  channel: string;
+  answered: boolean;
+  answer_at?: number | null;
+  answer_choice?: string;
+  answer_text?: string;
+};
+
+export async function answerPendingQuestion(
+  question_id: string,
+  choice: string,
+  text: string = "",
+): Promise<AgentAnswer & {
+  answered_question_id?: string;
+  answer_choice?: string;
+  answer_text?: string;
+  already_answered?: boolean;
+}> {
+  return json_post("/api/chat/answer-question", {
+    question_id, choice, text,
+  });
+}
+
+export async function fetchOpenQuestions(): Promise<{
+  questions: PendingQuestion[];
+}> {
+  return json_get("/api/chat/open-questions");
+}
 
 // Round A: full TurnWorkspace JSON returned by GET /api/turns/<id>.
 // Same shape as what backend.workspace.save_turn writes per turn.

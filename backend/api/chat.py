@@ -166,6 +166,115 @@ async def chat(req: ChatRequest, request: Request):
     return EventSourceResponse(stream())
 
 
+# --- AskUserQuestion follow-up: answer a pending question ---------------
+
+
+@router.post("/api/chat/answer-question")
+async def answer_question(req: dict, request: Request):
+    """Submit a user's answer to a `ask_user`-issued question.
+
+    Body shape:
+      { "question_id": "q-...", "choice": "opt-0", "text": "..." }
+
+    `choice` is the option `id` the user picked (for single-select)
+    or a comma-separated list of ids (for multi-select). `text` is
+    an optional free-text fallback (e.g. when the user typed "Other"
+    via Telegram). Behaviour:
+
+      1. Marks the question answered in the store (idempotent — a
+         second click after the answer landed is a no-op return).
+      2. Synthesizes a user-visible message describing the choice
+         (e.g. "I picked: chocolate") and fires a fresh agent turn
+         via the normal `/api/chat` pipeline so conversation memory
+         + tool loop continue from where the previous turn ended.
+
+    Returns the new turn's AgentAnswer JSON (same shape as `/api/chat`
+    minus the SSE streaming — the WebUI calls this from a button
+    click handler, not a chat-input form, so we keep the response
+    flat)."""
+    require_owner_for_writes(action="answering a pending question")
+    check_chat_rate(request)
+    from ..tools import ask_user as _aq
+    qid = (req.get("question_id") or "").strip()
+    choice = (req.get("choice") or "").strip()
+    text = (req.get("text") or "").strip()
+    if not qid:
+        raise HTTPException(status_code=400, detail="question_id required")
+    q_before = _aq.STORE.get(qid)
+    if q_before is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    if q_before.answered:
+        # Idempotent return — the question already has an answer.
+        # Surface the prior choice so the UI can update without
+        # firing a second turn.
+        return {
+            "ok": True,
+            "already_answered": True,
+            "question_id": qid,
+            "answer_choice": q_before.answer_choice,
+            "answer_text": q_before.answer_text,
+        }
+    q = _aq.STORE.mark_answered(qid, choice=choice, text=text)
+    if q is None:
+        raise HTTPException(status_code=500, detail="failed to persist answer")
+    # Compose a user-visible "I picked …" message that the agent's
+    # next turn sees as the new user input. Prefer the option label
+    # over the raw id so the conversation log reads naturally.
+    label_for_choice = ""
+    for opt in q.options:
+        if opt.get("id") == choice:
+            label_for_choice = opt.get("label") or ""
+            break
+    if not label_for_choice and "," in choice:
+        # multi-select — assemble labels in order
+        ids = [c.strip() for c in choice.split(",") if c.strip()]
+        labels = []
+        for oid in ids:
+            for opt in q.options:
+                if opt.get("id") == oid:
+                    labels.append(opt.get("label") or oid)
+                    break
+        label_for_choice = ", ".join(labels)
+    if text:
+        user_message = f"My answer (free text): {text}"
+    elif label_for_choice:
+        user_message = f"My choice: {label_for_choice}"
+    else:
+        user_message = f"My choice: {choice or '(none)'}"
+    # Run the new turn synchronously and return its result. Same
+    # pattern as /api/chat but without SSE streaming — the answer
+    # is delivered as a flat JSON response so the UI can render it
+    # inline below the question card.
+    from ..sessions import normalize_speaker
+    speaker = normalize_speaker(q.asker_speaker_id or "webui:default")
+    agent = Agent()
+    res, job_id = await asyncio.to_thread(
+        lambda: run_tracked(
+            agent,
+            user_message,
+            PROJECTS.current,
+            None,
+            channel="webui" if q.channel == "webui" else "telegram",
+            speaker_id=speaker,
+        ),
+    )
+    out = res.model_dump()
+    out["job_id"] = job_id
+    out["answered_question_id"] = qid
+    out["answer_choice"] = choice
+    out["answer_text"] = text
+    return out
+
+
+@router.get("/api/chat/open-questions")
+async def open_questions():
+    """List un-answered questions so the WebUI can restore them on
+    page reload."""
+    from ..tools import ask_user as _aq
+    items = _aq.STORE.list_open(limit=50)
+    return {"questions": [q.to_dict() for q in items]}
+
+
 # --- Round A: lazy-load turn artefacts + per-channel conversation -------
 
 
