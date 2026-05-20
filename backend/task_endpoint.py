@@ -196,6 +196,53 @@ class EndpointStore:
             tmp.replace(p)
 
 
+    def gc_old(self, *, older_than_days: int = 14) -> int:
+        """Delete endpoints whose owning job chain is terminal AND
+        older than N days. Called from the bg-job watchdog's daily
+        sweep so the store doesn't grow unboundedly.
+
+        Audit follow-up: every `define_task_endpoint` call writes
+        a JSON blob; without cleanup the store accumulates one
+        stale file per task forever. Endpoints linger longer than
+        questions (14 d vs 7 d) because the supervisor's history
+        + retry chain references them — better to keep an audit
+        trail for a couple weeks than wipe them aggressively.
+
+        Note: this method does NOT load BackgroundJob records — it
+        relies on the endpoint's `created_at` as a proxy. A job's
+        endpoint is created at task start, which happens within
+        ~seconds of the job; so endpoint age ≈ chain age.
+        """
+        cutoff = time.time() - max(1, int(older_than_days)) * 86400
+        removed = 0
+        try:
+            root = self._root
+            if not root.exists():
+                return 0
+            with _STORE_LOCK:
+                for path in root.glob("*.json"):
+                    if path.name.endswith(".tmp"):
+                        continue
+                    try:
+                        raw = json.loads(path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    if not isinstance(raw, dict):
+                        continue
+                    if (raw.get("created_at") or 0) >= cutoff:
+                        continue
+                    try:
+                        path.unlink()
+                        removed += 1
+                    except Exception as e:
+                        log.debug(
+                            "endpoint gc: unlink %s failed: %s", path, e,
+                        )
+        except Exception as e:
+            log.warning("endpoint gc sweep failed: %s", e)
+        return removed
+
+
 STORE = EndpointStore()
 
 

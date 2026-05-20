@@ -454,8 +454,26 @@ class JobStore:
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
                     continue
+                # Audit follow-up: legacy / corrupted JSON files can
+                # land here as lists or scalars and `data.get(...)`
+                # would throw AttributeError, which surfaced as a
+                # noisy WARNING on every boot (12 occurrences over 3
+                # days in prod logs). Skip non-dict entries cleanly.
+                if not isinstance(data, dict):
+                    log.debug(
+                        "recover_interrupted: skipping non-dict job "
+                        "file %s (type=%s)", p.name, type(data).__name__,
+                    )
+                    continue
                 if data.get("status") in ("running", "queued"):
-                    job = Job.from_dict(data)
+                    try:
+                        job = Job.from_dict(data)
+                    except Exception as e:
+                        log.debug(
+                            "recover_interrupted: bad shape in %s: %s",
+                            p.name, e,
+                        )
+                        continue
                     self.mark_interrupted(job.id)
                     touched.append(job.id)
             if touched:

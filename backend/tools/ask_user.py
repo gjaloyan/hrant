@@ -197,6 +197,48 @@ class QuestionStore:
             self.put(q)
             return q
 
+    def gc_old(self, *, older_than_days: int = 7) -> int:
+        """Delete answered questions older than N days. Called from
+        the bg-job watchdog's daily sweep so the store doesn't grow
+        unboundedly. Returns the number of files removed.
+
+        Audit follow-up: every `ask_user` call writes a JSON blob;
+        without cleanup the store accumulates one stale file per
+        question forever. 7-day default gives the user plenty of
+        time to scroll back through old conversations + revisit a
+        question, but caps long-term disk usage.
+        """
+        cutoff = time.time() - max(1, int(older_than_days)) * 86400
+        removed = 0
+        try:
+            root = self._root
+            if not root.exists():
+                return 0
+            with _STORE_LOCK:
+                for path in root.glob("*.json"):
+                    if path.name.endswith(".tmp"):
+                        continue
+                    try:
+                        raw = json.loads(path.read_text(encoding="utf-8"))
+                    except Exception:
+                        continue
+                    if not isinstance(raw, dict):
+                        continue
+                    if not raw.get("answered"):
+                        continue
+                    if (raw.get("answer_at") or 0) >= cutoff:
+                        continue
+                    try:
+                        path.unlink()
+                        removed += 1
+                    except Exception as e:
+                        log.debug(
+                            "question gc: unlink %s failed: %s", path, e,
+                        )
+        except Exception as e:
+            log.warning("question gc sweep failed: %s", e)
+        return removed
+
     def list_open(self, *, limit: int = 50) -> list[PendingQuestion]:
         """All un-answered questions, newest first. Used by the
         WebUI to restore an in-flight question on page reload."""

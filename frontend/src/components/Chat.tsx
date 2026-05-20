@@ -381,13 +381,31 @@ function TaskStatusCard({ jobId }: { jobId: string }) {
       }
     };
     fetchAll();
+    // Audit follow-up (M-6): poll every 15s instead of 5s; STOP
+    // polling entirely once the job reaches a terminal state. The
+    // old 5s tick at terminal would run forever as a no-op,
+    // burning a setInterval slot per visible job. For a 9-hour
+    // benchmark this drops from ~6500 polls to ~2200, and to 0
+    // once the job ends. Live updates remain responsive — 15s is
+    // imperceptible against multi-hour runtimes.
+    const terminalStatuses = new Set([
+      "done", "error", "killed", "interrupted", "vanished",
+    ]);
+    const status = job?.status || "";
+    if (terminalStatuses.has(status)) {
+      return () => { cancelled = true; };
+    }
     const iv = setInterval(() => {
       if (cancelled) return;
-      const status = job?.status || "";
-      if (status === "running" || status === "" || !status) {
+      const s = job?.status || "";
+      if (s === "running" || s === "" || s === "stale" || !s) {
         fetchAll();
+      } else {
+        // Reached a terminal state during this poll cycle —
+        // self-stop so we don't keep firing setInterval ticks.
+        clearInterval(iv);
       }
-    }, 5_000);
+    }, 15_000);
     return () => { cancelled = true; clearInterval(iv); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [jobId, job?.status]);

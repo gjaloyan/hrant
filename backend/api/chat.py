@@ -7,7 +7,19 @@ from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
+
+
+class AnswerQuestionRequest(BaseModel):
+    """Audit follow-up (M-1): strict request shape for
+    /api/chat/answer-question. The old `req: dict` was loosely
+    typed — a malformed payload silently fell through to "404
+    question_id" or worse. Pydantic gives us field-level errors
+    that surface as 422 with a concrete message."""
+    question_id: str = Field(..., min_length=1, max_length=64)
+    choice: str = Field(default="", max_length=512)
+    text: str = Field(default="", max_length=4000)
 
 log = logging.getLogger(__name__)
 
@@ -170,7 +182,7 @@ async def chat(req: ChatRequest, request: Request):
 
 
 @router.post("/api/chat/answer-question")
-async def answer_question(req: dict, request: Request):
+async def answer_question(req: AnswerQuestionRequest, request: Request):
     """Submit a user's answer to a `ask_user`-issued question.
 
     Body shape:
@@ -195,9 +207,9 @@ async def answer_question(req: dict, request: Request):
     require_owner_for_writes(action="answering a pending question")
     check_chat_rate(request)
     from ..tools import ask_user as _aq
-    qid = (req.get("question_id") or "").strip()
-    choice = (req.get("choice") or "").strip()
-    text = (req.get("text") or "").strip()
+    qid = req.question_id.strip()
+    choice = req.choice.strip()
+    text = req.text.strip()
     if not qid:
         raise HTTPException(status_code=400, detail="question_id required")
     q_before = _aq.STORE.get(qid)

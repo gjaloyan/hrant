@@ -354,10 +354,36 @@ def _tick_one(job: BackgroundJob) -> None:
             log.debug("stale check for %s failed: %s", job.job_id, e)
 
 
+def _gc_sweep_if_due(state: dict) -> None:
+    """Audit follow-up: run the question + endpoint store GC once
+    every 24h. `state` is the watchdog loop's mutable scratch dict —
+    tracks `last_gc_at` so we don't sweep every minute. Per-store
+    failures are swallowed; this is best-effort housekeeping."""
+    last = state.get("last_gc_at") or 0.0
+    if time.time() - last < 86400:  # once per day
+        return
+    state["last_gc_at"] = time.time()
+    try:
+        from .tools import ask_user as _aq
+        removed_q = _aq.STORE.gc_old(older_than_days=7)
+        if removed_q:
+            log.info("watchdog: question store GC removed %d", removed_q)
+    except Exception as e:
+        log.warning("watchdog: question GC failed: %s", e)
+    try:
+        from . import task_endpoint as _te
+        removed_e = _te.STORE.gc_old(older_than_days=14)
+        if removed_e:
+            log.info("watchdog: endpoint store GC removed %d", removed_e)
+    except Exception as e:
+        log.warning("watchdog: endpoint GC failed: %s", e)
+
+
 def _watchdog_loop() -> None:
     """Daemon-thread main. Loops forever; per-job failures are
     swallowed so one bad job can't break the watchdog for the rest."""
     log.info("bg-job watchdog: started, tick interval %.0fs", _TICK_INTERVAL_SEC)
+    state: dict = {"last_gc_at": 0.0}
     while True:
         try:
             jobs = STORE.list(status="running", limit=200)
@@ -375,6 +401,12 @@ def _watchdog_loop() -> None:
                     "watchdog: _tick_one for %s failed: %s",
                     job.job_id, e,
                 )
+        # Daily housekeeping — sweep stale answered questions and
+        # terminal endpoints so the JSON stores don't grow forever.
+        try:
+            _gc_sweep_if_due(state)
+        except Exception as e:
+            log.warning("watchdog: GC sweep failed: %s", e)
         time.sleep(_TICK_INTERVAL_SEC)
 
 
