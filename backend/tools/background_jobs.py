@@ -111,6 +111,32 @@ class BackgroundJob:
     # retry will fire. Pinned so a late-arriving on_done doesn't
     # accidentally re-open the supervisor.
     supervisor_terminal: bool = False
+    # ── Phase 2 watchdog hooks ───────────────────────────────────
+    # Total work units the job is expected to complete (e.g. 300 for
+    # "SWE-bench Lite 300"). When set together with
+    # `progress_probe_cmd`, the watchdog computes pct = done / total
+    # and fires a heartbeat DM at each 30% milestone (30 / 60 / 90).
+    # Unset = no measurable progress; watchdog falls back to a
+    # time-based heartbeat every 2 hours so the user knows the job
+    # is still alive on long runs.
+    total_units: Optional[int] = None
+    # Shell command that prints an integer (the "done" count) to
+    # stdout. Run by the watchdog under the job's `cwd`. Stderr is
+    # ignored; non-zero exit or non-integer output → probe skipped.
+    # Example: `find logs/run_evaluation -name report.json | wc -l`
+    # for a SWE-bench run.
+    progress_probe_cmd: str = ""
+    # Last sampled size/mtime of the job's stdout.log. Used by the
+    # stale-detection watchdog: when the file hasn't grown in a
+    # long time the watchdog opens a supervisor turn so the LLM can
+    # decide whether the run is stuck.
+    last_log_size: Optional[int] = None
+    last_log_size_at: Optional[float] = None
+    # Stale flag — set by the watchdog when it opens a supervisor
+    # turn for an apparently-stuck job, so subsequent watchdog ticks
+    # don't re-fire the same supervisor while the previous one is
+    # still deciding.
+    stale_supervisor_opened: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -291,6 +317,8 @@ def start_job(
     expected_outcome: str = "",
     parent_job_id: str = "",
     retry_count: int = 0,
+    total_units: Optional[int] = None,
+    progress_probe_cmd: str = "",
 ) -> BackgroundJob:
     """Spawn `command` in a background thread; return immediately
     with the BackgroundJob record (status='running'). On completion
@@ -338,6 +366,8 @@ def start_job(
         expected_outcome=(expected_outcome or "").strip(),
         parent_job_id=(parent_job_id or "").strip(),
         retry_count=int(retry_count or 0),
+        total_units=int(total_units) if total_units else None,
+        progress_probe_cmd=(progress_probe_cmd or "").strip(),
     )
     STORE.add(job)
 

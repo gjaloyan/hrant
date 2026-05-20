@@ -370,6 +370,8 @@ def _start_background_job_handler(
     parent_job_id: str = "",
     original_user_request: str = "",
     expected_outcome: str = "",
+    total_units: int = 0,
+    progress_probe_cmd: str = "",
 ) -> str:
     """Spawn `command` in a background thread and return the job_id
     immediately. OWNER-only. Use this INSTEAD of `terminal_exec` for
@@ -406,6 +408,8 @@ def _start_background_job_handler(
     inherit_original_speaker = ""
     inherit_original_chat_id: int | None = None
     inherit_expected = expected_outcome
+    inherit_total_units = int(total_units) if total_units else None
+    inherit_probe_cmd = progress_probe_cmd
     if effective_parent:
         parent = _bg.STORE.get(effective_parent)
         if parent is not None:
@@ -416,6 +420,12 @@ def _start_background_job_handler(
             inherit_original_speaker = parent.original_speaker_id
             inherit_original_chat_id = parent.original_chat_id
             inherit_expected = inherit_expected or parent.expected_outcome
+            # Heartbeat config also chains across retries — a retry of
+            # an SWE-bench run still has 300 instances and the same
+            # progress probe.
+            if inherit_total_units is None:
+                inherit_total_units = parent.total_units
+            inherit_probe_cmd = inherit_probe_cmd or parent.progress_probe_cmd
     # If we still don't know the original chat, try to resolve from
     # the current speaker — first-time launches outside a supervisor
     # context route DMs back to the user who triggered the tool call.
@@ -434,6 +444,8 @@ def _start_background_job_handler(
             expected_outcome=inherit_expected,
             parent_job_id=effective_parent,
             retry_count=retry_count,
+            total_units=inherit_total_units,
+            progress_probe_cmd=inherit_probe_cmd,
         )
     except Exception as e:
         return json.dumps({
@@ -2013,6 +2025,29 @@ def register_builtin_tools() -> None:
                         "Used by the supervisor to distinguish "
                         "'done' from 'partially ran'. Inherited from "
                         "`parent_job_id` if set."
+                    ),
+                    "default": "",
+                },
+                "total_units": {
+                    "type": "integer",
+                    "description": (
+                        "Total work units the job is expected to "
+                        "complete (e.g. 300 for SWE-bench Lite 300). "
+                        "Required for milestone-based heartbeats — "
+                        "without it, the watchdog falls back to a "
+                        "passive time-based heartbeat every 2 hours."
+                    ),
+                    "default": 0,
+                },
+                "progress_probe_cmd": {
+                    "type": "string",
+                    "description": (
+                        "Shell command that prints the current 'done' "
+                        "count to stdout. Run under cwd by the "
+                        "watchdog every 60s. Example for SWE-bench: "
+                        "'find logs/run_evaluation -name report.json "
+                        "| wc -l'. Combined with `total_units` it "
+                        "drives heartbeat DMs at 30/60/90% milestones."
                     ),
                     "default": "",
                 },

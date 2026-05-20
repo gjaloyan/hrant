@@ -107,6 +107,16 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("background-jobs interrupted-sweep error: %s", e)
 
+    # Audit T6 Phase 2: start the background-job watchdog. One
+    # daemon thread that ticks every 60s and checks running jobs
+    # for vanished PIDs, progress milestones, and stale
+    # (no log growth) state. Idempotent — safe across reloads.
+    try:
+        from . import bg_job_watchdog as _bgw
+        _bgw.start_watchdog()
+    except Exception as e:
+        log.warning("bg-job watchdog start failed: %s", e)
+
     # Audit follow-up: tighten file modes on sensitive configs that may
     # exist from before write_secret_json() landed. Best-effort; failures
     # never block startup. POSIX-only — Windows ignores os.chmod for mode
