@@ -167,6 +167,97 @@ async def test_edit_failure_swallowed():
 
 
 @pytest.mark.asyncio
+async def test_tool_lifecycle_not_double_counted():
+    """A single tool execution emits BOTH `tool_starting` (pre-call)
+    and `tool` (post-call) progress events. Pre-fix the coalescer
+    treated them as two separate calls and the user saw `(×2)` next
+    to every tool line — looking like the LLM was running each tool
+    twice when it wasn't. After the fix, the lifecycle pair renders
+    as `count=1` (the post-call `tool` event updates the entry in
+    place instead of opening a new one)."""
+    from types import SimpleNamespace
+    bot = _FakeBot()
+    loop = asyncio.get_running_loop()
+    stream = _TgProgressStream(bot=bot, chat_id=1, message_id=42, loop=loop)
+    detail = SimpleNamespace(name="terminal_exec", args={"cmd": "ls -la"})
+    # Pre-call event (live indicator).
+    stream.push("tool_starting", "terminal_exec(cmd)", tool_call=detail)
+    # Post-call event (callback after the tool returns).
+    stream.push("tool", "terminal_exec(cmd) -> output...", tool_call=detail)
+    await asyncio.sleep(0.15)
+    assert len(stream._entries) == 1, (
+        f"lifecycle pair must coalesce; got {stream._entries}"
+    )
+    assert stream._entries[0]["count"] == 1, (
+        f"single execution must render count=1, not ×2: {stream._entries[0]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_lifecycle_error_flips_icon():
+    """The post-call `tool_error` event must flip the entry's icon to
+    ❌ in place — without bumping the count."""
+    from types import SimpleNamespace
+    bot = _FakeBot()
+    loop = asyncio.get_running_loop()
+    stream = _TgProgressStream(bot=bot, chat_id=1, message_id=42, loop=loop)
+    detail = SimpleNamespace(name="terminal_exec", args={"cmd": "bad"})
+    stream.push("tool_starting", "terminal_exec(cmd)", tool_call=detail)
+    stream.push("tool_error", "terminal_exec(cmd) -> err", tool_call=detail)
+    await asyncio.sleep(0.15)
+    assert len(stream._entries) == 1
+    assert stream._entries[0]["count"] == 1
+    assert stream._entries[0]["icon"] == "❌"
+
+
+@pytest.mark.asyncio
+async def test_two_genuine_consecutive_identical_calls_still_coalesce():
+    """A real double-call (LLM emits the same tool_use block twice in
+    one iteration) must still render as `count=2`. We need this to
+    survive the lifecycle-coalescing fix above."""
+    from types import SimpleNamespace
+    bot = _FakeBot()
+    loop = asyncio.get_running_loop()
+    stream = _TgProgressStream(bot=bot, chat_id=1, message_id=42, loop=loop)
+    detail = SimpleNamespace(name="search_knowledge", args={"q": "armenia"})
+    # Two genuine starts back-to-back, BEFORE either completes.
+    stream.push("tool_starting", "search_knowledge(q)", tool_call=detail)
+    stream.push("tool_starting", "search_knowledge(q)", tool_call=detail)
+    await asyncio.sleep(0.15)
+    assert len(stream._entries) == 1
+    assert stream._entries[0]["count"] == 2, (
+        f"genuine duplicate must coalesce to count=2: {stream._entries[0]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_two_genuine_lifecycle_pairs_collapse_to_count():
+    """When the LLM REALLY emits the same tool_use block twice in a
+    turn, each execution produces a full `tool_starting → tool`
+    lifecycle pair. The user wants to see "ran twice" as a single
+    line with `(×2)`. That's the explicit signal the LLM duplicated;
+    showing two separate lines would just look like more noise."""
+    from types import SimpleNamespace
+    bot = _FakeBot()
+    loop = asyncio.get_running_loop()
+    stream = _TgProgressStream(bot=bot, chat_id=1, message_id=42, loop=loop)
+    detail = SimpleNamespace(name="search_knowledge", args={"q": "x"})
+    # Two full lifecycles, same args.
+    stream.push("tool_starting", "search_knowledge(q)", tool_call=detail)
+    stream.push("tool", "search_knowledge(q) -> ...", tool_call=detail)
+    stream.push("tool_starting", "search_knowledge(q)", tool_call=detail)
+    stream.push("tool", "search_knowledge(q) -> ...", tool_call=detail)
+    await asyncio.sleep(0.15)
+    assert len(stream._entries) == 1, (
+        f"two lifecycles for same args must coalesce to ONE row; "
+        f"got {stream._entries}"
+    )
+    assert stream._entries[0]["count"] == 2, (
+        f"two real executions must show count=2: {stream._entries[0]}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_empty_detail_renders_label_only():
     """Some whitelisted events fire with no detail string (e.g. just
     `tool_starting`). We render the label alone instead of a bare

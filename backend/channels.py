@@ -283,19 +283,68 @@ class _TgProgressStream:
             if event == "tool_error":
                 icon = "❌"
             preview = _arg_preview(name, args)
+            # Tool-call lifecycle: a SINGLE execution produces TWO
+            # progress events — `tool_starting` (fired by the runner
+            # BEFORE calling the tool) and `tool` / `tool_error`
+            # (fired by the `on_tool_call` callback AFTER the result
+            # is back). Both carry the same name + args. Pre-fix,
+            # the coalescer treated each as a separate call and the
+            # user saw `(×2)` next to every line in the trace block,
+            # looking exactly like the LLM was running each tool
+            # twice. It wasn't — one execution, two events.
+            #
+            # Rules (in order):
+            #   1. `tool_starting` matching the last entry's (name,
+            #      preview) — count += 1 and clear `_completed`
+            #      (the second iteration's lifecycle has begun).
+            #   2. `tool` / `tool_error` matching the last entry
+            #      that is NOT yet completed — lifecycle update:
+            #      seal it (`_completed=True`), flip icon to ❌ on
+            #      error. NO count change — that was the same exec.
+            #   3. `tool` / `tool_error` matching the last entry
+            #      that IS already completed — a second completion
+            #      for the same call (genuine duplicate execution).
+            #      count += 1.
+            #   4. Anything else — open a new entry.
             with self._lock:
                 self._total_seen += 1
-                if (
-                    self._entries
-                    and self._entries[-1]["name"] == name
-                    and self._entries[-1]["preview"] == preview
-                    and self._entries[-1]["icon"] == icon
+                last = self._entries[-1] if self._entries else None
+                matches_last = (
+                    last is not None
+                    and last["name"] == name
+                    and last["preview"] == preview
+                )
+                if matches_last and event == "tool_starting":
+                    # Rule 1: next-iter exec start.
+                    last["count"] += 1
+                    last["_completed"] = False
+                    last["icon"] = icon
+                elif (
+                    matches_last
+                    and event in ("tool", "tool_error")
+                    and not last.get("_completed", False)
                 ):
-                    self._entries[-1]["count"] += 1
+                    # Rule 2: lifecycle completion of the same exec.
+                    if event == "tool_error":
+                        last["icon"] = "❌"
+                    last["_completed"] = True
+                elif (
+                    matches_last
+                    and event in ("tool", "tool_error")
+                    and last.get("_completed", False)
+                ):
+                    # Rule 3: a second completion for the same args —
+                    # the LLM ran the same tool back-to-back without
+                    # an intervening tool_starting (some legacy code
+                    # paths emit only `tool`). Coalesce.
+                    if event == "tool_error":
+                        last["icon"] = "❌"
+                    last["count"] += 1
                 else:
                     self._entries.append({
                         "icon": icon, "name": name,
                         "preview": preview, "count": 1,
+                        "_completed": event in ("tool", "tool_error"),
                     })
             self._schedule_edit()
             return

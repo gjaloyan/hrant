@@ -597,6 +597,41 @@ def _propose_skill_handler(
     trig_list = [
         t.strip() for t in (triggers or "").split(",") if t.strip()
     ]
+    # Pre-flight: refuse near-duplicates of an existing skill. Without
+    # this, the post-turn skill_reflection occasionally proposes a new
+    # skill that semantically duplicates one already in the catalogue
+    # (e.g. `check-bench-status` while `background-job-status` is
+    # already active). The reflection prompt already nudges the LLM to
+    # `propose_skill(name=<existing>, ...)` to merge — this check is
+    # the kill switch when that nudge is ignored.
+    try:
+        dups = _skills.SKILLS.find_proposal_duplicates(
+            name=name,
+            description=description,
+            triggers=trig_list,
+            when_to_use=when_to_use,
+            body=body,
+        )
+    except Exception:
+        dups = []
+    if dups:
+        top_sk, top_score = dups[0]
+        return json.dumps({
+            "ok": False,
+            "error": "duplicate_skill",
+            "detail": (
+                f"A similar skill already exists: "
+                f"'{top_sk.name}' (score={top_score:.2f}, "
+                f"enabled={top_sk.enabled}). To merge/replace it, "
+                f"call propose_skill with name='{top_sk.name}'. To "
+                f"use it as-is, skip this proposal — it's already "
+                f"in the catalogue."
+            ),
+            "matched_name": top_sk.name,
+            "matched_score": round(float(top_score), 3),
+            "matched_enabled": bool(top_sk.enabled),
+            "matched_description": top_sk.description or "",
+        }, ensure_ascii=False)
     sk = _skills.propose(
         name=name,
         description=description,

@@ -658,6 +658,74 @@ class SkillsManager:
                 out.append((sk, score))
         return out
 
+    def find_proposal_duplicates(
+        self,
+        *,
+        name: str,
+        description: str,
+        triggers: list[str] | None = None,
+        when_to_use: str = "",
+        body: str = "",
+        min_score: float = 0.55,
+        limit: int = 3,
+    ) -> list[tuple[Skill, float]]:
+        """Find existing skills whose semantic signature is too close
+        to a proposed new one.
+
+        Used by `propose_skill` to refuse a duplicate before it lands.
+        Without this, a post-turn skill_reflection that misses the
+        existing-catalog hint produces a second skill with a different
+        name covering the same workflow (e.g. an active
+        `background-job-status` skill plus a fresh proposal for
+        `check-bench-status` that does the same thing).
+
+        Score is Jaccard overlap over the tokenized text
+        (name + description + tags + triggers + when_to_use) — the
+        same tokenizer the semantic index uses. Considers BOTH enabled
+        and disabled skills because a duplicate disabled skill is
+        still a duplicate. The same-name overwrite path (clean_name
+        equals an existing skill's name) is NOT flagged — that's the
+        explicit merge channel skill_reflection is supposed to take.
+        """
+        self.ensure_loaded()
+        proposal_text = " ".join(filter(None, [
+            name or "",
+            description or "",
+            " ".join(triggers or []),
+            when_to_use or "",
+            body or "",
+        ]))
+        proposal_tokens = _semantic_tokenize(proposal_text)
+        if not proposal_tokens:
+            return []
+        proposal_set: set[str] = set(proposal_tokens)
+        clean_name = "".join(
+            c if c.isalnum() or c in "_-" else "_" for c in (name or "")
+        ).strip("_")
+        out: list[tuple[Skill, float]] = []
+        for sk in self.skills:
+            # Same-name proposal is an explicit overwrite, not a
+            # duplicate — let it through.
+            if sk.name == clean_name:
+                continue
+            sk_text = " ".join([
+                sk.name or "",
+                sk.description or "",
+                " ".join(sk.tags or []),
+                " ".join(sk.triggers or []),
+                sk.when_to_use or "",
+            ])
+            sk_tokens = set(_semantic_tokenize(sk_text))
+            if not sk_tokens:
+                continue
+            inter = proposal_set & sk_tokens
+            union = proposal_set | sk_tokens
+            score = len(inter) / max(1, len(union))
+            if score >= min_score:
+                out.append((sk, score))
+        out.sort(key=lambda p: p[1], reverse=True)
+        return out[:limit]
+
     def get(self, name: str) -> Optional[Skill]:
         self.ensure_loaded()
         for s in self.skills:
