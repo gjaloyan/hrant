@@ -92,7 +92,7 @@ def test_create_endpoint_refuses_empty_criteria(isolated_endpoints):
 
 def test_create_endpoint_refuses_over_twelve(isolated_endpoints):
     from backend import task_endpoint as _te
-    with pytest.raises(ValueError, match="at most 12 criteria"):
+    with pytest.raises(ValueError, match="at most 12 entries"):
         _te.create_endpoint(
             task_summary="t",
             user_goal_verbatim="g",
@@ -513,6 +513,232 @@ def test_complete_supervisor_escalate_bypasses_gate(
 
 
 # ─── format_evaluation_block ──────────────────────────────────────
+
+
+# ─── Phase 3a: prerequisites pre-flight gate ──────────────────────
+
+
+def test_create_endpoint_accepts_prerequisites(isolated_endpoints):
+    """Phase 3a: endpoints can carry pre-flight prerequisites
+    separate from success_criteria."""
+    from backend import task_endpoint as _te
+    ep = _te.create_endpoint(
+        task_summary="t",
+        user_goal_verbatim="g",
+        success_criteria=[{"description": "out exists"}],
+        prerequisites=[
+            {"id": "input_present", "description": "input file",
+             "check_cmd": "true"},
+            {"id": "dep_installed", "description": "dep importable",
+             "check_cmd": "false"},
+        ],
+    )
+    assert len(ep.prerequisites) == 2
+    refreshed = _te.STORE.get(ep.endpoint_id)
+    assert refreshed is not None
+    assert len(refreshed.prerequisites) == 2
+
+
+def test_evaluate_prerequisites_runs_check_cmds(isolated_endpoints):
+    """Same shape as evaluate_endpoint but reads from
+    `prerequisites` instead of `success_criteria`."""
+    from backend import task_endpoint as _te
+    ep = _te.create_endpoint(
+        task_summary="t",
+        user_goal_verbatim="g",
+        success_criteria=[{"description": "out"}],
+        prerequisites=[
+            {"id": "ok", "description": "true", "check_cmd": "true"},
+            {"id": "fail", "description": "false", "check_cmd": "false"},
+        ],
+    )
+    results = _te.evaluate_prerequisites(ep)
+    statuses = {r.criterion_id: r.status for r in results}
+    assert statuses == {"ok": "met", "fail": "unmet"}
+
+
+def test_evaluate_prerequisites_empty_when_no_prereqs(isolated_endpoints):
+    """Backward compat: an endpoint without prerequisites returns
+    an empty result list — the gate sees no blocking criteria and
+    launches normally."""
+    from backend import task_endpoint as _te
+    ep = _te.create_endpoint(
+        task_summary="t",
+        user_goal_verbatim="g",
+        success_criteria=[{"description": "out"}],
+    )
+    assert _te.evaluate_prerequisites(ep) == []
+
+
+def test_start_background_job_refuses_when_prerequisite_unmet(
+    isolated_endpoints, monkeypatch,
+):
+    """The core Phase 3a contract: the pre-flight gate refuses
+    `start_background_job` if a critical prerequisite is unmet.
+    The agent gets a structured error explaining what to fix —
+    the 'Please run bench' incident becomes impossible because
+    the agent CAN'T launch a doomed job."""
+    from backend.tools import background_jobs as _bg
+    from backend.builtin_tools import _start_background_job_handler
+    monkeypatch.setattr(
+        _bg.STORE, "_root_override", isolated_endpoints / "jobs",
+    )
+    monkeypatch.setattr(
+        "backend.roles.is_owner", lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "backend.roles.current_speaker",
+        lambda: "telegram:848732236",
+    )
+    from backend import task_endpoint as _te
+    ep = _te.create_endpoint(
+        task_summary="bench",
+        user_goal_verbatim="run bench",
+        success_criteria=[{"description": "exit 0", "check_cmd": "true"}],
+        prerequisites=[
+            {"id": "patches_nonempty",
+             "description": "non-empty patches",
+             "check_cmd": "false",  # simulates "empty patches"
+             "critical": True},
+        ],
+    )
+    raw = _start_background_job_handler(
+        command="echo run",
+        label="blocked-bench",
+        endpoint_id=ep.endpoint_id,
+    )
+    body = json.loads(raw)
+    assert body["ok"] is False
+    assert body["error"] == "prerequisites_unmet"
+    assert body["endpoint_id"] == ep.endpoint_id
+    assert body["unmet"]
+    assert body["unmet"][0]["criterion_id"] == "patches_nonempty"
+    # No job got created.
+    running_jobs = _bg.list_jobs(status="running")
+    assert running_jobs == []
+
+
+def test_start_background_job_launches_when_prerequisites_met(
+    isolated_endpoints, monkeypatch,
+):
+    """Sanity: with all prerequisites passing, launch proceeds
+    normally."""
+    from backend.tools import background_jobs as _bg
+    from backend.builtin_tools import _start_background_job_handler
+    monkeypatch.setattr(
+        _bg.STORE, "_root_override", isolated_endpoints / "jobs",
+    )
+    monkeypatch.setattr(
+        "backend.roles.is_owner", lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "backend.roles.current_speaker",
+        lambda: "telegram:848732236",
+    )
+    from backend import task_endpoint as _te
+    ep = _te.create_endpoint(
+        task_summary="ok task",
+        user_goal_verbatim="do it",
+        success_criteria=[{"description": "x"}],
+        prerequisites=[
+            {"id": "input_ready", "description": "input file ready",
+             "check_cmd": "true", "critical": True},
+        ],
+    )
+    raw = _start_background_job_handler(
+        command="true",
+        label="ok-launch",
+        endpoint_id=ep.endpoint_id,
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["job_id"].startswith("bg-")
+
+
+def test_start_background_job_allows_launch_without_endpoint(
+    isolated_endpoints, monkeypatch,
+):
+    """Backward compat: launches without `endpoint_id` skip the
+    gate entirely."""
+    from backend.tools import background_jobs as _bg
+    from backend.builtin_tools import _start_background_job_handler
+    monkeypatch.setattr(
+        _bg.STORE, "_root_override", isolated_endpoints / "jobs",
+    )
+    monkeypatch.setattr(
+        "backend.roles.is_owner", lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "backend.roles.current_speaker", lambda: "webui:default",
+    )
+    raw = _start_background_job_handler(
+        command="true", label="no-endpoint",
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+
+
+def test_non_critical_prerequisite_does_not_block_launch(
+    isolated_endpoints, monkeypatch,
+):
+    """A prerequisite marked critical=False is informational —
+    failing it does NOT refuse the launch (mirrors success
+    criteria semantics for non-critical items)."""
+    from backend.tools import background_jobs as _bg
+    from backend.builtin_tools import _start_background_job_handler
+    monkeypatch.setattr(
+        _bg.STORE, "_root_override", isolated_endpoints / "jobs",
+    )
+    monkeypatch.setattr(
+        "backend.roles.is_owner", lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "backend.roles.current_speaker", lambda: "webui:default",
+    )
+    from backend import task_endpoint as _te
+    ep = _te.create_endpoint(
+        task_summary="t",
+        user_goal_verbatim="g",
+        success_criteria=[{"description": "x"}],
+        prerequisites=[
+            {"id": "nice_to_have", "description": "warn-only",
+             "check_cmd": "false", "critical": False},
+        ],
+    )
+    raw = _start_background_job_handler(
+        command="true",
+        label="non-critical-prereq",
+        endpoint_id=ep.endpoint_id,
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True, (
+        f"non-critical prerequisite must not block launch: {body}"
+    )
+
+
+def test_define_task_endpoint_handler_accepts_prerequisites(
+    isolated_endpoints, monkeypatch,
+):
+    """End-to-end via the LLM-facing handler: prerequisites JSON
+    arg is parsed and stored."""
+    from backend.builtin_tools import _define_task_endpoint_handler
+    monkeypatch.setattr(
+        "backend.roles.current_speaker", lambda: "webui:default",
+    )
+    raw = _define_task_endpoint_handler(
+        task_summary="t",
+        user_goal_verbatim="g",
+        success_criteria=json.dumps([{"description": "out"}]),
+        prerequisites=json.dumps([
+            {"description": "input ready", "check_cmd": "true"},
+        ]),
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["prerequisites_count"] == 1
+    from backend import task_endpoint as _te
+    ep = _te.STORE.get(body["endpoint_id"])
+    assert len(ep.prerequisites) == 1
 
 
 def test_format_evaluation_block_includes_status_icons(

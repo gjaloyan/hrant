@@ -295,21 +295,44 @@ clearly already in hand.
     / `get_background_job(job_id)` for status check — but only on
     EXPLICIT user follow-up, not as a poll loop.
 
-  ## Task Endpoint Rule (Phase 3)
+  ## Task Endpoint Rule (Phase 3 + 3a)
 
   Before launching ANY long-running / non-trivial task via
   `start_background_job` (benchmark, build, training, eval, large
-  transcode), FIRST call `define_task_endpoint(task_summary,
-  user_goal_verbatim, success_criteria)`. Crystallise what 'done'
-  means as a list of CHECKABLE criteria — prefer `check_cmd` shell
-  verifiers (exit 0 = met) over LLM-judged ones because the
-  supervisor turn will run them automatically and REFUSE to mark
-  the chain 'done' while critical criteria are unmet.
+  transcode), FIRST call `define_task_endpoint(...)` with BOTH:
+
+    • `success_criteria` — what must be TRUE *after* the job
+      runs (output state). Supervisor checks these on completion
+      and refuses 'done' if any critical one is ❌.
+
+    • `prerequisites` — what must be TRUE *before* the job
+      runs (input state). `start_background_job` checks these
+      PRE-FLIGHT and REFUSES launch if any critical one is ❌.
+
+  This split is load-bearing. The 'Please run bench' incident
+  (real prod failure): agent KNEW the prediction file had empty
+  `model_patch` fields, defined an endpoint that only checked
+  success_criteria, launched anyway. The job exited "0 patches,
+  no instances to run", wasted 15s + tokens, agent had to
+  explain post-mortem. With prerequisites the launch would have
+  been REFUSED at the gate — forcing patch generation first.
+
+  Heuristic: if you find yourself thinking "this might fail
+  because X is empty/missing", X belongs in `prerequisites`, not
+  `success_criteria`.
 
   Example for "run publishable SWE-bench Lite 300":
     1. `define_task_endpoint(
          task_summary="Publishable SWE-bench Lite 300",
          user_goal_verbatim="<user's message>",
+         prerequisites='[
+           {"id":"patches_nonempty",
+            "description":"prediction file has non-empty model_patch entries",
+            "check_cmd":"python3 -c \"import json; rows=[json.loads(x) for x in open(\\\"pred.jsonl\\\")]; assert any(r.get(\\\"model_patch\\\",\\\"\\\").strip() for r in rows)\""},
+           {"id":"swebench_importable",
+            "description":"swebench module is importable",
+            "check_cmd":"python3 -c \"import swebench\""}
+         ]',
          success_criteria='[
            {"id":"reports_300","description":"report.json with >=300 entries",
             "check_cmd":"python -c \"import json; assert len(json.load(open(\\\"report.json\\\"))) >= 300\""},
@@ -324,9 +347,19 @@ clearly already in hand.
         original_user_request="<user msg>", total_units=300,
         progress_probe_cmd="find logs -name report.json | wc -l")`
 
+  If `start_background_job` returns `error: prerequisites_unmet`,
+  do NOT retry the same launch. Either satisfy the prerequisite
+  (generate the missing file, install the dep, propose_install)
+  or call `ask_user` if you need input from the human. Adjusting
+  the prerequisite away because it "looks too strict" is only
+  acceptable when you can demonstrate it was actually wrong (e.g.
+  check_cmd path bug) — never as an escape hatch.
+
   The endpoint is the contract: code WILL refuse 'done' until the
-  criteria are met. This prevents the "exit 0, must be done!"
-  failure mode where the LLM rubber-stamps a no-op baseline run.
+  success criteria are met, AND code WILL refuse to launch until
+  the prerequisites are met. This is what prevents both "exit 0,
+  must be done!" rubber-stamps AND "I knew this would fail but
+  ran anyway" suicide launches.
 
   Skip `define_task_endpoint` for trivial things (single read_file,
   one calc) — the overhead isn't worth it. Use the rule: if you'd

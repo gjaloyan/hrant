@@ -438,6 +438,58 @@ def _start_background_job_handler(
     # context route DMs back to the user who triggered the tool call.
     if not inherit_original_speaker:
         inherit_original_speaker = speaker_id or ""
+
+    # Phase 3a pre-flight gate. If the endpoint defines
+    # `prerequisites`, run their check_cmds NOW (before spawning
+    # the subprocess). A failed critical prerequisite refuses the
+    # launch with a structured error — the LLM must satisfy the
+    # prerequisite first (generate the missing file, ask_user for
+    # input, install a dep) or adjust the endpoint. This closes
+    # the "agent knew patches were empty but launched anyway"
+    # failure mode the 'Please run bench' incident exposed.
+    if inherit_endpoint:
+        try:
+            from . import task_endpoint as _te
+            ep = _te.STORE.get(inherit_endpoint)
+            if ep is not None and ep.prerequisites:
+                prereq_results = _te.evaluate_prerequisites(
+                    ep, cwd=cwd or "",
+                )
+                blocking = [
+                    r for r in prereq_results
+                    if r.critical and r.status == "unmet"
+                ]
+                if blocking:
+                    return json.dumps({
+                        "ok": False,
+                        "error": "prerequisites_unmet",
+                        "detail": (
+                            "Cannot launch — these critical "
+                            "PRE-FLIGHT prerequisites are not yet "
+                            "satisfied. Do NOT relaunch with the "
+                            "same broken state. Your options:\n"
+                            "  (a) Satisfy each unmet prerequisite "
+                            "(write the missing file, install the "
+                            "missing dep, regenerate the empty "
+                            "input) and try again.\n"
+                            "  (b) Use `ask_user` if you need input "
+                            "from the human (e.g. credentials, "
+                            "business decision).\n"
+                            "  (c) If you believe a check_cmd is "
+                            "wrong, redefine the endpoint with "
+                            "corrected prerequisites — but only "
+                            "after verifying the actual state."
+                        ),
+                        "unmet": [r.to_dict() for r in blocking],
+                        "endpoint_id": inherit_endpoint,
+                    }, ensure_ascii=False)
+        except Exception as e:
+            log.warning(
+                "prerequisite gate eval for endpoint %s crashed: %s; "
+                "letting launch proceed (fail-open)",
+                inherit_endpoint, e,
+            )
+
     try:
         job = _bg.start_job(
             command=command,
@@ -481,6 +533,7 @@ def _define_task_endpoint_handler(
     user_goal_verbatim: str,
     success_criteria: str,
     failure_recovery: str = "",
+    prerequisites: str = "",
 ) -> str:
     """Crystallise what 'done' means for a non-trivial task BEFORE
     launching it. Returns an `endpoint_id` you pass to
@@ -542,6 +595,28 @@ def _define_task_endpoint_handler(
                 rec_parsed = json.loads(failure_recovery.replace("'", '"'))
             except Exception:
                 rec_parsed = []
+    # Phase 3a: optional pre-flight prerequisites. Same JSON shape
+    # as success_criteria. Parsed identically — leave empty for
+    # tasks with no preconditions (one-off script, fresh build).
+    prereq_parsed: list[dict] = []
+    if prerequisites and isinstance(prerequisites, str) and prerequisites.strip():
+        try:
+            prereq_parsed = json.loads(prerequisites)
+        except Exception:
+            try:
+                prereq_parsed = json.loads(prerequisites.replace("'", '"'))
+            except Exception:
+                return json.dumps({
+                    "ok": False,
+                    "error": "define_task_endpoint: prerequisites must be valid JSON list",
+                }, ensure_ascii=False)
+    elif isinstance(prerequisites, list):
+        prereq_parsed = prerequisites
+    if prereq_parsed and not isinstance(prereq_parsed, list):
+        return json.dumps({
+            "ok": False,
+            "error": "prerequisites must be a list",
+        }, ensure_ascii=False)
     speaker_id = current_speaker() or ""
     chat_id: int | None = None
     channel = ""
@@ -562,6 +637,7 @@ def _define_task_endpoint_handler(
             user_goal_verbatim=user_goal_verbatim,
             success_criteria=crit_parsed,
             failure_recovery=rec_parsed,
+            prerequisites=prereq_parsed,
             speaker_id=speaker_id,
             chat_id=chat_id,
             channel=channel,
@@ -576,10 +652,12 @@ def _define_task_endpoint_handler(
         "endpoint_id": ep.endpoint_id,
         "task_summary": ep.task_summary,
         "criteria_count": len(ep.success_criteria),
+        "prerequisites_count": len(ep.prerequisites),
         "recovery_hints_count": len(ep.failure_recovery),
         "note": (
             f"Endpoint {ep.endpoint_id} created with "
-            f"{len(ep.success_criteria)} criteria. Pass "
+            f"{len(ep.success_criteria)} success criteria and "
+            f"{len(ep.prerequisites)} prerequisites. Pass "
             f"endpoint_id='{ep.endpoint_id}' to start_background_job. "
             f"The supervisor will auto-evaluate criteria on completion "
             f"and refuse 'done' until critical ones are met."
@@ -2405,6 +2483,35 @@ def register_builtin_tools() -> None:
                         "stderr/stdout. Example:\n"
                         "[{\"trigger\":\"ModuleNotFoundError\","
                         "\"suggested_action\":\"propose_install the missing package\"}]"
+                    ),
+                    "default": "",
+                },
+                "prerequisites": {
+                    "type": "string",
+                    "description": (
+                        "Phase 3a — JSON-encoded list of PRE-FLIGHT "
+                        "criteria that MUST be true BEFORE the job "
+                        "launches. Same shape as success_criteria "
+                        "({id, description, check_cmd, critical}). "
+                        "`start_background_job` runs these via shell "
+                        "and REFUSES the launch when a critical "
+                        "prerequisite is unmet — preventing 'I knew "
+                        "this would fail but ran it anyway' bugs.\n\n"
+                        "Distinguish:\n"
+                        "  • prerequisites = INPUT state ('predictions "
+                        "have non-empty model_patch entries', "
+                        "'swebench module is importable')\n"
+                        "  • success_criteria = OUTPUT state "
+                        "('report.json with 300 entries', 'exit 0')\n\n"
+                        "Example for SWE-bench:\n"
+                        "[{\"id\":\"patches_nonempty\","
+                        "\"description\":\"prediction file has non-empty model_patch\","
+                        "\"check_cmd\":\"python3 -c 'import json; "
+                        "rows=[json.loads(x) for x in open(\\\"pred.jsonl\\\")]; "
+                        "assert any(r.get(\\\"model_patch\\\",\\\"\\\").strip() for r in rows)'\"},"
+                        "{\"id\":\"swebench_installed\","
+                        "\"description\":\"swebench is importable\","
+                        "\"check_cmd\":\"python3 -c 'import swebench'\"}]"
                     ),
                     "default": "",
                 },

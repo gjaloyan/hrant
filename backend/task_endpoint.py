@@ -99,7 +99,26 @@ class RecoveryHint:
 
 @dataclass
 class TaskEndpoint:
-    """What 'done' means for a single task."""
+    """What 'done' means for a single task — plus the pre-flight
+    state that must be TRUE before launching.
+
+    Two criterion sets, both shaped as Criterion dicts:
+
+      - `prerequisites` (Phase 3a) — INPUT state. Checked by the
+        `start_background_job` gate BEFORE the subprocess starts.
+        If any critical prerequisite is unmet, the launch is
+        REFUSED. This closes the "agent knows the job will fail
+        but launches anyway" hole that Phase 3 left open (the
+        original 'Please run bench' incident: agent knew patches
+        were empty, defined an endpoint without that criterion,
+        launched, wasted 15s + tokens, then admitted defeat
+        post-mortem).
+
+      - `success_criteria` — OUTPUT state. Checked by the
+        supervisor turn AFTER the subprocess exits. If any
+        critical success criterion is unmet, `complete_supervisor`
+        refuses `decision='done'`.
+    """
     endpoint_id: str
     created_at: float
     task_summary: str
@@ -112,6 +131,10 @@ class TaskEndpoint:
     speaker_id: str
     chat_id: Optional[int]
     channel: str
+    # Pre-flight prerequisites (Phase 3a follow-up). Empty list =
+    # no pre-flight gate, fall back to Phase 3 success-criteria-only
+    # behaviour for backward compat with existing endpoint records.
+    prerequisites: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -249,33 +272,22 @@ STORE = EndpointStore()
 # ─── public helpers ──────────────────────────────────────────────
 
 
-def create_endpoint(
+def _normalize_criteria(
+    raw_list: list[dict],
     *,
-    task_summary: str,
-    user_goal_verbatim: str,
-    success_criteria: list[dict],
-    failure_recovery: Optional[list[dict]] = None,
-    speaker_id: str = "",
-    chat_id: Optional[int] = None,
-    channel: str = "",
-) -> TaskEndpoint:
-    """Build + persist a TaskEndpoint.
-
-    `success_criteria` is a list of dicts shaped like Criterion
-    (id, description, check_cmd?, check_cwd?, critical?). The
-    structured Criterion objects are validated + normalized here.
-    """
-    if not (task_summary or "").strip():
-        raise ValueError("task_summary is required")
-    if not success_criteria:
-        raise ValueError("success_criteria: at least 1 criterion required")
-    if len(success_criteria) > 12:
+    field_name: str,
+    max_count: int = 12,
+) -> list[dict]:
+    """Shared normalizer for both `success_criteria` and
+    `prerequisites`. Assigns missing ids, dedupes collisions,
+    validates description present."""
+    if len(raw_list) > max_count:
         raise ValueError(
-            "success_criteria: at most 12 criteria; split the task"
+            f"{field_name}: at most {max_count} entries; split the task"
         )
-    norm_crit: list[dict] = []
+    out: list[dict] = []
     seen_ids: set[str] = set()
-    for i, raw in enumerate(success_criteria):
+    for i, raw in enumerate(raw_list):
         if not isinstance(raw, dict):
             continue
         cid = (raw.get("id") or "").strip() or f"crit-{i}"
@@ -285,15 +297,55 @@ def create_endpoint(
         desc = (raw.get("description") or "").strip()
         if not desc:
             raise ValueError(
-                f"criterion {cid}: description is required"
+                f"{field_name}[{cid}]: description is required"
             )
-        norm_crit.append(Criterion(
+        out.append(Criterion(
             id=cid,
             description=desc,
             check_cmd=(raw.get("check_cmd") or "").strip(),
             check_cwd=(raw.get("check_cwd") or "").strip(),
             critical=bool(raw.get("critical", True)),
         ).__dict__)
+    return out
+
+
+def create_endpoint(
+    *,
+    task_summary: str,
+    user_goal_verbatim: str,
+    success_criteria: list[dict],
+    failure_recovery: Optional[list[dict]] = None,
+    prerequisites: Optional[list[dict]] = None,
+    speaker_id: str = "",
+    chat_id: Optional[int] = None,
+    channel: str = "",
+) -> TaskEndpoint:
+    """Build + persist a TaskEndpoint.
+
+    `success_criteria` is a list of Criterion-shaped dicts checked
+    by the supervisor AFTER the job completes (deliver/retry/escalate
+    gate).
+
+    `prerequisites` (Phase 3a) is a list of Criterion-shaped dicts
+    checked by `start_background_job` BEFORE the job launches.
+    A failed critical prerequisite REFUSES the launch — preventing
+    the agent from spawning a doomed-to-fail subprocess just because
+    it forgot to check input state.
+    """
+    if not (task_summary or "").strip():
+        raise ValueError("task_summary is required")
+    if not success_criteria:
+        raise ValueError("success_criteria: at least 1 criterion required")
+    norm_crit = _normalize_criteria(
+        success_criteria, field_name="success_criteria",
+    )
+    # Prerequisites are optional — many tasks (a one-off script
+    # with no preconditions) don't need them.
+    norm_prereq: list[dict] = []
+    if prerequisites:
+        norm_prereq = _normalize_criteria(
+            prerequisites, field_name="prerequisites",
+        )
     norm_rec: list[dict] = []
     for raw in (failure_recovery or []):
         if not isinstance(raw, dict):
@@ -312,6 +364,7 @@ def create_endpoint(
         user_goal_verbatim=(user_goal_verbatim or "").strip(),
         success_criteria=norm_crit,
         failure_recovery=norm_rec,
+        prerequisites=norm_prereq,
         speaker_id=(speaker_id or "").strip(),
         chat_id=chat_id,
         channel=(channel or "").strip(),
@@ -330,8 +383,32 @@ def evaluate_endpoint(
     `cwd` is the default working directory (typically the job's
     cwd); a criterion's own `check_cwd` overrides it.
     """
+    return _evaluate_criteria(endpoint.success_criteria, cwd=cwd)
+
+
+def evaluate_prerequisites(
+    endpoint: TaskEndpoint, *, cwd: str = "",
+) -> list[CriterionResult]:
+    """Run each PRE-FLIGHT prerequisite's check_cmd. Same shape as
+    `evaluate_endpoint`, different criteria list.
+
+    `start_background_job` calls this BEFORE launching the
+    subprocess. If any critical prerequisite is `unmet`, the
+    launch is refused. Phase 3a — closes the "agent launches
+    knowing the job will fail" hole.
+    """
+    return _evaluate_criteria(endpoint.prerequisites, cwd=cwd)
+
+
+def _evaluate_criteria(
+    criteria: list[dict], *, cwd: str = "",
+) -> list[CriterionResult]:
+    """Shared runner — runs each criterion's check_cmd, returns
+    per-criterion results. Used by both `evaluate_endpoint`
+    (success criteria, supervisor turn) and
+    `evaluate_prerequisites` (pre-flight gate)."""
     results: list[CriterionResult] = []
-    for raw in endpoint.success_criteria:
+    for raw in criteria:
         try:
             c = Criterion(**{
                 k: v for k, v in raw.items()
