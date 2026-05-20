@@ -53,7 +53,14 @@ _MAX_CONCURRENT = 10
 
 @dataclass
 class BackgroundJob:
-    """One subprocess we're tracking."""
+    """One subprocess we're tracking.
+
+    Supervisor-turn fields (the bottom block) carry context the agent
+    needs when it re-engages after the subprocess finishes. Without
+    them, the on-completion turn would have no idea WHY the job was
+    launched or how many fix attempts came before — and would either
+    repeat the same broken command or give up at the first retry.
+    """
     job_id: str
     label: str
     command: str
@@ -66,6 +73,44 @@ class BackgroundJob:
     stderr_tail: str
     requester: str
     pid: Optional[int]
+
+    # ── supervisor-turn context (audit T6 follow-up) ─────────────
+    # The user request that ultimately spawned this job. Survives
+    # retry chains: a child job carries the SAME original_user_request
+    # as its parent, so the supervisor turn knows the user-facing goal
+    # no matter how many fix-and-retry rounds have happened.
+    original_user_request: str = ""
+    # Speaker / chat the original request came from. Lets the final
+    # DM land in the right Telegram conversation.
+    original_speaker_id: str = ""
+    original_chat_id: Optional[int] = None
+    # Plain-English description of what counts as a successful
+    # outcome. Used by the supervisor turn to decide "done vs. did
+    # half the work and needs another retry". Empty = supervisor
+    # infers from the user request + stdout.
+    expected_outcome: str = ""
+    # Chain telemetry: parent job id (when this run is a fix attempt)
+    # and retry count (1 for first attempt, N for Nth fix). The cap
+    # is a soft signal — the LLM-driven supervisor decides when to
+    # escalate, but we surface the count so it can self-limit.
+    parent_job_id: str = ""
+    retry_count: int = 0
+    # Audit trail of supervisor decisions across the chain. Each entry
+    # captures "what the supervisor decided, why, and what it did
+    # next" so future turns (and post-mortems) can read the history
+    # without re-running the LLM.
+    supervisor_history: list = field(default_factory=list)
+    # Heartbeat throttle: when the heartbeat lever last fired for
+    # this job and the progress percent it reported. Avoids
+    # spamming the user with `still running, 31%`, `still running,
+    # 32%`, …
+    last_heartbeat_at: Optional[float] = None
+    last_heartbeat_progress: Optional[float] = None
+    # When `True`, supervisor decided this chain is terminal — the
+    # final DM has been sent (or escalation surfaced) and no further
+    # retry will fire. Pinned so a late-arriving on_done doesn't
+    # accidentally re-open the supervisor.
+    supervisor_terminal: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -240,6 +285,12 @@ def start_job(
     cwd: Optional[str] = None,
     requester: str = "",
     timeout_seconds: float = 3 * 3600.0,
+    original_user_request: str = "",
+    original_speaker_id: str = "",
+    original_chat_id: Optional[int] = None,
+    expected_outcome: str = "",
+    parent_job_id: str = "",
+    retry_count: int = 0,
 ) -> BackgroundJob:
     """Spawn `command` in a background thread; return immediately
     with the BackgroundJob record (status='running'). On completion
@@ -252,6 +303,11 @@ def start_job(
     `timeout_seconds` is a watchdog cap. The default 3h is generous
     for SWE-bench runs; long-running training jobs need an explicit
     higher value.
+
+    The `original_*`/`expected_outcome`/`parent_job_id`/`retry_count`
+    fields wire up supervisor-turn context (audit T6 follow-up).
+    Pass them through unmodified when retrying a failed job so the
+    on-completion supervisor sees the full chain.
     """
     if not (command or "").strip():
         raise ValueError("background job: command is empty")
@@ -276,6 +332,12 @@ def start_job(
         stderr_tail="",
         requester=(requester or "").strip(),
         pid=None,
+        original_user_request=(original_user_request or "").strip(),
+        original_speaker_id=(original_speaker_id or "").strip(),
+        original_chat_id=original_chat_id,
+        expected_outcome=(expected_outcome or "").strip(),
+        parent_job_id=(parent_job_id or "").strip(),
+        retry_count=int(retry_count or 0),
     )
     STORE.add(job)
 

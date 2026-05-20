@@ -1672,6 +1672,8 @@ class Agent(
         speaker_id: str = "webui:default",
         session_key: str | None = None,
         job_id: str | None = None,
+        supervisor_mode: bool = False,
+        supervisor_job_id: str | None = None,
     ) -> AgentAnswer:
         import time as _time
         from .sessions import normalize_speaker
@@ -1751,6 +1753,8 @@ class Agent(
                 speaker_id=self._speaker_id,
                 session_key=self._session_key,
                 job_id=self._job_id,
+                supervisor_mode=supervisor_mode,
+                supervisor_job_id=supervisor_job_id,
             )
         finally:
             try:

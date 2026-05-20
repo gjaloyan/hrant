@@ -6,11 +6,15 @@
 """
 from __future__ import annotations
 import json
+import logging
 import time
 from collections import OrderedDict
 from typing import Any
 
 from .tool_registry import get_registry
+
+
+log = logging.getLogger(__name__)
 from .tools.analyze_image import analyze_image as _analyze_image
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
@@ -363,20 +367,60 @@ def _start_background_job_handler(
     label: str = "",
     cwd: str = "",
     timeout_seconds: float = 10800.0,
+    parent_job_id: str = "",
+    original_user_request: str = "",
+    expected_outcome: str = "",
 ) -> str:
     """Spawn `command` in a background thread and return the job_id
     immediately. OWNER-only. Use this INSTEAD of `terminal_exec` for
     any command expected to run more than ~60 seconds (SWE-bench,
     long bench runs, large video transcodes, multi-minute pip wheel
-    builds). Owner gets a Telegram DM on completion."""
+    builds). Owner gets a supervisor-driven DM on completion.
+
+    `parent_job_id` chains a retry to the previous job — the
+    supervisor turn passes its own job_id here when it decides RETRY
+    so the chain carries the original user goal across attempts.
+    `original_user_request` lets a fresh non-retry call seed the
+    supervisor context with the literal user message that triggered
+    the launch. `expected_outcome` describes what counts as done
+    (e.g. 'report.json with ≥300 entries')."""
     from .roles import current_speaker, is_owner
     from .tools import background_jobs as _bg
+    from . import job_supervisor as _jsup
     speaker_id = current_speaker()
     if not is_owner(speaker_id):
         return json.dumps({
             "ok": False,
             "error": "permission denied — start_background_job is owner-only",
         }, ensure_ascii=False)
+    # Resolve retry-chain context. If we're inside a supervisor turn,
+    # the active job is the parent unless the LLM explicitly passed
+    # a different parent_job_id. Inherit `original_user_request`,
+    # `original_speaker_id`, `original_chat_id`, `expected_outcome`
+    # from the parent so the chain carries goal context.
+    effective_parent = (parent_job_id or "").strip()
+    if not effective_parent:
+        effective_parent = _jsup.active_supervisor_job_id() or ""
+    retry_count = 0
+    inherit_original_request = original_user_request
+    inherit_original_speaker = ""
+    inherit_original_chat_id: int | None = None
+    inherit_expected = expected_outcome
+    if effective_parent:
+        parent = _bg.STORE.get(effective_parent)
+        if parent is not None:
+            retry_count = (parent.retry_count or 0) + 1
+            inherit_original_request = (
+                inherit_original_request or parent.original_user_request
+            )
+            inherit_original_speaker = parent.original_speaker_id
+            inherit_original_chat_id = parent.original_chat_id
+            inherit_expected = inherit_expected or parent.expected_outcome
+    # If we still don't know the original chat, try to resolve from
+    # the current speaker — first-time launches outside a supervisor
+    # context route DMs back to the user who triggered the tool call.
+    if not inherit_original_speaker:
+        inherit_original_speaker = speaker_id or ""
     try:
         job = _bg.start_job(
             command=command,
@@ -384,6 +428,12 @@ def _start_background_job_handler(
             cwd=cwd or None,
             requester=speaker_id or "",
             timeout_seconds=float(timeout_seconds),
+            original_user_request=inherit_original_request,
+            original_speaker_id=inherit_original_speaker,
+            original_chat_id=inherit_original_chat_id,
+            expected_outcome=inherit_expected,
+            parent_job_id=effective_parent,
+            retry_count=retry_count,
         )
     except Exception as e:
         return json.dumps({
@@ -395,11 +445,102 @@ def _start_background_job_handler(
         "job_id": job.job_id,
         "label": job.label,
         "status": job.status,
+        "parent_job_id": job.parent_job_id or None,
+        "retry_count": job.retry_count,
         "note": (
-            f"Job {job.job_id} started in the background. Tell the "
-            f"user they'll get a Telegram DM when it finishes. Don't "
-            f"poll status in this same turn — that defeats the point."
+            f"Job {job.job_id} started in the background. Supervisor "
+            f"turn will re-engage on completion (success or failure) "
+            f"and either deliver the final DM or retry. Don't poll "
+            f"status in this same turn."
         ),
+    }, ensure_ascii=False)
+
+
+def _complete_supervisor_handler(
+    decision: str,
+    final_message: str = "",
+    reason: str = "",
+) -> str:
+    """Supervisor-mode terminal action. Call this from inside a
+    supervisor turn when the job chain is DONE (success) or needs to
+    ESCALATE (truly blocked).
+
+    `decision` must be 'done' or 'escalate'.
+    `final_message` is the structured DM the user will receive — one
+    message, Russian by default, covering: what happened, what
+    problems hit, what fixed them, final result OR what blocks.
+    `reason` is a short internal note for the supervisor history.
+
+    For RETRY decisions DON'T call this — just call
+    `start_background_job` with the corrected command and
+    `parent_job_id` set; the supervisor will re-engage when the
+    child completes."""
+    from . import job_supervisor as _jsup
+    from .tools import background_jobs as _bg
+    job_id = _jsup.active_supervisor_job_id()
+    if not job_id:
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "not inside a supervisor turn — complete_supervisor "
+                "is only valid when the runtime is processing a "
+                "BACKGROUND_JOB_COMPLETED synthetic message"
+            ),
+        }, ensure_ascii=False)
+    decision_norm = (decision or "").strip().lower()
+    if decision_norm not in ("done", "escalate"):
+        return json.dumps({
+            "ok": False,
+            "error": f"decision must be 'done' or 'escalate', got {decision!r}",
+        }, ensure_ascii=False)
+    job = _bg.STORE.get(job_id)
+    if job is None:
+        return json.dumps({
+            "ok": False,
+            "error": f"job {job_id} not found in registry",
+        }, ensure_ascii=False)
+    # Send the final DM to the user via the Telegram channel.
+    # Fail-soft: if DM can't be sent (no chat_id, transport down) we
+    # still mark terminal so the chain doesn't loop.
+    dm_status = "skipped"
+    if final_message and job.original_chat_id:
+        try:
+            from . import channels as _ch
+            cm = getattr(_ch, "CHANNELS", None)
+            if cm is not None:
+                tg = cm.get_channel("telegram") if hasattr(cm, "get_channel") else None
+                # The bot send path is internal — go directly through
+                # the existing _send_with_buttons helper on the
+                # Telegram channel instance.
+                sent = False
+                for _ch_id, _ch_obj in (
+                    (getattr(cm, "channels", {}) or {}).items()
+                ):
+                    if hasattr(_ch_obj, "_send_with_buttons"):
+                        try:
+                            _ch_obj._send_with_buttons(
+                                job.original_chat_id, final_message, None,
+                            )
+                            sent = True
+                            break
+                        except Exception as e:
+                            log.warning(
+                                "complete_supervisor DM via %s failed: %s",
+                                _ch_id, e,
+                            )
+                dm_status = "sent" if sent else "no_channel"
+        except Exception as e:
+            log.warning("complete_supervisor DM dispatch failed: %s", e)
+            dm_status = f"error:{type(e).__name__}"
+    _jsup.mark_terminal(
+        job_id, decision=decision_norm, reason=reason or "",
+    )
+    return json.dumps({
+        "ok": True,
+        "job_id": job_id,
+        "decision": decision_norm,
+        "dm_status": dm_status,
+        "supervisor_terminal": True,
     }, ensure_ascii=False)
 
 
@@ -1839,10 +1980,99 @@ def register_builtin_tools() -> None:
                     ),
                     "default": 10800.0,
                 },
+                "parent_job_id": {
+                    "type": "string",
+                    "description": (
+                        "Set this to the job_id of a failed job you "
+                        "are retrying with a fixed command. The "
+                        "supervisor turn picks this up to chain "
+                        "context (original user request, retry count, "
+                        "history) across attempts. Leave empty for a "
+                        "fresh launch."
+                    ),
+                    "default": "",
+                },
+                "original_user_request": {
+                    "type": "string",
+                    "description": (
+                        "Verbatim user message that triggered this "
+                        "job (or the closest paraphrase if the chain "
+                        "spans multiple messages). The supervisor "
+                        "turn shows this to itself on completion so "
+                        "it knows what 'done' means. Inherited from "
+                        "`parent_job_id` if set."
+                    ),
+                    "default": "",
+                },
+                "expected_outcome": {
+                    "type": "string",
+                    "description": (
+                        "Plain-English description of what counts as "
+                        "successful completion (e.g. 'report.json "
+                        "with >=300 entries', 'all 5 fixtures pass'). "
+                        "Used by the supervisor to distinguish "
+                        "'done' from 'partially ran'. Inherited from "
+                        "`parent_job_id` if set."
+                    ),
+                    "default": "",
+                },
             },
             "required": ["command"],
         },
         handler=_start_background_job_handler,
+    )
+
+    reg.register_func(
+        name="complete_supervisor",
+        description=(
+            "SUPERVISOR-MODE TERMINAL ACTION. Only valid inside a "
+            "supervisor turn (when the runtime is handling a "
+            "BACKGROUND_JOB_COMPLETED synthetic message). Use this "
+            "when the job chain is DONE (success) or needs to "
+            "ESCALATE (truly blocked, need user). Sends ONE final "
+            "Telegram DM to the original requester and seals the "
+            "chain so no further on_done re-opens the supervisor.\n\n"
+            "For RETRY decisions DON'T call this — just call "
+            "`start_background_job` with the corrected command and "
+            "`parent_job_id` pointing at the just-failed job. The "
+            "supervisor will re-engage on the child's completion."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["done", "escalate"],
+                    "description": (
+                        "'done' = job succeeded against the user's "
+                        "goal. 'escalate' = chain is blocked and the "
+                        "user must intervene."
+                    ),
+                },
+                "final_message": {
+                    "type": "string",
+                    "description": (
+                        "Structured DM the user receives. ONE "
+                        "message, Russian by default, follow shape: "
+                        "short status / what problems hit / what "
+                        "fixed them / final result OR what blocks "
+                        "you. Markdown / HTML allowed."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Short internal note for the supervisor "
+                        "history (e.g. '297/299 resolved, 2 failed "
+                        "are upstream SWE-bench flakes'). Visible "
+                        "in get_background_job; NOT sent to user."
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["decision", "final_message"],
+        },
+        handler=_complete_supervisor_handler,
     )
 
     reg.register_func(

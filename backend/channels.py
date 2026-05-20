@@ -2053,15 +2053,23 @@ class TelegramBot:
             except Exception as e:
                 log.warning("installer subscribe failed: %s", e)
 
-            # T6: subscribe to background-job completion. When a
-            # long-running subprocess (SWE-bench, video transcode,
-            # benchmark) finishes, every owner-on-Telegram gets a
-            # status DM. The agent thread doesn't sit blocked
-            # waiting on the subprocess — turn returns immediately
-            # after start_background_job.
+            # T6 + supervisor follow-up: subscribe to background-job
+            # completion. The supervisor takes over the user-facing
+            # message — instead of the old passive DM ("job X done,
+            # exit Y"), the agent re-engages, decides retry / deliver
+            # / escalate, and the user only gets ONE final structured
+            # DM at the chain's terminal. If the supervisor turn
+            # itself crashes (degraded LLM / unexpected error), the
+            # supervisor module sends a degraded DM via this same
+            # channel so the user is never left in the dark.
             try:
                 from .tools import background_jobs as _bg
-                _bg.register_on_done(self._on_background_job_done)
+                from . import job_supervisor as _jsup
+                _bg.register_on_done(_jsup.on_job_completed)
+                # Keep the legacy passive DM helper exposed via the
+                # `CHANNELS` instance so `job_supervisor` can call
+                # back into it for fallback / degraded paths.
+                _jsup.set_fallback_dm(self._on_background_job_done)
             except Exception as e:
                 log.warning("background-jobs subscribe failed: %s", e)
 

@@ -148,7 +148,11 @@ def test_unified_default_routes_into_run_unified(monkeypatch):
 
     called = {"flag": False, "task": None}
 
-    def _fake_run_unified(*, agent, task, project, attachments, channel, speaker_id, session_key=None, job_id=None):
+    def _fake_run_unified(
+        *, agent, task, project, attachments, channel, speaker_id,
+        session_key=None, job_id=None,
+        supervisor_mode=False, supervisor_job_id=None,
+    ):
         called["flag"] = True
         called["task"] = task
         called["speaker_id"] = speaker_id

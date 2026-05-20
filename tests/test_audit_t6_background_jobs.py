@@ -216,9 +216,13 @@ def test_start_background_job_tool_owner_succeeds(isolated_store, monkeypatch):
     data = json.loads(out)
     assert data["ok"] is True
     assert data["job_id"].startswith("bg-")
-    assert "Telegram DM" in data["note"]
-    # Don't-poll hint must be there.
-    assert "poll" in data["note"].lower()
+    # Supervisor follow-up: the note now references the supervisor
+    # turn instead of the legacy "Telegram DM" string. Pin both
+    # signals (DM mention is still present in the supervisor path
+    # description) plus the don't-poll hint.
+    note_l = data["note"].lower()
+    assert "supervisor" in note_l or "dm" in note_l
+    assert "poll" in note_l
 
 
 def test_list_background_jobs_tool_owner_only(isolated_store, monkeypatch):
