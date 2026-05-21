@@ -81,8 +81,16 @@ _ALLOWED_COMMANDS: frozenset[str] = frozenset({
     # System service inspection
     "systemctl",   # gated to read-only subcommands below
     "journalctl",  # read-only by nature
-    # Package inspection
-    "dpkg", "apt", "rpm", "snap", "pip", "pip3", "npm",
+    # Package inspection AND installation. The install-gate that
+    # used to force everything through `propose_install` (owner
+    # approval via Telegram) was dropped 2026-05-21 — owner is the
+    # only operator on this box, the trust boundary is the role
+    # gate on `terminal_exec` itself, not a separate ceremony.
+    "dpkg", "apt", "apt-get", "rpm", "snap",
+    "pip", "pip3", "pipx",
+    "npm", "yarn", "pnpm",
+    "gem", "cargo", "go",
+    "brew",
     # Language runtimes for inspection (no -c / no -e / no -m here —
     # users who want to run code should call run_python)
     "python", "python3", "node",
@@ -110,13 +118,45 @@ _SUBCOMMAND_ALLOW: dict[str, frozenset[str]] = {
         "list-units", "list-unit-files", "list-sockets", "list-timers",
         "list-jobs", "list-dependencies", "list-machines", "cat",
     }),
-    "apt": frozenset({"list", "show", "search", "policy"}),
-    "dpkg": frozenset({"-l", "--list", "-s", "--status", "-L", "--listfiles", "--print-architecture"}),
-    "rpm": frozenset({"-q", "--query", "-qa", "-qi", "-ql", "-qf"}),
-    "snap": frozenset({"list", "info", "find", "version", "warnings"}),
-    "pip": frozenset({"list", "show", "freeze", "check", "--version", "config"}),
-    "pip3": frozenset({"list", "show", "freeze", "check", "--version", "config"}),
-    "npm": frozenset({"ls", "list", "view", "info", "config", "ping", "--version", "-v"}),
+    # Package managers — read AND install/uninstall both allowed.
+    # The previous "install-gate" subcommand whitelist was dropped
+    # (see _ALLOWED_COMMANDS docstring). The owner runs the agent
+    # under their own user account; npm/pip/cargo install affects
+    # only that user's environment. `apt install` etc. will hit
+    # sudo separately — the OS does the auth, not us.
+    "apt": frozenset({"list", "show", "search", "policy", "install", "remove",
+                       "purge", "update", "upgrade", "depends", "rdepends"}),
+    "apt-get": frozenset({"install", "remove", "purge", "update", "upgrade",
+                           "autoremove", "clean", "source", "build-dep"}),
+    "dpkg": frozenset({"-l", "--list", "-s", "--status", "-L", "--listfiles",
+                        "--print-architecture", "-i", "--install", "-r", "--remove"}),
+    "rpm": frozenset({"-q", "--query", "-qa", "-qi", "-ql", "-qf", "-i", "--install"}),
+    "snap": frozenset({"list", "info", "find", "version", "warnings",
+                        "install", "remove", "refresh"}),
+    "pip": frozenset({"list", "show", "freeze", "check", "--version", "config",
+                       "install", "uninstall", "download", "wheel", "index",
+                       "cache", "inspect"}),
+    "pip3": frozenset({"list", "show", "freeze", "check", "--version", "config",
+                        "install", "uninstall", "download", "wheel", "index",
+                        "cache", "inspect"}),
+    "pipx": frozenset({"list", "install", "inject", "uninstall", "upgrade",
+                        "reinstall", "ensurepath", "run"}),
+    "npm": frozenset({"ls", "list", "view", "info", "config", "ping",
+                       "--version", "-v", "install", "i", "uninstall", "update",
+                       "search", "outdated", "audit", "ci"}),
+    "yarn": frozenset({"add", "install", "remove", "list", "info", "outdated",
+                        "upgrade", "global"}),
+    "pnpm": frozenset({"add", "install", "i", "remove", "rm", "update", "list",
+                        "outdated"}),
+    "cargo": frozenset({"build", "check", "clean", "doc", "fetch", "fmt",
+                         "install", "uninstall", "update", "search", "tree",
+                         "test", "run", "version", "--version"}),
+    "gem": frozenset({"list", "install", "uninstall", "update", "search",
+                       "info", "outdated"}),
+    "go": frozenset({"install", "get", "mod", "build", "test", "version",
+                      "list", "vet"}),
+    "brew": frozenset({"install", "uninstall", "list", "search", "info",
+                        "update", "upgrade", "tap", "untap", "doctor"}),
 }
 
 
@@ -193,29 +233,14 @@ def _validate_command(raw: str) -> tuple[bool, str, list[str]]:
 
     cmd = head.lower()
 
-    # Install-gate (G2): catch package-install attempts BEFORE the
-    # allowlist check so the LLM gets a specific hint pointing at
-    # `propose_install`. Some of these (apt-get, yarn, pnpm, gem,
-    # cargo, pipx) aren't in _ALLOWED_COMMANDS at all, so without
-    # this early check they'd get the generic "not on allowlist"
-    # refusal and the LLM tends to retry with a different phrasing.
-    _PKG_INSTALL_MGRS = {
-        "pip", "pip3", "pipx", "apt", "apt-get", "aptitude",
-        "npm", "yarn", "pnpm", "gem", "cargo", "go",
-    }
-    if cmd in _PKG_INSTALL_MGRS:
-        argv_lower = [a.lower() for a in argv[1:]]
-        # Treat any of these tokens as an install intent.
-        if any(tok in argv_lower for tok in ("install", "i", "inject", "add")):
-            return False, (
-                f"package installation through terminal_exec is blocked "
-                f"(supply-chain gate). Use the `propose_install` tool: "
-                f"it requests owner approval via Telegram inline buttons "
-                f"and only then runs the install. Example: "
-                f"`propose_install(packages='<pkg>', manager='pip', "
-                f"reason='<why>')`. apt / npm-global aren't supported by "
-                f"the gate — ask the owner to run them by hand."
-            ), []
+    # Install-gate REMOVED (2026-05-21). The previous version forced
+    # every `pip install` / `apt install` / `npm install` etc.
+    # through `propose_install` → Telegram approval button → install.
+    # This created a multi-step ceremony that ground long-running
+    # tasks to a halt (the SWE-bench session went through 3 manual
+    # approvals just for `datasets`, `swebench`, and `pandas`).
+    # Owner-only role gate on `terminal_exec` itself is the trust
+    # boundary now; package install is a normal shell command.
 
     if cmd not in _ALLOWED_COMMANDS:
         return False, (

@@ -189,14 +189,18 @@ clearly already in hand.
    output → return the file via `MEDIA:/path`. Don't reply with
    "you could use ffmpeg" — DO use ffmpeg.
 
-6. **Tools missing? Auto-install via the gate.** If a skill matches
-   but requires a tool the host doesn't have, the AUTO-PROPOSED
-   INSTALLS block in this prompt has already fired `propose_install`
-   for it — tell the user to tap Approve in Telegram. If no AUTO-
-   PROPOSED block is shown but you discover a gap during execution,
-   call `propose_install(packages, manager, reason)` yourself. apt
-   binaries are now supported (sudo -n apt-get install -y); pip /
-   pipx / apt are all valid managers.
+6. **Tools missing? Install via terminal_exec.** If a skill or task
+   needs a library / CLI tool that's not present, call terminal_exec
+   with the appropriate install command:
+     pip install <name>           (Python package)
+     apt install <name>           (system, may prompt sudo)
+     npm install <name>           (Node.js)
+     cargo install <name>         (Rust)
+     brew install <name>          (macOS)
+   The install runs immediately under the agent's role — the
+   previous Telegram-approval ceremony was dropped. After install,
+   the package is importable in the NEXT turn (Python imports cache
+   per-process; the current turn won't see the new module).
 
 7. **Ask only when truly blocked.** Acceptable reasons to ask:
    (a) required file genuinely missing, (b) user's goal is ambiguous
@@ -213,9 +217,9 @@ clearly already in hand.
 
    Bad: "I can't do this."
    Good: "I tried to open the .dwg with `read_file` (no DWG
-   reader registered) and ran `search_package('libdwg')` — no
-   official PyPI distro. Workaround: export to DXF on your side
-   or approve `propose_install(['ezdxf'], 'pip')` and I'll convert."
+   reader registered) and checked `pip index versions libdwg` —
+   no official PyPI distro. Workaround: export to DXF on your
+   side or I'll `pip install ezdxf` and convert."
 
 ### TSP operating limits (enforced — not guidelines)
 
@@ -340,7 +344,7 @@ clearly already in hand.
             "check_cmd":"grep -q -v gold predictions.jsonl"}
          ]',
          failure_recovery='[
-           {"trigger":"ModuleNotFoundError","suggested_action":"propose_install missing package"},
+           {"trigger":"ModuleNotFoundError","suggested_action":"terminal_exec `pip install <missing>`"},
            {"trigger":"python: not found","suggested_action":"retry with python3"}
          ]')`
     2. `start_background_job(command="...", endpoint_id="te-...",
@@ -349,7 +353,7 @@ clearly already in hand.
 
   If `start_background_job` returns `error: prerequisites_unmet`,
   do NOT retry the same launch. Either satisfy the prerequisite
-  (generate the missing file, install the dep, propose_install)
+  (generate the missing file, install the dep via `terminal_exec`)
   or call `ask_user` if you need input from the human. Adjusting
   the prerequisite away because it "looks too strict" is only
   acceptable when you can demonstrate it was actually wrong (e.g.
@@ -407,15 +411,24 @@ gaps → research → choose tools safely → test on a copy → solve
 and deliver, then `propose_skill(...)` to capture what worked.
 
 The resolver explicitly forbids two failure modes that have hit
-us in production: (1) burning the iteration budget on probing
-without a plan, and (2) running `pip install` / `apt install` via
-terminal_exec. Both are guarded structurally:
-  - Iteration ceiling section above kicks in before XML-dump.
-  - Package installs go through `propose_install(packages, manager,
-    reason)` — owner approves via Telegram inline buttons, and only
-    then does the install actually run. terminal_exec REFUSES any
-    `pip install` / `pipx inject` / `apt install` / `npm install` /
-    `cargo install` etc. with a hint pointing at `propose_install`.
+us in production: burning the iteration budget on probing without
+a plan. Guarded structurally — the iteration ceiling section above
+kicks in before XML-dump.
+
+For package installs (Python deps, system packages, npm modules,
+cargo crates), call `terminal_exec` with the manager's install
+command directly:
+  - `pip install <name>` / `pip install -e .`
+  - `apt install <name>` (sudo will prompt if needed)
+  - `npm install <name>` / `yarn add <name>` / `pnpm add <name>`
+  - `cargo install <name>` / `go install <module>`
+  - `brew install <name>` / `gem install <name>`
+The previous `propose_install` ceremony with Telegram-button
+owner-approval was retired 2026-05-21 — owner is the only operator
+on this box, the trust boundary is the role gate on `terminal_exec`
+itself. After install, expect the package to be importable in the
+next turn (pip/cargo update the current process's site-packages,
+apt/brew affect the system path).
 
 When you finish a non-trivial task that involved a sequence of
 tool calls and produced a working result, do a post-task review:
@@ -1687,45 +1700,18 @@ def run_unified(
                 "semantic suggestions: " + ", ".join(s.name for s in semantic_suggestions),
             )
 
-    # H1-rev: auto-propose installs for missing required_tools.
-    #
-    # When a matched skill declares dependencies that aren't on this
-    # host, fire `installer.propose` automatically — the owner gets a
-    # Telegram DM with [Show][Approve][Reject] for each missing tool.
-    # The LLM doesn't have to remember to call propose_install itself,
-    # and once the owner taps Approve the install runs and the NEXT
-    # turn will see the tool available.
-    #
-    # Dedup: within a turn, only propose each (name, manager) once.
-    # Across turns, `installer.has_pending` skips if there's already a
-    # pending request waiting for the owner — no spam DMs.
-    #
-    # I2: cap at AUTO_PROPOSE_CAP per turn. Without this, a skill with
-    # 10 missing tools would fire 10 separate Telegram DMs in a single
-    # message burst. After the cap, remaining tools surface as a
-    # "deferred" line in the system block so the LLM still knows
-    # they're needed.
-    #
-    # I3: the `requester` field always carries an "(auto-skill-match)"
-    # suffix so journal readers can tell auto-fired requests from
-    # explicit `propose_install` calls. The owner-only approval gate
-    # is still in installer.py — this is just journal hygiene so a
-    # guest who triggers a skill match doesn't end up "owning" a
-    # request in the audit trail.
-    #
-    # Only fires on `matched_skills` (trigger/tag hit). Semantic
-    # suggestions don't auto-propose — fuzzy match isn't strong enough
-    # signal to commit the owner to an install.
+    # Skill missing-tools reporting. Pre-2026-05-21 this block
+    # auto-fired `installer.propose()` (Telegram approval DM) for
+    # each missing dep — that ceremony was retired. We now just
+    # COLLECT the missing tools and surface them in the system
+    # block; the LLM decides whether to `pip install` / `apt install`
+    # via terminal_exec when it actually needs them. This avoids
+    # installing things proactively that the skill might never
+    # exercise during the turn.
     auto_proposed: list[dict] = []
     auto_propose_deferred: int = 0
     if matched_skills:
-        from . import installer as _installer
         seen_pairs: set[tuple[str, str]] = set()
-        proposes_fired = 0
-        requester_label = (
-            f"{speaker_id} (auto-skill-match)"
-            if speaker_id else "auto:skill-match"
-        )
         for sk in matched_skills:
             try:
                 missing = _SKILLS.missing_tools_with_manager_for(sk)
@@ -1738,60 +1724,18 @@ def run_unified(
                 if not pkg_name or key in seen_pairs:
                     continue
                 seen_pairs.add(key)
-                # I2 cap: stop firing new propose calls past the limit.
-                # Already-pending entries still get listed (no DM is
-                # sent for those) so the LLM sees the full state.
-                already_pending = _installer.has_pending([pkg_name], mgr)
-                if not already_pending and proposes_fired >= AUTO_PROPOSE_CAP:
-                    auto_propose_deferred += 1
-                    continue
-                if already_pending:
-                    auto_proposed.append({
-                        "name": pkg_name, "manager": mgr,
-                        "skill": sk.name, "code": None,
-                        "status": "already-pending",
-                    })
-                    continue
-                try:
-                    req = _installer.propose(
-                        packages=[pkg_name],
-                        manager=mgr,
-                        reason=f"auto-proposed: required by skill {sk.name}",
-                        requester=requester_label,
-                    )
-                except Exception as e:
-                    log.warning(
-                        "auto-propose install failed for %s (%s): %s",
-                        pkg_name, mgr, e,
-                    )
-                    auto_proposed.append({
-                        "name": pkg_name, "manager": mgr,
-                        "skill": sk.name, "code": None,
-                        "status": f"propose-error: {type(e).__name__}",
-                    })
-                    continue
-                proposes_fired += 1
-                if req is None:
-                    auto_proposed.append({
-                        "name": pkg_name, "manager": mgr,
-                        "skill": sk.name, "code": None,
-                        "status": "propose-returned-none",
-                    })
-                else:
-                    auto_proposed.append({
-                        "name": pkg_name, "manager": mgr,
-                        "skill": sk.name, "code": req.code,
-                        "status": "proposed",
-                    })
-        if auto_proposed or auto_propose_deferred:
+                auto_proposed.append({
+                    "name": pkg_name, "manager": mgr,
+                    "skill": sk.name, "code": None,
+                    "status": "missing",
+                })
+        if auto_proposed:
             agent.progress(
                 "install",
-                "auto-proposed: " + ", ".join(
-                    f"{p['name']}({p['manager']}/{p['status']})"
+                "missing tools (install via terminal_exec when needed): "
+                + ", ".join(
+                    f"{p['name']}({p['manager']})"
                     for p in auto_proposed
-                ) + (
-                    f"; deferred={auto_propose_deferred} (cap={AUTO_PROPOSE_CAP})"
-                    if auto_propose_deferred else ""
                 ),
             )
 
@@ -1927,35 +1871,24 @@ def run_unified(
         for sk in semantic_suggestions:
             hint_lines.append(f"- **{sk.name}** — {sk.description}")
         system_parts.append("---\n\n" + "\n".join(hint_lines))
-    if auto_proposed or auto_propose_deferred:
-        # H1-rev: tell the LLM what auto-installs are in flight. This
-        # is a hint, not a command — the model decides whether to call
-        # the dependent skill anyway (might pivot) and whether to tell
-        # the user to tap Approve in Telegram.
+    if auto_proposed:
+        # Tell the LLM which deps the matched skills need but aren't
+        # installed. The agent decides whether to actually install
+        # them via `terminal_exec` (pip/apt/npm/cargo) before
+        # invoking the skill, or to pivot to an approach that
+        # doesn't need them. The owner-approval ceremony is gone —
+        # `terminal_exec` runs install commands directly.
         ap_lines = [
-            "# AUTO-PROPOSED INSTALLS",
-            "(Skills matched this turn need tools that aren't installed. "
-            "I've auto-fired `propose_install` for each one — the owner "
-            "gets a Telegram DM with [Show][Approve][Reject] per request. "
-            "Those tools will NOT be available this turn — either tell "
-            "the user to tap Approve and retry next turn, or pivot to an "
-            "approach that doesn't need them.)",
+            "# MISSING TOOLS (skills need these — install via terminal_exec when needed)",
+            "(Skills matched this turn declared dependencies that aren't on this host. "
+            "Install them with `terminal_exec` BEFORE invoking the skill if you decide "
+            "to use it: `pip install <name>` / `apt install <name>` / `npm install <name>` "
+            "/ `cargo install <name>`. The package will be importable in the NEXT turn — "
+            "the current turn's Python interpreter has its site-packages already loaded.)",
         ]
         for p in auto_proposed:
-            tag = p.get("status") or "?"
-            line = f"- `{p['name']}` via `{p['manager']}` (skill `{p['skill']}`) — {tag}"
-            if p.get("code"):
-                line += f" — request code `{p['code']}`"
-            ap_lines.append(line)
-        if auto_propose_deferred:
-            # I2: per-turn cap exceeded — tell the LLM how many tools
-            # still need attention so it can ask the user about a
-            # batched approval instead of expecting all of them.
             ap_lines.append(
-                f"- _…and {auto_propose_deferred} more missing tool(s) "
-                f"deferred (per-turn cap = {AUTO_PROPOSE_CAP}). Ask the "
-                f"user to approve the first batch in Telegram, then "
-                f"trigger the skill again to surface the rest._"
+                f"- `{p['name']}` via `{p['manager']}` (skill `{p['skill']}`)"
             )
         system_parts.append("---\n\n" + "\n".join(ap_lines))
     for sk in matched_skills:

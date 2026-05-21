@@ -260,6 +260,10 @@ def test_install_callbacks_refuse_non_owner(isolated_installer):
 # ─── terminal_exec deny-list ─────────────────────────────────────────
 
 
+# Install gate dropped 2026-05-21. The agent now installs packages
+# directly via terminal_exec — owner is the only operator on this
+# box, the trust boundary is the role gate on `terminal_exec`
+# itself. These commands used to be refused; they're allowed now.
 @pytest.mark.parametrize("cmd", [
     "pip install foo",
     "pip3 install bar",
@@ -272,11 +276,10 @@ def test_install_callbacks_refuse_non_owner(isolated_installer):
     "gem install z",
     "cargo install ripgrep",
 ])
-def test_terminal_exec_blocks_install_commands(cmd):
+def test_terminal_exec_allows_install_commands(cmd):
     from backend.tools.terminal_exec import _validate_command
     ok, msg, argv = _validate_command(cmd)
-    assert ok is False, f"{cmd!r} should be refused"
-    assert "propose_install" in msg, f"refusal for {cmd!r} should hint at propose_install"
+    assert ok is True, f"{cmd!r} should be allowed (install gate dropped): {msg!r}"
 
 
 def test_terminal_exec_allows_read_only_pip():
@@ -326,8 +329,11 @@ def test_propose_install_tool_rejects_empty(isolated_installer, monkeypatch):
     assert "empty" in data["error"]
 
 
-def test_propose_install_tool_registered():
-    from backend import builtin_tools
+def test_propose_install_tool_not_registered_anymore():
+    """Phase-3a follow-up: `propose_install` was dropped from the
+    tool registry along with the install gate. The handler stays in
+    source for back-compat in case anything imports it directly,
+    but the LLM no longer sees it as a callable."""
+    from backend import builtin_tools  # noqa: F401 — re-runs registration
     from backend.tool_registry import get_registry
-    builtin_tools.register_builtin_tools()
-    assert "propose_install" in get_registry().tools
+    assert "propose_install" not in get_registry().tools

@@ -227,11 +227,15 @@ def test_handler_handles_internal_error(monkeypatch):
     assert "search error" in data["error"]
 
 
-def test_search_package_tool_is_registered():
-    from backend import builtin_tools
+def test_search_package_tool_not_registered_anymore():
+    """Phase-3a follow-up: `search_package` was dropped from the
+    tool registry along with the install gate. The handler +
+    registry-query helpers stay in source for tests / future use,
+    but the LLM should use terminal_exec (`pip index versions`,
+    `apt show`, `npm view`) instead."""
+    from backend import builtin_tools  # noqa: F401
     from backend.tool_registry import get_registry
-    builtin_tools.register_builtin_tools()
-    assert "search_package" in get_registry().tools
+    assert "search_package" not in get_registry().tools
 
 
 # ─── universal_resolver mentions search_package ─────────────────────

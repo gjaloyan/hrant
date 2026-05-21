@@ -61,15 +61,18 @@ def test_task_solver_process_references_known_tools():
         assert tool in body, f"Task Solver Process should name {tool!r}"
 
 
-def test_task_solver_process_covers_auto_install_via_gate():
-    """Phase 6 must tell the LLM about the auto-install path so it
-    doesn't try `pip install` via terminal_exec (which is deny-listed
-    anyway)."""
+def test_task_solver_process_covers_install_via_terminal_exec():
+    """2026-05-21: install gate dropped — Phase 6 now tells the
+    LLM to install packages directly via terminal_exec
+    (`pip install`, `apt install`, etc.) instead of the old
+    propose_install ceremony."""
     from backend.unified_agent import _UNIFIED_RULES
-    low = _UNIFIED_RULES.lower()
-    assert "propose_install" in _UNIFIED_RULES
-    assert "auto-propose" in low or "auto-install" in low or \
-           "auto-propos" in low
+    body = _UNIFIED_RULES
+    low = body.lower()
+    # The rule must mention terminal_exec as the install vehicle.
+    assert "terminal_exec" in body
+    # And must name at least one install command shape.
+    assert "pip install" in low or "apt install" in low
 
 
 def test_task_solver_process_ask_when_blocked_rule():

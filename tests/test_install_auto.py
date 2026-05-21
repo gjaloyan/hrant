@@ -397,6 +397,12 @@ def isolated_skills_with_missing_dep(tmp_path, monkeypatch):
     sk_mod.SKILLS.skills = []
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: auto-propose ceremony retired — run_unified "
+    "no longer fires installer.propose for matched skills' missing "
+    "deps. Missing tools are now surfaced as a hint in the system "
+    "prompt; agent uses terminal_exec to install when actually needed."
+)
 def test_run_unified_auto_proposes_for_missing_required_tool(
     isolated_skills_with_missing_dep, monkeypatch,
 ):
@@ -444,6 +450,9 @@ def test_run_unified_auto_proposes_for_missing_required_tool(
     assert "definitely-not-real-xyz-789" in sys_prompt
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: auto-propose ceremony retired (see above)."
+)
 def test_run_unified_dedups_auto_propose_across_turns(
     isolated_skills_with_missing_dep, monkeypatch,
 ):
@@ -534,6 +543,9 @@ def isolated_skill_with_many_missing(tmp_path, monkeypatch):
     sk_mod.SKILLS.skills = []
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: auto-propose ceremony retired (see above)."
+)
 def test_auto_propose_caps_at_AUTO_PROPOSE_CAP(
     isolated_skill_with_many_missing, monkeypatch,
 ):
@@ -589,6 +601,9 @@ def test_auto_propose_cap_constant_is_five():
 # ─── I3: requester labeling for auto-propose ───────────────────────
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: auto-propose ceremony retired (see above)."
+)
 def test_auto_propose_requester_carries_auto_skill_match_suffix(
     isolated_skills_with_missing_dep, monkeypatch,
 ):

@@ -126,9 +126,13 @@ def test_pip_show_accepted():
     assert ok
 
 
-def test_pip_install_refused():
+def test_pip_install_allowed_now():
+    """2026-05-21: install gate dropped — `pip install <name>` is
+    a normal terminal command, no longer routed through
+    propose_install. The OS-level role gate on terminal_exec
+    itself remains the trust boundary."""
     ok, err, _ = tex._validate_command("pip install evil-package")
-    assert not ok
+    assert ok, f"pip install should be allowed (install gate dropped): {err!r}"
 
 
 # --- run_terminal end-to-end ------------------------------------------

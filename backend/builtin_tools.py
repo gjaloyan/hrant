@@ -1573,46 +1573,15 @@ def register_builtin_tools() -> None:
         handler=_web_search_handler,
     )
 
-    reg.register_func(
-        name="search_package",
-        description=(
-            "Query an authoritative package registry (PyPI / "
-            "crates.io / npm) for a single package. Returns whether "
-            "it exists, the latest version, summary, homepage, "
-            "license, maintainer, and the canonical install command "
-            "— directly from the registry's JSON API.\n\n"
-            "Use this in the universal_resolver Research step (4) "
-            "INSTEAD of trusting a blog post for `is package X "
-            "real / what version / what's the install command`. "
-            "Output is structured and the source is canonical.\n\n"
-            "Supported managers:\n"
-            "  - 'pip' (alias 'pypi') → pypi.org\n"
-            "  - 'cargo' (alias 'crates') → crates.io\n"
-            "  - 'npm' → registry.npmjs.org\n\n"
-            "Returns JSON: `{ok, exists, manager, name, "
-            "latest_version, summary, homepage, project_urls, "
-            "license, author, release_count, canonical_install, "
-            "registry_url, error?}`. `ok=False` means the registry "
-            "call failed (network / 4xx) and `exists` is meaningless."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "Package identifier (single name, no whitespace).",
-                },
-                "manager": {
-                    "type": "string",
-                    "enum": ["pip", "pypi", "cargo", "crates", "npm"],
-                    "description": "Registry to query (default 'pip').",
-                    "default": "pip",
-                },
-            },
-            "required": ["name"],
-        },
-        handler=_search_package_handler,
-    )
+    # `search_package` was dropped 2026-05-21. The dedicated tool
+    # only covered 3 registries (PyPI / crates.io / npm) with
+    # structured JSON output; in practice the agent needs to query
+    # apt, brew, conda, yarn, GitHub releases, etc. too. Generic
+    # terminal_exec calls (`pip index versions <name>`, `pip show`,
+    # `apt show`, `npm view`, `brew info`, `cargo search`) cover
+    # all of them with the same workflow. The handler stays in
+    # source for back-compat in case external callers still
+    # import it.
 
     reg.register_func(
         name="fetch_url",
@@ -1892,59 +1861,13 @@ def register_builtin_tools() -> None:
         handler=_load_skill_handler,
     )
 
-    reg.register_func(
-        name="propose_install",
-        description=(
-            "Open a package-install request. OWNER-only. Nothing is "
-            "installed until the owner taps Approve in their Telegram "
-            "DM. Use when the universal_resolver workflow concluded "
-            "the task needs a library or CLI tool that isn't already "
-            "available. Supported managers: 'pip' (Python via the "
-            "running interpreter), 'pipx' (inject into the agi-agent "
-            "venv).\n\n"
-            "Constraints:\n"
-            "  - `packages` is a comma-separated list of package "
-            "names. URL installs (`git+...`, `https://...`, "
-            "`file://...`) are REFUSED to keep the supply chain "
-            "checkable. Names must match `[A-Za-z0-9._+\\-\\[\\]]`.\n"
-            "  - `apt`/`npm -g` not supported here — those require "
-            "sudo / root decisions outside this gate.\n"
-            "  - Returns immediately with a request `code`. The "
-            "actual install only runs on owner approval. Do NOT "
-            "assume the packages are importable later in the same "
-            "turn — the next turn will see them."
-        ),
-        input_schema={
-            "type": "object",
-            "properties": {
-                "packages": {
-                    "type": "string",
-                    "description": (
-                        "Comma-separated package names. E.g. "
-                        "'openpyxl, pandas' or 'qpdf-bindings'."
-                    ),
-                },
-                "manager": {
-                    "type": "string",
-                    "enum": ["pip", "pipx"],
-                    "description": "Package manager to use (default 'pip').",
-                    "default": "pip",
-                },
-                "reason": {
-                    "type": "string",
-                    "description": (
-                        "Why this is needed for the current task. "
-                        "Shown to the owner in the approval DM so "
-                        "they can decide whether the install is "
-                        "appropriate."
-                    ),
-                    "default": "",
-                },
-            },
-            "required": ["packages"],
-        },
-        handler=_propose_install_handler,
-    )
+    # `propose_install` was dropped 2026-05-21 — the owner-approval
+    # ceremony added friction without security value (owner is the
+    # only operator on this box). The agent now installs packages
+    # directly via terminal_exec: `pip install <name>`, `apt install
+    # <name>`, `npm install <name>`, `cargo install <name>`, etc.
+    # The installer.py module + Telegram inline-callback handler
+    # are kept in source for any legacy code that still imports them.
 
     reg.register_func(
         name="propose_skill",
