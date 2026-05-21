@@ -154,8 +154,9 @@ class LogBusHandler(logging.Handler):
 
     Crash safety: `emit` swallows every exception. A logging handler
     that raises crashes the producer — never worth it for a UI
-    feature. The single private flag prevents `emit → publish → emit`
-    recursion if anything inside the bus accidentally logs."""
+    feature. The single private flag in `handle()` prevents
+    `handle → publish → log → handle` recursion if anything inside
+    the bus accidentally logs."""
 
     _LEVEL_MAP = {
         logging.DEBUG: "debug",
@@ -168,20 +169,20 @@ class LogBusHandler(logging.Handler):
     def __init__(self, bus: "LogBus | None" = None):
         super().__init__()
         self._bus = bus or BUS
-        self._in_emit = threading.local()
+        self._in_handle = threading.local()
 
     def handle(self, record: logging.LogRecord) -> bool:
         # Guard at the handle() boundary so the whole emit chain — including
         # any subclass behavior after super().emit() returns — is covered.
         # Without this, a subclass that logs after delegating up would
         # re-enter the handler (the flag would have already been reset).
-        if getattr(self._in_emit, "active", False):
+        if getattr(self._in_handle, "active", False):
             return False
-        self._in_emit.active = True
+        self._in_handle.active = True
         try:
             return super().handle(record)
         finally:
-            self._in_emit.active = False
+            self._in_handle.active = False
 
     def emit(self, record: logging.LogRecord) -> None:
         try:

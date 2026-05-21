@@ -76,7 +76,7 @@ def test_handler_includes_exception_meta(clean_bus):
 def test_handler_never_recurses_into_itself(clean_bus):
     """If the handler's own emit() logs a warning, the warning must
     NOT re-enter the bus (infinite loop). Pinned by using a private
-    `_in_emit` flag."""
+    `_in_handle` flag."""
     from backend.log_bus import LogBusHandler
 
     class Recursive(LogBusHandler):
@@ -94,5 +94,13 @@ def test_handler_never_recurses_into_itself(clean_bus):
     finally:
         logger.removeHandler(handler)
     rows = clean_bus.tail()
-    # Should land 'seed' once + 'from emit' once — NOT explode.
-    assert len(rows) <= 3
+    messages = [r["message"] for r in rows]
+    # Deterministic: only the outer "seed" event reaches the bus. The
+    # subclass's post-super `log.warning("from emit")` re-enters
+    # handle() on the same handler while the outer call is still on
+    # the stack, so the recursion guard suppresses it. A regression
+    # that drops the guard balloons this list (the inner warning
+    # would publish, re-trigger emit(), publish again, ...).
+    assert messages == ["seed"], (
+        f"unexpected event sequence: {messages}"
+    )
