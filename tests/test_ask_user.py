@@ -306,6 +306,92 @@ def test_answer_question_endpoint_unknown_id_returns_404(
     assert r.status_code == 404
 
 
+# ─── conversation-persistence ordering (2026-05-21 fix) ───────────
+#
+# Bug: the `answer = "❓ {question}"` overwrite (and question_payload
+# resolution) used to live AFTER `CONVERSATION.add_turn(...)`. So
+# when `ask_user` fired:
+#   - in-memory AgentAnswer returned to WebUI had the question text ✓
+#   - the conversation log persisted `answer=""` ✗
+#   - the saved turn artifact persisted `answer=""` ✗
+# When the user picked an option, the resume turn read the prior
+# turn from history and saw an empty assistant message — no context
+# for what was asked. The LLM either re-fired ask_user in a loop or
+# produced garbage. "agent stops working after I answer"
+# (user complaint, 2026-05-21).
+#
+# Fix: move the question_payload resolution + answer overwrite to
+# right after `_record_llm_call`, BEFORE `CONVERSATION.add_turn`
+# (and turn-artifact persistence). The tests below pin the ordering.
+
+
+def test_question_overwrite_happens_before_conversation_persist():
+    """Source-level pin: in `backend/unified_agent.py`, the
+    `_pending_question_id` resolution that sets `answer = "❓ …"`
+    must appear BEFORE the `CONVERSATION.add_turn(...)` call. If a
+    refactor moves them back to the old order the conversation log
+    silently drops the question text again."""
+    import pathlib
+    src = pathlib.Path("backend/unified_agent.py").read_text(
+        encoding="utf-8",
+    )
+    lines = src.splitlines()
+    # Find the resolution block: `if _pending_question_id["v"]:`
+    resolution_lines = [
+        i for i, ln in enumerate(lines)
+        if "if _pending_question_id[" in ln
+    ]
+    assert resolution_lines, (
+        "expected at least one `if _pending_question_id[...]:` block"
+    )
+    first_resolution = resolution_lines[0]
+    # Find the conversation persist call.
+    convo_lines = [
+        i for i, ln in enumerate(lines)
+        if "CONVERSATION.add_turn(" in ln
+    ]
+    assert convo_lines, "expected `CONVERSATION.add_turn(` call"
+    first_convo = convo_lines[0]
+    assert first_resolution < first_convo, (
+        f"question_payload resolution at line {first_resolution+1} "
+        f"must come BEFORE CONVERSATION.add_turn at line "
+        f"{first_convo+1} — otherwise the conversation log loses "
+        f"the question text and resume turns see an empty assistant "
+        f"message (bug fixed 2026-05-21)."
+    )
+
+
+def test_question_overwrite_happens_before_turn_artifact_save():
+    """Same pin for the saved turn artifact (`workspace/turns/<id>.json`).
+    Pre-fix it persisted `answer=""` even when ask_user fired."""
+    import pathlib
+    src = pathlib.Path("backend/unified_agent.py").read_text(
+        encoding="utf-8",
+    )
+    lines = src.splitlines()
+    resolution_lines = [
+        i for i, ln in enumerate(lines)
+        if "if _pending_question_id[" in ln
+    ]
+    first_resolution = resolution_lines[0]
+    # The artifact is built around `turn_record = {...  "answer": answer
+    # or "" ...}`. Find that literal.
+    artifact_lines = [
+        i for i, ln in enumerate(lines)
+        if '"answer": answer or ""' in ln
+    ]
+    assert artifact_lines, (
+        "expected the `turn_record` literal with `\"answer\": answer or \"\"`"
+    )
+    first_artifact = artifact_lines[0]
+    assert first_resolution < first_artifact, (
+        f"question_payload resolution at line {first_resolution+1} "
+        f"must come BEFORE turn_record assembly at line "
+        f"{first_artifact+1} — otherwise the saved turn artifact "
+        f"loses the question text."
+    )
+
+
 def test_open_questions_endpoint_lists_pending(
     isolated_questions, monkeypatch,
 ):

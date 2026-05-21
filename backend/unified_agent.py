@@ -2133,10 +2133,50 @@ def run_unified(
         usage_before=usage_before,
     )
 
+    # AskUserQuestion attachment — resolved EARLY so the question
+    # text lands in conversation history, the saved turn artifact,
+    # and the session row (not just the in-memory AgentAnswer).
+    # Pre-fix the overwrite happened AFTER `CONVERSATION.add_turn`,
+    # so the conversation log saved `answer=""` and the resume turn
+    # (fired when the user clicks an option) read the prior turn as
+    # an empty assistant message — no context for what was asked,
+    # so the LLM either re-fired `ask_user` in a loop or produced
+    # garbage. "agent stops working after I answer" (2026-05-21).
+    question_payload: Optional[dict] = None
+    if _pending_question_id["v"]:
+        try:
+            from .tools import ask_user as _aq
+            q = _aq.STORE.get(_pending_question_id["v"])
+            if q is not None:
+                question_payload = q.to_dict()
+                preview_q = q.question or "(no text)"
+                # Compose a conversation-readable representation that
+                # also carries the option labels. The resume turn
+                # sees this in history and understands what menu it
+                # offered — picks the right branch on the user's
+                # "My choice: …" follow-up without re-firing ask_user.
+                opt_lines = []
+                for opt in q.options:
+                    lbl = (opt.get("label") or "").strip()
+                    if lbl:
+                        opt_lines.append(f"  • {lbl}")
+                if opt_lines:
+                    answer = (
+                        f"❓ {preview_q}\n\n"
+                        f"Options offered:\n" + "\n".join(opt_lines)
+                    )
+                else:
+                    answer = f"❓ {preview_q}"
+        except Exception as e:
+            log.warning("ask_user payload attach failed: %s", e)
+
     # Post-hoc: memory extraction. Supervisor turns SKIP — the
     # synthetic "BACKGROUND_JOB_COMPLETED: ..." text would otherwise
     # land in the user's long-term memory as if they had said it.
-    if not supervisor_mode:
+    # ask_user turns also SKIP — the "❓ …" placeholder isn't a fact
+    # worth storing, and routing it through the extractor wastes
+    # tokens for zero learning signal.
+    if not supervisor_mode and not question_payload:
         try:
             MEMORY.extract_and_store(
                 task, answer, intent="task",
@@ -2287,27 +2327,11 @@ def run_unified(
     except Exception:
         pass
 
-    # AskUserQuestion attachment: if `ask_user` was called during
-    # this turn, the question payload supersedes the answer body
-    # for client rendering. The frontend / Telegram renderer reads
-    # `.question` and shows the structured card; `.answer` carries
-    # a short placeholder so the conversation log isn't empty.
-    question_payload: Optional[dict] = None
-    if _pending_question_id["v"]:
-        try:
-            from .tools import ask_user as _aq
-            q = _aq.STORE.get(_pending_question_id["v"])
-            if q is not None:
-                question_payload = q.to_dict()
-                # Overwrite the LLM's final paragraph with a short
-                # placeholder so the rendered conversation row has
-                # something readable even if the client doesn't yet
-                # know how to render the question card. Telegram /
-                # WebUI both prefer `.question` when present.
-                preview_q = q.question or "(no text)"
-                answer = f"❓ {preview_q}"
-        except Exception as e:
-            log.warning("ask_user payload attach failed: %s", e)
+    # NOTE: `question_payload` and the `answer = "❓ …"` overwrite
+    # for the AskUserQuestion path are resolved EARLIER (right after
+    # `_record_llm_call`) so the question text propagates into
+    # conversation history + saved turn artifact + session row —
+    # not just the in-memory AgentAnswer returned below.
 
     return AgentAnswer(
         answer=answer or "",
