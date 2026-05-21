@@ -34,91 +34,87 @@ def test_whitespace_only_refused():
     assert "empty" in err.lower()
 
 
-def test_compound_command_with_semicolon_refused():
-    ok, err, _ = tex._validate_command("ls ; cat /etc/passwd")
-    assert not ok
-    assert "metacharacter" in err.lower() or "';'" in err
-    assert "separate" in err.lower()
+# 2026-05-21: allowlist + subcommand gates + metachar block dropped.
+# Everything that used to be refused is now allowed. Trust boundary
+# is the owner-only role gate on terminal_exec itself, not
+# argument-shape introspection.
 
 
-def test_compound_with_pipe_refused():
-    ok, err, _ = tex._validate_command("ps aux | grep python")
-    assert not ok
-    assert "metacharacter" in err.lower() or "'|'" in err
+def test_compound_command_with_semicolon_allowed():
+    ok, _, _ = tex._validate_command("ls ; cat /etc/passwd")
+    assert ok
 
 
-def test_redirection_refused():
-    ok, err, _ = tex._validate_command("ls > /tmp/listing")
-    assert not ok
-    assert "metacharacter" in err.lower() or "'>'" in err
+def test_pipe_allowed():
+    """Pipes were blocked by the metachar guard; now they go straight
+    to /bin/sh -c which knows what to do."""
+    ok, _, _ = tex._validate_command("ps aux | grep python")
+    assert ok
 
 
-def test_command_substitution_refused():
-    ok, err, _ = tex._validate_command("echo $(whoami)")
-    assert not ok
-    assert "metacharacter" in err.lower()
+def test_redirection_allowed():
+    ok, _, _ = tex._validate_command("ls > /tmp/listing")
+    assert ok
 
 
-def test_absolute_path_to_binary_refused():
-    """Allowlist is keyed by basename — passing an absolute path
-    would let the LLM reach `/usr/local/bin/rm` past the filter."""
-    ok, err, _ = tex._validate_command("/usr/bin/ls -la")
-    assert not ok
-    assert "absolute" in err.lower() or "path" in err.lower()
+def test_command_substitution_allowed():
+    ok, _, _ = tex._validate_command("echo $(whoami)")
+    assert ok
 
 
-def test_relative_dot_path_refused():
-    ok, err, _ = tex._validate_command("./mybinary --version")
-    assert not ok
-    assert "path" in err.lower() or "relative" in err.lower()
+def test_absolute_path_allowed():
+    """The allowlist guard against absolute paths is gone — the LLM
+    can target /usr/local/bin/whatever directly."""
+    ok, _, _ = tex._validate_command("/usr/bin/ls -la")
+    assert ok
 
 
-def test_unknown_binary_refused():
-    ok, err, _ = tex._validate_command("rm -rf /")
-    assert not ok
-    assert "allowlist" in err.lower()
+def test_relative_dot_path_allowed():
+    ok, _, _ = tex._validate_command("./mybinary --version")
+    assert ok
+
+
+def test_arbitrary_binary_allowed():
+    """`rm` used to be blocked. With the allowlist gone the LLM can
+    invoke any binary on PATH — owner-only gate is the only
+    backstop."""
+    ok, _, _ = tex._validate_command("rm -rf /tmp/nope")
+    assert ok
 
 
 def test_known_safe_command_accepted():
     ok, err, argv = tex._validate_command("ls -la /tmp")
     assert ok, err
-    assert argv == ["ls", "-la", "/tmp"]
+    # `argv` no longer matches shell-split; with shell=True the
+    # whole command rides as one entry.
+    assert argv == ["ls -la /tmp"]
 
 
 def test_git_status_accepted():
-    ok, _, argv = tex._validate_command("git status")
-    assert ok
-    assert argv == ["git", "status"]
-
-
-def test_git_push_refused_via_denylist():
-    """`git` is in the allowlist but `git push` is destructive."""
-    ok, err, _ = tex._validate_command("git push origin master")
-    assert not ok
-    assert "push" in err.lower()
-
-
-def test_git_reset_refused():
-    ok, err, _ = tex._validate_command("git reset --hard HEAD")
-    assert not ok
-    assert "reset" in err.lower()
-
-
-def test_git_unknown_subcommand_refused():
-    """`git` subcommand allowlist — anything not on the list refuses."""
-    ok, err, _ = tex._validate_command("git pull origin master")
-    assert not ok
-
-
-def test_systemctl_status_accepted():
-    ok, _, _ = tex._validate_command("systemctl --user is-active hrant")
+    ok, _, _ = tex._validate_command("git status")
     assert ok
 
 
-def test_systemctl_restart_refused():
-    """The subcommand allowlist doesn't include `restart`."""
-    ok, err, _ = tex._validate_command("systemctl restart hrant.service")
-    assert not ok
+def test_git_push_allowed_now():
+    """The git denylist (push / reset / rebase / …) is gone. The
+    LLM can do anything to the repo state — owner has the audit
+    trail via turn artifacts."""
+    ok, _, _ = tex._validate_command("git push origin master")
+    assert ok
+
+
+def test_git_reset_allowed_now():
+    ok, _, _ = tex._validate_command("git reset --hard HEAD")
+    assert ok
+
+
+def test_systemctl_restart_allowed_now():
+    """systemctl allow-list used to be read-only-subcommands only.
+    `restart` is now allowed; user-units don't need sudo, system
+    units will fail at the OS level when called by a non-root
+    process."""
+    ok, _, _ = tex._validate_command("systemctl restart hrant.service")
+    assert ok
 
 
 def test_pip_show_accepted():
@@ -156,29 +152,32 @@ def test_run_echo_returns_stdout(tmp_path):
     assert res.elapsed_ms >= 0
 
 
-def test_refusal_returns_minus_one_exit_code():
-    res = tex.run_terminal("rm -rf /")
+def test_empty_command_returns_minus_one_exit_code():
+    """Empty / whitespace-only is the only refusal path now."""
+    res = tex.run_terminal("   ")
     assert not res.ok
     assert res.exit_code == -1
-    assert "allowlist" in res.error.lower()
+    assert "empty" in res.error.lower()
     assert res.stdout == "" and res.stderr == ""
 
 
-def test_refusal_for_metachars():
+def test_compound_command_runs_via_shell():
+    """With shell=True the pipe runs as expected — the previous
+    'metacharacter refusal' is gone."""
+    _platform_skip_if_no_unix_basics()
     res = tex.run_terminal("echo a ; echo b")
-    assert not res.ok
-    assert res.exit_code == -1
-    assert "metacharacter" in res.error.lower() or "';'" in res.error
+    assert res.ok
+    assert "a" in res.stdout and "b" in res.stdout
 
 
-def test_nonexistent_binary_returns_not_found():
-    """A binary that's in our allowlist but missing on the host
-    should produce a structured 'binary not found' error, not raise."""
-    with patch.object(tex, "_ALLOWED_COMMANDS", frozenset({"definitely-not-installed-binary"})):
-        res = tex.run_terminal("definitely-not-installed-binary --version")
+def test_nonexistent_binary_returns_nonzero_exit():
+    """A missing binary now hits the SHELL which returns the
+    standard 'command not found' (exit 127 on POSIX). No more
+    FileNotFoundError path — shell handles it."""
+    _platform_skip_if_no_unix_basics()
+    res = tex.run_terminal("definitely-not-installed-binary --version")
     assert not res.ok
-    assert res.exit_code == -1
-    assert "not found" in res.error.lower()
+    assert res.exit_code != 0
 
 
 def test_timeout_clamps_above_max():

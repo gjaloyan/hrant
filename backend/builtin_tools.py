@@ -1235,12 +1235,13 @@ def _delegate_handler(role: str, task: str) -> str:
 
 
 def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
-    """Run an allowlisted shell command on behalf of the OWNER.
+    """Run an arbitrary shell command on behalf of the OWNER.
 
-    Allowlist + denylist live in `backend.tools.terminal_exec`. Non-
-    owner callers get an immediate refusal — the gate runs BEFORE
-    subprocess so even a polluted allowlist would still refuse a
-    `telegram:guest` request.
+    2026-05-21: full-shell mode. The allowlist + subcommand gates +
+    metachar block in `backend.tools.terminal_exec` are gone — the
+    command runs through `/bin/sh -c` so pipes, redirects, command
+    substitution, multi-command chains all work. Owner-only gate
+    here is the trust boundary.
     """
     from .roles import current_speaker, is_owner
     speaker_id = current_speaker()
@@ -2092,38 +2093,52 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="terminal_exec",
         description=(
-            "Run an allowlisted shell command on the host machine and return "
-            "stdout/stderr/exit_code. OWNER-ONLY — guest / trusted callers "
-            "get permission denied without subprocess being touched.\n\n"
-            "ALLOWED: read-only inspection commands — `ls`, `cat`, `head`, "
-            "`tail`, `grep`, `find`, `ps`, `top`, `free`, `df`, `du`, "
-            "`uname`, `hostname`, `date`, `env`, `which`, `journalctl`, "
-            "`systemctl status / is-active / show / list-units / cat`, "
-            "`git status / log / diff / show / branch`, `pip list / show`, "
-            "`apt list / show`, `ping`, `dig`, `curl`, `python --version`, "
-            "etc.\n\n"
-            "REFUSED: any compound command (no `;`, `&&`, `||`, `|`, "
-            "backticks, `$(...)`, `>`, `<` — make separate calls); any "
-            "destructive operation (`rm`, `dd`, `mkfs`, `git push / reset / "
-            "rebase`, `systemctl stop / restart`, …); absolute paths to "
-            "binaries (`/usr/bin/foo`) — use the bare name.\n\n"
+            "Run an arbitrary shell command on the host machine and "
+            "return stdout/stderr/exit_code. OWNER-ONLY — guest / "
+            "trusted callers get permission denied without subprocess "
+            "being touched.\n\n"
+            "FULL SHELL: the command goes through `/bin/sh -c <cmd>` "
+            "so pipes (`|`), redirects (`>`, `<`, `2>&1`), command "
+            "substitution (`$(...)`, backticks), multi-command chains "
+            "(`;`, `&&`, `||`), env-var expansion, glob expansion — "
+            "all work natively. Use them when they're the natural "
+            "shell idiom; don't fake them with multiple tool calls.\n\n"
+            "Examples that work:\n"
+            "  - `pip install datasets swebench pandas`\n"
+            "  - `apt list --installed | grep python3-`\n"
+            "  - `find logs -name 'report.json' | wc -l`\n"
+            "  - `tail -F /var/log/syslog | grep -m5 ERROR`\n"
+            "  - `git log --oneline | head -20`\n"
+            "  - `python -c \"import sys; print(sys.path)\"`\n"
+            "  - `systemctl --user restart hrant && journalctl --user -u hrant -n 50`\n\n"
             "Returns JSON: {ok, command, exit_code, stdout, stderr, "
-            "truncated, elapsed_ms, error}. `ok=False` with `exit_code=-1` "
-            "means the command was REFUSED before execution (see `error` "
-            "field); `ok=False` with `exit_code>0` means the command RAN "
-            "and exited non-zero. Output is capped at 16KB combined; "
+            "truncated, elapsed_ms, error}. `ok=False` with "
+            "`exit_code=-1` means the command was REFUSED before "
+            "execution (empty command, timeout, permission error); "
+            "`ok=False` with `exit_code>0` means the command RAN and "
+            "exited non-zero. Output capped at 16KB combined; "
             "`truncated=True` when either stream was cut.\n\n"
-            "Use this for status checks (\"is the gateway running?\"), log "
-            "spelunking (\"why did the bot restart at 03:14?\"), file "
-            "inspection (\"what's in /etc/hostname?\"), and similar "
-            "read-only diagnostics."
+            "Safety reminders (the LLM is responsible — there's no "
+            "allowlist anymore):\n"
+            "  - Destructive ops (rm -rf, dd over devices, dropping "
+            "DBs, force-push to main) need a clear user goal — don't "
+            "do them speculatively or as 'cleanup' between turns.\n"
+            "  - Long-running commands (>60s) — use "
+            "`start_background_job` instead so the turn isn't blocked.\n"
+            "  - `sudo`-anything will prompt for password and likely "
+            "hang the timeout; ask the user to pre-authenticate or "
+            "skip the privilege escalation."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Single shell command (no compound features).",
+                    "description": (
+                        "Shell command. Pipes, redirects, command "
+                        "substitution, multi-command chains all "
+                        "work natively (no metachar restrictions)."
+                    ),
                 },
                 "timeout": {
                     "type": "integer",
