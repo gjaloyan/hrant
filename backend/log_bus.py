@@ -13,10 +13,7 @@ import collections
 import json
 import logging
 import threading
-import time
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Optional
 
 
 log = logging.getLogger(__name__)
@@ -40,11 +37,6 @@ class LogEvent:
 
     def to_dict(self) -> dict:
         return asdict(self)
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "LogEvent":
-        valid = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        return cls(**{k: v for k, v in d.items() if k in valid})
 
 
 class LogBus:
@@ -82,7 +74,7 @@ class LogBus:
                 pass
 
     def subscribe(self, *, maxsize: int = 1000) -> asyncio.Queue:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         q: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         with self._lock:
             self._subs.append((loop, q))

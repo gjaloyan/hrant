@@ -6,6 +6,18 @@ import time
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_bus():
+    """Reset the module-level singleton around every test so that
+    publishers added by future tasks (LogBusHandler from Task 2,
+    cross-cutting publishers from Task 8) don't leak events into
+    unrelated test runs."""
+    from backend.log_bus import BUS
+    BUS.clear()
+    yield
+    BUS.clear()
+
+
 def test_log_event_to_dict_shape():
     from backend.log_bus import LogEvent
     ev = LogEvent(
