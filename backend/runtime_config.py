@@ -45,7 +45,11 @@ _ALLOWED: dict[str, dict[str, tuple[type, Any]]] = {
         "api_ping_cache_seconds": (int, lambda v: 0 <= v <= 3600),
         "fallback_to_local": (bool, lambda v: True),
         "tool_synth_max_tokens": (int, lambda v: 256 <= v <= 16000),
-        "tool_loop_input_budget": (int, lambda v: 10000 <= v <= 2000000),
+        # 0 = disabled (no hard cap, the agent runs to natural
+        # max_iterations limit). Default flipped to 0 on 2026-05-21
+        # per the "no limits" directive. Operators can still set
+        # 10000-2000000 to opt back into a hard cap.
+        "tool_loop_input_budget": (int, lambda v: v == 0 or 10000 <= v <= 2000000),
     },
     "verification": {
         "enabled": (bool, lambda v: True),

@@ -34,81 +34,57 @@ import pytest
 # ─── Constants pinned ──────────────────────────────────────────────
 
 
-def test_default_soft_threshold():
-    """10_000 tokens default per the owner's directive (audit T4
-    request: 'like 10000 soft or 30000 hard, your choice, less is
-    better'). Aggressive on purpose — current median is 110k, so the
-    LLM sees the soft marker on essentially every multi-tool turn.
-    That's the design: bring spend back to earth via visibility."""
+def test_default_soft_threshold_disabled():
+    """2026-05-21 user directive: "no limits, agent need to have a
+    free work opportunity". Defaults flipped to 0 — the marker
+    mechanism stays in place so an operator can opt back in via the
+    env override, but no warning is injected into tool results out
+    of the box."""
     from backend.unified_agent import TOKEN_SOFT_PER_TURN
-    assert TOKEN_SOFT_PER_TURN == 10_000, (
-        f"audit T4 default soft = 10000; got {TOKEN_SOFT_PER_TURN}"
+    assert TOKEN_SOFT_PER_TURN == 0, (
+        f"defaults flipped to 0 (no limits); got {TOKEN_SOFT_PER_TURN}"
     )
 
 
-def test_default_hard_threshold():
-    """30_000 tokens — below current p90 (331k) but well above
-    bare-trivial turns (~5k). LLM sees red stop signal on the
-    spendiest turns only."""
+def test_default_hard_threshold_disabled():
+    """Same — hard threshold disabled by default 2026-05-21."""
     from backend.unified_agent import TOKEN_HARD_PER_TURN
-    assert TOKEN_HARD_PER_TURN == 30_000
+    assert TOKEN_HARD_PER_TURN == 0
 
 
-# ─── Marker formatter — by-threshold behaviour ─────────────────────
+# ─── Marker formatter — disabled-by-default + opt-in via env ─────
 
 
-def test_marker_empty_below_soft():
-    """Below the soft threshold, the marker must be empty — don't
-    pollute every tool result with bookkeeping the LLM doesn't need."""
+def test_marker_empty_at_defaults():
+    """With both thresholds at the 0 default, the marker is
+    permanently empty — the agent runs without any per-turn nudge."""
     from backend.unified_agent import _format_token_budget_marker
     assert _format_token_budget_marker(0) == ""
-    assert _format_token_budget_marker(1) == ""
     assert _format_token_budget_marker(9_999) == ""
+    assert _format_token_budget_marker(50_000) == ""
+    assert _format_token_budget_marker(500_000) == ""
 
 
-def test_marker_yellow_at_soft():
-    """At the soft threshold, the marker must be a yellow nudge —
-    'consider wrapping up'. NOT a stop."""
-    from backend.unified_agent import (
-        _format_token_budget_marker, TOKEN_SOFT_PER_TURN,
-    )
-    msg = _format_token_budget_marker(TOKEN_SOFT_PER_TURN)
-    assert "🟡" in msg
-    assert "wrap" in msg.lower() or "wrapping" in msg.lower()
-    # Must mention BOTH the number used and the threshold.
-    assert f"{TOKEN_SOFT_PER_TURN:,}" in msg
-    # Not the hard signal yet.
-    assert "🔴" not in msg
-    assert "EXCEEDED" not in msg
-
-
-def test_marker_yellow_between_soft_and_hard():
-    """Mid-zone — yellow, with the actual used number reflected."""
-    from backend.unified_agent import _format_token_budget_marker
-    msg = _format_token_budget_marker(20_000)
-    assert "🟡" in msg
-    assert "20,000" in msg
-
-
-def test_marker_red_at_hard():
-    """At the hard threshold, the marker must be a red stop signal —
-    'stop probing, write partial report, end the turn'."""
-    from backend.unified_agent import (
-        _format_token_budget_marker, TOKEN_HARD_PER_TURN,
-    )
-    msg = _format_token_budget_marker(TOKEN_HARD_PER_TURN)
-    assert "🔴" in msg
-    assert "EXCEEDED" in msg
-    assert "partial report" in msg.lower() or "stop" in msg.lower()
-    # The yellow nudge must NOT be there — single, unambiguous signal.
-    assert "🟡" not in msg
-
-
-def test_marker_red_well_above_hard():
-    from backend.unified_agent import _format_token_budget_marker
-    msg = _format_token_budget_marker(150_000)
-    assert "🔴" in msg
-    assert "150,000" in msg
+def test_marker_yellow_when_operator_opts_in(monkeypatch):
+    """If an operator opts back in via env, the original signal
+    shape is restored — this pins the mechanism for benchmark /
+    cost-investigation modes."""
+    monkeypatch.setenv("HRANT_TOKEN_SOFT_PER_TURN", "10000")
+    monkeypatch.setenv("HRANT_TOKEN_HARD_PER_TURN", "30000")
+    import importlib
+    from backend import unified_agent
+    importlib.reload(unified_agent)
+    try:
+        msg = unified_agent._format_token_budget_marker(15_000)
+        assert "🟡" in msg
+        assert "🔴" not in msg
+        red = unified_agent._format_token_budget_marker(50_000)
+        assert "🔴" in red
+        assert "EXCEEDED" in red
+    finally:
+        monkeypatch.delenv("HRANT_TOKEN_SOFT_PER_TURN", raising=False)
+        monkeypatch.delenv("HRANT_TOKEN_HARD_PER_TURN", raising=False)
+        importlib.reload(unified_agent)
 
 
 # ─── Env overrides ──────────────────────────────────────────────────

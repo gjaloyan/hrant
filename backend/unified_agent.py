@@ -991,11 +991,18 @@ AUTO_PROPOSE_CAP = 5
 import os as _os_for_token_budget
 
 TOKEN_SOFT_PER_TURN = int(
-    _os_for_token_budget.environ.get("HRANT_TOKEN_SOFT_PER_TURN", "10000")
+    _os_for_token_budget.environ.get("HRANT_TOKEN_SOFT_PER_TURN", "0")
 )
 TOKEN_HARD_PER_TURN = int(
-    _os_for_token_budget.environ.get("HRANT_TOKEN_HARD_PER_TURN", "30000")
+    _os_for_token_budget.environ.get("HRANT_TOKEN_HARD_PER_TURN", "0")
 )
+# Defaults flipped 2026-05-21 — user explicit decision: "no limits,
+# agent need to have a free work opportunity". Budget markers used
+# to default to 10k/30k and inject 🟡/🔴 warnings into tool results,
+# nudging the model to wrap up. The mechanism stays in case an
+# operator wants to opt back in via env vars, but it's OFF by
+# default. The previous 30k threshold was advisory anyway — audit
+# observed a turn going to 343k input despite the marker firing.
 
 
 _TRUNCATION_HINTS = {
@@ -1385,7 +1392,7 @@ def _post_turn_skill_reflection(
                 pass
 
         out = router().call_with_tools(
-            TaskType.COMPLEX_SOLVING,
+            TaskType.SKILL_REFLECTION,
             reflection_system,
             reflection_user,
             tools=filtered,
@@ -2056,6 +2063,13 @@ def run_unified(
     # report) so we widen a bit. Falls under failover chain.
     t0 = _time.monotonic()
     usage_before = TOKENS.request_usage()
+    # Snapshot the request-call log length so we can emit a
+    # per-iteration LLMCallDetail for each tool-loop API call after
+    # the loop completes. Pre-fix the whole loop showed up as a
+    # single `_unified` aggregate in the turn artifact — fine for
+    # the cumulative cost number but useless for "which iteration
+    # burned the tokens". Audit follow-up 2026-05-21.
+    _calls_before_loop = TOKENS.request_calls_count()
     try:
         answer = router().call_with_tools(
             TaskType.COMPLEX_SOLVING,
@@ -2119,10 +2133,37 @@ def run_unified(
         except Exception as _e:
             log.warning("skill reflection top-level swallow: %s", _e)
 
+    # Per-iteration telemetry: walk the new CallRecord entries
+    # produced inside the tool loop and emit a compact LLMCallDetail
+    # for each. We skip `system_redacted` / `user_redacted` (would
+    # balloon turn artifacts — same system prompt × N iterations);
+    # the value of these entries is the per-iter token breakdown,
+    # not re-dumping the prompt. The aggregate `_unified` call below
+    # stays for back-compat with the existing UI.
+    try:
+        iter_records = TOKENS.request_calls_since(_calls_before_loop)
+        for rec in iter_records:
+            tt = (rec.get("task_type") or "").strip()
+            if not tt:
+                continue
+            agent._llm_calls.append(LLMCallDetail(
+                label=f"_unified:{tt}",
+                task_type=tt,
+                model=(rec.get("model") or ""),
+                system_redacted="",
+                user_redacted="",
+                response_preview="",
+                duration_ms=int(rec.get("duration_ms") or 0),
+                input_tokens=int(rec.get("input_tokens") or 0),
+                output_tokens=int(rec.get("output_tokens") or 0),
+            ))
+    except Exception as e:
+        log.debug("unified: per-iter telemetry skipped: %s", e)
+
     # Record the (super) LLM call for the dev panel. We treat the
     # whole tool loop as one labelled call — per-iteration detail
-    # is already visible via the `tool` / `tool_error` trace
-    # entries.
+    # is the records emitted above; this aggregate preserves the
+    # cumulative cost number that pre-2026-05-21 UIs read.
     agent._record_llm_call(
         label="_unified",
         task_type=TaskType.COMPLEX_SOLVING,

@@ -52,13 +52,17 @@ def test_read_file_compact_respects_cap():
 # --- #4: per-loop input-token budget --------------------------------------
 
 
-def test_tool_loop_input_budget_in_config():
+def test_tool_loop_input_budget_default_is_disabled():
+    """2026-05-21: default flipped to 0 ("no limits, agent need to
+    have a free work opportunity"). The cap mechanism stays so an
+    operator can opt back in, but no turn is broken mid-loop by
+    default."""
     from backend.config import CONFIG
     val = CONFIG.router.get("tool_loop_input_budget")
     assert isinstance(val, int)
-    # Sane bounds: too low chokes legit deep reviews, too high
-    # defeats the guard. 200k is the chosen default.
-    assert 50_000 <= val <= 1_000_000
+    assert val == 0, (
+        f"tool_loop_input_budget default is 0 (disabled); got {val}"
+    )
 
 
 def test_budget_helper_false_when_under_cap():
@@ -71,24 +75,37 @@ def test_budget_helper_false_when_under_cap():
         TOKENS.reset_request()
 
 
-def test_budget_helper_true_when_over_cap():
-    """Simulate a tool-loop that has already eaten through the
-    configured cap — helper must report exceeded so callers can
-    short-circuit."""
+def test_budget_helper_does_not_fire_when_cap_zero():
+    """With the cap disabled (default), the helper must always
+    return False even if usage is astronomically high. This pins
+    the "no limits" behaviour."""
+    from backend.config import CONFIG
+    from backend.llm import TOKENS, _tool_loop_input_budget_exceeded
+    TOKENS.reset_request()
+    try:
+        TOKENS._request_input = 10_000_000  # 10M tokens, way past any old cap
+        # CONFIG default is 0 → helper must say False
+        assert CONFIG.router.get("tool_loop_input_budget") == 0
+        assert _tool_loop_input_budget_exceeded() is False
+    finally:
+        TOKENS.reset_request()
+
+
+def test_budget_helper_fires_when_operator_opts_in():
+    """If an operator sets a non-zero cap via runtime_config, the
+    enforcement mechanism must still work — pins the opt-in path."""
     from backend.config import CONFIG
     from backend.llm import TOKENS, _tool_loop_input_budget_exceeded
 
-    cap = int(CONFIG.router.get("tool_loop_input_budget", 200_000))
+    prev = CONFIG.router.get("tool_loop_input_budget")
+    CONFIG.router["tool_loop_input_budget"] = 50_000
     TOKENS.reset_request()
     try:
-        # Push input counter past the cap (using the internal
-        # field is the simplest path; production code always
-        # reaches usage via record_call which bumps the same
-        # field).
-        TOKENS._request_input = cap + 1
+        TOKENS._request_input = 60_000
         assert _tool_loop_input_budget_exceeded() is True
     finally:
         TOKENS.reset_request()
+        CONFIG.router["tool_loop_input_budget"] = prev
 
 
 def test_budget_helper_safe_when_tracker_blows_up(monkeypatch):

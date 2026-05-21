@@ -248,12 +248,15 @@ _COMMON_OTHER = {
         # answers we've shipped without truncating.
         "tool_synth_max_tokens": 4000,
         # Hard budget for the WHOLE tool-loop's accumulated input
-        # tokens (sum across iterations). Acts as a runaway-guard,
-        # NOT the primary token-saving knob (that's the curated
-        # synthesis payload — see `_curate_synth_messages_*`). 300k
-        # leaves room for legit deep self-reviews while still
-        # catching pathological loops before they cost real money.
-        "tool_loop_input_budget": 300000,
+        # tokens (sum across iterations). Acts as a runaway-guard.
+        # DISABLED by default (0) — user explicit decision 2026-05-21:
+        # "no limits, agent need to have a free work opportunity".
+        # The cap mechanism stays so an operator can opt back in via
+        # `set_setting('router.tool_loop_input_budget', 100000)`, but
+        # no turn is broken off mid-loop by default. Audit observed
+        # the 300k cap rarely triggering in practice anyway — the
+        # natural max_iterations limit ends most runaway loops first.
+        "tool_loop_input_budget": 0,
     },
     "knowledge": {
         "base_dir": "./knowledge",

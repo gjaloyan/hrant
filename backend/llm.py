@@ -250,6 +250,29 @@ class TokenTracker:
                 return None
             return self._log[-1].to_dict()
 
+    def request_calls_count(self) -> int:
+        """Current length of the per-request call log. Snapshot this
+        BEFORE a tool-loop call, then call `request_calls_since(index)`
+        AFTER to retrieve just the records produced by that call. Used
+        by unified_agent to emit per-iteration LLM telemetry into the
+        turn artifact (2026-05-21 audit follow-up — previously the
+        whole tool loop collapsed into one `_unified` aggregate)."""
+        with self._lock:
+            return len(self._request_calls_log)
+
+    def request_calls_since(self, start_index: int) -> list[dict]:
+        """Return `CallRecord` dicts for entries added to the request
+        log after `start_index`. Clamped to the current log length so
+        a caller passing a stale index gets an empty list, not an
+        IndexError."""
+        with self._lock:
+            if start_index < 0:
+                start_index = 0
+            log = self._request_calls_log
+            if start_index >= len(log):
+                return []
+            return [rec.to_dict() for rec in log[start_index:]]
+
     def reset_request(self) -> None:
         """Reset per-request counters (called at start of agent.run())."""
         with self._lock:
@@ -520,6 +543,13 @@ class TaskType(Enum):
     NOTE_SEARCH = "note_search"
     QUICK_ANSWER = "quick_answer"
     CLASSIFICATION = "classification"
+    # Post-turn meta-task: the LLM reviews its own work and decides
+    # whether to write a reusable skill. Separated from complex_solving
+    # so telemetry can attribute the cost cleanly and so the reasoning
+    # router can dial it down to `medium` (the default is `high` for
+    # complex_solving, which is overkill for reflection). Audit
+    # follow-up 2026-05-21 — previously masqueraded as complex_solving.
+    SKILL_REFLECTION = "skill_reflection"
 
 
 MODEL_A_TASKS = {

@@ -40,10 +40,12 @@ def test_read_file_cap_reverted_to_16k():
     assert _TOOL_LLM_RESULT_CAPS["view_file"] == 16_000
 
 
-def test_loop_input_budget_relaxed():
+def test_loop_input_budget_disabled_by_default():
+    """2026-05-21: cap flipped to 0 ("no limits"). Used to be 200k →
+    300k → now 0 (disabled). The mechanism stays for opt-in use."""
     from backend.config import CONFIG
     val = CONFIG.router.get("tool_loop_input_budget")
-    assert val >= 250_000  # was 200k, now 300k as a runaway-guard
+    assert val == 0
 
 
 # --- _summarize_tool_call_for_synth ----------------------------------------

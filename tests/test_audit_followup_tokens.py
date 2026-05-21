@@ -254,18 +254,24 @@ def test_chat_fast_path_swallows_router_exception(monkeypatch):
 def test_t4_budget_marker_uses_input_tokens(monkeypatch):
     """Audit follow-up: marker formatter is fed `input_tokens`, not
     `total_tokens`. This is pinned implicitly by the formatter
-    itself being a pure-function of one integer, but the wiring in
+    itself being a pure-function of one integer; the wiring in
     `_execute_with_progress` reads `request_usage().input_tokens`.
-    Pin that the formatter accepts the input-tokens value."""
-    from backend.unified_agent import _format_token_budget_marker
-    # Sanity — the formatter is the same function; behavior is
-    # token-count → marker. We don't need to test "input vs total"
-    # at the formatter level; the wiring decision is in the
-    # `_execute_with_progress` closure.
-    marker = _format_token_budget_marker(15000)
-    assert "15,000" in marker
-    # Soft threshold tripped (10k default).
-    assert "🟡" in marker
+    The shape pin survives even though the default thresholds were
+    flipped to 0 on 2026-05-21 ("no limits"). Force a non-zero
+    threshold via env to exercise the formatter."""
+    monkeypatch.setenv("HRANT_TOKEN_SOFT_PER_TURN", "10000")
+    monkeypatch.setenv("HRANT_TOKEN_HARD_PER_TURN", "30000")
+    import importlib
+    from backend import unified_agent
+    importlib.reload(unified_agent)
+    try:
+        marker = unified_agent._format_token_budget_marker(15000)
+        assert "15,000" in marker
+        assert "🟡" in marker
+    finally:
+        monkeypatch.delenv("HRANT_TOKEN_SOFT_PER_TURN", raising=False)
+        monkeypatch.delenv("HRANT_TOKEN_HARD_PER_TURN", raising=False)
+        importlib.reload(unified_agent)
 
 
 # ─── A2: Daily-counter persistence across restarts ────────────────
