@@ -13,6 +13,7 @@ import collections
 import json
 import logging
 import threading
+import time
 from dataclasses import asdict, dataclass, field
 
 
@@ -144,3 +145,68 @@ def _coerce_to_set(v) -> "set[str] | None":
 
 # Module-level singleton. The test suite resets via `BUS.clear()`.
 BUS = LogBus()
+
+
+class LogBusHandler(logging.Handler):
+    """Bridges stdlib `logging` → `LogBus`. Attach to the root logger
+    in `main.py` once at startup; every `log.info(...)` in the codebase
+    then flows through the bus as a side effect.
+
+    Crash safety: `emit` swallows every exception. A logging handler
+    that raises crashes the producer — never worth it for a UI
+    feature. The single private flag prevents `emit → publish → emit`
+    recursion if anything inside the bus accidentally logs."""
+
+    _LEVEL_MAP = {
+        logging.DEBUG: "debug",
+        logging.INFO: "info",
+        logging.WARNING: "warning",
+        logging.ERROR: "error",
+        logging.CRITICAL: "critical",
+    }
+
+    def __init__(self, bus: "LogBus | None" = None):
+        super().__init__()
+        self._bus = bus or BUS
+        self._in_emit = threading.local()
+
+    def handle(self, record: logging.LogRecord) -> bool:
+        # Guard at the handle() boundary so the whole emit chain — including
+        # any subclass behavior after super().emit() returns — is covered.
+        # Without this, a subclass that logs after delegating up would
+        # re-enter the handler (the flag would have already been reset).
+        if getattr(self._in_emit, "active", False):
+            return False
+        self._in_emit.active = True
+        try:
+            return super().handle(record)
+        finally:
+            self._in_emit.active = False
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            try:
+                msg = record.getMessage()
+            except Exception:
+                msg = record.msg or ""
+            meta: dict = {}
+            if record.exc_info:
+                try:
+                    import traceback
+                    meta["traceback"] = "".join(
+                        traceback.format_exception(*record.exc_info)
+                    )
+                except Exception:
+                    pass
+            level = self._LEVEL_MAP.get(record.levelno, "info")
+            ev = LogEvent(
+                ts=time.time(),
+                level=level,
+                source="python",
+                logger=record.name or "",
+                message=msg,
+                meta=meta,
+            )
+            self._bus.publish(ev)
+        except Exception:
+            pass
