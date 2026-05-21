@@ -133,6 +133,35 @@ export async function fetchOpenQuestions(): Promise<{
   return json_get("/api/chat/open-questions");
 }
 
+
+// ─── Reasoning routing (hybrid reasoning effort) ────────────────────
+
+export type ReasoningRoutingConfig = {
+  routing: Record<string, string>;
+  fallback: string;
+  override: string;
+  updated_at: number;
+  valid_levels: string[];
+  defaults: Record<string, string>;
+};
+
+export async function fetchReasoningRouting(): Promise<ReasoningRoutingConfig> {
+  return json_get("/api/reasoning-routing");
+}
+
+export async function saveReasoningRouting(
+  routing: Record<string, string>,
+  fallback: string,
+): Promise<{ ok: boolean; routing: Record<string, string>; fallback: string }> {
+  return json_put("/api/reasoning-routing", { routing, fallback });
+}
+
+export async function setReasoningOverride(
+  level: string,
+): Promise<{ ok: boolean; override: string }> {
+  return json_put("/api/reasoning-routing/override", { level });
+}
+
 // Round A: full TurnWorkspace JSON returned by GET /api/turns/<id>.
 // Same shape as what backend.workspace.save_turn writes per turn.
 export type TurnArtifact = {

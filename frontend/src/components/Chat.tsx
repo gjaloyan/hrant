@@ -535,6 +535,82 @@ function TaskStatusCard({ jobId }: { jobId: string }) {
 // chat would show "ERROR: { type: error, ... }" inline as if it
 // were the agent's answer, which read like the agent was confused.
 // Now it's a clean rose-themed card the user can spot at a glance.
+// Quick reasoning-effort selector for the chat input bar. Reads
+// the current override from /api/reasoning-routing and lets the
+// user bump GPT-5.x reasoning to high / drop to low for the next
+// turn without leaving the chat. "Off" clears the override and
+// falls back to the configured per-task routing matrix.
+function ReasoningQuickPick({ busy }: { busy: boolean }) {
+  const [override, setOverride] = useState<string>("");
+  const [open, setOpen] = useState(false);
+  const [busyHere, setBusyHere] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { fetchReasoningRouting } = await import("../api");
+        const c = await fetchReasoningRouting();
+        if (!cancelled) setOverride(c.override || "");
+      } catch { /* swallow — non-critical */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const apply = async (level: string) => {
+    setBusyHere(true);
+    try {
+      const { setReasoningOverride } = await import("../api");
+      await setReasoningOverride(level);
+      setOverride(level);
+    } catch { /* swallow */ }
+    finally {
+      setBusyHere(false);
+      setOpen(false);
+    }
+  };
+  const colorFor = (lv: string) => (
+    lv === "high" ? "bg-rose-700 text-white"
+      : lv === "medium" ? "bg-amber-700 text-white"
+        : lv === "low" ? "bg-sky-700 text-white"
+          : "bg-slate-700 text-slate-300"
+  );
+  const labelFor = (lv: string) => (
+    lv === "high" ? "🧠 high"
+      : lv === "medium" ? "🧠 med"
+        : lv === "low" ? "🧠 low"
+          : "🧠 auto"
+  );
+  return (
+    <div className="relative self-start">
+      <button
+        onClick={() => setOpen(!open)}
+        disabled={busy || busyHere}
+        title="Reasoning effort for next turn"
+        className={`rounded px-2 text-[11px] font-medium min-h-[44px] sm:min-h-0 sm:py-1 ${
+          colorFor(override)
+        } disabled:opacity-50 hover:opacity-90 transition-opacity`}
+      >
+        {labelFor(override)}
+      </button>
+      {open && (
+        <div className="absolute bottom-full mb-1 left-0 bg-slate-900 border border-slate-700 rounded shadow-lg z-10 py-1 min-w-[120px]">
+          {["", "low", "medium", "high"].map((lv) => (
+            <button
+              key={lv || "off"}
+              onClick={() => apply(lv)}
+              className={`block w-full text-left text-xs px-3 py-1.5 hover:bg-slate-800 ${
+                override === lv ? "bg-slate-800 font-medium" : ""
+              }`}
+            >
+              {lv === "" ? "Off (use routing)" : `${labelFor(lv)} (${lv})`}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 function ErrorCard({ message }: { message: string }) {
   return (
     <div className="rounded-lg overflow-hidden border border-rose-700/40 bg-rose-950/30">
@@ -1645,6 +1721,7 @@ const Chat = forwardRef<ChatHandle, {
           >
             {transcribing ? "…" : recording ? "⏹" : "🎤"}
           </button>
+          <ReasoningQuickPick busy={busy} />
           <textarea
             className="flex-1 bg-slate-900 rounded p-2 text-sm resize-none outline-none focus:ring-1 focus:ring-sky-600"
             rows={2}

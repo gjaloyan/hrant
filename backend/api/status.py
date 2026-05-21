@@ -25,6 +25,22 @@ def status():
         router_state = llm_router().stats()
     except Exception as e:
         router_state = {"error": str(e)}
+    # Phase 3a follow-up: surface the REAL active model (the pinned
+    # one from active_model.json) instead of the legacy
+    # `CONFIG.model_a` field which is just the mode-preset default.
+    # When `active_model.json` is set, that's what every LLM call
+    # actually routes to — the status bar lied otherwise.
+    real_model_a = CONFIG.model_a.get("model")
+    real_provider_a = CONFIG.model_a.get("provider") or "anthropic"
+    try:
+        from ..providers import ACTIVE_MODEL
+        pinned = ACTIVE_MODEL.get() or {}
+        if pinned.get("model"):
+            real_model_a = pinned["model"]
+        if pinned.get("provider_type"):
+            real_provider_a = pinned["provider_type"]
+    except Exception:
+        pass
     return {
         "topics_total": len(topics),
         "by_category": by_cat,
@@ -35,7 +51,8 @@ def status():
         "mode": CONFIG.mode,
         "finetune_enabled": CONFIG.finetune_enabled,
         "training_location": CONFIG.training_location,
-        "model_a": CONFIG.model_a.get("model"),
+        "model_a": real_model_a,
+        "model_a_provider": real_provider_a,
         "model_b": (CONFIG.model_b or {}).get("model") if CONFIG.model_b else None,
         "model_version": cur.tag if cur else None,
         "router": router_state,

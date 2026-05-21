@@ -347,6 +347,7 @@ from .api import (  # noqa: E402
     graph as graph_api,
     subagents as subagents_api,
     background_jobs as background_jobs_api,
+    reasoning_routing as reasoning_routing_api,
 )
 from .autonomic.api import router as autonomic_router  # noqa: E402
 
@@ -355,7 +356,7 @@ for mod in (
     intel, goals, sessions, providers_api, channels_api, attachments_api,
     health_api, voice_api, engine_api, roles_api, skills_api, jobs_api,
     failover_api, consolidation_api, graph_api, subagents_api,
-    background_jobs_api,
+    background_jobs_api, reasoning_routing_api,
 ):
     app.include_router(mod.router)
 app.include_router(autonomic_router)

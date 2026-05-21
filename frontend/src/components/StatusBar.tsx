@@ -66,6 +66,8 @@ export default function StatusBar({
     local_full: "bg-emerald-700",
     cloud_finetune: "bg-sky-700",
     local_cpu: "bg-amber-700",
+    cloud_only: "bg-violet-700",
+    // Back-compat: old config.yaml may still report `claude_only`.
     claude_only: "bg-violet-700",
   };
 

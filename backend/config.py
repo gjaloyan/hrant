@@ -5,7 +5,9 @@
   1. local_full     — локальный Qwen через Ollama + локальный fine-tune на GPU
   2. cloud_finetune — локальный Qwen через Ollama + fine-tune на арендованной cloud GPU
   3. local_cpu      — маленький локальный Qwen через CPU (1.5B/3B), тренировка экспериментальна
-  4. claude_only    — только Claude API, без локальных моделей, только сбор данных в finetune_queue
+  4. cloud_only     — только облачный API (Claude / GPT-5.x / Gemini / OpenRouter),
+                    без локальных моделей, только сбор данных в finetune_queue
+                    (legacy alias: `claude_only` — still accepted on load)
 
 Пресет задаёт разумные дефолты; любой ключ можно переопределить явно в yaml.
 """
@@ -190,8 +192,12 @@ MODE_PRESETS: dict[str, dict] = {
         },
     },
 
-    # ───────── 4. Только Claude API, без локальной модели ─────────
-    "claude_only": {
+    # ───────── 4. Только облако (любой API-only LLM), без локальной модели ─────────
+    # Renamed from `claude_only` (2026-05-20): mode is provider-agnostic
+    # — the active model is pinned via active_model.json and may be
+    # Claude, GPT-5.x, Gemini, etc. Keeping the legacy name was
+    # misleading once the agent moved off Claude as the default.
+    "cloud_only": {
         "model_a": _COMMON_MODEL_A,
         "model_b": None,   # локальная модель выключена
         "router": {
@@ -207,10 +213,15 @@ MODE_PRESETS: dict[str, dict] = {
             "enabled": False,
             "training_location": "disabled",
             "confidence_threshold": 85,
-            "output_prefix": "claude-data",
+            "output_prefix": "cloud-data",
         },
     },
 }
+
+# Backward-compat alias: older config.yaml files + tests / docs may
+# still spell the mode `claude_only`. Treat it as an alias for
+# `cloud_only` on load so we don't break existing installs.
+MODE_PRESETS["claude_only"] = MODE_PRESETS["cloud_only"]
 
 
 _COMMON_OTHER = {
@@ -327,7 +338,7 @@ class Config:
             # Fresh install — no config.yaml yet anywhere. Boot with
             # baked-in defaults (claude_only preset + _COMMON_OTHER).
             # `hrant init` writes a real file later.
-            raw: dict[str, Any] = {"mode": "claude_only"}
+            raw: dict[str, Any] = {"mode": "cloud_only"}
         else:
             with open(path, "r", encoding="utf-8") as f:
                 raw = yaml.safe_load(f) or {}

@@ -240,9 +240,9 @@ export default function FinetunePanel() {
           </div>
         )}
 
-        {appStatus?.mode === "claude_only" && (
+        {(appStatus?.mode === "cloud_only" || appStatus?.mode === "claude_only") && (
           <div className="mt-2 text-xs text-violet-300 bg-violet-900/30 rounded p-2">
-            mode: claude_only — local model disabled, fine-tune unavailable.
+            mode: {appStatus.mode} — local model disabled, fine-tune unavailable.
             Data is still collected in finetune_queue for future use.
           </div>
         )}

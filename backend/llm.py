@@ -1823,6 +1823,7 @@ class CodexLLM(BaseLLM):
     def _build_payload(
         self, system: str, input_items: list[dict], tools: list[dict] | None,
         max_tokens: int | None, temperature: float | None,
+        task_type: str = "",
     ) -> dict:
         # ChatGPT-subscription tier (chatgpt.com/backend-api/codex) rejects
         # `max_output_tokens` ("Unsupported parameter") and likely `temperature`.
@@ -1842,6 +1843,20 @@ class CodexLLM(BaseLLM):
             # chain-of-thought when re-feeding (matches Codex CLI's pattern).
             "include": ["reasoning.encrypted_content"],
         }
+        # Hybrid reasoning routing (May 2026 follow-up). When the caller
+        # supplies a task_type, look up the configured effort level
+        # (low/medium/high) in `reasoning_routing` and attach it. The
+        # default (`medium`) matches the Codex CLI behaviour and the
+        # cached `default_reasoning_level` for gpt-5.x. Higher levels
+        # cost more tokens but produce better planning + judgment on
+        # supervisor / complex-solving turns.
+        try:
+            from . import reasoning_routing as _rr
+            level = _rr.level_for(task_type)
+            if level and level != "none":
+                payload["reasoning"] = {"effort": level}
+        except Exception as e:
+            log.debug("reasoning_routing lookup failed: %s", e)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
@@ -1931,7 +1946,10 @@ class CodexLLM(BaseLLM):
                 "content": self._build_user_content_blocks(user, attachments),
             }
         ]
-        payload = self._build_payload(system, input_items, None, max_tokens, temperature)
+        payload = self._build_payload(
+            system, input_items, None, max_tokens, temperature,
+            task_type=_task_type,
+        )
         t0 = time.time()
         text, _items, usage = self._stream_and_aggregate(payload)
         duration_ms = int((time.time() - t0) * 1000)
@@ -1981,7 +1999,8 @@ class CodexLLM(BaseLLM):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
             payload = self._build_payload(
-                system, input_items, flat_tools or None, max_tokens, temperature
+                system, input_items, flat_tools or None, max_tokens, temperature,
+                task_type=_task_type,
             )
             t0 = time.time()
             text, items, usage = self._stream_and_aggregate(payload)
@@ -2037,6 +2056,7 @@ class CodexLLM(BaseLLM):
         synth_payload = self._build_payload(
             system, _curate_synth_input_items_codex(input_items),
             None, synth_max, temperature,
+            task_type=f"{_task_type}:tool_synth",
         )
         try:
             t0 = time.time()
@@ -2823,7 +2843,7 @@ def _supports_tools(llm: "BaseLLM", tools: list[dict] | None) -> bool:
 class DualModelRouter:
     def __init__(self, state_path: Path | None = None):
         self.cfg_a = CONFIG.model_a
-        self.cfg_b = CONFIG.model_b      # может быть None (claude_only)
+        self.cfg_b = CONFIG.model_b      # может быть None (cloud_only)
         self.cfg_router = CONFIG.router
         self.cfg_verification = CONFIG.verification
         self.mode = CONFIG.mode
@@ -2833,7 +2853,7 @@ class DualModelRouter:
         self._active_llm: BaseLLM | None = None
         self._active_cfg_hash: str = ""  # to detect changes
         self._api_cache: tuple[float, bool] = (0.0, True)
-        # Если model_b выключен (claude_only) — сразу помечаем как недоступный
+        # Если model_b выключен (cloud_only) — сразу помечаем как недоступный
         self._ollama_cache: tuple[float, bool] = (9e18, self.cfg_b is not None)
 
         if state_path is None:
@@ -3074,7 +3094,7 @@ class DualModelRouter:
 
     def _ollama_available(self) -> bool:
         """Проверка, что локальная Ollama запущена и отвечает."""
-        # В режиме claude_only локальная модель выключена
+        # В режиме cloud_only локальная модель выключена
         if self.cfg_b is None:
             return False
         ttl = self.cfg_router.get("api_ping_cache_seconds", 60)
