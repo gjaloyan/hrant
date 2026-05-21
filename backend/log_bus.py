@@ -15,6 +15,8 @@ import logging
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
+from pathlib import Path
 
 
 log = logging.getLogger(__name__)
@@ -38,6 +40,60 @@ class LogEvent:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _logs_dir() -> Path:
+    """Resolve the logs directory. Lazy import of `paths` avoids a
+    circular import on module load."""
+    try:
+        from . import paths
+        return paths.data_dir(require=False) / "logs"
+    except Exception:
+        return Path("/tmp/_hrant_logs_devstub")
+
+
+def _current_log_file() -> Path:
+    return _logs_dir() / f"agent-{datetime.now().strftime('%Y%m%d')}.jsonl"
+
+
+def _write_jsonl_line(event_dict: dict) -> None:
+    """Append one JSON line to the day's file. Best-effort: failures
+    are swallowed by the caller so the in-memory ring keeps working
+    even if disk is hostile."""
+    path = _current_log_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(event_dict, ensure_ascii=False) + "\n")
+
+
+def gc_old(*, days: int = 7) -> int:
+    """Delete daily JSONL files older than `days`. Matches `agent-
+    YYYYMMDD.jsonl` strictly — other files in the dir survive (e.g.
+    a README or a manual dump from the WebUI download endpoint).
+    Returns the count of files removed. Called from the bg_job
+    watchdog's daily sweep."""
+    root = _logs_dir()
+    if not root.exists():
+        return 0
+    cutoff = datetime.now() - timedelta(days=max(0, int(days)))
+    cutoff_stamp = cutoff.strftime("%Y%m%d")
+    removed = 0
+    for p in root.iterdir():
+        if not p.is_file():
+            continue
+        name = p.name
+        if not (name.startswith("agent-") and name.endswith(".jsonl")):
+            continue
+        stamp = name[len("agent-"):-len(".jsonl")]
+        if not (stamp.isdigit() and len(stamp) == 8):
+            continue
+        if stamp < cutoff_stamp:
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
 
 
 class LogBus:
@@ -65,6 +121,11 @@ class LogBus:
         with self._lock:
             self._ring.append(d)
             subs = list(self._subs)
+        # File persistence — best-effort, never crash on disk error.
+        try:
+            _write_jsonl_line(d)
+        except Exception:
+            pass
         # Fan out OUTSIDE the lock so a slow subscriber doesn't block
         # publishers. Each subscriber's queue has its own backpressure.
         for loop, q in subs:
