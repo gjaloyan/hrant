@@ -948,25 +948,39 @@ def propose(
     body: str = "",
     requester: str = "webui:default",
 ) -> Optional[Skill]:
-    """Create a new draft skill from a structured request.
+    """Create OR silently update a skill.
 
-    Self-improvement loop entry point. The agent calls this after
-    successfully completing a non-trivial workflow that future turns
-    could reuse. The new skill is written to the user-tier directory
-    (`~/.hrant/data/skills/<name>/SKILL.md`) BUT IS DISABLED by
-    default — the owner must press 'Activate' in Telegram (or
-    enable in the WebUI) before it goes live. That's the safety
-    backstop: an agent-authored skill can't auto-execute on the
-    next turn without explicit human OK.
+    Two paths:
 
-    Returns the freshly-loaded Skill (disabled state) or None on
-    persistence failure.
+    1. NEW skill (no skill of this name exists yet) → write to disk
+       as DISABLED, then fire `_fire_skill_proposed` so the owner
+       gets a Telegram DM with [Activate] / [Show] / [Delete]
+       buttons. That's the safety backstop: an agent-authored skill
+       can't auto-execute on the next turn without explicit owner OK.
+
+    2. UPDATE existing skill (same name) → overwrite the body
+       silently. Preserve the existing enabled-or-disabled state
+       (owner already decided about this name once; we don't
+       reset it). Do NOT fire `_fire_skill_proposed` — no second
+       DM, no "you already approved this, but here's another
+       button" prompt the user has been complaining about
+       (2026-05-21).
+
+    Returns the freshly-loaded Skill, or None on persistence failure.
     """
     clean_name = "".join(
         c if c.isalnum() or c in "_-" else "_" for c in (name or "")
     ).strip("_")
     if not clean_name:
         return None
+    # Detect "already exists" BEFORE upsert. SKILLS.get reads the
+    # in-memory list; ensure_loaded() runs first so disabled skills
+    # are visible too (the disabled.json filter sets .enabled=False
+    # on the loaded Skill objects, it doesn't drop them).
+    existing = SKILLS.get(clean_name)
+    is_update = existing is not None
+    was_enabled = bool(existing.enabled) if existing else False
+
     content = _render_skill_md(
         name=clean_name,
         description=description or "",
@@ -980,7 +994,16 @@ def propose(
         import logging as _l
         _l.getLogger(__name__).warning("propose(): upsert failed: %s", e)
         return None
-    # Disable by default — owner must explicitly activate.
+
+    if is_update:
+        # Silent update path: preserve the previous enabled state
+        # (don't reset to disabled), don't fire the proposed-DM.
+        # The owner's earlier decision about this name stands.
+        SKILLS.set_enabled(clean_name, was_enabled)
+        sk = SKILLS.get(clean_name)
+        return sk
+
+    # New skill path — current default: disabled + DM.
     SKILLS.set_enabled(clean_name, False)
     sk = SKILLS.get(clean_name)
     if sk is None:

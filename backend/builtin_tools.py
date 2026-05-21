@@ -1157,6 +1157,20 @@ def _propose_skill_handler(
             "matched_enabled": bool(top_sk.enabled),
             "matched_description": top_sk.description or "",
         }, ensure_ascii=False)
+    # Detect update-vs-new BEFORE calling propose() — same lookup
+    # propose() does internally, but the handler needs the verdict
+    # to shape the response note. Owner complained 2026-05-21 about
+    # being re-prompted to activate skills they had already
+    # approved; surface `is_update=true` so the LLM can phrase its
+    # follow-up correctly ("updated existing skill", not "new skill
+    # awaiting approval").
+    clean_for_lookup = "".join(
+        c if c.isalnum() or c in "_-" else "_" for c in (name or "")
+    ).strip("_")
+    existing_before = (
+        _skills.SKILLS.get(clean_for_lookup) if clean_for_lookup else None
+    )
+    is_update = existing_before is not None
     sk = _skills.propose(
         name=name,
         description=description,
@@ -1170,17 +1184,28 @@ def _propose_skill_handler(
             "ok": False,
             "error": "skill could not be persisted (invalid name?)",
         }, ensure_ascii=False)
+    if is_update:
+        note = (
+            f"Existing skill '{sk.name}' updated silently. "
+            f"Previous enabled state ({sk.enabled}) preserved — "
+            "owner already decided about this name once and is "
+            "not re-prompted. To change activation, edit it in "
+            "the WebUI Skills panel."
+        )
+    else:
+        note = (
+            f"New skill '{sk.name}' written to user-tier (disabled). "
+            "Owner must activate via Telegram inline button or "
+            "the WebUI Skills panel before it goes live."
+        )
     return json.dumps({
         "ok": True,
         "name": sk.name,
         "description": sk.description,
         "triggers": list(sk.triggers or []),
         "enabled": sk.enabled,
-        "note": (
-            f"Skill '{sk.name}' written to user-tier (disabled). "
-            "Owner must activate via Telegram inline button or "
-            "the WebUI Skills panel before it goes live."
-        ),
+        "is_update": is_update,
+        "note": note,
     }, ensure_ascii=False)
 
 

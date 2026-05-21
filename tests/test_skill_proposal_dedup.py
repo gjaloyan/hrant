@@ -256,6 +256,181 @@ def test_propose_skill_handler_allows_same_name_overwrite(
     assert body.get("name") == "background-job-status"
 
 
+# ─── silent-update path (2026-05-21 fix) ──────────────────────────
+#
+# Owner complaint: when the LLM proposes a skill name that already
+# exists, the agent was re-prompting via Telegram DM ("activate?")
+# even though the owner had already decided about that name. The
+# fix: `propose()` differentiates new vs update — updates are silent,
+# preserve the previous enabled state, and don't fire the DM.
+
+
+def _isolated_skills_with(name, frontmatter, skills_dir, monkeypatch):
+    """Helper: write a skill at `skills_dir/<name>/SKILL.md`, install
+    an isolated SkillsManager pointing at it, and force owner role.
+    Returns the manager so the test can flip enabled state."""
+    _write_skill(skills_dir, name, frontmatter)
+    from backend import skills as skills_mod
+    user_dir = skills_dir.parent / "user_skills"
+    user_dir.mkdir(exist_ok=True)
+    isolated = SkillsManager(
+        skills_dir=skills_dir, user_skills_dir=user_dir,
+    )
+    isolated.load(registry=ToolRegistry())
+    monkeypatch.setattr(skills_mod, "SKILLS", isolated)
+    monkeypatch.setattr("backend.roles.is_owner", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        "backend.roles.current_speaker", lambda: "webui:default"
+    )
+    return isolated
+
+
+def test_update_existing_enabled_skill_keeps_it_enabled(
+    skills_dir, monkeypatch
+):
+    """Owner enabled this skill once. A later update from the LLM
+    must NOT silently disable it — otherwise the next turn loses
+    access to a skill the owner had approved."""
+    sm = _isolated_skills_with(
+        "background-job-status",
+        textwrap.dedent("""
+            name: background-job-status
+            description: Check the status of long-running background jobs
+            triggers: [status, bench]
+        """),
+        skills_dir, monkeypatch,
+    )
+    sm.set_enabled("background-job-status", True)
+    assert sm.get("background-job-status").enabled is True
+
+    from backend.builtin_tools import _propose_skill_handler
+    raw = _propose_skill_handler(
+        name="background-job-status",
+        description="Check long-running jobs (updated with new tips)",
+        triggers="status, bench, ps",
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["is_update"] is True
+    assert body["enabled"] is True
+    # Spot-check the note phrasing — should NOT say "owner must activate"
+    assert "must activate" not in body["note"].lower()
+    assert "updated" in body["note"].lower()
+    # And the on-disk skill is still enabled.
+    sm2 = sm  # same isolated manager
+    assert sm2.get("background-job-status").enabled is True
+
+
+def test_update_existing_disabled_skill_keeps_it_disabled(
+    skills_dir, monkeypatch
+):
+    """Mirror of the enabled case. If the owner deliberately disabled
+    a skill, an update must respect that — not silently re-enable it.
+    Both directions of the previous decision must be preserved."""
+    sm = _isolated_skills_with(
+        "background-job-status",
+        textwrap.dedent("""
+            name: background-job-status
+            description: Check the status of long-running background jobs
+            triggers: [status, bench]
+        """),
+        skills_dir, monkeypatch,
+    )
+    sm.set_enabled("background-job-status", False)
+    assert sm.get("background-job-status").enabled is False
+
+    from backend.builtin_tools import _propose_skill_handler
+    raw = _propose_skill_handler(
+        name="background-job-status",
+        description="Check long-running jobs (updated with new tips)",
+        triggers="status, bench, ps",
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["is_update"] is True
+    assert body["enabled"] is False
+    assert sm.get("background-job-status").enabled is False
+
+
+def test_update_existing_skill_does_not_fire_proposed_dm(
+    skills_dir, monkeypatch
+):
+    """The Telegram-DM trigger is `_fire_skill_proposed`. On the
+    update path it must NOT fire — this is the actual user-facing
+    bug fix (no re-prompt for already-decided skill names)."""
+    sm = _isolated_skills_with(
+        "background-job-status",
+        textwrap.dedent("""
+            name: background-job-status
+            description: Check the status of long-running background jobs
+            triggers: [status, bench]
+        """),
+        skills_dir, monkeypatch,
+    )
+    sm.set_enabled("background-job-status", True)
+
+    from backend import skills as skills_mod
+    fired = []
+    monkeypatch.setattr(
+        skills_mod, "_fire_skill_proposed",
+        lambda sk: fired.append(sk),
+    )
+
+    from backend.builtin_tools import _propose_skill_handler
+    raw = _propose_skill_handler(
+        name="background-job-status",
+        description="Check long-running jobs (updated with new tips)",
+        triggers="status, bench, ps",
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["is_update"] is True
+    assert fired == [], (
+        "update path must not fire the proposed-DM hook; "
+        f"got {len(fired)} fires"
+    )
+
+
+def test_new_skill_path_still_fires_dm_and_lands_disabled(
+    skills_dir, monkeypatch
+):
+    """Back-compat: a genuinely new skill name still goes through
+    the disabled + DM path. This pins the contract that the update
+    silencing is scoped to the same-name case."""
+    # No pre-existing skill in skills_dir — we'll register the first one
+    # via the handler itself.
+    sm = _isolated_skills_with(
+        "placeholder",
+        textwrap.dedent("""
+            name: placeholder
+            description: A placeholder so the dir isn't empty
+            triggers: [zzz_never_match]
+        """),
+        skills_dir, monkeypatch,
+    )
+
+    from backend import skills as skills_mod
+    fired = []
+    monkeypatch.setattr(
+        skills_mod, "_fire_skill_proposed",
+        lambda sk: fired.append(sk),
+    )
+
+    from backend.builtin_tools import _propose_skill_handler
+    raw = _propose_skill_handler(
+        name="pdf-extract-tables",
+        description="Extract tabular data from a PDF using camelot",
+        triggers="pdf, table, camelot",
+    )
+    body = json.loads(raw)
+    assert body["ok"] is True
+    assert body["is_update"] is False
+    assert body["enabled"] is False
+    assert "must activate" in body["note"].lower()
+    assert len(fired) == 1, "new-skill path must fire the DM exactly once"
+    assert fired[0].name == "pdf-extract-tables"
+
+
 def test_propose_skill_handler_allows_genuinely_new_skill(
     skills_dir, monkeypatch
 ):
