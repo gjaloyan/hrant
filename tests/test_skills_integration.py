@@ -67,6 +67,9 @@ def test_catalog_block_includes_user_skill(isolated_skills):
     assert "AVAILABLE SKILLS" in block
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: keyword-based Skill.matches() removed"
+)
 def test_match_triggers_on_keyword(isolated_skills):
     matched = isolated_skills.match("please run uniqueprobe analysis now")
     assert any(s.name == "uniqueprobe" for s in matched)
@@ -115,6 +118,10 @@ def test_load_skill_missing_returns_error(isolated_skills):
 # ─── unified_agent prompt assembly ───────────────────────────────────
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: trigger-matched auto-injection of skill body "
+    "removed; LLM calls load_skill(name) on demand"
+)
 def test_run_unified_injects_catalog_and_matched_skill(isolated_skills, monkeypatch):
     """End-to-end: a task that contains the trigger word causes
     run_unified to inject BOTH the catalog block and the matched

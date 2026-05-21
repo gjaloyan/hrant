@@ -1,34 +1,32 @@
 """Tests for TSP-2 — refusal-without-attempts rewriter.
 
-Pinned behaviour:
-  - The regex matches actual refusal openings from production turns:
-    "Gor, я не могу выполнить...", "среди доступных мне сейчас
-    инструментов нет...", "Я не могу здесь реально...". And the
-    English equivalents.
-  - The rewriter ONLY fires when the trace shows <2 distinct tool
-    names called this turn. With 2+ distinct tools the answer is
-    left untouched — that's a TSP-compliant honest refusal.
-  - The rewrite output mentions Task Solver Process, lists the tools
-    that DID run, and gives the user concrete recovery options.
-  - The rewriter is integrated into run_unified's final-answer
-    post-processing pipeline alongside _rewrite_xml_tool_call_dump.
-  - Language detection: predominantly Russian answer → Russian
-    rewrite; English answer → English rewrite.
+2026-05-21: the rewriter + its keyword regexes were removed when
+the user asked to drop all keyword logic from the agent pipeline
+("remove keyword logic fully from agent pipeline"). The whole
+test module is skipped at collection time. The TSP attempt-bar
+rule still lives in the system prompt — the LLM enforces it
+itself.
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pytest
 
-from backend.unified_agent import (
-    _REFUSAL_OPENER_RE,
-    _is_policy_refusal,
-    _is_russian_dominant,
-    _count_distinct_tools_called,
-    _rewrite_refusal_without_attempts,
-    REFUSAL_ATTEMPT_BAR,
+pytest.skip(
+    "2026-05-21: refusal rewriter + its keyword regexes removed "
+    "from the pipeline; whole module skipped at collection.",
+    allow_module_level=True,
 )
+
+# Original imports preserved as documentation for reverter-friendly
+# reading; the symbols no longer exist in backend.unified_agent.
+# from backend.unified_agent import (
+#     _REFUSAL_OPENER_RE,
+#     _is_policy_refusal,
+#     _is_russian_dominant,
+#     _count_distinct_tools_called,
+#     _rewrite_refusal_without_attempts,
+#     REFUSAL_ATTEMPT_BAR,
+# )
 
 
 # ─── regex coverage ─────────────────────────────────────────────────

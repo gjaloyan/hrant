@@ -34,6 +34,11 @@ def test_gate_skips_empty_answer():
     assert "empty" in reason
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: _REFUSAL_OPENER_RE keyword gate removed; "
+    "low-tool-count turns naturally skip reflection via "
+    "SKILL_REFLECTION_TOOL_BAR"
+)
 def test_gate_skips_refusal_opener():
     """Failed turns don't produce reusable workflows."""
     from backend.unified_agent import _should_reflect_for_skill

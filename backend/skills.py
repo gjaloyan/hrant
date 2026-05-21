@@ -74,25 +74,16 @@ class Skill:
     tags: list[str] = field(default_factory=list)
 
     def matches(self, text: str) -> bool:
-        """Triggers (substring, legacy) + tags (word-boundary).
-
-        Triggers match like before — `pdf` fires on `pdf_summary`. Tags
-        require a word boundary — `video` fires on `video editor` but
-        NOT on `subdivide`. This keeps trigger semantics stable while
-        letting tags be broader topical keywords without false-firing.
+        """Always returns False (2026-05-21: keyword-based skill
+        routing dropped). The agent now sees the full skill catalog
+        in its system prompt + the TF-IDF semantic-match suggestions
+        and decides via `load_skill(name)` whether any are relevant.
+        The brittle substring/word-boundary match — `pdf` firing on
+        `pdf_summary`, `bench` firing on `benchmark` but not on
+        `test performance` — caused inconsistent routing the user
+        explicitly asked us to drop ("run bench" / "test perf" /
+        "check benchmark" should be treated the same).
         """
-        if not text:
-            return False
-        low = text.lower()
-        if self.triggers and any(t.lower() in low for t in self.triggers):
-            return True
-        if self.tags:
-            for tag in self.tags:
-                tag_low = tag.lower().strip()
-                if not tag_low:
-                    continue
-                if _re.search(rf"\b{_re.escape(tag_low)}\b", low):
-                    return True
         return False
 
     def system_block(self, missing_tools: Optional[list[str]] = None) -> str:
@@ -810,22 +801,32 @@ class SkillsManager:
     def catalog_block(self, registry: Optional[ToolRegistry] = None) -> str:
         """Catalog of ENABLED skills only. Skills with `required_tools`
         that aren't resolvable on this host are marked `[NEEDS: ...]`
-        so the LLM can `propose_install` or pivot rather than silently
-        try to call a missing binary."""
+        so the LLM can install them via `terminal_exec` or pivot
+        rather than silently try to call a missing binary.
+
+        2026-05-21: the legacy "Detailed instructions activate
+        automatically on trigger match" footnote is gone — keyword
+        routing was dropped. The LLM reads this catalog, decides if
+        any skill matches the task, and calls `load_skill(name)` to
+        inject the skill body when it wants the detailed playbook.
+        """
         self.ensure_loaded()
         active = [s for s in self.skills if s.enabled]
         if not active:
             return ""
         lines = [
             "# AVAILABLE SKILLS",
-            "(Detailed instructions activate automatically on trigger match.)",
+            "(Read the catalog, decide if any skill fits the task, "
+            "then call `load_skill(name)` to inject the full skill "
+            "body. The catalog itself is just the menu — bodies stay "
+            "out of the prompt until you ask for them.)",
         ]
         for s in active:
-            triggers = ", ".join(s.triggers) if s.triggers else "—"
-            meta_parts = [f"triggers: {triggers}"]
+            meta_parts = []
             if s.tags:
                 meta_parts.append(f"tags: {', '.join(s.tags)}")
-            line = f"- **{s.name}**: {s.description}  _({'; '.join(meta_parts)})_"
+            meta = f"  _({'; '.join(meta_parts)})_" if meta_parts else ""
+            line = f"- **{s.name}**: {s.description}{meta}"
             missing = self.missing_tools_for(s, registry=registry)
             if missing:
                 line += f"  ⚠️ **[NEEDS: {', '.join(missing)}]**"

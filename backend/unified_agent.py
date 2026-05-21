@@ -170,12 +170,13 @@ clearly already in hand.
    the answer depends on it, then ask — not before.
 
 3. **Try existing skills first.** Walk AVAILABLE SKILLS (the
-   catalog block already in this prompt). Match by name /
-   description / triggers / tags / `when_to_use`. If a skill fits,
-   either let its auto-injected `## SKILL: <name>` block guide you
-   or call `load_skill(name)` to pull a non-matched one. SEMANTIC
-   SUGGESTIONS (if present) are second-pass candidates — load them
-   if the trigger-matched ones don't fit.
+   catalog block already in this prompt). Read each skill's
+   description + tags + `when_to_use`; if any fits the task,
+   call `load_skill(name)` to inject the full skill body. Keyword
+   trigger-matching is gone (2026-05-21) — the LLM picks via
+   semantic judgment now, no substring routing. SEMANTIC
+   SUGGESTIONS (if present) are TF-IDF hints — load them when
+   you don't see an obvious catalog match.
 
 4. **Universal fallback for unknowns.** If no skill applies and the
    task is non-trivial, call `load_skill("universal_resolver")` and
@@ -390,13 +391,16 @@ clearly already in hand.
 ## Skills come BEFORE ad-hoc tool loops
 
 If the AVAILABLE SKILLS block lists a skill whose `description` /
-`when_to_use` matches the task, FOLLOW THAT SKILL. Trigger-matched
-skills already have their full instructions injected into this
-prompt as a `## SKILL: <name>` block — read that block carefully,
-then act on it.
+`when_to_use` matches the task, FOLLOW THAT SKILL by calling
+`load_skill(name)` to inject the full skill body. The catalog
+gives you names + descriptions + tags only — the playbook bodies
+stay out of the prompt until you ask for them.
 
-If no trigger fired but the catalog hints a relevant skill, call
-`load_skill(name)` to pull its body BEFORE attempting the work.
+Keyword/trigger auto-injection was dropped 2026-05-21 — you
+decide which skill applies based on semantic match. SEMANTIC
+SUGGESTIONS (TF-IDF top matches) are a hint when the catalog is
+big; ignore them when an obvious one stands out.
+
 Skills capture pitfalls (ffmpeg flags, Telegram cache paths, edge
 cases) that ad-hoc tool loops have to rediscover painfully.
 
@@ -856,87 +860,16 @@ def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
     )
 
 
-# TSP-2: detect refusal-without-attempts.
-#
-# Patterns harvested from real production turns (workspace/turns/),
-# e.g. "Gor, я не могу выполнить этот запрос", "среди доступных мне
-# сейчас инструментов нет Telegram send_voice", "Я не могу здесь
-# реально 'услышать' отправленное аудио". Each of those answers opened
-# with a refusal phrase AND made <2 distinct tool calls. The TSP rule
-# says: do not refuse before walking inspect → skill-match → universal
-# fallback → at least one real execution attempt. This regex is the
-# tripwire that fires the rewriter when the rule is violated.
-_REFUSAL_OPENER_RE = re.compile(
-    r"(?:"
-    # Russian opens
-    r"я\s+не\s+могу|"
-    r"не\s+могу\s+(?:выполнить|сделать|обработать|помочь|это|такое)|"
-    r"у\s+меня\s+нет\s+(?:доступа|инструмент|возможност|тул)|"
-    r"среди\s+(?:доступных\s+(?:мне\s+)?)?(?:сейчас\s+)?инструмент\w*\s+нет|"
-    r"инструмент\w*\s+(?:не\s+)?(?:отключ|недоступ|отсутству)|"
-    r"невозможно\s+(?:выполнить|сделать|обработать)|"
-    r"я\s+не\s+поддержива|"
-    r"это\s+не\s+поддержива|"
-    r"к\s+сожалени[юе],?\s+(?:я\s+)?не\s+мог|"
-    # English opens
-    r"\bi\s+(?:can(?:not|'?t)|am\s+(?:not\s+able|unable))\b|"
-    r"\bi'?m\s+(?:not\s+able|unable)\b|"
-    r"\bi\s+(?:don'?t|do\s+not)\s+have\s+(?:access|the\s+tool|a\s+tool)|"
-    r"tools?\s+(?:are\s+)?(?:not\s+available|disabled|off|unavailable)|"
-    r"this\s+(?:isn'?t|is\s+not)\s+supported|"
-    r"unable\s+to\s+(?:do|perform|execute|complete)|"
-    r"sorry,?\s+(?:i\s+)?(?:can(?:not|'?t)|don'?t\s+have)"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
-
-
-# C1: policy / privacy / recall refusals are LEGITIMATE — they're not
-# capability gaps and the rewriter must not touch them. Without this
-# exclude the rewriter would mangle "I can't share private phone
-# numbers" or "не могу показать user.md гостю" into "you didn't try
-# the TSP" messages, which would be a lie. If any of these keywords
-# appears in the same window where the refusal opener fires, leave
-# the answer alone.
-_POLICY_REFUSAL_KEYWORDS_RE = re.compile(
-    r"(?:"
-    # Russian — privacy / policy / recall / guest gating
-    r"приват|конфиденциальн|"
-    r"личн\w+\s+данн|"
-    r"персональн\w+\s+данн|"
-    r"чужи\w*\s+данн|"
-    r"чужо\w*\s+(?:телефон|почт|email|номер|адрес)|"
-    r"посторонн|"
-    r"гостев|гостю|гостям|гостях|"
-    r"закрыт(?:ый|ая|ое|ые)\s+(?:доступ|канал|чат|инфо)|"
-    r"раскрыт(?:ь|ие)\s+(?:личн|персональн|конфиденц)|"
-    r"в\s+моей\s+(?:памяти|базе|notes)\s+нет|"
-    r"у\s+меня\s+нет\s+(?:верифицированн|проверенн|подтвержденн)|"
-    # English — same axis
-    r"\bprivate\s+(?:phone|number|email|address|data|info|details)|"
-    r"\bpersonal\s+(?:data|info|details|information)|"
-    r"\bsomeone(?:'s|s)?\s+(?:phone|number|email|address)|"
-    r"\bthird(?:[\s-]+)party(?:'s)?\s+(?:phone|number|email|data|info)|"
-    r"\bsensitive\s+(?:data|info|information)|"
-    r"\bconfidential|"
-    r"\bguest\s+(?:user|account|access)|"
-    r"\bi\s+(?:don'?t|do\s+not)\s+have\s+(?:verified|reliable|trustworthy)|"
-    r"\bno\s+verified\s+(?:public\s+)?(?:info|information)|"
-    # Safety / abuse refusals
-    r"\b(?:abuse|harassment|stalking|doxx?ing)\b"
-    r")",
-    re.IGNORECASE | re.UNICODE,
-)
-
-
-def _is_policy_refusal(text: str) -> bool:
-    """Return True if the refusal-opener window also contains a
-    policy / privacy / recall keyword that marks the refusal as
-    legitimate (not a capability gap). Used by the rewriter to
-    exclude refusals it should leave alone."""
-    if not text:
-        return False
-    return bool(_POLICY_REFUSAL_KEYWORDS_RE.search(text))
+# Keyword-based refusal detection (`_REFUSAL_OPENER_RE`,
+# `_POLICY_REFUSAL_KEYWORDS_RE`, `_is_policy_refusal`) was removed
+# on 2026-05-21 along with the rewriter it powered
+# (`_rewrite_refusal_without_attempts`). The user explicitly asked
+# to drop all keyword logic from the pipeline; refusing or rewriting
+# the LLM's answer based on substring matches was the worst
+# offender. The TSP rule "do not refuse before 2 distinct tools"
+# still lives in the system prompt — the LLM enforces it itself.
+# `_is_russian_dominant` below stays (script counting, not
+# keyword-based) — used by other helpers for language picking.
 
 
 def _is_russian_dominant(text: str) -> bool:
@@ -987,10 +920,9 @@ def _count_distinct_tools_called(agent) -> tuple[int, set[str]]:
     return len(names), names
 
 
-# The minimum "I actually tried" bar before a refusal is allowed.
-# Two distinct tool names — not two `read_file` calls on the same
-# missing file, but two genuinely different probes / attempts.
-REFUSAL_ATTEMPT_BAR = 2
+# `REFUSAL_ATTEMPT_BAR` was used by the deleted refusal rewriter
+# (the keyword-based one). The "2 distinct tools before refusing"
+# rule still lives in the system prompt for the LLM to honour.
 
 
 # Post-turn skill_creator reflection — settings.
@@ -1241,97 +1173,12 @@ def _format_token_budget_marker(used: int) -> str:
     return ""
 
 
-def _rewrite_refusal_without_attempts(answer: str, agent) -> str:
-    """If the final answer opens with a refusal pattern AND the trace
-    shows fewer than `REFUSAL_ATTEMPT_BAR` distinct tool calls,
-    rewrite into a 'what I tried / what's still needed' status with
-    a TSP-anchored reset.
-
-    Conservative on purpose: only fires when the agent literally
-    refused without trying. A refusal AFTER 2+ distinct tools
-    counts as a TSP-compliant honest report and is left untouched.
-
-    Skips:
-      - empty / non-string answers,
-      - answers that don't open with a known refusal pattern,
-      - answers where ≥ `REFUSAL_ATTEMPT_BAR` distinct tools ran.
-    """
-    if not isinstance(answer, str):
-        return ""
-    if not answer:
-        return ""
-
-    # Detect on the first 300 chars — refusals lead with the pattern;
-    # checking the whole answer risks false positives in proper
-    # status reports that quote a refusal example.
-    head = answer[:300]
-    if not _REFUSAL_OPENER_RE.search(head):
-        return answer
-
-    # C1: policy / privacy / recall refusals are NOT capability gaps
-    # and must not be rewritten. Examples from real prod turns that
-    # this guard protects:
-    #   - "не могу показать `user.md` гостевому пользователю" (privacy)
-    #   - "I can't help find or provide a private person's phone" (privacy)
-    #   - "I don't have verified information about X" (recall)
-    # We widen the window to 500 chars here because policy markers
-    # often follow the opener (e.g. "Я не могу выполнить — это работа
-    # с персональными данными").
-    if _is_policy_refusal(answer[:500]):
-        return answer
-
-    n_distinct, names = _count_distinct_tools_called(agent)
-    if n_distinct >= REFUSAL_ATTEMPT_BAR:
-        return answer
-
-    tools_str = ", ".join(sorted(names)) or "(none)"
-    excerpt = head.strip().replace("\n", " ")[:160]
-    if _is_russian_dominant(answer):
-        return (
-            f"⚠️ Я открыл ответ отказом, не пройдя Task Solver Process. "
-            f"Перезапускаю.\n\n"
-            f"Что я реально попробовал в этом турне: **{tools_str}** "
-            f"(порог по TSP — минимум {REFUSAL_ATTEMPT_BAR} разных тулов "
-            f"до фразы «не могу»).\n\n"
-            f"По TSP до отказа я должен был:\n"
-            f"  1. Определить конкретный output, который ты ждёшь.\n"
-            f"  2. Проверить attachments / sha-ссылки / workspace.\n"
-            f"  3. Пройти AVAILABLE SKILLS + SEMANTIC SUGGESTIONS, "
-            f"`load_skill(name)` для подходящего.\n"
-            f"  4. Если ничего не подошло — `load_skill(\"universal_resolver\")` "
-            f"и его 7 фаз.\n"
-            f"  5. И только тогда отчитаться форматом «что попробовал / "
-            f"что упало / что нужно дальше».\n\n"
-            f"Чтобы продолжить, выбери одно:\n"
-            f"  • повтори запрос — я попробую execute сразу;\n"
-            f"  • или скажи «посоветуй» / «объясни» — отвечу теорией "
-            f"без выполнения;\n"
-            f"  • или укажи что именно блокирует (отсутствует файл, "
-            f"нужен пароль, выбор между вариантами).\n\n"
-            f"_(Мой исходный отказ: «{excerpt}…»)_"
-        )
-    return (
-        f"⚠️ I opened with a refusal without walking the Task Solver "
-        f"Process. Resetting.\n\n"
-        f"Tools I actually called this turn: **{tools_str}** "
-        f"(TSP bar — at least {REFUSAL_ATTEMPT_BAR} distinct tools "
-        f"before any \"I can't\").\n\n"
-        f"Per TSP, before refusing I should have:\n"
-        f"  1. Identified the concrete output you want.\n"
-        f"  2. Inspected attachments / sha refs / workspace state.\n"
-        f"  3. Walked AVAILABLE SKILLS + SEMANTIC SUGGESTIONS and "
-        f"`load_skill(name)` for the best fit.\n"
-        f"  4. Fallen back to `load_skill(\"universal_resolver\")` if "
-        f"nothing matched.\n"
-        f"  5. Only then reported \"tried X, failed at Y, need Z\".\n\n"
-        f"To unblock me:\n"
-        f"  • repeat the request — I'll execute on this next turn;\n"
-        f"  • or say \"explain\" / \"advise\" — I'll answer with "
-        f"theory and skip execution;\n"
-        f"  • or name the specific blocker (missing file, password, "
-        f"choice between outputs).\n\n"
-        f"_(Original refusal: \"{excerpt}…\")_"
-    )
+# `_rewrite_refusal_without_attempts` was deleted 2026-05-21 along
+# with its keyword regex tripwires. The TSP attempt-bar rule still
+# lives in the system prompt — the LLM enforces "do not refuse
+# before 2 distinct tools" itself. The post-processing rewriter
+# was the most brittle keyword-driven piece of the pipeline and
+# the user explicitly asked it gone.
 
 
 # ─── Post-turn skill_creator reflection (Option C from H3 audit) ───
@@ -1359,12 +1206,13 @@ def _should_reflect_for_skill(agent, answer: str) -> tuple[bool, str]:
     if not answer or not isinstance(answer, str):
         return False, "empty-or-nonstring-answer"
     head = answer[:300]
-    if _REFUSAL_OPENER_RE.search(head):
-        return False, "refusal-opener"
+    # The keyword-based "refusal opener" gate used to live here.
+    # Removed 2026-05-21 — skill reflection skips on low tool-count
+    # turns anyway (see SKILL_REFLECTION_TOOL_BAR below), so a
+    # failed turn naturally won't reflect. The iteration-ceiling
+    # rewriter marker (different mechanism) still short-circuits.
     rewriter_marker_starts = (
         "⚠️ I hit the iteration ceiling",
-        "⚠️ Я открыл ответ отказом",
-        "⚠️ I opened with a refusal",
     )
     for marker in rewriter_marker_starts:
         if head.startswith(marker):
@@ -1624,7 +1472,6 @@ def run_unified(
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles
-    from . import sticky_requests as _sticky
     from . import context_compressor as _cc
     from . import self_state as _ss
     from .conversation import CONVERSATION
@@ -1644,15 +1491,15 @@ def run_unified(
     except Exception as e:
         log.debug("unified: compaction failed (non-fatal): %s", e)
 
-    # Pre-flight 2: sticky-request detection (renders into prompt).
-    # Sticky detection reads RECENT turns to catch repeat asks — must
-    # be per-thread, not per-speaker, or a separate chat resurrects
-    # stale "you didn't do X" signals from a completely different
-    # conversation.
-    sticky_info = _sticky.detect_sticky_request(
-        current_user_message=task, speaker_id=speaker_id, session_key=skey,
-    )
-    sticky_block = _sticky.render_sticky_block(sticky_info)
+    # Sticky-request detection disconnected 2026-05-21 — it was
+    # entirely keyword-based (regex per system attribute: voice /
+    # language / model / config / etc.) and post-routed the LLM
+    # output with "you ack'd without acting" warnings. The TSP rule
+    # "Apply, don't acknowledge" + reasoning_routing high effort
+    # for complex_solving cover the same ground without keyword
+    # gates. The `backend.sticky_requests` module stays in source
+    # for any test that imports it.
+    sticky_block = ""
 
     # Pre-flight 3: progress event.
     agent.progress("unified", "single-loop turn starting")
@@ -2239,12 +2086,15 @@ def run_unified(
     # status report so the human knows what was tried and what
     # input is missing.
     answer = _rewrite_xml_tool_call_dump(answer, agent)
-    # TSP-2: catch the "I can't do this" / "у меня нет инструмента"
-    # opener when the agent literally didn't try (< 2 distinct tools).
-    # Same shape as the XML-dump rewriter — surface the violation in
-    # plain language with a recovery prompt instead of letting a
-    # bare refusal reach the user.
-    answer = _rewrite_refusal_without_attempts(answer, agent)
+    # 2026-05-21: refusal-rewriter dropped. The previous version
+    # ran a ~25-keyword regex over the answer head ("не могу",
+    # "I can't", "tools are not available") and a second regex to
+    # exclude legitimate privacy refusals. With the trust-LLM
+    # direction the user explicitly asked for ("remove keyword
+    # logic fully from agent pipeline"), the answer stands as-is —
+    # if the LLM gives up too early, that's a prompt issue to fix
+    # via the TSP rules + reasoning_routing, not a regex
+    # post-processor.
 
     # H3 enforcement: post-turn skill_creator reflection. Out-of-band
     # LLM call that walks skill_creator's 3 gates against this turn's

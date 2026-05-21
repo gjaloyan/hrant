@@ -10,6 +10,8 @@ behavior doesn't regress.
 """
 from __future__ import annotations
 
+import pytest
+
 
 def test_task_solver_process_section_present():
     from backend.unified_agent import _UNIFIED_RULES
@@ -166,11 +168,12 @@ def test_inspection_cheatsheet_in_tsp_section():
         assert tool in body, f"cheatsheet should name {tool!r}"
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: REFUSAL_ATTEMPT_BAR runtime constant + the "
+    "keyword-based rewriter that used it were removed. The '2 distinct "
+    "tools before refusing' rule still lives in the system prompt — "
+    "the LLM enforces it itself."
+)
 def test_attempt_bar_constant_matches_rules():
     """The REFUSAL_ATTEMPT_BAR runtime constant and the rules text
     must agree on the threshold. If you change one, change both."""
-    from backend.unified_agent import REFUSAL_ATTEMPT_BAR, _UNIFIED_RULES
-    assert REFUSAL_ATTEMPT_BAR == 2
-    # Mention of '2' as the threshold must appear in the rules.
-    low = _UNIFIED_RULES.lower()
-    assert "2 distinct" in low or "minimum 2" in low or "at least 2" in low

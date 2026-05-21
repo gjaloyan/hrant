@@ -16,6 +16,20 @@ from pathlib import Path
 
 import pytest
 
+# 2026-05-21: keyword-based skill matching (`Skill.matches` via
+# substring triggers + word-boundary tags) was removed when the
+# user asked to drop all keyword routing from the agent pipeline.
+# `Skill.matches()` now always returns False; the LLM picks skills
+# semantically via the catalog + `load_skill(name)` instead. The
+# catalog block also no longer renders the `triggers: ...` line.
+# Skipping this whole H2 test module at collection — the behaviour
+# it pinned doesn't exist anymore.
+pytest.skip(
+    "keyword-based Skill.matches() + catalog `triggers: ...` "
+    "rendering dropped 2026-05-21; H2 trigger/tag tests no longer apply",
+    allow_module_level=True,
+)
+
 from backend.skills import SkillsManager, Skill
 from backend.tool_registry import ToolRegistry
 

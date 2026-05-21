@@ -60,6 +60,10 @@ def test_loader_skips_invalid_yaml(skills_dir):
     assert sm.load(registry=ToolRegistry()) == []
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: keyword-based Skill.matches() removed; "
+    "LLM picks skills semantically via load_skill(name)"
+)
 def test_match_returns_skills_by_trigger(skills_dir):
     _write_skill(skills_dir, "alpha", textwrap.dedent("""
         name: alpha

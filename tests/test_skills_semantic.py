@@ -263,6 +263,10 @@ def test_semantic_match_scored_returns_scores(skills_dir):
     assert 0.0 < score <= 1.0
 
 
+@pytest.mark.skip(
+    reason="2026-05-21: keyword-based Skill.matches() removed; "
+    "semantic_match is now the only auto-routing surface"
+)
 def test_semantic_match_is_fallback_not_replacement_for_match(skills_dir):
     """Skills must still match by trigger — semantic_match is purely
     additive. This pins the contract: both APIs exist, callers decide."""
