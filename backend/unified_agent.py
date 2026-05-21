@@ -203,6 +203,14 @@ clearly already in hand.
    the package is importable in the NEXT turn (Python imports cache
    per-process; the current turn won't see the new module).
 
+   **Web research escalation.** For JS-rendered pages where
+   `fetch_url` returns a skeleton (SPA, lazy-load, login-walled),
+   reach for `agent_browser` — it drives a real headless Chromium.
+   On first use the tool returns `binary_missing=true` with the
+   install hint; run `npm install -g @vercel/agent-browser`
+   (needs Node + Chromium), retry. Stick with `fetch_url` for
+   plain HTML — it's an order of magnitude cheaper.
+
 7. **Ask only when truly blocked.** Acceptable reasons to ask:
    (a) required file genuinely missing, (b) user's goal is ambiguous
    with multiple defensible interpretations, (c) action is

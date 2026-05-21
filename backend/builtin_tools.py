@@ -27,6 +27,11 @@ from .tools.terminal_exec import (
     run_terminal,
 )
 from .tools.web_search import fetch_url, web_search
+from .tools.agent_browser import (
+    run_agent_browser as _run_agent_browser,
+    DEFAULT_TIMEOUT_SEC as _AGENT_BROWSER_DEFAULT_TIMEOUT,
+    MAX_TIMEOUT_SEC as _AGENT_BROWSER_MAX_TIMEOUT,
+)
 
 
 # ---------- in-session TTL cache ----------
@@ -113,6 +118,29 @@ def _fetch_url_handler(url: str, max_chars: int = 8000) -> str:
     if not _is_error_result(out):
         WEB_CACHE.set("fetch_url", args, out)
     return out
+
+
+def _agent_browser_handler(command: str, timeout_seconds: int = 0) -> str:
+    """Deep-research browser. Owner-only. Runs `agent-browser <cmd>
+    --json` and returns the structured stdout. See the tool's
+    description for when to reach for this vs `fetch_url`."""
+    from .roles import current_speaker, is_owner
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "command": command,
+            "exit_code": -1,
+            "stdout": "",
+            "stderr": "",
+            "truncated": False,
+            "elapsed_ms": 0,
+            "binary_missing": False,
+            "error": "permission denied — agent_browser is owner-only",
+        }, ensure_ascii=False)
+    t = int(timeout_seconds) if timeout_seconds else _AGENT_BROWSER_DEFAULT_TIMEOUT
+    res = _run_agent_browser(command, timeout_seconds=t)
+    return json.dumps(res.to_dict(), ensure_ascii=False)
 
 
 # File read cache — same file is often read multiple times across subtasks
@@ -1603,6 +1631,76 @@ def register_builtin_tools() -> None:
             "required": ["url"],
         },
         handler=_fetch_url_handler,
+    )
+
+    reg.register_func(
+        name="agent_browser",
+        description=(
+            "Deep-research browser via the Vercel Labs `agent-browser` "
+            "CLI (Rust + Chrome DevTools Protocol). Drives a headless "
+            "Chromium instance to read JS-rendered pages, interact "
+            "with DOM (click, fill, eval), capture screenshots/PDF, "
+            "and inspect React components. Owner-only.\n\n"
+            "WHEN TO REACH FOR THIS vs `fetch_url`:\n"
+            "  • `fetch_url` is the cheap default for plain HTML — "
+            "docs, blog posts, READMEs, JSON endpoints, anything "
+            "that renders without JS. Always try `fetch_url` first.\n"
+            "  • `agent_browser` is for pages where `fetch_url` "
+            "returns a skeleton / empty body / a JS-blob: SPAs "
+            "(React/Vue/Svelte), lazy-loaded content, login-walled "
+            "pages, sites with infinite scroll, anywhere you need "
+            "to click a button / fill a form / screenshot the UI / "
+            "wait for a network request to settle.\n\n"
+            "USAGE:\n"
+            "`command` is the agent-browser sub-command + its args, "
+            "passed straight to the CLI. `--json` is appended "
+            "automatically so stdout is structured. Examples:\n"
+            "  command=`navigate https://example.com`\n"
+            "  command=`extract https://x.com --selector \"article h1\"`\n"
+            "  command=`screenshot https://x.com --output /tmp/shot.png`\n"
+            "  command=`click 'button.submit'`\n"
+            "  command=`fill 'input[name=\"q\"]' --value \"hello\"`\n"
+            "  command=`eval 'document.title'`\n\n"
+            "INSTALL:\n"
+            "If the tool returns `binary_missing=true`, install via "
+            "terminal_exec: `npm install -g @vercel/agent-browser` "
+            "(needs Node + Chromium). After install, retry — no "
+            "service restart needed.\n\n"
+            "RETURNS JSON: {ok, command, exit_code, stdout, stderr, "
+            "truncated, elapsed_ms, binary_missing, error}. Browser "
+            "output (page text, screenshots as base64, DOM dumps) "
+            "lands in `stdout` — parse it as the JSON shape agent-"
+            "browser returns. Default timeout 90s (browser is slow); "
+            "cap 300s. Owner-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": (
+                        "agent-browser sub-command + args, e.g. "
+                        "`navigate https://example.com` or "
+                        "`extract https://x.com --selector \"h1\"`. "
+                        "Do NOT prefix `agent-browser` — the wrapper "
+                        "adds the binary path."
+                    ),
+                },
+                "timeout_seconds": {
+                    "type": "integer",
+                    "description": (
+                        f"Watchdog cap. Default "
+                        f"{_AGENT_BROWSER_DEFAULT_TIMEOUT}s, max "
+                        f"{_AGENT_BROWSER_MAX_TIMEOUT}s. Long-running "
+                        "navigations / screenshots may need >60s; the "
+                        "default is generous."
+                    ),
+                    "default": _AGENT_BROWSER_DEFAULT_TIMEOUT,
+                },
+            },
+            "required": ["command"],
+        },
+        handler=_agent_browser_handler,
     )
 
     reg.register_func(
