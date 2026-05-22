@@ -194,3 +194,78 @@ def test_history_and_restore_reject_invalid_id(isolated_store):
     from backend.pipeline_profile import PROFILES
     assert PROFILES.history("../etc/passwd") == []
     assert PROFILES.restore("../foo", 12345) is None
+
+
+def test_validate_accepts_empty_overlay():
+    from backend.pipeline_profile import validate
+    errors = validate({})
+    assert errors == []
+
+
+def test_validate_engine_unknown_section():
+    from backend.pipeline_profile import validate
+    errors = validate({"engine_overrides": {"made_up_section": {"k": 1}}})
+    assert errors
+    assert any("made_up_section" in e for e in errors)
+
+
+def test_validate_engine_unknown_field():
+    from backend.pipeline_profile import validate
+    errors = validate({"engine_overrides": {"router": {"made_up_field": 1}}})
+    assert errors
+    assert any("made_up_field" in e for e in errors)
+
+
+def test_validate_engine_field_out_of_range():
+    from backend.pipeline_profile import validate
+    # tool_loop_input_budget validator allows 0 OR 10000..2000000.
+    errors = validate({"engine_overrides": {"router": {"tool_loop_input_budget": 5}}})
+    assert errors
+
+
+def test_validate_engine_field_valid():
+    from backend.pipeline_profile import validate
+    errors = validate({"engine_overrides": {"router": {"tool_loop_input_budget": 80000}}})
+    assert errors == []
+
+
+def test_validate_reasoning_routing_bad_level():
+    from backend.pipeline_profile import validate
+    errors = validate({"reasoning_overrides": {"routing": {"chat": "extreme"}}})
+    assert errors
+
+
+def test_validate_reasoning_routing_good_level():
+    from backend.pipeline_profile import validate
+    errors = validate({"reasoning_overrides": {"routing": {"chat": "low"}}})
+    assert errors == []
+
+
+def test_validate_prompt_section_unknown_key():
+    from backend.pipeline_profile import validate
+    errors = validate({"prompt_overrides": {"sections": {"not_a_section": "x"}}})
+    assert errors
+    assert any("not_a_section" in e for e in errors)
+
+
+def test_validate_prompt_section_null_allowed():
+    from backend.pipeline_profile import validate
+    errors = validate({"prompt_overrides": {"sections": {"iteration_ceiling": None}}})
+    assert errors == []
+
+
+def test_validate_logging_bad_level():
+    from backend.pipeline_profile import validate
+    errors = validate({"logging_overrides": {"root": "EXTREME"}})
+    assert errors
+
+
+def test_validate_logging_good_levels():
+    from backend.pipeline_profile import validate
+    errors = validate({
+        "logging_overrides": {
+            "root": "INFO",
+            "modules": {"backend.unified_agent": "DEBUG"},
+        }
+    })
+    assert errors == []

@@ -276,3 +276,121 @@ PROFILES = ProfileStore()
 def active_overrides() -> dict:
     """Module-level convenience for config readers."""
     return PROFILES.active_overrides()
+
+
+# ─── Overlay validation ────────────────────────────────────────────
+
+
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def validate(overlay: dict) -> list[str]:
+    """Return a list of human-readable error messages. Empty list = valid.
+
+    Reuses existing whitelists:
+      - `engine_overrides` -> `runtime_config._ALLOWED` validators
+      - `reasoning_overrides.routing` values -> `reasoning_routing.VALID_LEVELS`
+      - `prompt_overrides.sections` keys -> `system_prompt_sections.SECTIONS`
+      - `logging_overrides.root` / `.modules.*` -> stdlib log level names
+    """
+    errors: list[str] = []
+    overlay = overlay or {}
+
+    # Engine.
+    engine = overlay.get("engine_overrides") or {}
+    if engine:
+        try:
+            from .runtime_config import _ALLOWED  # type: ignore[attr-defined]
+        except Exception:
+            _ALLOWED = {}
+        for section, fields in engine.items():
+            if section not in _ALLOWED:
+                errors.append(f"engine_overrides.{section}: unknown section")
+                continue
+            if not isinstance(fields, dict):
+                errors.append(f"engine_overrides.{section}: must be a dict")
+                continue
+            for key, value in fields.items():
+                if key not in _ALLOWED[section]:
+                    errors.append(
+                        f"engine_overrides.{section}.{key}: unknown field"
+                    )
+                    continue
+                typ, check = _ALLOWED[section][key]
+                try:
+                    coerced = typ(value)
+                except Exception:
+                    errors.append(
+                        f"engine_overrides.{section}.{key}: not a {typ.__name__}"
+                    )
+                    continue
+                if not check(coerced):
+                    errors.append(
+                        f"engine_overrides.{section}.{key}: value {coerced!r} out of range"
+                    )
+
+    # Reasoning.
+    reasoning = overlay.get("reasoning_overrides") or {}
+    if reasoning:
+        try:
+            from .reasoning_routing import VALID_LEVELS
+        except Exception:
+            VALID_LEVELS = ("none", "low", "medium", "high")
+        routing = reasoning.get("routing") or {}
+        if not isinstance(routing, dict):
+            errors.append("reasoning_overrides.routing: must be a dict")
+        else:
+            for task_type, level in routing.items():
+                if level not in VALID_LEVELS:
+                    errors.append(
+                        f"reasoning_overrides.routing.{task_type}: "
+                        f"{level!r} not in {VALID_LEVELS}"
+                    )
+        fb = reasoning.get("fallback")
+        if fb is not None and fb not in VALID_LEVELS:
+            errors.append(
+                f"reasoning_overrides.fallback: {fb!r} not in {VALID_LEVELS}"
+            )
+
+    # Prompt.
+    prompt = overlay.get("prompt_overrides") or {}
+    if prompt:
+        try:
+            from .system_prompt_sections import SECTIONS
+        except Exception:
+            SECTIONS = {}
+        sections = prompt.get("sections") or {}
+        if not isinstance(sections, dict):
+            errors.append("prompt_overrides.sections: must be a dict")
+        else:
+            for name, body in sections.items():
+                if name not in SECTIONS:
+                    errors.append(
+                        f"prompt_overrides.sections.{name}: unknown section"
+                    )
+                    continue
+                if body is not None and not isinstance(body, str):
+                    errors.append(
+                        f"prompt_overrides.sections.{name}: must be string or null"
+                    )
+
+    # Logging.
+    logging_overrides = overlay.get("logging_overrides") or {}
+    if logging_overrides:
+        root = logging_overrides.get("root")
+        if root is not None and root not in _VALID_LOG_LEVELS:
+            errors.append(
+                f"logging_overrides.root: {root!r} not in {_VALID_LOG_LEVELS}"
+            )
+        modules = logging_overrides.get("modules") or {}
+        if not isinstance(modules, dict):
+            errors.append("logging_overrides.modules: must be a dict")
+        else:
+            for mod, level in modules.items():
+                if level not in _VALID_LOG_LEVELS:
+                    errors.append(
+                        f"logging_overrides.modules.{mod}: "
+                        f"{level!r} not in {_VALID_LOG_LEVELS}"
+                    )
+
+    return errors
