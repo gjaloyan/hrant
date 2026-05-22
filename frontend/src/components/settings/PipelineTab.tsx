@@ -220,10 +220,15 @@ export default function PipelineTab({ flash }: Props) {
         {subtab === "prompt" && (
           <PromptEditor editing={editing} setEditing={setEditing} />
         )}
-        {(subtab === "logging" || subtab === "history") && (
-          <div className="text-slate-500 text-sm">
-            ({subtab} editor implemented in Task 11)
-          </div>
+        {subtab === "logging" && (
+          <LoggingEditor editing={editing} setEditing={setEditing} />
+        )}
+        {subtab === "history" && (
+          <HistoryViewer
+            editingId={editing.id}
+            onRestored={() => loadEditing(editing.id)}
+            flash={flash}
+          />
         )}
       </div>
     </div>
@@ -452,5 +457,163 @@ function PromptEditor({
         </pre>
       )}
     </div>
+  );
+}
+
+function LoggingEditor({
+  editing,
+  setEditing,
+}: {
+  editing: PipelineProfile;
+  setEditing: (p: PipelineProfile) => void;
+}) {
+  const l = editing.logging_overrides || {};
+  const modules = (l.modules || {}) as Record<string, string>;
+  const levels = ["", "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"];
+  const setRoot = (v: string) => {
+    const next = { ...l };
+    if (!v) delete next.root;
+    else next.root = v;
+    setEditing({ ...editing, logging_overrides: next });
+  };
+  const setModule = (mod: string, level: string) => {
+    const next = { ...modules };
+    if (!level) delete next[mod];
+    else next[mod] = level;
+    setEditing({
+      ...editing,
+      logging_overrides: { ...l, modules: next },
+    });
+  };
+  return (
+    <div className="space-y-4 text-sm text-slate-200">
+      <label className="flex items-center gap-2">
+        <span className="w-32">root</span>
+        <select
+          value={(l.root as string) || ""}
+          onChange={(e) => setRoot(e.target.value)}
+          className="bg-slate-800 text-slate-100 rounded px-1 py-0.5"
+        >
+          {levels.map((lv) => (
+            <option key={lv} value={lv}>{lv || "(default)"}</option>
+          ))}
+        </select>
+      </label>
+      <div>
+        <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">
+          Per-module overrides
+        </div>
+        <table className="text-xs w-full">
+          <tbody>
+            {Object.entries(modules).map(([mod, level]) => (
+              <tr key={mod}>
+                <td className="pr-2 py-0.5 font-mono">{mod}</td>
+                <td>
+                  <select
+                    value={level}
+                    onChange={(e) => setModule(mod, e.target.value)}
+                    className="bg-slate-800 text-slate-100 rounded px-1 py-0.5"
+                  >
+                    {levels.filter((x) => x).map((lv) => (
+                      <option key={lv} value={lv}>{lv}</option>
+                    ))}
+                  </select>
+                </td>
+                <td>
+                  <button
+                    onClick={() => setModule(mod, "")}
+                    className="text-rose-300 text-xs px-1"
+                  >
+                    delete
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <button
+          onClick={() => {
+            const mod = prompt("Module name (e.g. backend.unified_agent):", "");
+            if (mod) setModule(mod, "INFO");
+          }}
+          className="text-xs px-2 py-1 bg-slate-700 text-slate-200 rounded mt-2"
+        >
+          + add module
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function HistoryViewer({
+  editingId,
+  onRestored,
+  flash,
+}: {
+  editingId: string;
+  onRestored: () => void;
+  flash: (m: string) => void;
+}) {
+  const [rows, setRows] = useState<
+    Array<{ timestamp: number; name: string; updated_at: number; description: string }>
+  >([]);
+  const refresh = async () => {
+    try {
+      const { fetchPipelineProfileHistory } = await import("../../api");
+      const r = await fetchPipelineProfileHistory(editingId);
+      setRows(r.history);
+    } catch (e: any) {
+      flash("History load failed: " + (e?.message || e));
+    }
+  };
+  useEffect(() => {
+    refresh();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingId]);
+  const restore = async (ts: number) => {
+    if (!confirm("Restore this version? Current version will be saved to history first.")) return;
+    try {
+      const { restorePipelineProfile } = await import("../../api");
+      await restorePipelineProfile(editingId, ts);
+      flash("Restored.");
+      onRestored();
+      await refresh();
+    } catch (e: any) {
+      flash("Restore failed: " + (e?.message || e));
+    }
+  };
+  if (rows.length === 0) {
+    return <div className="text-slate-500 text-sm">No history yet.</div>;
+  }
+  return (
+    <table className="text-xs w-full">
+      <thead>
+        <tr className="text-slate-400">
+          <th className="text-left py-1">When</th>
+          <th className="text-left">Name</th>
+          <th className="text-left">Description</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {rows.map((r) => (
+          <tr key={r.timestamp} className="border-t border-slate-800">
+            <td className="py-1 text-slate-400">
+              {new Date(r.updated_at * 1000).toLocaleString()}
+            </td>
+            <td className="text-slate-200">{r.name}</td>
+            <td className="text-slate-400">{r.description}</td>
+            <td>
+              <button
+                onClick={() => restore(r.timestamp)}
+                className="text-xs px-2 py-0.5 bg-amber-700/40 text-amber-200 rounded"
+              >
+                Restore
+              </button>
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
   );
 }
