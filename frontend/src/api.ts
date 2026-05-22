@@ -2296,3 +2296,90 @@ export const fetchSubagentStats = () =>
 
 export const fetchSubagentRoles = () =>
   json_get<{ roles: Record<string, string> }>("/api/subagents/roles");
+
+
+// ─── Pipeline Profiles ────────────────────────────────────────────
+
+export type PipelineProfile = {
+  id: string;
+  name: string;
+  description: string;
+  created_at: number;
+  updated_at: number;
+  engine_overrides: Record<string, Record<string, unknown>>;
+  reasoning_overrides: {
+    routing?: Record<string, string>;
+    fallback?: string;
+  };
+  prompt_overrides: {
+    sections?: Record<string, string | null>;
+  };
+  logging_overrides: {
+    root?: string;
+    modules?: Record<string, string>;
+  };
+};
+
+export type PipelineProfileSummary = {
+  id: string;
+  name: string;
+  description: string;
+  created_at: number;
+  updated_at: number;
+};
+
+export type PipelineHistoryEntry = PipelineProfileSummary & {
+  timestamp: number;
+};
+
+export type SystemPromptSectionsPayload = {
+  order: string[];
+  sections: Record<string, string>;
+};
+
+export async function fetchPipelineProfiles(): Promise<{
+  profiles: PipelineProfileSummary[];
+}> {
+  return json_get("/api/pipeline-profiles");
+}
+
+export async function fetchPipelineProfile(id: string): Promise<PipelineProfile> {
+  return json_get(`/api/pipeline-profiles/${encodeURIComponent(id)}`);
+}
+
+export async function fetchActivePipelineProfile(): Promise<{ active_id: string }> {
+  return json_get("/api/pipeline-profiles/active");
+}
+
+export async function setActivePipelineProfile(id: string): Promise<{ active_id: string }> {
+  return json_put("/api/pipeline-profiles/active", { id });
+}
+
+export async function createPipelineProfile(p: PipelineProfile): Promise<PipelineProfile> {
+  return json_post("/api/pipeline-profiles", p);
+}
+
+export async function updatePipelineProfile(p: PipelineProfile): Promise<PipelineProfile> {
+  return json_put(`/api/pipeline-profiles/${encodeURIComponent(p.id)}`, p);
+}
+
+export async function deletePipelineProfile(id: string): Promise<{ deleted: string }> {
+  return json_delete(`/api/pipeline-profiles/${encodeURIComponent(id)}`);
+}
+
+export async function fetchPipelineProfileHistory(id: string): Promise<{
+  history: PipelineHistoryEntry[];
+}> {
+  return json_get(`/api/pipeline-profiles/${encodeURIComponent(id)}/history`);
+}
+
+export async function restorePipelineProfile(
+  id: string,
+  timestamp: number,
+): Promise<PipelineProfile> {
+  return json_post(`/api/pipeline-profiles/${encodeURIComponent(id)}/restore/${timestamp}`, {});
+}
+
+export async function fetchSystemPromptSections(): Promise<SystemPromptSectionsPayload> {
+  return json_get("/api/pipeline-profiles/system-prompt-sections");
+}
