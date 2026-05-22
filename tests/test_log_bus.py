@@ -7,15 +7,18 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _isolate_bus():
+def _isolate_bus(tmp_path, monkeypatch):
     """Reset the module-level singleton around every test so that
     publishers added by future tasks (LogBusHandler from Task 2,
     cross-cutting publishers from Task 8) don't leak events into
-    unrelated test runs."""
-    from backend.log_bus import BUS
-    BUS.clear()
+    unrelated test runs. Also point the JSONL writer at tmp_path so
+    the test suite doesn't pollute ~/.hrant/data/logs/ with stray
+    daily files."""
+    from backend import log_bus as _lb
+    monkeypatch.setattr(_lb, "_logs_dir", lambda: tmp_path)
+    _lb.BUS.clear()
     yield
-    BUS.clear()
+    _lb.BUS.clear()
 
 
 def test_log_event_to_dict_shape():

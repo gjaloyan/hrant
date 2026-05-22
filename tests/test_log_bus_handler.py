@@ -8,6 +8,17 @@ import logging
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_logs_dir(tmp_path, monkeypatch):
+    """Point the JSONL writer at tmp_path so the test suite doesn't
+    pollute ~/.hrant/data/logs/ with stray daily files (Task 3 added
+    persistence on every publish — this fixture keeps that off-disk
+    for tests in this file)."""
+    from backend import log_bus as _lb
+    monkeypatch.setattr(_lb, "_logs_dir", lambda: tmp_path)
+    yield
+
+
 @pytest.fixture
 def clean_bus():
     from backend.log_bus import BUS
