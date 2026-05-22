@@ -134,6 +134,58 @@ export async function fetchOpenQuestions(): Promise<{
 }
 
 
+// ─── Logs tab ─────────────────────────────────────────────────────
+
+export type LogLevel = "debug" | "info" | "warning" | "error" | "critical";
+export type LogSource = "python" | "tool" | "job" | "supervisor" | "agent";
+
+export type LogEvent = {
+  ts: number;
+  level: LogLevel;
+  source: LogSource;
+  logger: string;
+  message: string;
+  meta: Record<string, unknown>;
+  request_id: string;
+};
+
+export type LogSourcesPayload = {
+  levels: LogLevel[];
+  sources: LogSource[];
+};
+
+export type FetchLogsParams = {
+  level?: LogLevel;
+  source?: LogSource;
+  search?: string;
+  limit?: number;
+  before_ts?: number;
+};
+
+export async function fetchLogs(
+  params: FetchLogsParams = {},
+): Promise<{ events: LogEvent[]; count: number }> {
+  const q = new URLSearchParams();
+  if (params.level) q.set("level", params.level);
+  if (params.source) q.set("source", params.source);
+  if (params.search) q.set("search", params.search);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  if (params.before_ts != null) q.set("before_ts", String(params.before_ts));
+  return json_get(`/api/logs?${q.toString()}`);
+}
+
+export async function fetchLogSources(): Promise<LogSourcesPayload> {
+  return json_get("/api/logs/sources");
+}
+
+/** Triggers a browser download of the current ring buffer. */
+export function downloadLogs(format: "jsonl" | "txt"): void {
+  const a = document.createElement("a");
+  a.href = `/api/logs/download?format=${format}`;
+  a.click();
+}
+
+
 // ─── Reasoning routing (hybrid reasoning effort) ────────────────────
 
 export type ReasoningRoutingConfig = {
