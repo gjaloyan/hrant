@@ -865,6 +865,19 @@ class Agent(
             self._user_progress(event, message, tool_call)
         except TypeError:
             self._user_progress(event, message)
+        # Mirror this progress event onto the LogBus so the WebUI
+        # Logs tab sees it alongside Python logging + tool calls +
+        # job events. Best-effort — never break the agent on a
+        # logging concern.
+        try:
+            from .log_bus import publish_agent_event as _pub_agent
+            _pub_agent(
+                event=event,
+                message=message,
+                request_id=getattr(self, "_last_turn_id", "") or "",
+            )
+        except Exception:
+            pass
 
     # Шаг 1
     def _load_core(self) -> str:

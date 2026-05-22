@@ -272,3 +272,79 @@ class LogBusHandler(logging.Handler):
             self._bus.publish(ev)
         except Exception:
             pass
+
+
+# ─── Convenience publishers — keep call sites tiny ──────────────────
+
+
+def publish_tool_event(
+    *, name: str, args: dict, result_preview: str = "",
+    is_error: bool = False, request_id: str = "",
+) -> None:
+    """Called from `unified_agent._on_tool_call`. Keeps the cross-
+    cutting wiring to one line at the call site."""
+    BUS.publish(LogEvent(
+        ts=time.time(),
+        level="error" if is_error else "info",
+        source="tool",
+        logger=name or "",
+        message=f"{name}({', '.join((args or {}).keys())}) -> {result_preview}".strip(),
+        meta={
+            "args": args or {},
+            "result_preview": result_preview,
+            "is_error": is_error,
+        },
+        request_id=request_id,
+    ))
+
+
+def publish_job_event(
+    *, job_id: str, new_status: str, prev_status: str = "",
+    error: str = "",
+) -> None:
+    """Called from `jobs.py` whenever a Job transitions state."""
+    level = "error" if new_status in ("failed", "interrupted") else "info"
+    BUS.publish(LogEvent(
+        ts=time.time(),
+        level=level,
+        source="job",
+        logger=f"job/{job_id[:12]}",
+        message=f"{prev_status or '?'} -> {new_status}"
+                + (f": {error}" if error else ""),
+        meta={
+            "job_id": job_id,
+            "from": prev_status,
+            "to": new_status,
+            "error": error,
+        },
+    ))
+
+
+def publish_supervisor_event(
+    *, job_id: str, decision: str, message: str = "",
+) -> None:
+    """Called from `job_supervisor.py` at decision points
+    (done/escalate/retry/heartbeat)."""
+    BUS.publish(LogEvent(
+        ts=time.time(),
+        level="info" if decision in ("done", "heartbeat") else "warning",
+        source="supervisor",
+        logger=f"supervisor/{job_id[:12]}",
+        message=message or decision,
+        meta={"job_id": job_id, "decision": decision},
+    ))
+
+
+def publish_agent_event(
+    *, event: str, message: str, request_id: str = "",
+) -> None:
+    """Called from `agent.progress(...)` so the same thinking-trace
+    events that feed the chat SSE also land in the Logs tab."""
+    BUS.publish(LogEvent(
+        ts=time.time(),
+        level="info",
+        source="agent",
+        logger=event or "",
+        message=message or "",
+        request_id=request_id,
+    ))

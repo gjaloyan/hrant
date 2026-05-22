@@ -358,6 +358,13 @@ def mark_terminal(job_id: str, *, decision: str, reason: str = "") -> None:
         "at": time.time(),
     }]
     STORE.update(job)
+    # Side-publish to LogBus so the Logs tab sees the supervisor
+    # decision. Best-effort.
+    try:
+        from .log_bus import publish_supervisor_event as _pub_sup
+        _pub_sup(job_id=job_id, decision=decision, message=reason or "")
+    except Exception:
+        pass
 
 
 def append_supervisor_history(

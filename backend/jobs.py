@@ -133,6 +133,23 @@ class Job:
         return cls(**{k: v for k, v in data.items() if k in valid})
 
 
+def _publish_job_transition(
+    job_id: str, prev_status: str, new_status: str, *, error: str = "",
+) -> None:
+    """Side-publish a job state transition to the LogBus so the WebUI
+    Logs tab sees it. Lazy import to avoid module-load cycles, and
+    best-effort — never block or crash a job update on a logging
+    concern."""
+    try:
+        from .log_bus import publish_job_event as _pub
+        _pub(
+            job_id=job_id, new_status=new_status,
+            prev_status=prev_status, error=error,
+        )
+    except Exception:
+        pass
+
+
 class JobStore:
     """File-backed job database. One JSON file per job.
 
@@ -282,11 +299,15 @@ class JobStore:
             return job
 
     def mark_running(self, job_id: str) -> Optional[Job]:
-        return self._update(
+        prev = self.get(job_id)
+        prev_status = prev.status if prev else ""
+        out = self._update(
             job_id,
             status="running",
             started_at=time.time(),
         )
+        _publish_job_transition(job_id, prev_status, "running")
+        return out
 
     def mark_completed(
         self,
@@ -299,6 +320,7 @@ class JobStore:
             job = self.get(job_id)
             if job is None:
                 return None
+            prev_status = job.status
             job.status = "completed"
             job.response = response
             job.completed_at = time.time()
@@ -310,22 +332,31 @@ class JobStore:
                 job.tool_calls = tool_calls
             job.error = None
             self._write(job)
-            return job
+        _publish_job_transition(job_id, prev_status, "completed")
+        return job
 
     def mark_failed(self, job_id: str, *, error: str) -> Optional[Job]:
-        return self._update(
+        prev = self.get(job_id)
+        prev_status = prev.status if prev else ""
+        out = self._update(
             job_id,
             status="failed",
             error=error,
             completed_at=time.time(),
         )
+        _publish_job_transition(job_id, prev_status, "failed", error=error)
+        return out
 
     def mark_cancelled(self, job_id: str) -> Optional[Job]:
-        return self._update(
+        prev = self.get(job_id)
+        prev_status = prev.status if prev else ""
+        out = self._update(
             job_id,
             status="cancelled",
             completed_at=time.time(),
         )
+        _publish_job_transition(job_id, prev_status, "cancelled")
+        return out
 
     def mark_interrupted(self, job_id: str) -> Optional[Job]:
         """Used by the boot recovery hook. Bumps interrupted_count
@@ -334,6 +365,7 @@ class JobStore:
             job = self.get(job_id)
             if job is None:
                 return None
+            prev_status = job.status
             job.status = "interrupted"
             job.error = (job.error or "") + (
                 "" if not (job.error or "") else "\n"
@@ -341,7 +373,8 @@ class JobStore:
             job.interrupted_count += 1
             job.completed_at = time.time()
             self._write(job)
-            return job
+        _publish_job_transition(job_id, prev_status, "interrupted")
+        return job
 
     # ─── Attempts / tool-call append (Phase B prep) ─────────────
 

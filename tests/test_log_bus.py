@@ -141,6 +141,73 @@ def test_tail_before_ts_returns_older():
     assert {r["message"] for r in rows} == {"old", "mid"}
 
 
+def test_tool_call_publishes_event():
+    from backend.log_bus import BUS, publish_tool_event
+    publish_tool_event(
+        name="read_file",
+        args={"path": "x.py"},
+        result_preview="abc",
+        is_error=False,
+        request_id="t-123",
+    )
+    rows = BUS.tail()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "tool"
+    assert rows[0]["logger"] == "read_file"
+    assert rows[0]["request_id"] == "t-123"
+    assert rows[0]["meta"].get("args") == {"path": "x.py"}
+    assert rows[0]["level"] == "info"
+
+
+def test_tool_error_publishes_error_event():
+    from backend.log_bus import BUS, publish_tool_event
+    publish_tool_event(
+        name="terminal_exec",
+        args={"command": "false"},
+        result_preview="exit code 1",
+        is_error=True,
+    )
+    rows = BUS.tail()
+    assert rows[0]["level"] == "error"
+
+
+def test_job_status_change_publishes():
+    from backend.log_bus import BUS, publish_job_event
+    publish_job_event(
+        job_id="2b7d6ed82c76",
+        new_status="completed",
+        prev_status="running",
+    )
+    rows = BUS.tail()
+    assert len(rows) == 1
+    assert rows[0]["source"] == "job"
+    assert rows[0]["meta"].get("job_id") == "2b7d6ed82c76"
+    assert rows[0]["meta"].get("from") == "running"
+    assert rows[0]["meta"].get("to") == "completed"
+
+
+def test_agent_progress_publishes():
+    from backend.log_bus import BUS, publish_agent_event
+    publish_agent_event(event="think", message="planning", request_id="t-456")
+    rows = BUS.tail()
+    assert rows[0]["source"] == "agent"
+    assert rows[0]["logger"] == "think"
+    assert rows[0]["message"] == "planning"
+    assert rows[0]["request_id"] == "t-456"
+
+
+def test_supervisor_decision_publishes():
+    from backend.log_bus import BUS, publish_supervisor_event
+    publish_supervisor_event(
+        job_id="abc",
+        decision="done",
+        message="all criteria met",
+    )
+    rows = BUS.tail()
+    assert rows[0]["source"] == "supervisor"
+    assert rows[0]["meta"].get("decision") == "done"
+
+
 def test_publish_rejects_invalid_level_and_source():
     """A bad level/source must NOT poison the bus — it lands at a
     well-defined fallback so the UI dropdown stays clean."""

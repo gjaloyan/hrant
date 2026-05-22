@@ -1924,6 +1924,21 @@ def run_unified(
                 snippet += f"\n…[+{len(result) - cap} more chars truncated]"
             tag_str = f"[{name} ERROR]" if is_error else f"[{name}]"
             tool_outputs.append(f"{tag_str} {snippet}")
+        # Side-publish to LogBus so the WebUI Logs tab sees this
+        # tool call alongside Python logging + job state + agent
+        # progress. Best-effort: never block or crash the tool loop
+        # on a logging concern.
+        try:
+            from .log_bus import publish_tool_event as _pub_tool
+            _pub_tool(
+                name=name,
+                args=args or {},
+                result_preview=preview,
+                is_error=is_error,
+                request_id=getattr(agent, "_last_turn_id", "") or "",
+            )
+        except Exception:
+            pass
 
     def _execute_with_progress(name: str, args: dict):
         preview = ", ".join(str(k) for k in (args or {}).keys())

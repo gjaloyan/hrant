@@ -377,6 +377,13 @@ def _gc_sweep_if_due(state: dict) -> None:
             log.info("watchdog: endpoint store GC removed %d", removed_e)
     except Exception as e:
         log.warning("watchdog: endpoint GC failed: %s", e)
+    try:
+        from .log_bus import gc_old as _lb_gc
+        removed_l = _lb_gc(days=7)
+        if removed_l:
+            log.info("watchdog: log files GC removed %d", removed_l)
+    except Exception as e:
+        log.warning("watchdog: log GC failed: %s", e)
 
 
 def _watchdog_loop() -> None:
