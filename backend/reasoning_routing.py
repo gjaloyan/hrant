@@ -109,6 +109,16 @@ _CACHE_LOADED_AT: float = 0.0
 _CACHE_TTL_SEC = 5.0
 
 
+def _profile_reasoning_overrides() -> dict:
+    """Active profile's reasoning_overrides — empty dict if profile missing
+    or store import fails (tests outside the FastAPI boot path)."""
+    try:
+        from .pipeline_profile import active_overrides
+        return (active_overrides().get("reasoning_overrides") or {})
+    except Exception:
+        return {}
+
+
 def _config_path() -> Path:
     try:
         return paths.knowledge_dir() / "reasoning_routing.json"
@@ -157,14 +167,40 @@ def _load_from_disk() -> RoutingConfig:
 def get_config() -> RoutingConfig:
     """Cached snapshot of the live config. TTL 5s — covers a turn's
     worth of calls without re-reading the JSON on every LLM call,
-    but picks up owner edits within 5s of saving."""
+    but picks up owner edits within 5s of saving.
+
+    Phase 1 (Task 5): the active pipeline profile's reasoning_overrides
+    form a second layer on top of the on-disk routing config. The
+    profile's own cache (5s TTL, invalidated on switch) keeps this
+    cheap. The overlay is applied per call so a profile switch shows
+    up immediately without invalidating this module's disk cache.
+    """
     global _CACHE, _CACHE_LOADED_AT
     with _LOCK:
         now = time.time()
         if _CACHE is None or (now - _CACHE_LOADED_AT) > _CACHE_TTL_SEC:
             _CACHE = _load_from_disk()
             _CACHE_LOADED_AT = now
-        return _CACHE
+        base = _CACHE
+    overlay = _profile_reasoning_overrides()
+    if not overlay:
+        return base
+    merged_routing = dict(base.routing)
+    overlay_routing = overlay.get("routing") or {}
+    if isinstance(overlay_routing, dict):
+        for task_type, level in overlay_routing.items():
+            if level in VALID_LEVELS:
+                merged_routing[task_type] = level
+    fallback = base.fallback
+    overlay_fallback = overlay.get("fallback")
+    if overlay_fallback in VALID_LEVELS:
+        fallback = overlay_fallback
+    return RoutingConfig(
+        routing=merged_routing,
+        fallback=fallback,
+        override=base.override,
+        updated_at=base.updated_at,
+    )
 
 
 def save_config(cfg: RoutingConfig) -> None:
@@ -218,12 +254,16 @@ def level_for(task_type: str) -> str:
 
 
 def set_override(level: str) -> None:
-    """Set the global per-turn override level. Empty string clears it."""
+    """Set the global per-turn override level. Empty string clears it.
+
+    Reads via `_load_from_disk()` (NOT `get_config()`) so the active
+    profile's reasoning_overrides don't accidentally bleed into the
+    persisted on-disk routing file when the override is saved."""
     norm = (level or "").strip().lower()
     if norm and norm not in VALID_LEVELS:
         raise ValueError(
             f"reasoning level must be one of {VALID_LEVELS}, got {level!r}"
         )
-    cfg = get_config()
+    cfg = _load_from_disk()
     cfg.override = norm
     save_config(cfg)

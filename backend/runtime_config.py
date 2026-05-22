@@ -85,6 +85,16 @@ def _overrides_path() -> Path:
     return Path(CONFIG.knowledge["base_dir"]) / "runtime_overrides.json"
 
 
+def _profile_engine_overrides() -> dict:
+    """Active profile's engine_overrides — empty dict if profile missing
+    or store import fails (tests outside the FastAPI boot path)."""
+    try:
+        from .pipeline_profile import active_overrides
+        return (active_overrides().get("engine_overrides") or {})
+    except Exception:
+        return {}
+
+
 def load_overrides() -> dict:
     """Read the saved overrides file. Returns `{}` if not present —
     that's the normal "no user customisations yet" state."""
@@ -202,6 +212,19 @@ def get_effective_config() -> dict:
     for section, fields in _ALLOWED.items():
         sec_src = CONFIG._data.get(section) or {}
         out[section] = {k: sec_src.get(k) for k in fields}
+    # Phase 1 (Task 5): active pipeline profile's engine_overrides
+    # form a third layer on top of file overrides. Only whitelisted
+    # keys are applied (mirrors validate_partial gates).
+    profile_engine = _profile_engine_overrides()
+    for section, fields in profile_engine.items():
+        if section not in out:
+            continue
+        if not isinstance(fields, dict):
+            continue
+        allowed_keys = _ALLOWED.get(section) or {}
+        for key, value in fields.items():
+            if key in allowed_keys:
+                out[section][key] = value
     return out
 
 

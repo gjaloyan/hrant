@@ -116,7 +116,23 @@ def unified_enabled() -> bool:
 # A profile override may replace any section at runtime — see
 # `pipeline_profile.active_overrides()` (Task 2+).
 
-_UNIFIED_RULES_CORE = _assemble_prompt()
+def _unified_rules_core() -> str:
+    """Live system-prompt body. Reads the active pipeline profile's
+    `prompt_overrides` (5s in-process cache, invalidated on switch)
+    and assembles the section dict into a single string. Falls back
+    to defaults if the profile system is unavailable (tests, boot
+    race)."""
+    try:
+        from .pipeline_profile import active_overrides
+        return _assemble_prompt(active_overrides().get("prompt_overrides"))
+    except Exception:
+        return _assemble_prompt()
+
+
+# Back-compat: tests that grep `_UNIFIED_RULES_CORE` still work
+# because the module-level attribute reflects current defaults at
+# import time. Live callers go through the function.
+_UNIFIED_RULES_CORE = _unified_rules_core()
 
 
 # ─── Scenario blocks — loaded on demand by `_build_rules_for_turn` ─
@@ -425,7 +441,7 @@ def _build_rules_for_turn(
     triggers it. We trust the LLM more than a Russian-plus-English
     bug-keyword regex.
     """
-    parts = [_UNIFIED_RULES_CORE, _RULES_JOURNAL_FIRST]
+    parts = [_unified_rules_core(), _RULES_JOURNAL_FIRST]
     if has_attachments:
         parts.append(_RULES_FILE_TYPES)
         # MEDIA convention is most useful alongside an inbound

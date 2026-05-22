@@ -40,6 +40,35 @@ _HTTPX_LEVEL = _os_for_log_levels.environ.get("LOG_LEVEL_HTTPX", "WARNING").uppe
 for _noisy in ("httpx", "httpcore", "telegram", "telegram.ext.Updater"):
     logging.getLogger(_noisy).setLevel(_HTTPX_LEVEL)
 
+
+def _apply_logging_overrides(overrides: dict | None) -> None:
+    """Apply per-module log levels from the active pipeline profile.
+    Idempotent — safe to re-call on profile switch."""
+    if not overrides:
+        return
+    root_level = overrides.get("root")
+    if root_level:
+        logging.getLogger().setLevel(root_level)
+    for module, level in (overrides.get("modules") or {}).items():
+        if level:
+            logging.getLogger(module).setLevel(level)
+
+
+# Boot apply: seed the five starter profiles on first run, then apply
+# the active profile's logging_overrides. Wrapped in try/except so a
+# transient store failure doesn't block FastAPI startup.
+try:
+    from .pipeline_profile import (
+        active_overrides as _po_active_overrides,
+        seed_starter_profiles as _po_seed,
+    )
+    _po_seed()
+    _apply_logging_overrides(_po_active_overrides().get("logging_overrides"))
+except Exception as _e:
+    logging.getLogger(__name__).warning(
+        "pipeline profile boot apply failed: %s", _e,
+    )
+
 from .config import CONFIG
 from .channels import CHANNELS, get_channels
 from .runtime_config import apply_overrides_from_file
