@@ -3,19 +3,19 @@
 Spec: docs/superpowers/specs/2026-05-22-pipeline-settings-phase-1-design.md"""
 from __future__ import annotations
 
-import pytest
 
-
-def test_default_order_has_seven_known_sections():
+def test_default_order_has_eight_known_sections():
     from backend.system_prompt_sections import DEFAULT_ORDER
-    assert "header" in DEFAULT_ORDER
-    assert "apply_dont_acknowledge" in DEFAULT_ORDER
-    assert "task_solver_process" in DEFAULT_ORDER
-    assert "pick_right_tool" in DEFAULT_ORDER
-    assert "skills_first" in DEFAULT_ORDER
-    assert "refusals_honest" in DEFAULT_ORDER
-    assert "iteration_ceiling" in DEFAULT_ORDER
-    assert "chat_vs_task" in DEFAULT_ORDER
+    assert DEFAULT_ORDER == [
+        "header",
+        "apply_dont_acknowledge",
+        "task_solver_process",
+        "pick_right_tool",
+        "skills_first",
+        "refusals_honest",
+        "iteration_ceiling",
+        "chat_vs_task",
+    ]
 
 
 def test_sections_dict_matches_default_order():
@@ -54,10 +54,31 @@ def test_assemble_with_unknown_section_key_is_ignored():
 
 
 def test_assemble_preserves_section_order():
+    """Sections appear in DEFAULT_ORDER order. Pairwise adjacent
+    check — catches a future bug that swaps any two consecutive
+    sections."""
     from backend.system_prompt_sections import assemble, DEFAULT_ORDER, SECTIONS
     out = assemble()
-    last = -1
-    for name in DEFAULT_ORDER:
-        idx = out.find(SECTIONS[name])
-        assert idx > last, f"section {name!r} out of order"
-        last = idx
+    positions = [out.index(SECTIONS[name]) for name in DEFAULT_ORDER]
+    for i in range(len(positions) - 1):
+        assert positions[i] < positions[i + 1], (
+            f"section {DEFAULT_ORDER[i]!r} must come before "
+            f"{DEFAULT_ORDER[i + 1]!r}"
+        )
+
+
+def test_assemble_preserves_order_with_overrides():
+    """The override path must respect DEFAULT_ORDER too — a
+    regression where overrides leak section bodies into the wrong
+    position would slip past the no-override test."""
+    from backend.system_prompt_sections import assemble, DEFAULT_ORDER
+    sentinels = {
+        name: f"@@SECTION_{i}@@" for i, name in enumerate(DEFAULT_ORDER)
+    }
+    out = assemble({"sections": sentinels})
+    positions = [out.index(sentinels[name]) for name in DEFAULT_ORDER]
+    for i in range(len(positions) - 1):
+        assert positions[i] < positions[i + 1], (
+            f"override path: section {DEFAULT_ORDER[i]!r} must come "
+            f"before {DEFAULT_ORDER[i + 1]!r}"
+        )

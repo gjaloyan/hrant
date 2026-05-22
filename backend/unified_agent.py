@@ -106,14 +106,15 @@ def unified_enabled() -> bool:
 # ─── RULES block (the single biggest difference from legacy) ──────
 
 
-# Audit T5: the rules used to be a single ~14KB monolith that got
-# injected on every turn — including trivial "2+2" chats. After the
-# May 2026 cost audit (input:output = 40:1), we split this into a
+# Audit T5 (May 2026) split the original ~14KB rules monolith into a
 # core always-on block + four scenario blocks loaded on signal.
-# `_build_rules_for_turn` composes the right subset for each turn.
-# `_UNIFIED_RULES` (below) is the full concatenation, preserved
-# unchanged for backward-compat with tests and for any caller that
-# wants the complete surface.
+# Phase 1 (May 2026) further extracted the core into named sections
+# living in `backend/system_prompt_sections.py` — SECTIONS dict +
+# DEFAULT_ORDER + `assemble()`. `_UNIFIED_RULES_CORE` is now the
+# result of `_assemble_prompt()` at import time; the same name is
+# preserved so existing tests that grep for sentences still work.
+# A profile override may replace any section at runtime — see
+# `pipeline_profile.active_overrides()` (Task 2+).
 
 _UNIFIED_RULES_CORE = _assemble_prompt()
 
