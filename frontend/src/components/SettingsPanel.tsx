@@ -16,6 +16,7 @@ const MemoryTab = lazy(() => import("./settings/MemoryTab"));
 const VoiceTab = lazy(() => import("./settings/VoiceTab"));
 const EngineTab = lazy(() => import("./settings/EngineTab"));
 const ReasoningTab = lazy(() => import("./settings/ReasoningTab"));
+const LogsTab = lazy(() => import("./settings/LogsTab"));
 const SelfModsTab = lazy(() => import("./settings/SelfModsTab"));
 const RolesTab = lazy(() => import("./settings/RolesTab"));
 const SkillsTab = lazy(() => import("./settings/SkillsTab"));
@@ -76,7 +77,7 @@ import {
   type AvailableModel,
 } from "../api";
 
-type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "subagents" | "digests" | "kgraph" | "conversation" | "capabilities" | "status" | "reasoning";
+type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "subagents" | "digests" | "kgraph" | "conversation" | "capabilities" | "status" | "reasoning" | "logs";
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState<IdentityTab>("soul");
@@ -298,6 +299,7 @@ export default function SettingsPanel() {
     { id: "conversation", label: "Conversation" },
     { id: "capabilities", label: "Capabilities" },
     { id: "status", label: "System Status" },
+    { id: "logs", label: "Logs" },
   ];
 
   const editorProps = (file: string, value: string, setter: (v: string) => void) => ({
@@ -365,6 +367,7 @@ export default function SettingsPanel() {
 
         {tab === "engine" && <EngineTab flash={flash} />}
         {tab === "reasoning" && <ReasoningTab flash={flash} />}
+        {tab === "logs" && <LogsTab flash={flash} />}
 
         {tab === "selfmods" && <SelfModsTab flash={flash} />}
 
