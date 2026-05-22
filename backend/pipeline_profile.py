@@ -414,3 +414,89 @@ def validate(overlay: dict) -> list[str]:
                     )
 
     return errors
+
+
+# ─── First-boot seeding ────────────────────────────────────────────
+
+
+def _starter_definitions() -> list[dict]:
+    """Five illustrative starter profiles seeded on first boot. The
+    names + descriptions are examples; owner can rename / edit /
+    delete freely. Only `default` is special (empty overlay, used
+    as the fallback when active points nowhere)."""
+    now = time.time()
+    def _shell(pid, name, desc, **overrides):
+        return {
+            "id": pid, "name": name, "description": desc,
+            "created_at": now, "updated_at": now,
+            "engine_overrides": overrides.get("engine_overrides", {}),
+            "reasoning_overrides": overrides.get("reasoning_overrides", {}),
+            "prompt_overrides": overrides.get("prompt_overrides", {}),
+            "logging_overrides": overrides.get("logging_overrides", {}),
+        }
+    return [
+        _shell(
+            "default", "Default", "Empty overlay — uses code defaults.",
+        ),
+        _shell(
+            "benchmark", "Benchmark Mode",
+            "Tighter token discipline, medium reasoning, debug logs on supervisor.",
+            engine_overrides={"router": {"tool_loop_input_budget": 80000}},
+            reasoning_overrides={
+                "routing": {"complex_solving": "medium"},
+            },
+            logging_overrides={
+                "modules": {"backend.job_supervisor": "DEBUG"},
+            },
+        ),
+        _shell(
+            "development", "Development Mode",
+            "Verbose logging, high reasoning, no token caps.",
+            engine_overrides={"router": {"tool_loop_input_budget": 0}},
+            reasoning_overrides={
+                "routing": {"chat": "medium", "classification": "medium"},
+            },
+            logging_overrides={
+                "root": "DEBUG",
+                "modules": {"backend.unified_agent": "DEBUG"},
+            },
+        ),
+        _shell(
+            "safe", "Safe Mode",
+            "Higher confidence bar, low reasoning on cheap tasks.",
+            engine_overrides={"verification": {"min_confidence": 90}},
+            reasoning_overrides={
+                "routing": {"chat": "low", "quick_answer": "low"},
+            },
+        ),
+        _shell(
+            "solver", "Autonomous Solver Mode",
+            "High reasoning across the board, no budget marker.",
+            reasoning_overrides={
+                "routing": {
+                    "complex_solving": "high",
+                    "supervisor": "high",
+                    "self_critic": "high",
+                },
+                "fallback": "high",
+            },
+        ),
+    ]
+
+
+def seed_starter_profiles() -> None:
+    """Idempotent: only writes profiles that don't already exist on
+    disk. Owner edits survive subsequent boots."""
+    for spec in _starter_definitions():
+        if PROFILES.get(spec["id"]) is None:
+            try:
+                PROFILES.put(PipelineProfile.from_dict(spec))
+            except Exception as e:
+                log.warning("seed %s failed: %s", spec["id"], e)
+    # Only set active=default if no _active.json exists.
+    p = _active_path()
+    if not p.exists():
+        try:
+            PROFILES.set_active("default")
+        except Exception as e:
+            log.warning("seed set-active failed: %s", e)
