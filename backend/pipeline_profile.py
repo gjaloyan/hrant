@@ -81,6 +81,7 @@ class ProfileStore:
         self._cache_overrides: dict = {}
         self._cache_loaded_at: float = 0.0
         self._cache_active_id: str = ""
+        self._cache_valid: bool = False
 
     def _path(self, pid: str) -> Path:
         if not validate_id(pid):
@@ -174,6 +175,8 @@ class ProfileStore:
         self._invalidate_cache()
 
     def history(self, pid: str) -> list[PipelineProfile]:
+        if not validate_id(pid):
+            return []
         hroot = _history_root_for(pid)
         if not hroot.exists():
             return []
@@ -187,6 +190,8 @@ class ProfileStore:
         return out
 
     def restore(self, pid: str, ts: int) -> Optional[PipelineProfile]:
+        if not validate_id(pid):
+            return None
         hroot = _history_root_for(pid)
         f = hroot / f"{ts}.json"
         if not f.exists():
@@ -239,7 +244,7 @@ class ProfileStore:
         on-disk file, or a stale id pointing nowhere)."""
         now = time.time()
         with self._lock:
-            if now - self._cache_loaded_at < _CACHE_TTL_SEC and self._cache_overrides:
+            if self._cache_valid and now - self._cache_loaded_at < _CACHE_TTL_SEC:
                 return dict(self._cache_overrides)
             pid = self.active_id()
             prof = self.get(pid)
@@ -254,12 +259,15 @@ class ProfileStore:
                 }
             self._cache_active_id = pid
             self._cache_loaded_at = now
+            self._cache_valid = True
             return dict(self._cache_overrides)
 
     def _invalidate_cache(self) -> None:
-        self._cache_overrides = {}
-        self._cache_loaded_at = 0.0
-        self._cache_active_id = ""
+        with self._lock:
+            self._cache_overrides = {}
+            self._cache_loaded_at = 0.0
+            self._cache_active_id = ""
+            self._cache_valid = False
 
 
 PROFILES = ProfileStore()

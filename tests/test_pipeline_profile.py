@@ -55,6 +55,8 @@ def test_put_and_get(isolated_store):
 
 
 def test_list_excludes_history_and_active(isolated_store):
+    """Force the existence of _active.json AND a _history/ dir, then
+    confirm list() doesn't surface them as profiles."""
     from backend.pipeline_profile import PROFILES, PipelineProfile
     for pid in ("a", "b", "c"):
         PROFILES.put(PipelineProfile(
@@ -63,6 +65,14 @@ def test_list_excludes_history_and_active(isolated_store):
             engine_overrides={}, reasoning_overrides={},
             prompt_overrides={}, logging_overrides={},
         ))
+    # Force _active.json to exist.
+    PROFILES.set_active("a")
+    # Force _history/ dir to exist by overwriting one of the profiles.
+    overwritten = PROFILES.get("a")
+    assert overwritten is not None
+    overwritten.name = "A2"
+    overwritten.updated_at = time.time() + 1
+    PROFILES.put(overwritten)
     ids = {p.id for p in PROFILES.list()}
     assert ids == {"a", "b", "c"}
 
@@ -150,7 +160,7 @@ def test_invalid_id_chars_refused():
     assert not validate_id("x" * 33)  # 32 char cap
 
 
-def test_atomic_write_does_not_leave_tmp(isolated_store):
+def test_put_leaves_no_tmp_file_after_success(isolated_store):
     from backend.pipeline_profile import PROFILES, PipelineProfile
     PROFILES.put(PipelineProfile(
         id="x", name="X", description="",
@@ -161,3 +171,26 @@ def test_atomic_write_does_not_leave_tmp(isolated_store):
     root = Path(isolated_store)
     leftovers = list(root.glob("**/*.tmp"))
     assert leftovers == []
+
+
+def test_list_skips_corrupted_json(isolated_store):
+    """A malformed JSON file in the profiles dir must not crash list();
+    the bad entry is silently skipped."""
+    from backend.pipeline_profile import PROFILES, PipelineProfile
+    PROFILES.put(PipelineProfile(
+        id="good", name="OK", description="",
+        created_at=time.time(), updated_at=time.time(),
+        engine_overrides={}, reasoning_overrides={},
+        prompt_overrides={}, logging_overrides={},
+    ))
+    bad = isolated_store / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    ids = {p.id for p in PROFILES.list()}
+    assert ids == {"good"}
+
+
+def test_history_and_restore_reject_invalid_id(isolated_store):
+    """Defense-in-depth — these methods used to accept any string."""
+    from backend.pipeline_profile import PROFILES
+    assert PROFILES.history("../etc/passwd") == []
+    assert PROFILES.restore("../foo", 12345) is None
