@@ -9,13 +9,15 @@ Spec: docs/superpowers/specs/2026-05-21-logs-tab-design.md
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import Response
+from sse_starlette.sse import EventSourceResponse
 
 from ..log_bus import VALID_LEVELS, VALID_SOURCES, BUS
 from ._auth import require_owner_for_writes
@@ -91,3 +93,31 @@ def download_logs(format: str = Query(default="jsonl", pattern="^(jsonl|txt)$"))
             "content-disposition": f'attachment; filename="agent-logs-{stamp}.txt"',
         },
     )
+
+
+@router.get("/api/logs/stream")
+async def stream_logs(request: Request):
+    """Server-sent events of every new event published to the bus
+    after subscription. Newest only — for backfill, the client first
+    calls `/api/logs` for a snapshot, then attaches the SSE stream
+    for live updates. Same pattern as `/api/chat`."""
+    require_owner_for_writes(action="streaming agent logs")
+    queue = BUS.subscribe(maxsize=1000)
+
+    async def _gen() -> AsyncIterator[dict]:
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    # Keep-alive heartbeat so reverse proxies don't
+                    # 504 a long-idle stream.
+                    yield {"event": "ping", "data": "{}"}
+                    continue
+                yield {"data": json.dumps(item, ensure_ascii=False)}
+        finally:
+            BUS.unsubscribe(queue)
+
+    return EventSourceResponse(_gen())

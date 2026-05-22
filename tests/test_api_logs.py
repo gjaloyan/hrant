@@ -122,3 +122,30 @@ def test_logs_endpoints_require_owner():
     client = TestClient(app, client=("192.0.2.1", 50000))
     r = client.get("/api/logs")
     assert r.status_code in (401, 403)
+
+
+def test_logs_stream_route_is_registered():
+    """Pin that /api/logs/stream is a registered route. End-to-end
+    event-delivery is covered by the LogBus subscribe/unsubscribe +
+    concurrency tests (test_log_bus_concurrency.py); driving SSE
+    through Starlette's TestClient blocks the test runner because
+    the EventSourceResponse generator never returns until the
+    client disconnects, and TestClient's stream context doesn't
+    surface a way to cleanly detach mid-stream without hanging on
+    some platforms. The route shape + handler import is what the
+    API contract actually owes here."""
+    from backend.main import app
+    paths = {getattr(r, "path", "") for r in app.routes}
+    assert "/api/logs/stream" in paths
+
+
+def test_logs_stream_endpoint_is_owner_gated_in_source():
+    """Pin the security gate at source level so a refactor can't
+    silently drop the owner check on the streaming endpoint."""
+    import inspect
+    from backend.api import logs as _logs_api
+    src = inspect.getsource(_logs_api.stream_logs)
+    assert "require_owner_for_writes" in src, (
+        "stream_logs must call require_owner_for_writes before "
+        "subscribing to the bus"
+    )
