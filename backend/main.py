@@ -19,6 +19,14 @@ from fastapi.staticfiles import StaticFiles
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s")
 log = logging.getLogger(__name__)
 
+# Bridge stdlib logging into the LogBus so the WebUI Logs tab sees
+# every `log.info(...)` / `log.warning(...)` call as a unified event.
+# Idempotent — if main is reloaded under pytest, don't double-attach.
+from .log_bus import LogBusHandler as _LogBusHandler  # noqa: E402
+_root_logger = logging.getLogger()
+if not any(isinstance(h, _LogBusHandler) for h in _root_logger.handlers):
+    _root_logger.addHandler(_LogBusHandler())
+
 # Audit P0 #2 fix: suppress INFO-level logs from HTTP-client libraries.
 # Default INFO from httpx/httpcore/telegram leaks the full request URL,
 # which for the Telegram polling loop embeds the bot token in plaintext:

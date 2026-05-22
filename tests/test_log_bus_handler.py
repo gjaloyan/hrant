@@ -27,11 +27,25 @@ def clean_bus():
     BUS.clear()
 
 
+def test_root_logger_has_logbushandler_after_main_import():
+    """Pin that importing `backend.main` attaches a LogBusHandler to
+    the root logger. A future refactor that drops this wiring would
+    silently break the Logs tab."""
+    import logging
+    import backend.main  # noqa: F401 — side-effect import
+    from backend.log_bus import LogBusHandler
+    root = logging.getLogger()
+    assert any(isinstance(h, LogBusHandler) for h in root.handlers), (
+        "root logger must carry a LogBusHandler after main is imported"
+    )
+
+
 def test_handler_emits_info_event(clean_bus):
     from backend.log_bus import LogBusHandler
     handler = LogBusHandler()
     logger = logging.getLogger("test.handler.info")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # don't bubble to root's LogBusHandler
     logger.addHandler(handler)
     try:
         logger.info("hello %s", "world")
@@ -50,6 +64,7 @@ def test_handler_maps_warning_and_error_levels(clean_bus):
     handler = LogBusHandler()
     logger = logging.getLogger("test.handler.levels")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # don't bubble to root's LogBusHandler
     logger.addHandler(handler)
     try:
         logger.warning("w")
@@ -70,6 +85,7 @@ def test_handler_includes_exception_meta(clean_bus):
     handler = LogBusHandler()
     logger = logging.getLogger("test.handler.exc")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # don't bubble to root's LogBusHandler
     logger.addHandler(handler)
     try:
         try:
@@ -99,6 +115,7 @@ def test_handler_never_recurses_into_itself(clean_bus):
     handler = Recursive()
     logger = logging.getLogger("test.handler.recurse")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # don't bubble to root's LogBusHandler
     logger.addHandler(handler)
     try:
         logger.info("seed")
