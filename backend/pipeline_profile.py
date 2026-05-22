@@ -297,7 +297,12 @@ def validate(overlay: dict) -> list[str]:
     overlay = overlay or {}
 
     # Engine.
-    engine = overlay.get("engine_overrides") or {}
+    raw_engine = overlay.get("engine_overrides")
+    if raw_engine is not None and not isinstance(raw_engine, dict):
+        errors.append("engine_overrides: must be a dict")
+        engine = {}
+    else:
+        engine = raw_engine or {}
     if engine:
         try:
             from .runtime_config import _ALLOWED  # type: ignore[attr-defined]
@@ -330,7 +335,12 @@ def validate(overlay: dict) -> list[str]:
                     )
 
     # Reasoning.
-    reasoning = overlay.get("reasoning_overrides") or {}
+    raw_reasoning = overlay.get("reasoning_overrides")
+    if raw_reasoning is not None and not isinstance(raw_reasoning, dict):
+        errors.append("reasoning_overrides: must be a dict")
+        reasoning = {}
+    else:
+        reasoning = raw_reasoning or {}
     if reasoning:
         try:
             from .reasoning_routing import VALID_LEVELS
@@ -353,7 +363,12 @@ def validate(overlay: dict) -> list[str]:
             )
 
     # Prompt.
-    prompt = overlay.get("prompt_overrides") or {}
+    raw_prompt = overlay.get("prompt_overrides")
+    if raw_prompt is not None and not isinstance(raw_prompt, dict):
+        errors.append("prompt_overrides: must be a dict")
+        prompt = {}
+    else:
+        prompt = raw_prompt or {}
     if prompt:
         try:
             from .system_prompt_sections import SECTIONS
@@ -375,7 +390,12 @@ def validate(overlay: dict) -> list[str]:
                     )
 
     # Logging.
-    logging_overrides = overlay.get("logging_overrides") or {}
+    raw_logging = overlay.get("logging_overrides")
+    if raw_logging is not None and not isinstance(raw_logging, dict):
+        errors.append("logging_overrides: must be a dict")
+        logging_overrides = {}
+    else:
+        logging_overrides = raw_logging or {}
     if logging_overrides:
         root = logging_overrides.get("root")
         if root is not None and root not in _VALID_LOG_LEVELS:

@@ -269,3 +269,31 @@ def test_validate_logging_good_levels():
         }
     })
     assert errors == []
+
+
+def test_validate_engine_overrides_must_be_dict():
+    from backend.pipeline_profile import validate
+    errors = validate({"engine_overrides": "not a dict"})
+    assert errors
+    assert any("engine_overrides" in e and "must be a dict" in e for e in errors)
+
+
+def test_validate_reasoning_overrides_must_be_dict():
+    from backend.pipeline_profile import validate
+    errors = validate({"reasoning_overrides": []})
+    assert errors
+    assert any("reasoning_overrides" in e for e in errors)
+
+
+def test_validate_prompt_overrides_must_be_dict():
+    from backend.pipeline_profile import validate
+    errors = validate({"prompt_overrides": "x"})
+    assert errors
+    assert any("prompt_overrides" in e for e in errors)
+
+
+def test_validate_logging_overrides_must_be_dict():
+    from backend.pipeline_profile import validate
+    errors = validate({"logging_overrides": 42})
+    assert errors
+    assert any("logging_overrides" in e for e in errors)
