@@ -214,9 +214,15 @@ export default function PipelineTab({ flash }: Props) {
         {subtab === "engine" && (
           <EngineEditor editing={editing} setEditing={setEditing} />
         )}
-        {subtab !== "engine" && (
+        {subtab === "reasoning" && (
+          <ReasoningEditor editing={editing} setEditing={setEditing} />
+        )}
+        {subtab === "prompt" && (
+          <PromptEditor editing={editing} setEditing={setEditing} />
+        )}
+        {(subtab === "logging" || subtab === "history") && (
           <div className="text-slate-500 text-sm">
-            ({subtab} editor implemented in Tasks 10-11)
+            ({subtab} editor implemented in Task 11)
           </div>
         )}
       </div>
@@ -282,6 +288,169 @@ function EngineEditor({
           />
         </label>
       </div>
+    </div>
+  );
+}
+
+function ReasoningEditor({
+  editing,
+  setEditing,
+}: {
+  editing: PipelineProfile;
+  setEditing: (p: PipelineProfile) => void;
+}) {
+  const r = editing.reasoning_overrides || {};
+  const routing = (r.routing as Record<string, string>) || {};
+  const levels = ["", "none", "low", "medium", "high"];
+  const tasks = [
+    "chat", "quick_answer", "classification", "keyword_extraction",
+    "task", "task_analysis", "note_creation", "verification",
+    "simple_lookup", "note_search", "learning",
+    "complex_solving", "supervisor", "self_critic", "skill_reflection",
+  ];
+  const setRouting = (task: string, level: string) => {
+    const next = { ...routing };
+    if (!level) delete next[task];
+    else next[task] = level;
+    setEditing({
+      ...editing,
+      reasoning_overrides: { ...r, routing: next },
+    });
+  };
+  return (
+    <div className="space-y-4 text-sm text-slate-200">
+      <div>
+        <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">
+          Routing — leave blank to use default
+        </div>
+        <div className="grid grid-cols-2 gap-x-4 gap-y-1">
+          {tasks.map((t) => (
+            <label key={t} className="flex items-center gap-2 text-xs">
+              <span className="w-44 truncate">{t}</span>
+              <select
+                value={routing[t] || ""}
+                onChange={(e) => setRouting(t, e.target.value)}
+                className="bg-slate-800 text-slate-100 rounded px-1 py-0.5"
+              >
+                {levels.map((l) => (
+                  <option key={l} value={l}>
+                    {l || "(default)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ))}
+        </div>
+      </div>
+      <div>
+        <label className="flex items-center gap-2 text-sm">
+          <span className="w-44">fallback</span>
+          <select
+            value={(r.fallback as string) || ""}
+            onChange={(e) => {
+              const next = { ...r };
+              if (!e.target.value) delete next.fallback;
+              else next.fallback = e.target.value;
+              setEditing({ ...editing, reasoning_overrides: next });
+            }}
+            className="bg-slate-800 text-slate-100 rounded px-1 py-0.5"
+          >
+            {levels.map((l) => (
+              <option key={l} value={l}>
+                {l || "(default)"}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function PromptEditor({
+  editing,
+  setEditing,
+}: {
+  editing: PipelineProfile;
+  setEditing: (p: PipelineProfile) => void;
+}) {
+  const [defaults, setDefaults] = useState<{
+    order: string[]; sections: Record<string, string>;
+  } | null>(null);
+  const [section, setSection] = useState<string>("");
+  useEffect(() => {
+    import("../../api").then(({ fetchSystemPromptSections }) =>
+      fetchSystemPromptSections().then((d) => {
+        setDefaults(d);
+        if (!section && d.order.length > 0) setSection(d.order[0]);
+      }),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (!defaults) return <div className="text-slate-500">Loading…</div>;
+  const sections = (editing.prompt_overrides?.sections || {}) as Record<
+    string, string | null
+  >;
+  const override = sections[section];
+  const mode: "default" | "override" | "skip" =
+    !(section in sections) ? "default"
+      : override === null ? "skip" : "override";
+  const setMode = (m: "default" | "override" | "skip") => {
+    const next = { ...sections };
+    if (m === "default") delete next[section];
+    else if (m === "skip") next[section] = null;
+    else next[section] = defaults.sections[section];
+    setEditing({
+      ...editing,
+      prompt_overrides: { sections: next },
+    });
+  };
+  const setBody = (body: string) => {
+    setEditing({
+      ...editing,
+      prompt_overrides: {
+        sections: { ...sections, [section]: body },
+      },
+    });
+  };
+  return (
+    <div className="space-y-3 text-sm text-slate-200">
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-slate-400">Section:</span>
+        <select
+          value={section}
+          onChange={(e) => setSection(e.target.value)}
+          className="bg-slate-800 text-slate-100 rounded px-2 py-1 text-xs"
+        >
+          {defaults.order.map((name) => (
+            <option key={name} value={name}>{name}</option>
+          ))}
+        </select>
+        {(["default", "override", "skip"] as const).map((m) => (
+          <label key={m} className="flex items-center gap-1 text-xs">
+            <input
+              type="radio"
+              name="mode"
+              checked={mode === m}
+              onChange={() => setMode(m)}
+            />
+            {m}
+          </label>
+        ))}
+      </div>
+      {mode === "override" && (
+        <textarea
+          value={(override as string) || ""}
+          onChange={(e) => setBody(e.target.value)}
+          rows={20}
+          className="w-full font-mono text-[11px] bg-slate-900 text-slate-100 rounded p-2"
+        />
+      )}
+      {mode !== "override" && (
+        <pre className="font-mono text-[11px] bg-slate-950/40 text-slate-400 rounded p-2 max-h-96 overflow-auto whitespace-pre-wrap">
+{defaults.sections[section]}
+        </pre>
+      )}
     </div>
   );
 }
