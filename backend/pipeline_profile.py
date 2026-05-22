@@ -189,6 +189,25 @@ class ProfileStore:
                 continue
         return out
 
+    def history_with_timestamps(self, pid: str) -> list[tuple[int, "PipelineProfile"]]:
+        """Like history() but pairs each entry with its file timestamp.
+        The timestamp is the unix millisecond used as the filename — the
+        same value the restore endpoint takes."""
+        if not validate_id(pid):
+            return []
+        hroot = _history_root_for(pid)
+        if not hroot.exists():
+            return []
+        out: list[tuple[int, PipelineProfile]] = []
+        for f in sorted(hroot.iterdir(), reverse=True):
+            try:
+                ts = int(f.stem)
+                raw = json.loads(f.read_text(encoding="utf-8"))
+                out.append((ts, PipelineProfile.from_dict(raw)))
+            except Exception:
+                continue
+        return out
+
     def restore(self, pid: str, ts: int) -> Optional[PipelineProfile]:
         if not validate_id(pid):
             return None

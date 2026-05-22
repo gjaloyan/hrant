@@ -130,3 +130,69 @@ def test_system_prompt_sections_endpoint(isolated_store, owner_client):
     assert "order" in body and "sections" in body
     assert "header" in body["order"]
     assert isinstance(body["sections"]["header"], str)
+
+
+def test_history_empty_for_new_profile(isolated_store, owner_client):
+    _put_profile(owner_client, "x", "v1")
+    r = owner_client.get("/api/pipeline-profiles/x/history")
+    assert r.status_code == 200
+    assert r.json()["history"] == []
+
+
+def test_history_lists_after_update(isolated_store, owner_client):
+    _put_profile(owner_client, "x", "v1")
+    owner_client.put("/api/pipeline-profiles/x", json={
+        "id": "x", "name": "v2", "description": "",
+        "engine_overrides": {}, "reasoning_overrides": {},
+        "prompt_overrides": {}, "logging_overrides": {},
+    })
+    r = owner_client.get("/api/pipeline-profiles/x/history")
+    assert r.status_code == 200
+    history = r.json()["history"]
+    assert len(history) == 1
+    assert history[0]["name"] == "v1"
+
+
+def test_history_capped_at_ten(isolated_store, owner_client):
+    _put_profile(owner_client, "x", "0")
+    for i in range(1, 13):
+        owner_client.put("/api/pipeline-profiles/x", json={
+            "id": "x", "name": str(i), "description": "",
+            "engine_overrides": {}, "reasoning_overrides": {},
+            "prompt_overrides": {}, "logging_overrides": {},
+        })
+    r = owner_client.get("/api/pipeline-profiles/x/history")
+    history = r.json()["history"]
+    assert len(history) == 10
+
+
+def test_restore_round_trip(isolated_store, owner_client):
+    _put_profile(owner_client, "x", "v1")
+    owner_client.put("/api/pipeline-profiles/x", json={
+        "id": "x", "name": "v2", "description": "",
+        "engine_overrides": {}, "reasoning_overrides": {},
+        "prompt_overrides": {}, "logging_overrides": {},
+    })
+    hist = owner_client.get("/api/pipeline-profiles/x/history").json()["history"]
+    ts = hist[0]["timestamp"]
+    r = owner_client.post(f"/api/pipeline-profiles/x/restore/{ts}")
+    assert r.status_code == 200
+    current = owner_client.get("/api/pipeline-profiles/x").json()
+    assert current["name"] == "v1"
+
+
+def test_history_rejects_invalid_id(isolated_store, owner_client):
+    """history endpoint should refuse traversal-shaped ids."""
+    r = owner_client.get("/api/pipeline-profiles/..%2Fetc/history")
+    # FastAPI/Starlette may normalize the path before our validator runs
+    # (collapsing `..` and falling through to the SPA catch-all). Either
+    # a non-200 response OR a response that is NOT our JSON history body
+    # is acceptable — the key thing is that no traversal reached our
+    # history endpoint with a bad id.
+    if r.status_code == 200:
+        # Must not be a successful history response — i.e. no JSON body
+        # with a "history" key from our endpoint.
+        ctype = r.headers.get("content-type", "")
+        assert "application/json" not in ctype or "history" not in r.json()
+    else:
+        assert r.status_code != 200

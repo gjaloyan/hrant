@@ -162,3 +162,35 @@ def delete_profile(pid: str):
         raise HTTPException(status_code=400, detail="switch active profile first")
     PROFILES.delete(pid)
     return {"deleted": pid}
+
+
+@router.get("/api/pipeline-profiles/{pid}/history")
+def list_history(pid: str):
+    require_owner_for_writes(action="listing profile history")
+    if not validate_id(pid):
+        raise HTTPException(status_code=400, detail="invalid profile id")
+    rows = PROFILES.history_with_timestamps(pid)
+    return {
+        "history": [
+            {
+                "timestamp": ts,
+                "id": prof.id,
+                "name": prof.name,
+                "description": prof.description,
+                "created_at": prof.created_at,
+                "updated_at": prof.updated_at,
+            }
+            for ts, prof in rows
+        ],
+    }
+
+
+@router.post("/api/pipeline-profiles/{pid}/restore/{ts}")
+def restore_history(pid: str, ts: int):
+    require_owner_for_writes(action="restoring profile history snapshot")
+    if not validate_id(pid):
+        raise HTTPException(status_code=400, detail="invalid profile id")
+    prof = PROFILES.restore(pid, ts)
+    if prof is None:
+        raise HTTPException(status_code=404, detail="snapshot not found")
+    return _to_dict(prof)
