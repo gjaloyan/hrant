@@ -25,6 +25,7 @@ const FailoverPanel = lazy(() => import("./settings/FailoverPanel"));
 const MemoryDigestsTab = lazy(() => import("./settings/MemoryDigestsTab"));
 const KnowledgeGraphTab = lazy(() => import("./settings/KnowledgeGraphTab"));
 const SubagentsTab = lazy(() => import("./settings/SubagentsTab"));
+const PipelineTab = lazy(() => import("./settings/PipelineTab"));
 import {
   clearConversation,
   compareModels,
@@ -77,7 +78,7 @@ import {
   type AvailableModel,
 } from "../api";
 
-type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "subagents" | "digests" | "kgraph" | "conversation" | "capabilities" | "status" | "reasoning" | "logs";
+type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "skills" | "jobs" | "subagents" | "digests" | "kgraph" | "conversation" | "capabilities" | "status" | "reasoning" | "logs" | "pipeline";
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState<IdentityTab>("soul");
@@ -285,6 +286,7 @@ export default function SettingsPanel() {
     { id: "user", label: "User Profile" },
     { id: "providers", label: "Providers" },
     { id: "reasoning", label: "Reasoning" },
+    { id: "pipeline", label: "Pipeline" },
     { id: "channels", label: "Channels" },
     { id: "memory", label: "Memory" },
     { id: "voice", label: "Voice" },
@@ -367,6 +369,7 @@ export default function SettingsPanel() {
 
         {tab === "engine" && <EngineTab flash={flash} />}
         {tab === "reasoning" && <ReasoningTab flash={flash} />}
+        {tab === "pipeline" && <PipelineTab flash={flash} />}
         {tab === "logs" && <LogsTab flash={flash} />}
 
         {tab === "selfmods" && <SelfModsTab flash={flash} />}
