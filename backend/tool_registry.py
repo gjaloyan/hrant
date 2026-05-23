@@ -76,6 +76,16 @@ class ToolRegistry:
 
         Любая ошибка ловится и форматируется как текст — LLM должна её
         прочитать и решить, что делать дальше (повторить, спросить, прекратить).
+
+        2026-05-23 audit follow-up (Important #6): pre-fix, only handlers
+        that RAISED were tagged is_error=True. Most production tools
+        catch internally and return an error-shaped string (e.g.
+        `[fetch error: ...]`, `{"ok": false, "error": "..."}`,
+        `{"returncode": 1, ...}`). Those slipped through with
+        is_error=False, producing the audit-flagged "0/416 errors"
+        anomaly. The post-execute heuristic in `_looks_like_error`
+        catches the common error shapes without false-positiving on
+        successful JSON payloads.
         """
         tool = self.tools.get(name)
         if not tool:
@@ -89,10 +99,62 @@ class ToolRegistry:
 
         if isinstance(result, (dict, list)):
             try:
-                return json.dumps(result, ensure_ascii=False, default=str), False
+                text = json.dumps(result, ensure_ascii=False, default=str)
             except Exception:
-                return str(result), False
-        return str(result), False
+                text = str(result)
+        else:
+            text = str(result)
+        return text, _looks_like_error(name, text)
+
+
+# Patterns at the start of a result string that indicate the tool
+# caught an error and stringified it instead of raising. The actual
+# bracket convention is established across the codebase (see
+# `_is_error_result` in builtin_tools.py + every `_fetch_url` style
+# handler). Kept tight — false-positives are worse than misses here
+# because every `is_error=True` shows up in the dev panel and
+# influences the LLM's next iteration.
+_ERROR_BRACKET_PREFIXES = (
+    "[fetch error",
+    "[fetch refused",
+    "[no results",
+    "[bad arguments",
+    "[tool ",          # registry's own "tool 'X' not found" / "[X runtime error"
+    "[error",
+    "[no tool",
+    "[refusal",
+    "[skipped",
+    "[forbidden",
+    "[permission denied",
+)
+
+
+def _looks_like_error(name: str, text: str) -> bool:
+    """Heuristic — given a tool's stringified result, decide whether
+    it represents a failure that the caller should treat as
+    `is_error=True`. Conservative on purpose: misses are recoverable
+    (the LLM still sees the error text), false-positives surface as
+    spurious red badges in the dev panel."""
+    if not text or not isinstance(text, str):
+        return False
+    head = text.lstrip()[:32].lower()
+    if any(head.startswith(p) for p in _ERROR_BRACKET_PREFIXES):
+        return True
+    stripped = text.lstrip()
+    # JSON wrapper: {"ok": false, ...} — the canonical shape used by
+    # ask_user, agent_browser, set_setting, propose_skill, several
+    # access tools.
+    if stripped.startswith("{") and ('"ok": false' in stripped[:200] or
+                                     '"ok":false' in stripped[:200]):
+        return True
+    # Subprocess wrapper: {"returncode": <non-zero>, ...} — used by
+    # run_python, terminal_exec when the wrapped command exited
+    # non-zero. Match digit form; "returncode": 0 → False.
+    import re as _re
+    m = _re.search(r'"returncode"\s*:\s*(-?\d+)', stripped[:200])
+    if m and int(m.group(1)) != 0:
+        return True
+    return False
 
 
 # Глобальный реестр. Тесты могут создать локальный экземпляр и подменить.
