@@ -68,8 +68,31 @@ class ToolRegistry:
     def names(self) -> list[str]:
         return sorted(self.tools.keys())
 
-    def to_anthropic_list(self) -> list[dict[str, Any]]:
-        return [t.to_anthropic() for t in self.tools.values()]
+    def to_anthropic_list(
+        self,
+        filter_names: "set[str] | None" = None,
+    ) -> list[dict[str, Any]]:
+        """Render every registered tool into the Anthropic / OpenAI
+        tools schema shape: `[{"name": ..., "description": ...,
+        "input_schema": ...}, ...]`.
+
+        Phase 2 addition (2026-05-23): when `filter_names` is set, only
+        tools whose name is in the set are returned. Used by the
+        per-iteration schema rebuild in `unified_agent.run_unified` to
+        ship only the base set + loaded bundles. `None` (default) keeps
+        the legacy "return everything" behaviour for non-bundle callers
+        (CLI, tests, the WebUI's tool catalog endpoint).
+        """
+        out: list[dict[str, Any]] = []
+        for name, tool in self.tools.items():
+            if filter_names is not None and name not in filter_names:
+                continue
+            out.append({
+                "name": name,
+                "description": tool.description,
+                "input_schema": tool.input_schema,
+            })
+        return out
 
     def execute(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
         """Выполнить инструмент. Возвращает (текст_результата, is_error).
