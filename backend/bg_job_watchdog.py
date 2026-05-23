@@ -384,6 +384,23 @@ def _gc_sweep_if_due(state: dict) -> None:
             log.info("watchdog: log files GC removed %d", removed_l)
     except Exception as e:
         log.warning("watchdog: log GC failed: %s", e)
+    # Audit Important #12 (2026-05-23): workspace/ holds turn
+    # artifacts (~7MB each) under linear-growth pressure. The store's
+    # opportunistic sweep only fires from save_outbox/save_turn —
+    # idle days leave the marker stale. Run from the daily watchdog
+    # tick so cleanup happens even when the agent isn't being used.
+    try:
+        from .workspace import get_workspace
+        from .config import CONFIG
+        ws_cfg = CONFIG.workspace
+        get_workspace().sweep_old(
+            inbox_retention_days=int(ws_cfg.get("inbox_retention_days", 90) or 0),
+            outbox_retention_days=int(ws_cfg.get("outbox_retention_days", 0) or 0),
+            notes_retention_days=int(ws_cfg.get("notes_retention_days", 0) or 0),
+            turns_retention_days=int(ws_cfg.get("turns_retention_days", 30) or 0),
+        )
+    except Exception as e:
+        log.warning("watchdog: workspace GC failed: %s", e)
 
 
 def _watchdog_loop() -> None:

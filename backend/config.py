@@ -295,7 +295,12 @@ _COMMON_OTHER = {
         "inbox_retention_days": 90,
         "outbox_retention_days": 0,
         "notes_retention_days": 0,
-        "turns_retention_days": 30,
+        # Audit Important #12 (2026-05-23): reduced from 30 to 14
+        # because each turn artifact is ~7MB (full thinking_trace +
+        # llm_calls). 14 days × ~30 turns/day = ~3GB steady-state,
+        # vs. ~6GB at 30 days. Operator can raise via runtime_config
+        # if longer history is needed for debugging.
+        "turns_retention_days": 14,
     },
     "search": {
         "method": "keyword",
