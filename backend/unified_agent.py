@@ -1234,15 +1234,11 @@ def run_unified(
     except Exception as e:
         log.debug("unified: compaction failed (non-fatal): %s", e)
 
-    # Sticky-request detection disconnected 2026-05-21 — it was
-    # entirely keyword-based (regex per system attribute: voice /
-    # language / model / config / etc.) and post-routed the LLM
-    # output with "you ack'd without acting" warnings. The TSP rule
-    # "Apply, don't acknowledge" + reasoning_routing high effort
-    # for complex_solving cover the same ground without keyword
-    # gates. The `backend.sticky_requests` module stays in source
-    # for any test that imports it.
-    sticky_block = ""
+    # Sticky-request detection was dropped 2026-05-21 (keyword-based
+    # regexes per system attribute — voice / language / model / etc.)
+    # and the `backend.sticky_requests` module was purged 2026-05-23
+    # (audit Important #8). TSP rule "Apply, don't acknowledge" +
+    # reasoning_routing high effort cover the same ground.
 
     # Pre-flight 3: progress event.
     agent.progress("unified", "single-loop turn starting")
@@ -1443,8 +1439,6 @@ def run_unified(
     ]
     if snapshot:
         system_parts.append(f"---\n\n{snapshot}")
-    if sticky_block:
-        system_parts.append(f"---\n\n{sticky_block}")
     if recall:
         system_parts.append(f"---\n\n{recall}")
     if convo:
@@ -1500,7 +1494,7 @@ def run_unified(
     )
     _rules_for_turn = _build_rules_for_turn(
         has_attachments=bool(attachments),
-        sticky_fired=bool(sticky_block),
+        sticky_fired=False,
         repeat_refusal=_repeat_refusal,
     )
     system_parts.append(f"---\n\n{_rules_for_turn}")

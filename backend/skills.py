@@ -60,8 +60,8 @@ class Skill:
     # can run. Resolved against (ToolRegistry name) | (binary on PATH)
     # | (importable Python module), in that order. Skills with
     # missing tools are still listed in the catalog but marked
-    # `[NEEDS: ...]` so the LLM sees the gap and can propose_install
-    # rather than blindly invoke a missing binary.
+    # `[NEEDS: ...]` so the LLM sees the gap and can install via
+    # terminal_exec rather than blindly invoke a missing binary.
     #
     # H1-rev: stored as list of dicts `{"name": str, "manager": str|None}`.
     # Strings in YAML are normalised into `{"name": "...", "manager": None}`
@@ -90,16 +90,18 @@ class Skill:
         """Блок, который подмешивается в system prompt при активации.
 
         `missing_tools`, если передан и непустой, добавляет видимое
-        предупреждение сверху — модель должна либо `propose_install`,
-        либо пивотнуться, а не звать заведомо отсутствующий бинарь.
+        предупреждение сверху — модель должна либо установить
+        недостающее через `terminal_exec`, либо пивотнуться,
+        а не звать заведомо отсутствующий бинарь.
         """
         parts = [f"## SKILL: {self.name}", self.description.strip()]
         if missing_tools:
             parts.append(
                 f"\n⚠️ **MISSING TOOLS:** {', '.join(missing_tools)} — "
                 f"this skill requires them but they are not available. "
-                f"Either call `propose_install` to add them, or pivot to "
-                f"a different approach."
+                f"Either install them via `terminal_exec` (e.g. "
+                f"`pip install <name>` or `apt install <name>`), or "
+                f"pivot to a different approach."
             )
         if self.when_to_use:
             parts.append(f"\n*When to use:* {self.when_to_use.strip()}")
@@ -178,6 +180,26 @@ def _normalize_required_tools(raw) -> list[dict]:
 
 # H1: tool availability probe. Public so unified_agent / WebUI can
 # call it without recreating the resolution logic.
+
+# Minimal package-manager hint for skill `required_tools` entries
+# that don't carry an explicit `manager:` frontmatter hint. Inlined
+# from the purged `backend.installer.resolve_manager_for` (audit
+# Important #8). Apt for system binaries we install via the OS;
+# pip for everything else (the safer default for Python-package
+# unknowns the agent might hit on a new skill).
+_APT_BINARIES = frozenset({
+    "ffmpeg", "libreoffice", "qpdf", "pdftotext", "pdfinfo",
+    "bubblewrap", "bwrap", "firejail", "unshare", "tesseract",
+    "imagemagick", "convert", "rsvg-convert", "wkhtmltopdf",
+    "yt-dlp", "youtube-dl", "pandoc", "ghostscript", "gs",
+})
+
+
+def _resolve_manager_for_binary(name: str) -> str:
+    """Guess which package manager installs `name`. Returns 'apt'
+    for known system binaries, 'pip' as the default."""
+    return "apt" if name.lower() in _APT_BINARIES else "pip"
+
 
 def _tool_is_available(name: str, registry: Optional[ToolRegistry] = None) -> bool:
     """Probe whether `name` is reachable.
@@ -767,15 +789,16 @@ class SkillsManager:
         resolved manager: `[{"name": "ffmpeg", "manager": "apt"}, ...]`.
 
         Manager resolution: explicit hint on the frontmatter wins;
-        otherwise `installer.resolve_manager_for(name)` guesses based
-        on the known-binary list (apt for ffmpeg/libreoffice/qpdf/...,
-        pip for everything else).
+        otherwise a small built-in mapping guesses based on the known
+        system-binary list (apt for ffmpeg / libreoffice / qpdf /
+        bubblewrap / firejail / etc.), defaulting to pip.
 
-        Used by the auto-propose path in unified_agent to fire
-        `installer.propose` per missing tool with the right manager.
+        2026-05-23: `installer.resolve_manager_for` was removed
+        with the install gate purge (audit Important #8). The
+        minimal mapping below replaces it inline — the universe of
+        binaries the skill catalog references is small enough that
+        a hand-curated dict is cheaper than the legacy module.
         """
-        from . import installer as _installer
-
         if not skill.required_tools:
             return []
         reg = registry if registry is not None else get_registry()
@@ -794,7 +817,7 @@ class SkillsManager:
             if _tool_is_available(name, reg):
                 continue
             if not manager:
-                manager = _installer.resolve_manager_for(name)
+                manager = _resolve_manager_for_binary(name)
             out.append({"name": name, "manager": manager})
         return out
 

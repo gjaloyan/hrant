@@ -208,8 +208,7 @@ TOOL_ICON: dict[str, str] = {
     # Schedule / cron / messages
     "schedule_message": "⏰",
     "cronjob": "⏰",
-    # Install / config
-    "propose_install": "📦",
+    # Config
     "set_setting": "⚙️",
     "save_user_fact": "🗒️",
     # Roles + access
@@ -260,7 +259,6 @@ _TOOL_PRIMARY_ARG: dict[str, str] = {
     "preprocess_video": "sha",
     "schedule_message": "when",
     "cronjob": "action",
-    "propose_install": "packages",
     "set_setting": "key",
     "save_user_fact": "fact",
     "grant_telegram_access": "user_id",

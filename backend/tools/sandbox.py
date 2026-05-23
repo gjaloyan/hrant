@@ -4,8 +4,8 @@ archive contents / random LibreOffice-headless conversions.
 The universal_resolver step 6 says "test on a copy" — this is the
 mechanism. The point isn't bulletproof isolation (we're not
 defending against a kernel exploit). It's that an unverified
-binary the agent just downloaded for `propose_install` review
-shouldn't have a straight line to `~/.hrant/data/.env`, the
+binary the agent just downloaded shouldn't have a straight line
+to `~/.hrant/data/.env`, the
 attachments store, or the LAN.
 
 Three isolation tiers, picked in order of strength:
@@ -292,7 +292,8 @@ def sandbox_exec(
             "unshare tier: no fs isolation. The command sees the "
             "real filesystem; only mount/PID/network namespaces "
             "are fresh. Stronger isolation requires bubblewrap "
-            "or firejail (consider `propose_install` if missing)."
+            "or firejail (install via `terminal_exec apt install "
+            "bubblewrap` if missing)."
         )
     else:
         # Degraded — no isolator on PATH. Run in scratch dir with

@@ -587,7 +587,7 @@ def _define_task_endpoint_handler(
     `failure_recovery` is a JSON-encoded list of:
       {
         "trigger": "ModuleNotFoundError",   # substring match in stderr/stdout
-        "suggested_action": "propose_install <module>"
+        "suggested_action": "terminal_exec pip install <module>"
       }
     """
     from . import task_endpoint as _te
@@ -1028,62 +1028,6 @@ def _sandbox_exec_handler(
             "error": f"sandbox error: {type(e).__name__}: {e}",
         }, ensure_ascii=False)
     return json.dumps(result.to_dict(), ensure_ascii=False)
-
-
-def _propose_install_handler(
-    packages: str,
-    manager: str = "pip",
-    reason: str = "",
-) -> str:
-    """Open an install request. OWNER-only. The packages are NOT
-    installed yet — a Telegram DM goes to the owner with inline
-    `[Show] [Approve] [Reject]` buttons; only on Approve does the
-    actual `pip install …` (or pipx inject) run.
-
-    Use this when the universal_resolver workflow concludes the
-    task needs a library/CLI tool that's not present. Never call
-    `pip install` through `terminal_exec` directly — that's blocked
-    by the install gate.
-    """
-    from .roles import current_speaker, is_owner
-    from . import installer as _installer
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — propose_install is owner-only",
-        }, ensure_ascii=False)
-    pkgs = [p.strip() for p in (packages or "").split(",") if p.strip()]
-    if not pkgs:
-        return json.dumps({
-            "ok": False, "error": "packages list is empty",
-        }, ensure_ascii=False)
-    try:
-        req = _installer.propose(
-            packages=pkgs,
-            manager=manager or "pip",
-            reason=reason or "",
-            requester=speaker_id or "webui:default",
-        )
-    except ValueError as e:
-        return json.dumps({"ok": False, "error": str(e)}, ensure_ascii=False)
-    if req is None:
-        return json.dumps({
-            "ok": False, "error": "install request could not be persisted",
-        }, ensure_ascii=False)
-    return json.dumps({
-        "ok": True,
-        "code": req.code,
-        "packages": req.packages,
-        "manager": req.manager,
-        "note": (
-            f"Install request {req.code} created. The owner sees a "
-            f"DM with [Show] [Approve] [Reject] inline buttons. "
-            f"Nothing has been installed yet — wait for the next "
-            f"turn (or for the owner to approve) before assuming "
-            f"the packages are available."
-        ),
-    }, ensure_ascii=False)
 
 
 def _propose_skill_handler(
@@ -1985,13 +1929,11 @@ def register_builtin_tools() -> None:
         handler=_load_skill_handler,
     )
 
-    # `propose_install` was dropped 2026-05-21 — the owner-approval
-    # ceremony added friction without security value (owner is the
-    # only operator on this box). The agent now installs packages
-    # directly via terminal_exec: `pip install <name>`, `apt install
-    # <name>`, `npm install <name>`, `cargo install <name>`, etc.
-    # The installer.py module + Telegram inline-callback handler
-    # are kept in source for any legacy code that still imports them.
+    # `propose_install` was dropped 2026-05-21 and the installer.py
+    # module + its handler + the Telegram callback were purged
+    # 2026-05-23 (audit Important #8). The agent installs packages
+    # directly via terminal_exec: `pip install <name>` / `apt install
+    # <name>` / `npm install <name>` / `cargo install <name>` / etc.
 
     reg.register_func(
         name="propose_skill",
@@ -2553,7 +2495,7 @@ def register_builtin_tools() -> None:
                         "the trigger appears in the job's "
                         "stderr/stdout. Example:\n"
                         "[{\"trigger\":\"ModuleNotFoundError\","
-                        "\"suggested_action\":\"propose_install the missing package\"}]"
+                        "\"suggested_action\":\"terminal_exec pip install <missing>\"}]"
                     ),
                     "default": "",
                 },

@@ -247,7 +247,9 @@ def test_system_block_warning_when_missing_passed():
     block = sk.system_block(missing_tools=["ffmpeg"])
     assert "MISSING TOOLS" in block
     assert "ffmpeg" in block
-    assert "propose_install" in block.lower()
+    # 2026-05-23: post install-gate purge, the warning points the
+    # agent at terminal_exec instead of the removed propose_install.
+    assert "terminal_exec" in block
     # Body still rendered so model has the workflow.
     assert "step 1" in block
 

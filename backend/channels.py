@@ -820,59 +820,10 @@ class TelegramBot:
             except Exception as e:
                 log.warning("self-mod notify(%s) failed: %s", chat_id, e)
 
-    def _on_install_proposed(self, req) -> None:
-        """Install-gate notification — DM every Telegram-owner that
-        the agent has opened a package-install request. Three
-        inline buttons: [👀 Show] / [✅ Approve] / [❌ Reject].
-        Owner-only; the install only runs after explicit Approve."""
-        from . import roles as _roles
-        from . import contacts as _contacts
-        from . import tg_interactive as _tg
-
-        code = getattr(req, "code", "") or ""
-        if not code:
-            return
-        try:
-            state = _roles._load()
-        except Exception:
-            return
-        owner_ids = [
-            sid for sid in (state.get("owner_speaker_ids") or [])
-            if isinstance(sid, str) and sid.startswith("telegram:")
-        ]
-        if not owner_ids:
-            return
-
-        pkgs = ", ".join(req.packages or [])
-        text = (
-            f"📦 <b>Install request</b>\n\n"
-            f"<b>Code:</b> <code>{_tg.escape_html(code)}</code>\n"
-            f"<b>Manager:</b> <code>{_tg.escape_html(req.manager)}</code>\n"
-            f"<b>Packages:</b> <code>{_tg.escape_html(pkgs)}</code>\n"
-            f"<b>Reason:</b> <i>{_tg.escape_html(req.reason or '(none)')}</i>\n"
-            f"<b>Requester:</b> <code>{_tg.escape_html(req.requester or '?')}</code>\n\n"
-            f"<i>Nothing is installed until you tap Approve. "
-            f"Show prints the exact command that will run.</i>"
-        )
-        buttons = (
-            _tg.InlineButtonSet()
-            .row(
-                _tg.InlineButton("👀 Show", callback_data=f"install:show:{code}"),
-            )
-            .row(
-                _tg.InlineButton("✅ Approve", callback_data=f"install:approve:{code}"),
-                _tg.InlineButton("❌ Reject", callback_data=f"install:reject:{code}"),
-            )
-        )
-        markup = buttons.to_markup()
-        for owner_sid in owner_ids:
-            chat_id = _contacts.chat_id_for_speaker(owner_sid)
-            if chat_id is None:
-                continue
-            try:
-                self._send_with_buttons(chat_id, text, markup)
-            except Exception as e:
-                log.warning("install-proposed DM(%s) failed: %s", chat_id, e)
+    # `_on_install_proposed` was removed 2026-05-23 (audit Important
+    # #8). The install-gate (propose_install tool + installer.py
+    # module + Telegram inline-callback approval flow) was retired
+    # 2026-05-21 — agent installs packages directly via terminal_exec.
 
     def _on_background_job_done(self, job) -> None:
         """T6: background-job completion DM. Sends a single message
@@ -1226,13 +1177,14 @@ class TelegramBot:
                     "message_id": query.message.message_id if query.message else None,
                     "callback_data": data,
                 }
-                # For long-running callbacks (notably install approvals),
+                # For long-running callbacks (self-mod proposal apply),
                 # acknowledge the Telegram button BEFORE doing the work.
                 # Telegram expires unanswered callback queries after a few
-                # seconds; the old flow ran the install first, so the owner
-                # could tap Approve and see an endless spinner / no progress.
+                # seconds; the old flow ran the work first, leaving the
+                # owner with an endless spinner. (The install-approve
+                # callback was removed 2026-05-23 with the install gate.)
                 pre_answered = False
-                if data.startswith(("install:approve:", "prop:apply:")):
+                if data.startswith("prop:apply:"):
                     try:
                         await query.answer(text="Working…", show_alert=False)
                         pre_answered = True
@@ -2066,7 +2018,7 @@ class TelegramBot:
 
             # Eager-import the modules that register
             # tg_interactive callback handlers at module-load time
-            # (`pair:`, `prop:`, `sched:`, `skill:`, `install:`).
+            # (`pair:`, `prop:`, `sched:`, `skill:`).
             # Without this, the first time the user pressed a button
             # on a pre-restart message we'd dispatch "no handler"
             # because the imports are otherwise lazy.
@@ -2107,16 +2059,9 @@ class TelegramBot:
             except Exception as e:
                 log.warning("skills subscribe failed: %s", e)
 
-            # Install gate: when the agent opens a package-install
-            # request, DM the owner with [👀 Show] [✅ Approve]
-            # [❌ Reject] inline buttons. The install only runs
-            # after explicit approval — supply-chain safety boundary
-            # for the universal_resolver workflow.
-            try:
-                from . import installer as _installer
-                _installer.register_on_install_proposed(self._on_install_proposed)
-            except Exception as e:
-                log.warning("installer subscribe failed: %s", e)
+            # Install gate removed 2026-05-21; installer.py module
+            # purged 2026-05-23 (audit Important #8). The agent now
+            # installs via terminal_exec directly.
 
             # T6 + supervisor follow-up: subscribe to background-job
             # completion. The supervisor takes over the user-facing

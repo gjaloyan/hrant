@@ -107,34 +107,17 @@ def _format_llm_error_short(exc: BaseException, *, max_len: int = 200) -> str:
     return f"⚠ {short}"
 
 
-import contextvars as _contextvars
-
-# Per-turn sticky-request hint resolved at `Agent.run()` entry.
-# All `_with_identity` call sites (chat / think / solve / verify)
-# read from this ContextVar, so they don't each need an extra
-# kwarg threaded through. Default is empty string = no hint added.
-_current_sticky_block: _contextvars.ContextVar[str] = _contextvars.ContextVar(
-    "hrant_current_sticky_block", default=""
-)
-
-
 def _with_identity(
     base_system: str,
     *,
     speaker_id: str | None = None,
-    sticky_block: str = "",
 ) -> str:
     """Склеивает identity preamble + agent state snapshot +
-    (optional) sticky-request hint + per-speaker permissions с
-    конкретным system-промптом шага.
+    per-speaker permissions с конкретным system-промптом шага.
 
     `speaker_id` selects which user_profile and role/permission
     block to inject. Default None falls back to the WebUI speaker
     (which is always owner) for back-compat.
-
-    `sticky_block` is the rendered output of
-    `backend.sticky_requests.render_sticky_block` for the current
-    turn — empty string when no sticky pattern detected.
 
     The STATE SNAPSHOT block (`backend.self_state`) is what gives
     the agent line-of-sight to its own current settings — active
@@ -142,7 +125,13 @@ def _with_identity(
     Without it, "change your voice to male" became "Понял" + a
     stored preference fact + no actual change; with it, the LLM
     sees the current voice + config path + the `set_setting`
-    tool it can use to mutate the file."""
+    tool it can use to mutate the file.
+
+    Note: per-turn `sticky_block` plumbing was removed 2026-05-23
+    (audit Important #8) along with `backend.sticky_requests`.
+    The TSP rule "Apply, don't acknowledge" plus the new
+    `re_prompt_resilience` section cover the original use case.
+    """
     from . import roles as _roles
     from . import self_state as _ss
     perms = _roles.permissions_block(speaker_id)
@@ -151,13 +140,9 @@ def _with_identity(
         snapshot = _ss.render_snapshot(state)
     except Exception:
         snapshot = ""  # never block a turn over the bookkeeping block
-    # Fallback: if caller didn't pass sticky_block explicitly,
-    # pull from the per-turn ContextVar that `Agent.run` sets.
-    effective_sticky = sticky_block or _current_sticky_block.get()
     return (
         f"{IDENTITY.preamble(speaker_id=speaker_id)}\n\n"
         + (f"---\n\n{snapshot}\n\n" if snapshot else "")
-        + (f"---\n\n{effective_sticky}\n" if effective_sticky else "")
         + f"---\n\n{base_system}\n\n"
         + f"---\n\n{perms}"
     )
@@ -1703,8 +1688,7 @@ class Agent(
                 "_trace", "_llm_calls", "_request_id",
                 "_self_analysis_unverified", "_t0", "_attachments",
                 "_channel", "_speaker_id", "_session_key", "_job_id",
-                "_role", "_role_token",
-                "_sticky_info", "_sticky_token", "_mode",
+                "_role", "_role_token", "_mode",
             )
         }
         TOKENS.reset_request()

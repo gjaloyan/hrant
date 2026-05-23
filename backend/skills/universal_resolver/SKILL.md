@@ -159,26 +159,18 @@ task; only descend on real failure.
    libreoffice, imagemagick, qpdf, etc. are likely present.
 3. Already-installed Python libraries: try `python3 -c "import X"`
    before pip-installing — many libraries are pre-loaded.
-4. NEW installs — owner approval is REQUIRED. Go through
-   `propose_install(packages, manager, reason)`. The tool writes
-   a pending request and DMs the owner `[👀 Show] [✅ Approve]
-   [❌ Reject]` inline buttons; only on Approve does the install
-   command actually run.
-   - Supported managers: `pip` (default), `pipx`.
-   - `apt` / `npm -g` are NOT supported by the gate — sudo /
-     root decisions sit outside this layer. Ask the owner to
-     run them manually if absolutely needed.
-   - Calling `pip install` / `pipx inject` / `apt install` /
-     `npm install` / `cargo install` etc. through `terminal_exec`
-     will be REFUSED with an error pointing back here.
-   - After `propose_install`, STOP and wait. Don't assume the
-     package is importable in the same turn — the install runs
-     in the next turn after the owner approves.
-
-The reasoning isn't paranoia about your own choices — it's that
-any auto-install is a supply-chain decision the owner needs to
-sign for. A wrong install creeps into the agent's runtime
-permanently.
+4. NEW installs — call `terminal_exec` with the right package
+   manager directly. The install gate was retired 2026-05-21 (no
+   more Telegram approval ceremony — owner is the only operator
+   on this box). Examples:
+   - `pip install <name>` / `pip install -e .`
+   - `apt install <name>` (sudo will prompt if needed)
+   - `npm install -g <name>`
+   - `cargo install <name>`
+   - `brew install <name>`
+   After install, the package is importable in the NEXT turn
+   (Python imports cache per-process; the current turn won't
+   see the new module).
 
 ### 6. Test safely
 
@@ -196,9 +188,8 @@ Before you produce a deliverable:
   commands, not "run this thing I just downloaded".
 - Check `result.isolation` — if it's `'degraded'`, no real
   containment happened (the box has no bwrap/firejail/unshare).
-  Either tell the owner before trusting the output, or call
-  `propose_install(packages=['bubblewrap'], manager='apt', …)`
-  through them.
+  Either tell the owner before trusting the output, or install
+  one via `terminal_exec("apt install bubblewrap")`.
 - Watch for non-zero exit codes. ffmpeg `returncode 187`,
   imagemagick policy.xml refusals, libreoffice timeout — surface
   the actual error, don't paper over it.
