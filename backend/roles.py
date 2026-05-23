@@ -99,7 +99,18 @@ def _load() -> dict:
 def _save(state: dict) -> None:
     p = _roles_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Atomic write — power-loss between truncate and full body would
+    # zero the file. The loader's catch (line ~88) then falls back to
+    # `{"owner_speaker_ids": [DEFAULT_SPEAKER], "speakers": {}}` and
+    # silently demotes EVERY trusted/owner Telegram speaker to guest.
+    # `.tmp` + atomic rename eliminates that window (audit Important
+    # #9 — same pattern used by pipeline_profile.put and ask_user).
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    tmp.replace(p)
 
 
 def role_of(speaker_id: str | None) -> Role:
