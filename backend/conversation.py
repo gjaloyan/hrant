@@ -241,8 +241,13 @@ class ConversationMemory:
             lines.append("")
             lines.append("**Agent:**")
             lines.append(t.get("answer", "(no response recorded)"))
-            if t.get("confidence"):
-                lines.append(f"_(confidence: {t['confidence']}%)_")
+            # Confidence label removed from context_block 2026-05-23:
+            # the next turn's LLM was reading `_(confidence: 16%)_` on
+            # the prior assistant message as evidence the agent should
+            # keep hedging, which reinforced the verifier-refusal loop
+            # caught in the audit. Confidence is still surfaced in the
+            # WebUI (read from CONVERSATION rows / SESSIONS), just not
+            # injected into the next LLM call's context.
             lines.append("")
             lines.append("---")
             lines.append("")

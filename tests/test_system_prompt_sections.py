@@ -4,18 +4,35 @@ Spec: docs/superpowers/specs/2026-05-22-pipeline-settings-phase-1-design.md"""
 from __future__ import annotations
 
 
-def test_default_order_has_eight_known_sections():
+def test_default_order_has_nine_known_sections():
+    """Order pinned. `re_prompt_resilience` was added 2026-05-23 to
+    break the meta-cognitive refusal loop caught in the post-Phase 1
+    audit; it sits right after `task_solver_process` because it's a
+    direct extension of TSP for the re-prompt case."""
     from backend.system_prompt_sections import DEFAULT_ORDER
     assert DEFAULT_ORDER == [
         "header",
         "apply_dont_acknowledge",
         "task_solver_process",
+        "re_prompt_resilience",
         "pick_right_tool",
         "skills_first",
         "refusals_honest",
         "iteration_ceiling",
         "chat_vs_task",
     ]
+
+
+def test_re_prompt_resilience_section_addresses_refusal_loop():
+    """The new section must address the specific failure mode caught
+    in the audit: meta-cognitive 'не могу подтвердить' refusal after
+    20+ diagnostic tool calls, with the user re-prompting."""
+    from backend.system_prompt_sections import SECTIONS
+    body = SECTIONS["re_prompt_resilience"]
+    # Names the symptom phrase verbatim so the LLM recognises it.
+    assert "не могу подтвердить" in body
+    # Gives ask_user as the only acceptable escape hatch.
+    assert "ask_user" in body
 
 
 def test_sections_dict_matches_default_order():
