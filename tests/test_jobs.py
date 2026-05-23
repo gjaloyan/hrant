@@ -44,6 +44,54 @@ def store(tmp_path, monkeypatch):
 # ─── CRUD ───────────────────────────────────────────────────────────
 
 
+def test_list_skips_non_dict_json_files(store):
+    """A stray top-level-list JSON in jobs/ (e.g. a misplaced index file)
+    must NOT crash list() — pre-2026-05-22 a `background.json` list
+    file put the consolidation scheduler into a 24h+ crash loop with
+    `'list' object has no attribute 'items'`. Guard pattern: detect
+    non-dict payload via `Job.from_dict` raising ValueError, log,
+    skip the file, continue scanning the rest."""
+    import json
+    real = store.create(prompt="real job", channel="webui",
+                        speaker_id="webui:default")
+    bogus = store.root / "background.json"
+    bogus.parent.mkdir(parents=True, exist_ok=True)
+    bogus.write_text(json.dumps([{"id": "bg-1"}, {"id": "bg-2"}]),
+                     encoding="utf-8")
+    rows = store.list()
+    assert len(rows) == 1
+    assert rows[0].id == real.id
+
+
+def test_get_skips_non_dict_json_file(store):
+    """Same defense for the single-file lookup path."""
+    import json
+    bogus = store.root / "weirdname.json"
+    bogus.parent.mkdir(parents=True, exist_ok=True)
+    bogus.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+    assert store.get("weirdname") is None
+
+
+def test_count_skips_non_dict_json_files(store):
+    """count(status=...) must not crash on a list-payload file."""
+    import json
+    store.create(prompt="A", channel="webui", speaker_id="webui:default")
+    bogus = store.root / "background.json"
+    bogus.parent.mkdir(parents=True, exist_ok=True)
+    bogus.write_text(json.dumps([1, 2]), encoding="utf-8")
+    # status=None counts files (legit case where a glob hits a non-Job
+    # file — keep the count cheap, don't open the file).
+    # status="queued" must inspect contents; the non-dict file is skipped.
+    assert store.count(status="queued") == 1
+
+
+def test_job_from_dict_raises_value_error_on_non_dict():
+    """Direct decoder check — non-dict must raise ValueError so callers
+    can `except (ValueError, TypeError): continue` instead of bombing."""
+    with pytest.raises(ValueError, match="expected dict"):
+        _jobs.Job.from_dict([1, 2, 3])  # type: ignore[arg-type]
+
+
 def test_create_persists_with_unique_id(store):
     j1 = store.create(prompt="hello", channel="webui", speaker_id="webui:default")
     j2 = store.create(prompt="world", channel="webui", speaker_id="webui:default")

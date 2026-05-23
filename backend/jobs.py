@@ -128,7 +128,15 @@ class Job:
         # Tolerant decoder — drop unknown keys so old jobs round-trip
         # forward when we add fields, and fill in missing keys with
         # defaults so newly-added fields work on jobs created before
-        # the schema bump.
+        # the schema bump. Raises ValueError on a non-dict payload so
+        # the caller can skip the file instead of crashing — the
+        # consolidation scheduler spent 24h+ in a 60-second crash loop
+        # because a stray `background.json` (top-level list) made
+        # `data.items()` blow up here (2026-05-22 audit).
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Job.from_dict expected dict, got {type(data).__name__}"
+            )
         valid = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         return cls(**{k: v for k, v in data.items() if k in valid})
 
@@ -229,7 +237,11 @@ class JobStore:
             except Exception as e:
                 log.warning("jobs/%s.json unreadable (%s); skipping", job_id, e)
                 return None
-            return Job.from_dict(data)
+            try:
+                return Job.from_dict(data)
+            except (ValueError, TypeError) as e:
+                log.warning("jobs/%s.json malformed (%s); skipping", job_id, e)
+                return None
 
     def list(
         self,
@@ -255,7 +267,13 @@ class JobStore:
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
                     continue
-                job = Job.from_dict(data)
+                try:
+                    job = Job.from_dict(data)
+                except (ValueError, TypeError) as e:
+                    log.warning(
+                        "jobs/%s.json malformed (%s); skipping", p.name, e,
+                    )
+                    continue
                 if status and job.status != status:
                     continue
                 if channel and job.channel != channel:
@@ -279,10 +297,12 @@ class JobStore:
                     continue
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
-                    if data.get("status") == status:
-                        n += 1
                 except Exception:
                     continue
+                if not isinstance(data, dict):
+                    continue
+                if data.get("status") == status:
+                    n += 1
             return n
 
     # ─── Update: lifecycle transitions ──────────────────────────
