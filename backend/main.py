@@ -41,9 +41,55 @@ for _noisy in ("httpx", "httpcore", "telegram", "telegram.ext.Updater"):
     logging.getLogger(_noisy).setLevel(_HTTPX_LEVEL)
 
 
+# Snapshot of root + per-module log levels taken once at boot,
+# BEFORE any pipeline profile is applied. Used by
+# `_apply_logging_overrides` to restore modules to their boot state
+# when a profile switch drops them from its `modules` overlay —
+# without this, switching from `development` (root=DEBUG +
+# backend.unified_agent=DEBUG) to `default` (no logging overlay)
+# would leave both loggers stuck at DEBUG forever, growing disk
+# usage in logs/ unbounded. Audit Important #10 (2026-05-23).
+_LOG_LEVEL_BOOT_SNAPSHOT: dict[str, int] = {}
+
+# Modules touched by the previous overlay — we need to remember the
+# set so the next apply knows which modules to RESET vs which to
+# leave alone (don't reset modules the user / other code raised
+# manually after boot).
+_LOG_LEVEL_OVERLAY_MODULES: set[str] = set()
+
+
+def _snapshot_log_levels() -> None:
+    """Capture the boot-time root + per-module levels. Called once."""
+    _LOG_LEVEL_BOOT_SNAPSHOT["__root__"] = logging.getLogger().level
+    # Snapshot only loggers that exist — pre-created ones for noisy
+    # libs (httpx, telegram, etc.) and root itself. Unknown modules
+    # default to NOTSET (which inherits root) and we'll capture them
+    # lazily the first time an overlay touches them.
+    for name in logging.root.manager.loggerDict:  # type: ignore[attr-defined]
+        logger = logging.getLogger(name)
+        _LOG_LEVEL_BOOT_SNAPSHOT[name] = logger.level
+
+
 def _apply_logging_overrides(overrides: dict | None) -> None:
     """Apply per-module log levels from the active pipeline profile.
-    Idempotent — safe to re-call on profile switch."""
+
+    On every call, restore any module that was raised by a PREVIOUS
+    overlay but is not mentioned by this one — otherwise switching
+    profile X (root=DEBUG, unified_agent=DEBUG) → profile Y (no
+    overlay) would leave both loggers stuck at DEBUG.
+    """
+    global _LOG_LEVEL_OVERLAY_MODULES
+
+    # Restore root + previously-touched modules to boot snapshot
+    # before applying the new overlay. Modules not in the snapshot
+    # (created after boot) reset to NOTSET so they inherit root.
+    root_default = _LOG_LEVEL_BOOT_SNAPSHOT.get("__root__", logging.INFO)
+    logging.getLogger().setLevel(root_default)
+    for module in _LOG_LEVEL_OVERLAY_MODULES:
+        prev = _LOG_LEVEL_BOOT_SNAPSHOT.get(module, logging.NOTSET)
+        logging.getLogger(module).setLevel(prev)
+    _LOG_LEVEL_OVERLAY_MODULES = set()
+
     if not overrides:
         return
     root_level = overrides.get("root")
@@ -51,12 +97,20 @@ def _apply_logging_overrides(overrides: dict | None) -> None:
         logging.getLogger().setLevel(root_level)
     for module, level in (overrides.get("modules") or {}).items():
         if level:
+            # Snapshot the module's CURRENT level the first time we
+            # touch it, so we know what to restore later — but only
+            # if it wasn't already in the boot snapshot.
+            if module not in _LOG_LEVEL_BOOT_SNAPSHOT:
+                _LOG_LEVEL_BOOT_SNAPSHOT[module] = logging.getLogger(module).level
             logging.getLogger(module).setLevel(level)
+            _LOG_LEVEL_OVERLAY_MODULES.add(module)
 
 
-# Boot apply: seed the five starter profiles on first run, then apply
-# the active profile's logging_overrides. Wrapped in try/except so a
-# transient store failure doesn't block FastAPI startup.
+# Boot apply: snapshot log levels, seed the five starter profiles
+# on first run, then apply the active profile's logging_overrides.
+# Wrapped in try/except so a transient store failure doesn't block
+# FastAPI startup.
+_snapshot_log_levels()
 try:
     from .pipeline_profile import (
         active_overrides as _po_active_overrides,
