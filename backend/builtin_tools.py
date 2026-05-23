@@ -387,6 +387,50 @@ def _load_skill_handler(name: str) -> str:
     }, ensure_ascii=False)
 
 
+def _load_tool_bundle_handler(name: str) -> str:
+    """Add a named bundle's tools to this turn's loadout.
+
+    Phase 2 of the cost audit: only the 16-tool BASE_TOOLS set ships
+    in every iteration's tool schema. Niche/heavy tools live in 4
+    bundles (bench / admin / self / media). The LLM calls this when
+    its task needs one — the bundle's tools become callable from the
+    NEXT iteration of this turn (not the current one — the tool
+    schema is frozen for the in-flight LLM call). Bundle state
+    resets at turn end.
+    """
+    from . import tool_bundles as _tb
+    if name not in _tb.TOOL_BUNDLES:
+        return json.dumps({
+            "ok": False,
+            "error": f"unknown bundle {name!r}",
+            "available": sorted(_tb.TOOL_BUNDLES.keys()),
+        }, ensure_ascii=False)
+    current = _tb.get_loaded_bundles()
+    if name in current:
+        return json.dumps({
+            "ok": True,
+            "name": name,
+            "added": [],
+            "note": (
+                f"bundle {name!r} was already loaded earlier in this "
+                f"turn — nothing to do, the tools are already in your "
+                f"toolbox."
+            ),
+        }, ensure_ascii=False)
+    _tb.set_loaded_bundles(current | {name})
+    return json.dumps({
+        "ok": True,
+        "name": name,
+        "added": list(_tb.TOOL_BUNDLES[name]),
+        "note": (
+            "The tools listed in `added` will appear in your tool "
+            "schema starting from the NEXT iteration of this turn. "
+            "Don't try to call them yet — finish the current "
+            "iteration first."
+        ),
+    }, ensure_ascii=False)
+
+
 # ─── T6: background-job tool handlers ──────────────────────────────
 
 
@@ -1927,6 +1971,33 @@ def register_builtin_tools() -> None:
             "required": ["name"],
         },
         handler=_load_skill_handler,
+    )
+
+    reg.register_func(
+        name="load_tool_bundle",
+        description=(
+            "Add a named tool bundle to this turn's loadout. Only 16 "
+            "base tools are loaded by default; call this to unlock a "
+            "niche bundle when the task needs one. The unlocked tools "
+            "are available from the NEXT iteration of this turn. "
+            "Available bundles: bench (long-running jobs / "
+            "benchmarks), admin (config / Telegram-access changes), "
+            "self (propose new skill / code-mod / delegate), media "
+            "(agent_browser, sandbox_exec). Loaded bundles reset at "
+            "turn end."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "enum": ["bench", "admin", "self", "media"],
+                    "description": "Bundle id to load.",
+                },
+            },
+            "required": ["name"],
+        },
+        handler=_load_tool_bundle_handler,
     )
 
     # `propose_install` was dropped 2026-05-21 and the installer.py

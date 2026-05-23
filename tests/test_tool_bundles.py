@@ -95,3 +95,79 @@ def test_contextvar_returns_copy_not_reference():
     snapshot.add("admin")
     assert get_loaded_bundles() == {"bench"}
     set_loaded_bundles(set())
+
+
+def test_handler_loads_valid_bundle():
+    from backend.builtin_tools import _load_tool_bundle_handler
+    from backend.tool_bundles import (
+        get_loaded_bundles, set_loaded_bundles, TOOL_BUNDLES,
+    )
+    import json
+    set_loaded_bundles(set())
+    try:
+        raw = _load_tool_bundle_handler(name="bench")
+        body = json.loads(raw)
+        assert body["ok"] is True
+        assert body["name"] == "bench"
+        assert set(body["added"]) == set(TOOL_BUNDLES["bench"])
+        assert "next iteration" in body["note"].lower()
+        assert get_loaded_bundles() == {"bench"}
+    finally:
+        set_loaded_bundles(set())
+
+
+def test_handler_idempotent_on_repeat():
+    """Loading a bundle twice in the same turn is a no-op success —
+    not an error. Empty `added` signals 'already in your toolbox'."""
+    from backend.builtin_tools import _load_tool_bundle_handler
+    from backend.tool_bundles import set_loaded_bundles
+    import json
+    set_loaded_bundles(set())
+    try:
+        _load_tool_bundle_handler(name="bench")
+        raw = _load_tool_bundle_handler(name="bench")
+        body = json.loads(raw)
+        assert body["ok"] is True
+        assert body["added"] == []
+        assert "already loaded" in body["note"].lower()
+    finally:
+        set_loaded_bundles(set())
+
+
+def test_handler_rejects_unknown_bundle():
+    from backend.builtin_tools import _load_tool_bundle_handler
+    from backend.tool_bundles import (
+        get_loaded_bundles, set_loaded_bundles, TOOL_BUNDLES,
+    )
+    import json
+    set_loaded_bundles(set())
+    try:
+        raw = _load_tool_bundle_handler(name="not_a_real_bundle")
+        body = json.loads(raw)
+        assert body["ok"] is False
+        assert "unknown" in body["error"].lower()
+        assert set(body["available"]) == set(TOOL_BUNDLES.keys())
+        # State must NOT have been mutated.
+        assert get_loaded_bundles() == set()
+    finally:
+        set_loaded_bundles(set())
+
+
+def test_handler_loads_multiple_independent_bundles():
+    from backend.builtin_tools import _load_tool_bundle_handler
+    from backend.tool_bundles import set_loaded_bundles, get_loaded_bundles
+    set_loaded_bundles(set())
+    try:
+        _load_tool_bundle_handler(name="bench")
+        _load_tool_bundle_handler(name="admin")
+        assert get_loaded_bundles() == {"bench", "admin"}
+    finally:
+        set_loaded_bundles(set())
+
+
+def test_load_tool_bundle_registered_in_global_registry():
+    """The handler must be wired into the global registry so the LLM
+    actually sees it in the schema."""
+    from backend.tool_registry import get_registry
+    names = {t["name"] for t in get_registry().to_anthropic_list()}
+    assert "load_tool_bundle" in names
