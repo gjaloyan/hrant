@@ -209,17 +209,24 @@ class ProfileStore:
         return out
 
     def restore(self, pid: str, ts: int) -> Optional[PipelineProfile]:
+        """Restore a snapshot atomically. Audit Important #11
+        (2026-05-23): pre-fix the snapshot was read OUTSIDE the lock,
+        so a concurrent `delete(pid)` between the read and the
+        subsequent `put(prof)` would silently resurrect a deleted
+        profile. Now everything happens under one RLock take —
+        delete + restore are mutually exclusive."""
         if not validate_id(pid):
             return None
-        hroot = _history_root_for(pid)
-        f = hroot / f"{ts}.json"
-        if not f.exists():
-            return None
-        raw = json.loads(f.read_text(encoding="utf-8"))
-        prof = PipelineProfile.from_dict(raw)
-        prof.updated_at = time.time()
-        self.put(prof)  # this snapshots the current version first
-        return prof
+        with self._lock:
+            hroot = _history_root_for(pid)
+            f = hroot / f"{ts}.json"
+            if not f.exists():
+                return None
+            raw = json.loads(f.read_text(encoding="utf-8"))
+            prof = PipelineProfile.from_dict(raw)
+            prof.updated_at = time.time()
+            self.put(prof)  # snapshots current first; RLock re-entrant
+            return prof
 
     def _prune_history(self, pid: str) -> None:
         hroot = _history_root_for(pid)
