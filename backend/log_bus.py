@@ -277,12 +277,67 @@ class LogBusHandler(logging.Handler):
 # ─── Convenience publishers — keep call sites tiny ──────────────────
 
 
+# Audit Critical #3 (2026-05-23): tool args go into both the in-memory
+# ring AND the rotating JSONL file on disk (kept 7 days). If the LLM
+# ever calls `set_setting("anthropic_api_key", "sk-ant-...")` or any
+# tool that takes a token/password/OAuth secret as an arg, that value
+# would persist unredacted. Redact known sensitive arg names before
+# the publish — match by key substring, value-side check for
+# obvious-secret prefixes.
+
+_SENSITIVE_KEY_SUBSTRINGS = (
+    "api_key", "apikey", "api-key",
+    "secret", "password", "passwd",
+    "token", "bearer",
+    "private_key", "privatekey", "private-key",
+    "client_secret", "refresh_token", "access_token",
+    "auth", "credential",
+)
+
+# Tools whose `key`-named arg (set_setting / save_user_fact / etc.)
+# selects WHICH setting the `value` arg is for. When the key itself
+# names a sensitive setting, the value is also sensitive even
+# though its parameter name is just "value".
+_VALUE_FOLLOWS_KEY_FOR = ("set_setting", "save_user_fact")
+
+
+def _redact_tool_args(name: str, args: dict) -> dict:
+    """Return a copy of `args` with sensitive values replaced by
+    `'<redacted>'`. Safe to call with any dict shape (tolerant of
+    non-string keys / nested structures — only top-level args matter
+    for the tool surface we have)."""
+    if not isinstance(args, dict):
+        return args  # let downstream handle the shape error
+    redacted: dict = {}
+    sensitive_value_arg = (
+        name in _VALUE_FOLLOWS_KEY_FOR
+        and isinstance(args.get("key"), str)
+        and any(s in args["key"].lower() for s in _SENSITIVE_KEY_SUBSTRINGS)
+    )
+    for k, v in args.items():
+        key_str = str(k).lower()
+        is_sensitive_arg_name = any(
+            s in key_str for s in _SENSITIVE_KEY_SUBSTRINGS
+        )
+        is_value_of_sensitive_setting = (
+            sensitive_value_arg and key_str == "value"
+        )
+        if is_sensitive_arg_name or is_value_of_sensitive_setting:
+            redacted[k] = "<redacted>"
+        else:
+            redacted[k] = v
+    return redacted
+
+
 def publish_tool_event(
     *, name: str, args: dict, result_preview: str = "",
     is_error: bool = False, request_id: str = "",
 ) -> None:
     """Called from `unified_agent._on_tool_call`. Keeps the cross-
-    cutting wiring to one line at the call site."""
+    cutting wiring to one line at the call site. Args are redacted
+    for sensitive key/value pairs before publishing — see
+    `_redact_tool_args` for the policy."""
+    safe_args = _redact_tool_args(name, args or {})
     BUS.publish(LogEvent(
         ts=time.time(),
         level="error" if is_error else "info",
@@ -290,7 +345,7 @@ def publish_tool_event(
         logger=name or "",
         message=f"{name}({', '.join((args or {}).keys())}) -> {result_preview}".strip(),
         meta={
-            "args": args or {},
+            "args": safe_args,
             "result_preview": result_preview,
             "is_error": is_error,
         },
