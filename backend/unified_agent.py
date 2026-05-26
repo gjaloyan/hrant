@@ -1581,11 +1581,30 @@ def run_unified(
         system_parts.append(f"---\n\n{sup_block}")
     system_prompt = "\n\n".join(system_parts)
 
-    # Tool surface = whole registry. The LLM picks.
+    # Tool surface = base set + currently-loaded bundles. The LLM
+    # picks; mid-turn it can call `load_tool_bundle(name)` to unlock
+    # a niche bundle, which mutates the per-turn ContextVar; the next
+    # iteration's `tools_provider` callback (see below) sees the new
+    # set. Phase 2 (2026-05-23).
     # MUST be after SKILLS.ensure_loaded() above so skill-provided
     # tools (handler.py register) make it into the schema.
     registry = get_registry()
-    tools_schema = registry.to_anthropic_list()
+
+    def _current_tool_schema_for_turn() -> list[dict]:
+        """Re-derive the tool schema from the current loaded-bundle
+        state. Called by `call_with_tools` before each LLM iteration
+        so a mid-turn `load_tool_bundle` is reflected in the next
+        request."""
+        from .tool_bundles import (
+            BASE_TOOLS, expand_loaded, get_loaded_bundles,
+        )
+        loaded = get_loaded_bundles()
+        allowed = set(BASE_TOOLS) | expand_loaded(loaded)
+        return registry.to_anthropic_list(filter_names=allowed)
+
+    # Initial schema is the cold-start (base-only) view — passed for
+    # back-compat with any provider path that ignores tools_provider.
+    tools_schema = _current_tool_schema_for_turn()
 
     # Tool execution + progress wiring. Reuse the agent's existing
     # `_on_tool_call` shape so the dev panel + SSE event stream
@@ -1824,6 +1843,7 @@ def run_unified(
             system_prompt,
             task,
             tools=tools_schema,
+            tools_provider=_current_tool_schema_for_turn,
             execute_tool=_execute_with_progress,
             max_tokens=4000,
             temperature=0.3,
