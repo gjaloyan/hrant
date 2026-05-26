@@ -2025,7 +2025,6 @@ class TelegramBot:
             try:
                 from . import access as _access_eager  # noqa: F401
                 from . import skills as _skills_eager  # noqa: F401
-                from . import installer as _installer_eager  # noqa: F401
             except Exception as e:
                 log.warning("callback module eager-import failed: %s", e)
 
