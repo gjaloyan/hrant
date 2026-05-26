@@ -1212,6 +1212,13 @@ def run_unified(
         internal plumbing, not user conversation, and we don't
         want them to pollute long-term memory or trigger skill
         proposals based on synthetic system messages."""
+    # Phase 2 (2026-05-23): reset the per-turn tool-bundle state at
+    # the very start of every turn. The ContextVar's default is an
+    # empty frozenset, but a previous turn in the same process may
+    # have set it; without this reset the next turn would start
+    # with stale bundles loaded.
+    from .tool_bundles import set_loaded_bundles as _po_set_loaded_bundles
+    _po_set_loaded_bundles(set())
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles
