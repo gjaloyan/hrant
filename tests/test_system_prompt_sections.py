@@ -4,11 +4,11 @@ Spec: docs/superpowers/specs/2026-05-22-pipeline-settings-phase-1-design.md"""
 from __future__ import annotations
 
 
-def test_default_order_has_nine_known_sections():
-    """Order pinned. `re_prompt_resilience` was added 2026-05-23 to
-    break the meta-cognitive refusal loop caught in the post-Phase 1
-    audit; it sits right after `task_solver_process` because it's a
-    direct extension of TSP for the re-prompt case."""
+def test_default_order_has_ten_known_sections():
+    """Order pinned. `tool_bundles` was added 2026-05-23 (Phase 2 of
+    the cost-audit cycle) right after `skills_first` because both
+    describe the on-demand-load contract (skills body via
+    `load_skill`, tools via `load_tool_bundle`)."""
     from backend.system_prompt_sections import DEFAULT_ORDER
     assert DEFAULT_ORDER == [
         "header",
@@ -17,10 +17,22 @@ def test_default_order_has_nine_known_sections():
         "re_prompt_resilience",
         "pick_right_tool",
         "skills_first",
+        "tool_bundles",
         "refusals_honest",
         "iteration_ceiling",
         "chat_vs_task",
     ]
+
+
+def test_tool_bundles_section_mentions_all_four_bundles():
+    """The catalog block must explicitly name all four bundles —
+    otherwise the LLM won't know they exist."""
+    from backend.system_prompt_sections import SECTIONS
+    body = SECTIONS["tool_bundles"]
+    for bundle in ("bench", "admin", "self", "media"):
+        assert bundle in body, f"bundle {bundle!r} missing from prompt"
+    assert "load_tool_bundle" in body
+    assert "16 tools" in body or "base" in body.lower()
 
 
 def test_re_prompt_resilience_section_addresses_refusal_loop():
