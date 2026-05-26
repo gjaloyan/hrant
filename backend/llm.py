@@ -1316,6 +1316,7 @@ class AnthropicLLM(BaseLLM):
         on_tool_call: "ToolCallCB | None" = None,
         attachments: list[str] | None = None,
         _task_type: str = "",
+        tools_provider=None,
     ) -> str:
         """Multi-turn tool-use loop.
 
@@ -1329,6 +1330,11 @@ class AnthropicLLM(BaseLLM):
         Безопасно деградирует, если tools пустые или модель сразу
         возвращает текст. `attachments` (sha256 list) attach images on
         the first user turn.
+
+        Phase 2 (2026-05-23): `tools_provider`, when set, is called
+        before each iteration to re-derive the tool schema. Lets
+        `load_tool_bundle` take effect in the next iteration of the
+        same turn. When None, falls back to the static `tools` arg.
         """
         first_content = self._build_user_content(user, attachments)
         messages: list[dict] = [{"role": "user", "content": first_content}]
@@ -1340,6 +1346,19 @@ class AnthropicLLM(BaseLLM):
             # so the forced synthesis below can wrap up cheaply.
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
+            # Phase 2: per-iteration tool list — bundle aware when
+            # tools_provider supplied.
+            if tools_provider is not None:
+                try:
+                    current_tools = tools_provider()
+                except Exception as e:
+                    log.warning(
+                        "tools_provider raised, falling back to "
+                        "static tools list: %s", e,
+                    )
+                    current_tools = tools
+            else:
+                current_tools = tools
             payload = {
                 "model": self.model,
                 "max_tokens": max_tokens or self.default_max,
@@ -1347,8 +1366,8 @@ class AnthropicLLM(BaseLLM):
                 "system": system,
                 "messages": messages,
             }
-            if tools:
-                payload["tools"] = tools
+            if current_tools:
+                payload["tools"] = current_tools
             t0 = time.time()
             data = self._post(payload)
             duration_ms = int((time.time() - t0) * 1000)
@@ -1611,23 +1630,32 @@ class OpenAICompatibleLLM(BaseLLM):
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
         max_iterations=6, on_tool_call=None, attachments=None, _task_type="",
+        tools_provider=None,
     ) -> str:
         """OpenAI-style tool-use loop. `attachments` (sha256 list) attach
-        images on the first user turn via image_url data URIs."""
-        # Convert Anthropic tool format to OpenAI format if needed
-        oai_tools = []
-        for t in tools:
-            if "function" in t:
-                oai_tools.append(t)
-            else:
-                oai_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": t["name"],
-                        "description": t.get("description", ""),
-                        "parameters": t.get("input_schema", {}),
-                    },
-                })
+        images on the first user turn via image_url data URIs.
+
+        Phase 2 (2026-05-23): `tools_provider` callable rebuilds the
+        tool schema before each iteration (bundle-aware)."""
+
+        def _to_oai_tools(tool_list):
+            """Convert Anthropic tool format to OpenAI format if needed."""
+            out = []
+            for t in (tool_list or []):
+                if "function" in t:
+                    out.append(t)
+                else:
+                    out.append({
+                        "type": "function",
+                        "function": {
+                            "name": t["name"],
+                            "description": t.get("description", ""),
+                            "parameters": t.get("input_schema", {}),
+                        },
+                    })
+            return out
+
+        static_oai_tools = _to_oai_tools(tools) if tools_provider is None else None
 
         first_user = self._build_user_content(user, attachments)
         messages = [
@@ -1638,6 +1666,17 @@ class OpenAICompatibleLLM(BaseLLM):
         for _iter in range(max_iterations):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
+            # Phase 2: bundle-aware per-iteration tool list.
+            if tools_provider is not None:
+                try:
+                    oai_tools = _to_oai_tools(tools_provider())
+                except Exception as e:
+                    log.warning(
+                        "tools_provider raised, falling back to static: %s", e,
+                    )
+                    oai_tools = _to_oai_tools(tools)
+            else:
+                oai_tools = static_oai_tools or []
             payload = {
                 "model": self.model,
                 "max_tokens": max_tokens or self.default_max,
@@ -1992,29 +2031,34 @@ class CodexLLM(BaseLLM):
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
         max_iterations=6, on_tool_call=None, attachments=None, _task_type: str = "",
+        tools_provider=None,
     ) -> str:
         # Convert tools to Responses API flat format. Accept either:
         #   {"name", "description", "input_schema"}                  (Anthropic-ish)
         #   {"type":"function","function":{"name","description","parameters"}}  (Chat Completions)
-        flat_tools: list[dict] = []
-        for t in tools or []:
-            if t.get("type") == "function" and isinstance(t.get("function"), dict):
-                fn = t["function"]
-                flat_tools.append({
-                    "type": "function",
-                    "name": fn.get("name", ""),
-                    "description": fn.get("description", ""),
-                    "parameters": fn.get("parameters", {}),
-                    "strict": False,
-                })
-            else:
-                flat_tools.append({
-                    "type": "function",
-                    "name": t.get("name", ""),
-                    "description": t.get("description", ""),
-                    "parameters": t.get("input_schema") or t.get("parameters") or {},
-                    "strict": False,
-                })
+        def _to_flat_tools(tool_list):
+            out: list[dict] = []
+            for t in tool_list or []:
+                if t.get("type") == "function" and isinstance(t.get("function"), dict):
+                    fn = t["function"]
+                    out.append({
+                        "type": "function",
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "parameters": fn.get("parameters", {}),
+                        "strict": False,
+                    })
+                else:
+                    out.append({
+                        "type": "function",
+                        "name": t.get("name", ""),
+                        "description": t.get("description", ""),
+                        "parameters": t.get("input_schema") or t.get("parameters") or {},
+                        "strict": False,
+                    })
+            return out
+
+        static_flat_tools = _to_flat_tools(tools) if tools_provider is None else None
 
         input_items: list[dict] = [
             {
@@ -2028,6 +2072,17 @@ class CodexLLM(BaseLLM):
         for _iter in range(max_iterations):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
+            # Phase 2: bundle-aware per-iteration tool list.
+            if tools_provider is not None:
+                try:
+                    flat_tools = _to_flat_tools(tools_provider())
+                except Exception as e:
+                    log.warning(
+                        "tools_provider raised, falling back to static: %s", e,
+                    )
+                    flat_tools = _to_flat_tools(tools)
+            else:
+                flat_tools = static_flat_tools or []
             payload = self._build_payload(
                 system, input_items, flat_tools or None, max_tokens, temperature,
                 task_type=_task_type,
@@ -2227,26 +2282,42 @@ class BedrockLLM(BaseLLM):
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
         max_iterations=6, on_tool_call=None, attachments=None, _task_type: str = "",
+        tools_provider=None,
     ) -> str:
         _ = attachments  # vision not supported on this backend
         # Convert tools to Anthropic shape: {name, description, input_schema}
-        anthropic_tools = []
-        for t in tools or []:
-            if "input_schema" in t:
-                anthropic_tools.append(t)
-            elif t.get("type") == "function" and isinstance(t.get("function"), dict):
-                fn = t["function"]
-                anthropic_tools.append({
-                    "name": fn.get("name", ""),
-                    "description": fn.get("description", ""),
-                    "input_schema": fn.get("parameters", {}),
-                })
+        def _to_anthropic_tools(tool_list):
+            out = []
+            for t in tool_list or []:
+                if "input_schema" in t:
+                    out.append(t)
+                elif t.get("type") == "function" and isinstance(t.get("function"), dict):
+                    fn = t["function"]
+                    out.append({
+                        "name": fn.get("name", ""),
+                        "description": fn.get("description", ""),
+                        "input_schema": fn.get("parameters", {}),
+                    })
+            return out
+
+        static_anthropic_tools = _to_anthropic_tools(tools) if tools_provider is None else None
 
         messages: list[dict] = [{"role": "user", "content": user}]
         final_text = ""
         for _iter in range(max_iterations):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
+            # Phase 2: bundle-aware per-iteration tool list.
+            if tools_provider is not None:
+                try:
+                    anthropic_tools = _to_anthropic_tools(tools_provider())
+                except Exception as e:
+                    log.warning(
+                        "tools_provider raised, falling back to static: %s", e,
+                    )
+                    anthropic_tools = _to_anthropic_tools(tools)
+            else:
+                anthropic_tools = static_anthropic_tools or []
             payload = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": max_tokens or self.default_max,
@@ -2490,22 +2561,27 @@ class CohereLLM(BaseLLM):
         self, system, user, tools, execute_tool,
         *, max_tokens=None, temperature=None,
         max_iterations=6, on_tool_call=None, attachments=None, _task_type: str = "",
+        tools_provider=None,
     ) -> str:
         _ = attachments  # vision not supported on this backend
         # Cohere v2 accepts OpenAI-style {type:"function", function:{...}} tools.
-        coh_tools: list[dict] = []
-        for t in tools or []:
-            if t.get("type") == "function" and isinstance(t.get("function"), dict):
-                coh_tools.append(t)
-            else:
-                coh_tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": t.get("name", ""),
-                        "description": t.get("description", ""),
-                        "parameters": t.get("input_schema") or t.get("parameters") or {},
-                    },
-                })
+        def _to_coh_tools(tool_list):
+            out: list[dict] = []
+            for t in tool_list or []:
+                if t.get("type") == "function" and isinstance(t.get("function"), dict):
+                    out.append(t)
+                else:
+                    out.append({
+                        "type": "function",
+                        "function": {
+                            "name": t.get("name", ""),
+                            "description": t.get("description", ""),
+                            "parameters": t.get("input_schema") or t.get("parameters") or {},
+                        },
+                    })
+            return out
+
+        static_coh_tools = _to_coh_tools(tools) if tools_provider is None else None
 
         messages: list[dict] = [
             {"role": "system", "content": system},
@@ -2515,6 +2591,17 @@ class CohereLLM(BaseLLM):
         for _iter in range(max_iterations):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
+            # Phase 2: bundle-aware per-iteration tool list.
+            if tools_provider is not None:
+                try:
+                    coh_tools = _to_coh_tools(tools_provider())
+                except Exception as e:
+                    log.warning(
+                        "tools_provider raised, falling back to static: %s", e,
+                    )
+                    coh_tools = _to_coh_tools(tools)
+            else:
+                coh_tools = static_coh_tools or []
             payload = {
                 "model": self.model,
                 "messages": messages,
@@ -2849,7 +2936,12 @@ def create_llm(cfg: dict) -> BaseLLM:
         raise LLMError(f"Unknown provider type: {provider}")
 
 
-def _supports_tools(llm: "BaseLLM", tools: list[dict] | None) -> bool:
+def _supports_tools(
+    llm: "BaseLLM",
+    tools: list[dict] | None,
+    *,
+    tools_provider=None,
+) -> bool:
     """Check that an LLM concretely overrides `complete_with_tools`.
 
     Some provider classes (GoogleLLM, OllamaLLM) extend BaseLLM but
@@ -2859,8 +2951,12 @@ def _supports_tools(llm: "BaseLLM", tools: list[dict] | None) -> bool:
     whether it was a code bug or a routing decision. The qualname
     check rejects `BaseLLM.complete_with_tools` if it ever gets added
     later as a stub; only real subclass overrides count as supporting.
+
+    Phase 2: when `tools_provider` is supplied, the caller intends
+    to ship a dynamic per-iteration tool list — treat this as
+    "has tools" even if the static `tools` arg is empty.
     """
-    if not tools:
+    if not tools and tools_provider is None:
         return False
     fn = getattr(llm, "complete_with_tools", None)
     if fn is None:
@@ -3437,6 +3533,7 @@ class DualModelRouter:
         max_iterations: int = 6,
         on_tool_call: ToolCallCB | None = None,
         attachments: list[str] | None = None,
+        tools_provider=None,
     ) -> str:
         """Tool-use loop via selected model.
 
@@ -3445,14 +3542,19 @@ class DualModelRouter:
         when its LLM class implements `complete_with_tools` (fix #4 from
         the self-review). Only models that lack tool support fall through
         to plain `call()`.
+
+        Phase 2: `tools_provider` (callable returning the current tool
+        list) lets unified_agent rebuild the schema each iteration
+        for bundle-aware loadouts. When supplied, treats "has tools"
+        as true even if static `tools` is empty.
         """
         tt = task_type.value
 
         # Check active model first
         active = self._get_active_llm()
-        if active is not None and tools:
+        if active is not None and (tools or tools_provider is not None):
             self.state["last_reason"] = f"active model: {self._active_cfg_hash}"
-            if not _supports_tools(active, tools):
+            if not _supports_tools(active, tools, tools_provider=tools_provider):
                 # Pinned providers like GoogleLLM and OllamaLLM extend
                 # BaseLLM but never override `complete_with_tools` —
                 # the previous code unconditionally called it and got
@@ -3477,6 +3579,7 @@ class DualModelRouter:
                     on_tool_call=on_tool_call,
                     attachments=attachments,
                     _task_type=tt,
+                    tools_provider=tools_provider,
                 )
 
             def _make_fallback(entry_cfg: dict):
@@ -3494,7 +3597,7 @@ class DualModelRouter:
                             f"create_llm({c.get('provider_id')}/"
                             f"{c.get('model')}): {e}"
                         ) from e
-                    if not _supports_tools(llm, tools):
+                    if not _supports_tools(llm, tools, tools_provider=tools_provider):
                         raise LLMError(
                             f"chain entry {c.get('provider_id')}/"
                             f"{c.get('model')} does not support tools"
@@ -3507,6 +3610,7 @@ class DualModelRouter:
                         on_tool_call=on_tool_call,
                         attachments=attachments,
                         _task_type=tt,
+                        tools_provider=tools_provider,
                     )
                 return _fb
 
@@ -3528,7 +3632,7 @@ class DualModelRouter:
 
         # Pick the LLM for this turn first so we can probe its capabilities.
         target = self.model_a if choice == "a" else self.model_b
-        if not _supports_tools(target, tools):
+        if not _supports_tools(target, tools, tools_provider=tools_provider):
             # The previous code here `return self.call(...)` SILENTLY
             # stripped tools and ran a plain completion when the
             # routed-to model lacked complete_with_tools. That's
@@ -3548,7 +3652,7 @@ class DualModelRouter:
             #     been short-circuited earlier in the function.
             if (
                 choice == "b"
-                and _supports_tools(self.model_a, tools)
+                and _supports_tools(self.model_a, tools, tools_provider=tools_provider)
                 and self._api_available()
             ):
                 target = self.model_a
@@ -3572,6 +3676,7 @@ class DualModelRouter:
                 on_tool_call=on_tool_call,
                 attachments=attachments if choice == "a" else None,
                 _task_type=tt,
+                tools_provider=tools_provider,
             )
             if choice == "a":
                 self.state["api_calls_today"] += 1
