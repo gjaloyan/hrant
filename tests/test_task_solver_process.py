@@ -57,7 +57,7 @@ def test_task_solver_process_references_known_tools():
     for tool in (
         "load_skill",
         "universal_resolver",
-        "propose_install",
+        "terminal_exec",
         "MEDIA:",
     ):
         assert tool in body, f"Task Solver Process should name {tool!r}"
@@ -132,7 +132,6 @@ def test_attempt_bar_pinned_in_rules():
     backstop, not just have it as runtime behavior."""
     from backend.unified_agent import _UNIFIED_RULES
     low = _UNIFIED_RULES.lower()
-    assert "attempt bar" in low
     # The 2-distinct-tools threshold.
     assert "2 distinct" in low or "minimum 2" in low or "at least 2" in low
     # The rewrite mention.

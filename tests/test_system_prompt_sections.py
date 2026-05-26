@@ -5,22 +5,24 @@ from __future__ import annotations
 
 
 def test_default_order_has_ten_known_sections():
-    """Order pinned. `tool_bundles` was added 2026-05-23 (Phase 2 of
-    the cost-audit cycle) right after `skills_first` because both
-    describe the on-demand-load contract (skills body via
-    `load_skill`, tools via `load_tool_bundle`)."""
+    """Order pinned. U-attention layout — `chat_vs_task` is the
+    cheapest stance-setter near the top; `apply_dont_acknowledge`
+    (merged with the former `refusals_honest`) sits last as the
+    most behaviorally-critical rule. `task_endpoint` was extracted
+    out of the bloated `pick_right_tool` section into its own
+    block."""
     from backend.system_prompt_sections import DEFAULT_ORDER
     assert DEFAULT_ORDER == [
         "header",
-        "apply_dont_acknowledge",
+        "chat_vs_task",
         "task_solver_process",
-        "re_prompt_resilience",
         "pick_right_tool",
+        "task_endpoint",
         "skills_first",
         "tool_bundles",
-        "refusals_honest",
+        "re_prompt_resilience",
         "iteration_ceiling",
-        "chat_vs_task",
+        "apply_dont_acknowledge",
     ]
 
 
@@ -70,8 +72,8 @@ def test_assemble_with_section_override_replaces_body():
 
 def test_assemble_with_section_null_skips_it():
     from backend.system_prompt_sections import assemble, SECTIONS
-    out = assemble({"sections": {"refusals_honest": None}})
-    body = SECTIONS["refusals_honest"]
+    out = assemble({"sections": {"task_endpoint": None}})
+    body = SECTIONS["task_endpoint"]
     assert body not in out
 
 

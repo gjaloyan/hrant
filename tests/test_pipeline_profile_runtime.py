@@ -79,11 +79,11 @@ def test_prompt_section_skip_drops_it(isolated_store):
     from backend.system_prompt_sections import SECTIONS
     from backend.unified_agent import _unified_rules_core
     _seed_profile("bench", prompt_overrides={
-        "sections": {"refusals_honest": None},
+        "sections": {"task_endpoint": None},
     })
     PROFILES.set_active("bench")
     text = _unified_rules_core()
-    body = SECTIONS["refusals_honest"]
+    body = SECTIONS["task_endpoint"]
     assert body not in text
 
 

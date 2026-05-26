@@ -32,13 +32,15 @@ def test_re_prompt_resilience_section_present():
     assert "re_prompt_resilience" in DEFAULT_ORDER
 
 
-def test_re_prompt_resilience_immediately_after_tsp():
-    """The new section must come right after `task_solver_process`
-    so re-prompt rules read as a TSP extension, not an afterthought."""
+def test_re_prompt_resilience_sits_in_safety_cluster():
+    """U-attention layout: `re_prompt_resilience` lives in the
+    back-half safety cluster next to `iteration_ceiling`, not next
+    to `task_solver_process`. Both describe runtime-failure
+    recovery rules and should read together."""
     from backend.system_prompt_sections import DEFAULT_ORDER
-    idx_tsp = DEFAULT_ORDER.index("task_solver_process")
     idx_re = DEFAULT_ORDER.index("re_prompt_resilience")
-    assert idx_re == idx_tsp + 1
+    idx_iter = DEFAULT_ORDER.index("iteration_ceiling")
+    assert abs(idx_re - idx_iter) == 1
 
 
 # ─── _recent_refusal_pattern detector ─────────────────────────────
