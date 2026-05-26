@@ -1649,42 +1649,21 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="agent_browser",
         description=(
-            "Deep-research browser via the Vercel Labs `agent-browser` "
-            "CLI (Rust + Chrome DevTools Protocol). Drives a headless "
-            "Chromium instance to read JS-rendered pages, interact "
-            "with DOM (click, fill, eval), capture screenshots/PDF, "
-            "and inspect React components. Owner-only.\n\n"
-            "WHEN TO REACH FOR THIS vs `fetch_url`:\n"
-            "  • `fetch_url` is the cheap default for plain HTML — "
-            "docs, blog posts, READMEs, JSON endpoints, anything "
-            "that renders without JS. Always try `fetch_url` first.\n"
-            "  • `agent_browser` is for pages where `fetch_url` "
-            "returns a skeleton / empty body / a JS-blob: SPAs "
-            "(React/Vue/Svelte), lazy-loaded content, login-walled "
-            "pages, sites with infinite scroll, anywhere you need "
-            "to click a button / fill a form / screenshot the UI / "
-            "wait for a network request to settle.\n\n"
-            "USAGE:\n"
-            "`command` is the agent-browser sub-command + its args, "
-            "passed straight to the CLI. `--json` is appended "
-            "automatically so stdout is structured. Examples:\n"
-            "  command=`navigate https://example.com`\n"
-            "  command=`extract https://x.com --selector \"article h1\"`\n"
-            "  command=`screenshot https://x.com --output /tmp/shot.png`\n"
-            "  command=`click 'button.submit'`\n"
-            "  command=`fill 'input[name=\"q\"]' --value \"hello\"`\n"
-            "  command=`eval 'document.title'`\n\n"
-            "INSTALL:\n"
-            "If the tool returns `binary_missing=true`, install via "
-            "terminal_exec: `npm install -g @vercel/agent-browser` "
-            "(needs Node + Chromium). After install, retry — no "
-            "service restart needed.\n\n"
-            "RETURNS JSON: {ok, command, exit_code, stdout, stderr, "
-            "truncated, elapsed_ms, binary_missing, error}. Browser "
-            "output (page text, screenshots as base64, DOM dumps) "
-            "lands in `stdout` — parse it as the JSON shape agent-"
-            "browser returns. Default timeout 90s (browser is slow); "
-            "cap 300s. Owner-only."
+            "Headless-Chromium deep-research via Vercel Labs "
+            "`agent-browser` CLI. Drives a real browser to read "
+            "JS-rendered SPAs, click/fill DOM, screenshot, eval JS. "
+            "OWNER-only.\n\n"
+            "DO NOT use as default — try `fetch_url` first for plain "
+            "HTML (docs, JSON, READMEs). Reach for `agent_browser` "
+            "ONLY when `fetch_url` returns a JS skeleton, or you "
+            "need to click/fill/screenshot/wait-for-network.\n\n"
+            "`command` is the sub-command + args passed straight to "
+            "the CLI (`--json` auto-appended). E.g. `navigate URL`, "
+            "`extract URL --selector \"h1\"`, `screenshot URL "
+            "--output /tmp/x.png`, `click 'button.submit'`, "
+            "`eval 'document.title'`.\n\n"
+            "On `binary_missing=true`: install via "
+            "`npm install -g @vercel/agent-browser` then retry."
         ),
         input_schema={
             "type": "object",
@@ -1786,18 +1765,12 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="schedule_message",
         description=(
-            "Schedule a message to be delivered to another speaker at "
-            "a specific time. Use this when the user (owner or trusted) "
-            "says things like 'remind my wife to call me at 10am' or "
-            "'tell Mom in an hour that dinner is ready'.\n"
-            "Resolve the target via relationships.json aliases ('wife', "
-            "'mom', etc.) OR pass a full speaker_id like "
-            "'telegram:123456789'. Convert the user's natural-language "
-            "time ('tomorrow 10am', 'in 30 minutes') into UTC ISO 8601 "
-            "('YYYY-MM-DDTHH:MM:SSZ') yourself before calling.\n"
-            "Owner-only and trusted-to-owner permissions are enforced "
-            "server-side; guests cannot use this tool. Returns "
-            "{ok, id, target_speaker, due_at} on success."
+            "Deliver a message to another speaker at a future time "
+            "('remind wife at 10am', 'tell Mom in an hour'). Target = "
+            "alias from relationships.json OR full `telegram:<id>`. "
+            "Convert natural time to UTC ISO 8601 yourself. "
+            "Owner/trusted only. Returns `{ok, id, target_speaker, "
+            "due_at}`."
         ),
         input_schema={
             "type": "object",
@@ -1854,22 +1827,15 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="save_user_fact",
         description=(
-            "Persist a stable user-profile fact (language preference, "
-            "style/tone, personal info, or interaction rule). Dedup is "
-            "automatic. Use this when the user shares a STABLE trait or "
-            "preference about themselves or how to interact — NOT for "
-            "temporary task state. Examples:\n"
-            "  - User says 'I prefer Russian' → "
-            "save_user_fact('language', 'Respond in Russian')\n"
-            "  - User says 'My name is Gor' → "
-            "save_user_fact('about_user', 'User is Gor')\n"
-            "  - User says 'always be brief' → "
-            "save_user_fact('style', 'Keep responses brief')\n"
-            "  - User says 'don't mention my brother' → "
-            "save_user_fact('rule', 'Do not mention the user's brother')\n"
-            "Do NOT use for system-setting CHANGES (voice, model, etc.) "
-            "— those go through `set_setting`. Do NOT use for one-off "
-            "task requests (write a note for me, schedule a message)."
+            "Persist a STABLE user-profile fact: language, style/tone, "
+            "personal info, interaction rule. Dedup is automatic. "
+            "`fact` must be a canonical third-person phrase (e.g. "
+            "'User prefers terse answers', not 'I want short "
+            "replies').\n\n"
+            "DO NOT use for system-setting changes (voice, model — "
+            "use `set_setting`). DO NOT use for one-off task "
+            "requests (notes, schedules — those are not profile "
+            "facts)."
         ),
         input_schema={
             "type": "object",
@@ -2009,18 +1975,13 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="propose_skill",
         description=(
-            "Self-improvement loop. Owner-only. Propose a NEW "
-            "reusable skill (Markdown workflow) based on a process "
-            "you just completed successfully. The skill is written "
-            "DISABLED — the owner must tap 'Activate' in their "
-            "Telegram DM to make it live. Use AFTER you've shipped "
-            "a working result for a non-trivial multi-step task "
-            "that future turns are likely to encounter again. The "
-            "`body` should be a step-by-step Markdown procedure: "
-            "where to find inputs, exact commands, expected outputs, "
-            "common pitfalls. Future turns will see the body "
-            "auto-injected into their system prompt when any "
-            "`triggers` keyword appears in the user message."
+            "OWNER-only. Propose a new reusable skill (Markdown "
+            "workflow) AFTER shipping a non-trivial multi-step "
+            "task that future turns will repeat. Skill is written "
+            "DISABLED — owner activates via Telegram DM. `body` = "
+            "step-by-step procedure (inputs, exact commands, "
+            "outputs, pitfalls). Re-proposing an existing name "
+            "silently overwrites and preserves prior enabled state."
         ),
         input_schema={
             "type": "object",
@@ -2126,22 +2087,18 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="set_setting",
         description=(
-            "Apply a user-mutable agent config change in ONE call. "
-            "OWNER-only. The router validates the value, persists it, "
-            "and resets the relevant subsystem so the change applies "
-            "live (no agent restart needed).\n\n"
-            "Use this INSTEAD of hand-editing config files via "
-            "terminal_exec / run_python — those still work but are "
-            "4-6× more expensive (find file, read JSON, mutate, "
-            "write back, hope singleton notices). set_setting is the "
-            "canonical path.\n\n"
+            "OWNER-only. Mutate one config key in a single call "
+            "(TTS voice/rate, language, model alias, retention "
+            "days, etc.). Validates, persists, resets the affected "
+            "subsystem live. USE INSTEAD of hand-editing JSON via "
+            "terminal_exec.\n\n"
             "Available keys:\n"
             f"{_settings_lines}\n\n"
-            "Returns JSON: {ok, key, old, new, note, error?}. `ok=False` "
-            "means refused or invalid value (see `error`); the value "
-            "was NOT applied. `old == new` with `note='value already "
-            "at requested state'` means the setting was already where "
-            "the user wants it — tell them, don't re-apply silently."
+            "Returns `{ok, key, old, new, note, error?}`. `old==new` "
+            "with `note='value already...'` means no-op — tell the "
+            "user, don't re-apply. For `tts.rate`: absolute `'+25%'` "
+            "vs delta `'+=25%'` (clamped ±100%). DO NOT use to set "
+            "credentials — those go in `.env`."
         ),
         input_schema={
             "type": "object",
@@ -2186,21 +2143,15 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="delegate",
         description=(
-            "Delegate a focused subtask to a specialised SUBAGENT. The "
-            "subagent runs in isolation with its own restricted tool set "
-            "and a role-specific system prompt; you receive a single "
-            "answer + tool-call summary back, not the child's full "
-            "thinking trace.\n\n"
-            "Available roles:\n"
+            "Delegate a focused subtask to a specialised SUBAGENT "
+            "(isolated context, role prompt, restricted tools). "
+            "You get one answer + tool-call summary back.\n\n"
+            "Roles:\n"
             f"{_role_lines}\n\n"
-            "When to use this vs. doing the work yourself:\n"
-            "  - You need WEB RESEARCH with citations → researcher\n"
-            "  - You need to READ + EXPLAIN source code → coder\n"
-            "  - You want a SECOND OPINION on an answer / diff → reviewer\n"
-            "Don't use delegate for: short factual answers you can give "
-            "directly, casual chat, or pure arithmetic.\n\n"
-            "Hard limits: depth-1 (subagents cannot recurse), "
-            "owner-only, sequential (no parallel batches yet)."
+            "Use for: web research with citations (researcher), "
+            "reading+explaining code (coder), second opinion "
+            "(reviewer). DO NOT use for short factual answers, "
+            "chat, or arithmetic. Depth-1, OWNER-only, sequential."
         ),
         input_schema={
             "type": "object",
@@ -2229,51 +2180,20 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="terminal_exec",
         description=(
-            "Run an arbitrary shell command on the host machine and "
-            "return stdout/stderr/exit_code. OWNER-ONLY — guest / "
-            "trusted callers get permission denied without subprocess "
-            "being touched.\n\n"
-            "FULL SHELL: the command goes through `/bin/sh -c <cmd>` "
-            "so pipes (`|`), redirects (`>`, `<`, `2>&1`), command "
-            "substitution (`$(...)`, backticks), multi-command chains "
-            "(`;`, `&&`, `||`), env-var expansion, glob expansion — "
-            "all work natively. Use them when they're the natural "
-            "shell idiom; don't fake them with multiple tool calls.\n\n"
-            "Examples that work:\n"
-            "  - `pip install datasets swebench pandas`\n"
-            "  - `apt list --installed | grep python3-`\n"
-            "  - `find logs -name 'report.json' | wc -l`\n"
-            "  - `tail -F /var/log/syslog | grep -m5 ERROR`\n"
-            "  - `git log --oneline | head -20`\n"
-            "  - `python -c \"import sys; print(sys.path)\"`\n"
-            "  - `systemctl --user restart hrant && journalctl --user -u hrant -n 50`\n\n"
-            "Returns JSON: {ok, command, exit_code, stdout, stderr, "
-            "truncated, elapsed_ms, error}. `ok=False` with "
-            "`exit_code=-1` means the command was REFUSED before "
-            "execution (empty command, timeout, permission error); "
-            "`ok=False` with `exit_code>0` means the command RAN and "
-            "exited non-zero. Output capped at 16KB combined; "
-            "`truncated=True` when either stream was cut.\n\n"
-            "Safety reminders (the LLM is responsible — no allowlist, "
-            "tiny denylist):\n"
-            "  - A small set of CATASTROPHIC patterns is blocked at "
-            "the validator: `rm -rf /` / `~` / `$HOME` / system "
-            "dirs, `dd of=/dev/sd*`, `curl url | sh` and shell-pipe "
-            "variants, fork bomb `:(){:|:&};:`, `mkfs` on /dev, "
-            "`shred` on /dev, `chmod -R 000` on root/home, `kill 1` "
-            "or `kill -1`, `> /dev/sd*` redirects. Refusal cites the "
-            "denylist explicitly.\n"
-            "  - Scoped variants stay allowed: `rm -rf /tmp/...`, "
-            "`rm -rf ./build`, `dd of=/tmp/img`, `curl url -o /tmp/file`.\n"
-            "  - Destructive ops outside the denylist (drop DBs, "
-            "force-push to main, `git reset --hard`) need a clear "
-            "user goal — don't do them speculatively or as 'cleanup' "
-            "between turns.\n"
-            "  - Long-running commands (>60s) — use "
-            "`start_background_job` instead so the turn isn't blocked.\n"
-            "  - `sudo`-anything will prompt for password and likely "
-            "hang the timeout; ask the user to pre-authenticate or "
-            "skip the privilege escalation."
+            "Run a shell command via `/bin/sh -c` and return "
+            "stdout/stderr/exit_code. OWNER-only. Full shell: pipes, "
+            "redirects, `$(...)`, `&&`/`||`, globs all work natively "
+            "— use them, don't fake them with multiple calls.\n\n"
+            "Returns `{ok, exit_code, stdout, stderr, truncated, "
+            "elapsed_ms}`. `exit_code=-1` = refused pre-exec "
+            "(timeout, empty, permission); `>0` = command ran and "
+            "failed. Output capped at 16KB combined.\n\n"
+            "DO NOT use for jobs expected >60s — use "
+            "`start_background_job`. DO NOT use `sudo` (hangs on "
+            "password prompt). Catastrophic patterns (`rm -rf /`, "
+            "`dd of=/dev/sd*`, `curl|sh`, fork bombs, `kill 1`, "
+            "`mkfs /dev/*`) are denylisted; scoped variants stay "
+            "allowed."
         ),
         input_schema={
             "type": "object",
@@ -2303,28 +2223,18 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="sandbox_exec",
         description=(
-            "Run a shell command inside an isolated sandbox. "
-            "OWNER-only. Use when the universal_resolver workflow "
-            "needs to TEST something on a copy of the input — "
-            "extract an unknown archive, run libreoffice headless "
-            "to convert .doc, probe a binary you just downloaded, "
-            "etc. Stronger isolation than `terminal_exec`: a fresh "
+            "Run a shell command in an isolated sandbox (fresh "
             "scratch dir, HOME overridden, network off by default, "
-            "PID/mount namespaces fresh.\n\n"
-            "Three tiers picked automatically by what's installed:\n"
-            "  - bubblewrap (`bwrap`) — strongest. Read-only system "
-            "mounts, fresh /tmp + /proc.\n"
-            "  - firejail — comparable strength.\n"
-            "  - unshare — Linux kernel namespaces, no FS isolation.\n"
-            "  - degraded — no isolator on PATH; just env + cwd "
-            "constraint. Warning surfaces in result.notes.\n\n"
-            "`input_paths` is a comma-separated list of real files "
-            "(or dirs) to copy into the scratch dir BEFORE the "
-            "command runs. They appear at `<scratch>/<basename>`.\n\n"
-            "Returns JSON: {ok, exit_code, stdout, stderr, "
-            "isolation, elapsed_ms, scratch_dir, network, notes}. "
-            "Check `isolation` — if it's 'degraded' your test ran "
-            "without real containment; treat the result as such."
+            "namespaces). OWNER-only. Use when testing on a copy "
+            "of unknown input — extract archive, convert .doc, "
+            "probe a freshly downloaded binary.\n\n"
+            "`input_paths` (comma-separated) is copied into scratch "
+            "at `<scratch>/<basename>` before the command runs.\n\n"
+            "Returns `{ok, exit_code, stdout, stderr, isolation, "
+            "scratch_dir, network, notes}`. Isolation tier is "
+            "auto-picked: bwrap > firejail > unshare > degraded. "
+            "Check `isolation`='degraded' means no real "
+            "containment — treat result accordingly."
         ),
         input_schema={
             "type": "object",
@@ -2375,15 +2285,12 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="start_background_job",
         description=(
-            "Spawn a shell command in the BACKGROUND. Returns "
-            "immediately with a job_id. Owner gets a Telegram DM "
-            "when the subprocess finishes (success or failure). USE "
-            "INSTEAD of `terminal_exec` for anything expected to run "
-            "more than ~60 seconds: SWE-bench, video transcode, large "
-            "wheel builds, long pip/apt installs (combined with the "
-            "install gate), trainings. Don't poll status in the same "
-            "turn — the whole point is to free the turn. The agent "
-            "will notify you via DM on completion. OWNER-only."
+            "Spawn a shell command in the background. Returns a "
+            "job_id immediately; owner gets a Telegram DM on "
+            "completion. USE INSTEAD of `terminal_exec` for anything "
+            "expected to run >~60s (benchmarks, transcodes, builds, "
+            "trainings). DO NOT poll status in the same turn. "
+            "OWNER-only."
         ),
         input_schema={
             "type": "object",
@@ -2503,20 +2410,14 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="define_task_endpoint",
         description=(
-            "Crystallise the user's goal into checkable success "
-            "criteria BEFORE launching a long-running task. Returns "
-            "an `endpoint_id` you pass to `start_background_job`.\n\n"
-            "Call this whenever the user asks for a multi-step or "
-            "long-running task — benchmarks, builds, trainings, "
-            "transcodes, evaluations. Don't call it for trivial "
-            "things (single grep, one read_file, chat reply).\n\n"
-            "Why this matters: on job completion the supervisor "
-            "loads the endpoint, auto-runs each criterion's "
-            "check_cmd, and REFUSES to mark the chain 'done' while "
-            "any critical criterion is unmet. This is what prevents "
-            "the agent from reporting 'job exited 0, must be done!' "
-            "when the real goal (publishable result, ≥300 instances, "
-            "report.json with real predictions) wasn't actually met."
+            "Crystallise a long-running task's goal into checkable "
+            "criteria. Call BEFORE `start_background_job` for any "
+            "benchmark / build / training / eval. Returns an "
+            "`endpoint_id`. `prerequisites` (true BEFORE launch — "
+            "code refuses launch if not) and `success_criteria` "
+            "(checked at completion — supervisor refuses 'done' "
+            "if not). Skip for trivial one-call jobs. DO NOT use "
+            "as a substitute for `ask_user`."
         ),
         input_schema={
             "type": "object",
@@ -2608,24 +2509,15 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="ask_user",
         description=(
-            "Ask the user a STRUCTURED multiple-choice question. Use "
-            "this INSTEAD of free-form 'should I X or Y?' prose when "
-            "you need a clear decision and have 2-6 concrete options. "
-            "The question card is shown to the user as a clean block "
-            "with the question, an optional 'why' explanation, and "
-            "clickable option buttons. The turn ENDS as soon as you "
-            "call this tool — do NOT compose additional answer text "
-            "after calling. A new agent turn fires when the user "
-            "picks a choice; you'll see their answer as the next "
-            "user message.\n\n"
-            "When NOT to use:\n"
-            "  • For trivial follow-ups inside a chat ('how are you "
-            "today?') — just write the prose.\n"
-            "  • When you can apply a trivial fix without asking "
-            "(typo, missing flag, retry on transient error).\n"
-            "  • When you're in supervisor mode — call "
-            "`complete_supervisor(decision='escalate', ...)` instead "
-            "so the chain seals cleanly."
+            "Ask the user a STRUCTURED multiple-choice question with "
+            "2-6 concrete options. Renders as a clean card with "
+            "clickable buttons. The turn ENDS on call — do not write "
+            "more text after; a new turn fires with the user's "
+            "choice as the next message.\n\n"
+            "DO NOT use for trivial chat follow-ups (just write "
+            "prose), for fixes you can apply trivially, or in "
+            "supervisor mode (use `complete_supervisor` "
+            "decision='escalate')."
         ),
         input_schema={
             "type": "object",
@@ -2700,17 +2592,15 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="complete_supervisor",
         description=(
-            "SUPERVISOR-MODE TERMINAL ACTION. Only valid inside a "
-            "supervisor turn (when the runtime is handling a "
-            "BACKGROUND_JOB_COMPLETED synthetic message). Use this "
-            "when the job chain is DONE (success) or needs to "
-            "ESCALATE (truly blocked, need user). Sends ONE final "
-            "Telegram DM to the original requester and seals the "
-            "chain so no further on_done re-opens the supervisor.\n\n"
-            "For RETRY decisions DON'T call this — just call "
+            "SUPERVISOR-MODE TERMINAL ACTION. Valid only in a "
+            "supervisor turn (BACKGROUND_JOB_COMPLETED synthetic "
+            "message). Use for 'done' (success) or 'escalate' "
+            "(blocked, need user). Sends ONE final Telegram DM to "
+            "the requester and seals the chain.\n\n"
+            "DO NOT call for retries — instead call "
             "`start_background_job` with the corrected command and "
-            "`parent_job_id` pointing at the just-failed job. The "
-            "supervisor will re-engage on the child's completion."
+            "`parent_job_id` of the failed job; supervisor "
+            "re-engages on the child's completion."
         ),
         input_schema={
             "type": "object",
