@@ -59,6 +59,10 @@ def test_lever_rebuild_when_graph_smaller_than_facts(monkeypatch):
     from backend.autonomic.types import LeverStatus
 
     monkeypatch.setattr(
+        "backend.autonomic.levers.graph_rebuild._is_legacy_schema",
+        lambda: False,  # v2 schema present — drift gate is the only check
+    )
+    monkeypatch.setattr(
         "backend.autonomic.levers.graph_rebuild._count_facts",
         lambda: 1453,
     )
@@ -112,6 +116,10 @@ def test_lever_handles_rebuild_exception(monkeypatch):
     from backend.autonomic.levers.graph_rebuild import FIRE_GRAPH_REBUILD
     from backend.autonomic.types import LeverStatus
 
+    monkeypatch.setattr(
+        "backend.autonomic.levers.graph_rebuild._is_legacy_schema",
+        lambda: False,
+    )
     monkeypatch.setattr(
         "backend.autonomic.levers.graph_rebuild._count_facts",
         lambda: 1453,
@@ -168,3 +176,65 @@ def test_drift_threshold_proportional(monkeypatch):
     assert gr._is_drifted(facts=1000, nodes=900) is False  # 90% — fine
     assert gr._is_drifted(facts=10, nodes=2) is True       # 20% — drift
     assert gr._is_drifted(facts=0, nodes=0) is False       # cold start
+
+
+def test_lever_skips_on_legacy_schema(monkeypatch, tmp_path):
+    """Prod 2026-05-27 graph.json is the legacy KnowledgeGraph format
+    (only `edges` dict, no `nodes`). The v2 rebuild would WIPE the
+    legacy edges produced by memory_extractor / knowledge_manager —
+    not all of which are derivable from memory_facts.jsonl. Until
+    writers are reconciled, the lever must skip on legacy schema."""
+    import json
+    from backend.autonomic.levers.graph_rebuild import FIRE_GRAPH_REBUILD
+    from backend.autonomic.types import LeverStatus
+
+    legacy_graph = tmp_path / "graph.json"
+    legacy_graph.write_text(json.dumps({
+        "edges": {
+            "user wife": [
+                {"target": "wife", "relation": "has",
+                 "note": "_memory", "weight": 0.9},
+            ],
+        },
+    }), encoding="utf-8")
+    monkeypatch.setattr(
+        "backend.paths.knowledge_dir", lambda: tmp_path,
+    )
+    # Rebuild itself should NOT be called.
+    rebuild_called = {"n": 0}
+    monkeypatch.setattr(
+        "backend.autonomic.levers.graph_rebuild._do_rebuild",
+        lambda: rebuild_called.update({"n": rebuild_called["n"] + 1}),
+    )
+
+    lever = FIRE_GRAPH_REBUILD()
+    report = lever.run({}, {})
+    assert report.status == LeverStatus.SKIPPED
+    assert "legacy_schema" in report.reason
+    assert rebuild_called["n"] == 0
+
+
+def test_lever_force_overrides_legacy_schema_skip(monkeypatch, tmp_path):
+    """Operator can explicitly opt into the migration via
+    `params={"force": True}` — the lever runs the rebuild even on
+    a legacy file. This is the migration trigger."""
+    import json
+    from backend.autonomic.levers.graph_rebuild import FIRE_GRAPH_REBUILD
+    from backend.autonomic.types import LeverStatus
+
+    legacy_graph = tmp_path / "graph.json"
+    legacy_graph.write_text(
+        json.dumps({"edges": {"x": [{"target": "y", "note": "_m"}]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "backend.paths.knowledge_dir", lambda: tmp_path,
+    )
+    monkeypatch.setattr(
+        "backend.autonomic.levers.graph_rebuild._do_rebuild",
+        lambda: {"facts": 100, "edges": 250},
+    )
+
+    lever = FIRE_GRAPH_REBUILD()
+    report = lever.run({"force": True}, {})
+    assert report.status == LeverStatus.SUCCESS
