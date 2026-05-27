@@ -2097,10 +2097,19 @@ def run_unified(
         _trace_tool_names: list[str] = []
         for _step in (agent._trace or []):
             tc = getattr(_step, "tool_call", None)
-            if tc and isinstance(tc, dict):
+            if tc is None:
+                continue
+            # `tool_call` is a `ToolCallDetail` Pydantic model on
+            # ThinkingStep — not a dict. Earlier code did
+            # `isinstance(tc, dict)` and silently produced an empty
+            # trace list, defeating the endpoint check. Pull `name`
+            # via attribute access; fall back to dict semantics for
+            # robustness across older trace formats.
+            name = getattr(tc, "name", None)
+            if name is None and isinstance(tc, dict):
                 name = tc.get("name")
-                if isinstance(name, str):
-                    _trace_tool_names.append(name)
+            if isinstance(name, str):
+                _trace_tool_names.append(name)
         _was_met = endpoint_met(
             task=task, answer=answer or "", tool_names=_trace_tool_names,
         )
