@@ -188,7 +188,7 @@ def test_tool_install_is_auto_registered():
 def test_autonomic_plus_immune_total_count():
     """D-09 had 19 (15 autonomic + 4 immune). Phase 11 added
     FIRE_SCHEDULED_MESSAGES → 20. 2026-05-27 audit T1 added
-    FIRE_EMBEDDING_BACKFILL + FIRE_GRAPH_REBUILD → 24."""
+    FIRE_EMBEDDING_BACKFILL + FIRE_GRAPH_REBUILD → 25."""
     from backend.autonomic.levers import (
         register_default_autonomic_levers,
         register_default_immune_levers,
@@ -196,5 +196,5 @@ def test_autonomic_plus_immune_total_count():
     clear_registry()
     register_default_immune_levers()
     register_default_autonomic_levers()
-    assert len(LeverRegistry.instance().names()) == 24
+    assert len(LeverRegistry.instance().names()) == 25
     clear_registry()

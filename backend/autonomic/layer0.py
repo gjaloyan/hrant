@@ -201,6 +201,13 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=86400.0,  # daily
         ),
         LayerZeroRule(
+            name="goal_executor_tick",
+            predicate=lambda s: True,
+            lever="FIRE_GOAL_EXECUTOR",
+            params={},
+            cooldown_seconds=86400.0,  # daily
+        ),
+        LayerZeroRule(
             # Phase 11D: deliver any due cross-speaker scheduled
             # messages. Placed LAST in the rule list so fall-through
             # ordering tests (test_d03_integration) keep their

@@ -78,6 +78,7 @@ def register_default_autonomic_levers() -> None:
     from .embedding_backfill import FIRE_EMBEDDING_BACKFILL
     from .finetune_qc import FIRE_FINETUNE_QC
     from .gap_detection import FIRE_GAP_DETECTION
+    from .goal_executor import FIRE_GOAL_EXECUTOR
     from .goal_propose import FIRE_GOAL_PROPOSE
     from .graph_maintenance import FIRE_GRAPH_MAINTENANCE
     from .graph_rebuild import FIRE_GRAPH_REBUILD
@@ -95,6 +96,7 @@ def register_default_autonomic_levers() -> None:
     from .scheduled_messages import FIRE_SCHEDULED_MESSAGES
     register_lever(FIRE_INTEGRITY_HEARTBEAT)
     register_lever(FIRE_GOAL_PROPOSE)
+    register_lever(FIRE_GOAL_EXECUTOR)
     register_lever(FIRE_MEMORY_CONSOLIDATION)
     register_lever(FIRE_EMBEDDING_BACKFILL)
     register_lever(FIRE_CAPABILITY_SCAN)
