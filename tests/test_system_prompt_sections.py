@@ -54,13 +54,17 @@ def test_sections_dict_matches_default_order():
     assert set(SECTIONS.keys()) == set(DEFAULT_ORDER)
 
 
-def test_assemble_with_no_overrides_returns_legacy_prompt():
-    """The refactor must be byte-equal to the legacy constant at
-    defaults — any cross-test that greps the prompt continues to work."""
+def test_assemble_still_returns_string_for_legacy_callers():
+    """V2 cutover (2026-05-27): `_UNIFIED_RULES_CORE` now snapshots
+    the v2 module-loader output via `build_prompt()`, while
+    `assemble()` still returns the v1 SECTIONS-based body. The
+    byte-equality invariant from the v1 section refactor no longer
+    holds; we only require that legacy callers of `assemble()`
+    still get a non-empty string."""
     from backend.system_prompt_sections import assemble
-    from backend.unified_agent import _UNIFIED_RULES_CORE
     out = assemble()
-    assert out == _UNIFIED_RULES_CORE
+    assert isinstance(out, str)
+    assert len(out) > 1000
 
 
 def test_assemble_with_section_override_replaces_body():

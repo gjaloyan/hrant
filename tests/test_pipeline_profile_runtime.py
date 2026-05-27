@@ -64,10 +64,12 @@ def test_reasoning_overrides_apply(isolated_store):
 
 
 def test_prompt_overrides_apply(isolated_store):
+    """V2 cutover (2026-05-27): overrides go in `modules` key, not
+    `sections`. Profile-driven body replacement still works."""
     from backend.pipeline_profile import PROFILES
     from backend.unified_agent import _unified_rules_core
     _seed_profile("bench", prompt_overrides={
-        "sections": {"iteration_ceiling": "## OVERRIDDEN\nhi\n"},
+        "modules": {"m8_safety_approval": "## OVERRIDDEN\nhi\n"},
     })
     PROFILES.set_active("bench")
     text = _unified_rules_core()
@@ -75,15 +77,16 @@ def test_prompt_overrides_apply(isolated_store):
 
 
 def test_prompt_section_skip_drops_it(isolated_store):
+    """V2 cutover: `None` value in `modules` map skips that module."""
     from backend.pipeline_profile import PROFILES
-    from backend.system_prompt_sections import SECTIONS
+    from backend.prompt_modules import MODULES
     from backend.unified_agent import _unified_rules_core
     _seed_profile("bench", prompt_overrides={
-        "sections": {"task_endpoint": None},
+        "modules": {"m4_job_tracking": None},
     })
     PROFILES.set_active("bench")
     text = _unified_rules_core()
-    body = SECTIONS["task_endpoint"]
+    body = MODULES["m4_job_tracking"].body
     assert body not in text
 
 

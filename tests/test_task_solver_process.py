@@ -14,8 +14,10 @@ import pytest
 
 
 def test_task_solver_process_section_present():
+    """V2 (2026-05-27): the section is now in M2 with the
+    'TASK SOLVER POLICY' header."""
     from backend.unified_agent import _UNIFIED_RULES
-    assert "Task Solver Process" in _UNIFIED_RULES
+    assert "TASK SOLVER" in _UNIFIED_RULES
 
 
 def test_task_solver_process_says_execution_first():
@@ -28,25 +30,29 @@ def test_task_solver_process_says_execution_first():
 
 
 def test_task_solver_process_forbids_capability_limitation_first():
-    """The bad-opening example must explicitly call out the failure
-    mode the user keeps seeing in production logs."""
+    """The bad-opening pattern (lead with 'I can't' / 'tools are
+    not available') must be explicitly forbidden. V2 wording lives
+    in M2's 'Anti-patterns' block — phrases evolve but the
+    'no leading refusal' rule must remain visible."""
     from backend.unified_agent import _UNIFIED_RULES
     low = _UNIFIED_RULES.lower()
-    # Anti-refusal language anchors.
-    assert "limitation" in low
-    assert "can't do" in low or "cannot" in low or "can not" in low
+    # The "no upfront refusal" anchor — any phrasing.
+    assert "i can't" in low or "cannot" in low or "can not" in low
+    # The anti-pattern frame — refusal / lecture / limit phrasing.
+    assert (
+        "anti-pattern" in low or "limitation" in low
+        or "refusal" in low or "lecture" in low
+    )
 
 
-def test_task_solver_process_walks_eight_phases():
-    """The body must enumerate the phases. Tests don't pin exact
-    wording (it can evolve), only that the markers are there."""
+def test_task_solver_process_walks_react_state_machine():
+    """V2: the 8 numbered phases were replaced by a ReAct state
+    machine with 5 verbs (PLAN / EXECUTE / VERIFY / ASK / FINALIZE).
+    Pin those verbs in M2."""
     from backend.unified_agent import _UNIFIED_RULES
-    body = _UNIFIED_RULES
-    # 8 numbered phases must each be marked at start-of-line.
-    for n in (1, 2, 3, 4, 5, 6, 7, 8):
-        assert f"\n{n}." in body or body.startswith(f"{n}."), (
-            f"missing phase {n} marker"
-        )
+    body = _UNIFIED_RULES.upper()
+    for verb in ("PLAN", "EXECUTE", "VERIFY", "ASK", "FINALIZE"):
+        assert verb in body, f"M2 state-machine missing verb {verb!r}"
 
 
 def test_task_solver_process_references_known_tools():
@@ -78,15 +84,16 @@ def test_task_solver_process_covers_install_via_terminal_exec():
 
 
 def test_task_solver_process_ask_when_blocked_rule():
-    """Phase 7 must restrict question-asking to specific scenarios so
-    the agent stops asking 'do you want me to try?' on routine tasks."""
+    """V2: the ask-when-blocked rule lives in M2 + M6. The
+    'blocked' anchor + the four acceptable triggers must still
+    be visible. V2 says 'interpretations' instead of 'ambig'."""
     from backend.unified_agent import _UNIFIED_RULES
     body = _UNIFIED_RULES
     low = body.lower()
-    assert "blocked" in low or "truly blocked" in low
-    # The 4 acceptable-question categories.
-    for marker in ("missing", "ambig", "destructive"):
-        assert marker in low, f"phase 7 should mention {marker!r}"
+    assert "blocked" in low
+    # The acceptable triggers — wording varies between v1/v2.
+    for marker in ("missing", "interpret", "destructive", "credential"):
+        assert marker in low, f"ask_user trigger {marker!r} missing"
 
 
 def test_task_solver_process_failure_format():
@@ -121,9 +128,19 @@ def test_phase_1_requires_plan_sentence():
 
 
 def test_operating_limits_section_present():
+    """V2: 'operating limits' was the v1 section header inside the
+    legacy TSP. In v2 the same rules live under M2's 'Loop
+    discipline' / 'Anti-patterns' / 'Long-running shell' blocks.
+    The behavioral content — attempt-bar threshold + sequencing
+    discipline — is what we pin, not the header text."""
     from backend.unified_agent import _UNIFIED_RULES
-    assert "TSP operating limits" in _UNIFIED_RULES or \
-           "operating limits" in _UNIFIED_RULES.lower()
+    low = _UNIFIED_RULES.lower()
+    # The discipline blocks (any one of these must be visible).
+    assert (
+        "loop discipline" in low
+        or "anti-pattern" in low
+        or "long-running" in low
+    )
 
 
 def test_attempt_bar_pinned_in_rules():
@@ -138,13 +155,25 @@ def test_attempt_bar_pinned_in_rules():
     assert "rewrit" in low or "automat" in low
 
 
+@pytest.mark.skip(
+    reason="V2 (2026-05-27): the 30/50/20 iteration-budget heuristic "
+    "was dropped during the audit refactor. The behavioral floor "
+    "(5+ inspect-without-execute → stop) is now in M2 anti-patterns; "
+    "the explicit percentage math added prompt weight without "
+    "measurably improving behavior."
+)
 def test_iteration_budget_30_50_20_present():
-    """The 30/50/20 phased budget is the planning heuristic — pin
-    its presence so a future edit doesn't quietly drop it."""
+    pass
+
+
+def test_inspect_without_execute_threshold_pinned():
+    """V2: M2 has a hard threshold for inspect-without-execute
+    that replaces the 30/50/20 heuristic — pin its existence."""
     from backend.unified_agent import _UNIFIED_RULES
-    body = _UNIFIED_RULES
-    # Either as percentages or as phases.
-    assert "30/50/20" in body or "30%" in body and "50%" in body
+    low = _UNIFIED_RULES.lower()
+    assert "inspect" in low
+    # The threshold (5+ inspect calls without execute).
+    assert "5+" in _UNIFIED_RULES or "5 " in low
 
 
 def test_iteration_budget_names_explore_execute_verify_phases():
@@ -156,15 +185,17 @@ def test_iteration_budget_names_explore_execute_verify_phases():
     assert "verify" in low or "deliver" in low
 
 
-def test_inspection_cheatsheet_in_tsp_section():
-    """Phase 2 inspection cheatsheet — quick lookup so the agent
-    doesn't reinvent inspection per turn."""
+def test_inspection_tool_lookup_in_rules():
+    """V2: the inspection 'cheatsheet' header was dropped; the
+    file-type→tool mappings live in M3 (tool routing) + the
+    `_RULES_FILE_TYPES` scenario block. Pin that the inspection
+    tools are still namable somewhere in _UNIFIED_RULES."""
     from backend.unified_agent import _UNIFIED_RULES
     body = _UNIFIED_RULES
-    assert "Inspection cheatsheet" in body or "cheatsheet" in body.lower()
-    # The file-type → tool mappings must be visible.
     for tool in ("preprocess_video", "analyze_image", "read_file", "run_python"):
-        assert tool in body, f"cheatsheet should name {tool!r}"
+        assert tool in body, (
+            f"inspection tool {tool!r} should still be visible in rules"
+        )
 
 
 @pytest.mark.skip(
