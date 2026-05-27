@@ -117,6 +117,22 @@ def test_terminal_exec_alone_does_not_count_as_execute():
     ) is False
 
 
+def test_run_python_alone_does_not_count_as_execute():
+    """run_python is the workaround-route that the 2026-05-27 smoke
+    test exposed: agent dodged `start_background_job` for "run
+    terminal-bench" by executing tasks inline with run_python and
+    claimed success. Like terminal_exec, run_python is ambiguous
+    (compute 2+2 vs write a file), so the endpoint check must NOT
+    accept it as a stand-in for proper job control."""
+    from backend.endpoint_check import endpoint_met
+    assert endpoint_met(
+        task="запусти terminal-bench",
+        answer="ran 3 tasks",
+        tool_names=["load_skill", "terminal_exec", "run_python",
+                    "run_python", "read_file", "run_python"],
+    ) is False
+
+
 def test_cap_confidence_helper_caps_only_when_endpoint_missed():
     """The verifier-side helper drops confidence to <=30 when the
     endpoint isn't met. When met (or non-action), the original

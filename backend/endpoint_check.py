@@ -23,15 +23,19 @@ confidence label changes.
 from __future__ import annotations
 
 
-# Tools whose presence in the trace counts as "the agent actually
-# did something". `terminal_exec` is deliberately excluded — it's
-# ambiguous (inspection vs execution by command, which we'd need
-# to parse). `run_python` is included because it's almost always
-# used for file-writes / computation in our codebase.
+# Tools whose presence in the trace UNAMBIGUOUSLY signals "the
+# agent took a state-changing action against the user's request".
+# Deliberately narrow: `terminal_exec` and `run_python` are
+# EXCLUDED because they can be inspection (`which X`, `2+2`) OR
+# execution (`pip install X`, `Path.write_text(...)`). Counting
+# them would falsely pass the endpoint check for an inspection-
+# only trace — which is exactly what the 2026-05-27 smoke test of
+# `run terminal-bench` revealed: 36 terminal_exec + 24 run_python
+# without one `start_background_job`, agent claimed "ran 3 tasks",
+# verifier accepted because run_python was in this set.
 _EXECUTE_TOOLS: frozenset[str] = frozenset({
     "set_setting",
     "save_user_fact",
-    "run_python",
     "start_background_job",
     "define_task_endpoint",
     "complete_supervisor",
