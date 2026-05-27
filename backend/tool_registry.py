@@ -35,9 +35,90 @@ _per_turn_call_cache: ContextVar[dict] = ContextVar(
 )
 
 
+# ─── Per-turn no-progress nudge ───────────────────────────────────
+#
+# Counts consecutive non-advancing tool calls. When the counter
+# hits NUDGE_THRESHOLD, the NEXT tool result has a "NUDGE" banner
+# prepended pointing the agent at execution / ask_user as the
+# escape hatch. The nudge fires once per cycle; an "advancing" tool
+# call resets the counter so subsequent inspections can earn
+# another nudge later in the same turn.
+#
+# Advancing = state-changing or terminal action: setting a config,
+# launching a job, asking the user, delegating, sending a message,
+# proposing a skill, etc. The remaining tools (read_file,
+# locate_symbol, search_knowledge, get_background_job, fetch_url,
+# analyze_image, preprocess_video, list_*) are pure inspection.
+# `terminal_exec` is treated as advancing because it's the primary
+# state-change vehicle; if the agent uses it for pure inspection
+# the dedup guard (above) catches the abuse.
+
+_ADVANCING_TOOLS = frozenset({
+    "set_setting",
+    "save_user_fact",
+    "terminal_exec",
+    "run_python",
+    "start_background_job",
+    "define_task_endpoint",
+    "schedule_message",
+    "grant_telegram_access",
+    "revoke_telegram_access",
+    "approve_pairing",
+    "propose_skill",
+    "propose_self_modification",
+    "complete_supervisor",
+    "delegate",
+    "ask_user",
+    "sandbox_exec",
+    "agent_browser",
+    "load_skill",
+    "load_tool_bundle",
+})
+
+NUDGE_THRESHOLD = 5
+
+_per_turn_nudge_state: ContextVar[dict] = ContextVar(
+    "per_turn_nudge_state",
+    default={"n_inspections": 0, "nudge_fired": False},
+)
+
+
 def reset_per_turn_call_cache() -> None:
-    """Clear the per-turn cache. Call at turn entry."""
+    """Clear all per-turn state (dedup cache + nudge counter).
+    Called at turn entry from `run_unified()`."""
     _per_turn_call_cache.set({})
+    _per_turn_nudge_state.set({"n_inspections": 0, "nudge_fired": False})
+
+
+_NUDGE_BANNER = (
+    "[NUDGE] You have made {n} tool calls without any state-changing "
+    "action this turn. Either:\n"
+    "  - pick an execute-class tool now (set_setting, start_background_job, "
+    "ask_user, write_file, MEDIA: emit, complete_supervisor); OR\n"
+    "  - call `ask_user(question, options)` if you are genuinely blocked.\n"
+    "Re-running inspections will not change the state of the world.\n"
+    "\n--- original tool result follows ---\n\n"
+)
+
+
+def _update_nudge_state_and_maybe_banner(tool_name: str) -> str:
+    """Update the inspection counter for `tool_name` and return a
+    nudge banner string if this call crosses the threshold (empty
+    string otherwise). The state-changing branch resets the counter
+    AND clears the "nudge_fired" latch."""
+    state = _per_turn_nudge_state.get()
+    if tool_name in _ADVANCING_TOOLS:
+        state["n_inspections"] = 0
+        state["nudge_fired"] = False
+        _per_turn_nudge_state.set(state)
+        return ""
+    state["n_inspections"] += 1
+    if state["n_inspections"] >= NUDGE_THRESHOLD and not state["nudge_fired"]:
+        state["nudge_fired"] = True
+        _per_turn_nudge_state.set(state)
+        return _NUDGE_BANNER.format(n=state["n_inspections"])
+    _per_turn_nudge_state.set(state)
+    return ""
 
 
 def _canonical_args(args: Optional[dict]) -> str:
@@ -186,6 +267,11 @@ class ToolRegistry:
         # share the ContextVar in this same turn.
         cache[cache_key] = (text, is_error)
         _per_turn_call_cache.set(cache)
+        # No-progress nudge: prepend a banner if we've crossed the
+        # inspect-without-execute threshold this turn.
+        banner = _update_nudge_state_and_maybe_banner(name)
+        if banner:
+            text = banner + text
         return text, is_error
 
 
