@@ -1374,15 +1374,27 @@ def _propose_self_modification_handler(
         }, ensure_ascii=False)
     try:
         from . import self_modifier
-        # The self_modifier API surface is module-level — different
-        # callers use it differently; we keep the bridge thin and
-        # let the agent's planner decide what details to provide.
-        proposal = self_modifier.propose(
-            description=description or "",
-            files=[f.strip() for f in (files or "").split(",") if f.strip()],
-            rationale=rationale or "",
-            requester=speaker_id or "webui:default",
-        )
+        file_list = [f.strip() for f in (files or "").split(",") if f.strip()]
+        # Audit 2026-05-28: prefer `propose_with_diff` when a target
+        # file is given — it actually calls the LLM to generate the
+        # diff. The legacy `propose()` creates an empty shell, which
+        # the owner could then approve via Telegram thinking real
+        # code would be applied. This routes the common case
+        # through the diff generator.
+        if file_list:
+            proposal = self_modifier.propose_with_diff(
+                description=description or "",
+                module=file_list[0],
+                rationale=rationale or "",
+                requester=speaker_id or "webui:default",
+            )
+        else:
+            proposal = self_modifier.propose(
+                description=description or "",
+                files=file_list,
+                rationale=rationale or "",
+                requester=speaker_id or "webui:default",
+            )
     except AttributeError:
         # propose() doesn't exist yet — graceful fallback so the
         # tool surface is stable even before the self_modifier
@@ -1401,11 +1413,33 @@ def _propose_self_modification_handler(
             "ok": False,
             "error": f"{type(e).__name__}: {e}",
         }, ensure_ascii=False)
+    if proposal is None:
+        return json.dumps({
+            "ok": False,
+            "error": "self_modifier.propose returned None (storage failure)",
+        }, ensure_ascii=False)
+
+    has_diff = bool(
+        (getattr(proposal, "old_code", "") or "").strip()
+        or (getattr(proposal, "new_code", "") or "").strip()
+    )
     return json.dumps({
         "ok": True,
-        "proposal_id": getattr(proposal, "id", "") if proposal else "",
+        "proposal_id": getattr(proposal, "id", ""),
         "description": description,
         "files": files,
+        "has_diff": has_diff,
+        "status": getattr(proposal, "status", "pending"),
+        "review_note": getattr(proposal, "review_note", ""),
+        "note": (
+            "Diff auto-generated — owner can approve in WebUI."
+            if has_diff else
+            "Proposal registered as a shell (no diff). The LLM did "
+            "not produce a concrete patch — either no target module "
+            "was given, the file is missing, or the LLM failed. "
+            "Re-run with a specific `files` arg, OR call "
+            "`SELF_MODIFIER.analyze_module(<module>)` manually."
+        ),
     }, ensure_ascii=False)
 
 

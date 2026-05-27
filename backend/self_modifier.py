@@ -615,6 +615,207 @@ def propose(
         return None
 
 
+# ─── Targeted diff generation (audit 2026-05-28) ─────────────────────
+
+
+_TARGETED_DIFF_SYSTEM = """You are a precise code-patch generator for a Python AI agent.
+
+Given a module's source code AND the owner's specific request, produce
+ONE concrete diff that implements the request. The owner has already
+decided WHAT to change; your job is to produce the exact code.
+
+Return strictly JSON:
+{
+  "title": "one-line summary of the patch",
+  "old_code": "exact code snippet to replace (must appear verbatim in the source)",
+  "new_code": "replacement code (or '' if this is a pure-addition with no old_code)",
+  "impact": "performance" | "reliability" | "clarity" | "feature",
+  "risk": "low" | "medium" | "high",
+  "reasoning": "why this implements the owner's request",
+  "test_commands": ["python -m pytest tests/test_X.py -q"],
+  "success_criteria": "one-line assertion of what passing looks like",
+  "rollback_plan": "one-line shell snippet to revert"
+}
+
+Rules:
+- `old_code` MUST appear character-for-character in the provided source,
+  unless the patch is a pure addition (then leave `old_code` empty).
+- `new_code` empty AND `old_code` empty is INVALID — that's not a patch.
+- Keep `old_code` under ~30 lines. If the change spans more, split into
+  multiple JSON objects in an `improvements` array (same shape as
+  ANALYZE_SYSTEM's output).
+- `test_commands` REQUIRED — at minimum `["python -m py_compile <file>"]`.
+- For pure additions (new file / new function appended), `old_code` is ""
+  and `new_code` carries the full text to insert; the applier appends
+  to end-of-file when `old_code` is empty.
+
+DO NOT propose changes unrelated to the owner's request. Stay scoped.
+"""
+
+
+def propose_with_diff(
+    *,
+    description: str,
+    module: str,
+    rationale: str = "",
+    requester: str = "webui:default",
+) -> Optional[Proposal]:
+    """Generate an actual diff for the owner's request via LLM,
+    then register it as a Proposal with non-empty old_code/new_code.
+
+    Audit 2026-05-28 found `propose()` creates empty shells that
+    can be approved without real code. This function is the proper
+    path the `propose_self_modification` tool now uses: it reads
+    the target module, asks the LLM to produce a targeted diff for
+    THIS request, and saves the result.
+
+    On LLM failure or empty diff, falls back to the legacy shell
+    behaviour (so the user still sees their request in the queue)
+    but stamps `review_note` with the failure cause.
+    """
+    if not module:
+        return propose(
+            description=description, rationale=rationale,
+            requester=requester,
+        )
+
+    # Resolve module file (accepts "backend/x.py", "x.py", "x")
+    module_name = module
+    if module_name.startswith("backend/"):
+        module_name = module_name[len("backend/"):]
+    if not module_name.endswith(".py"):
+        module_name += ".py"
+    module_path = SELF_MODIFIER._backend_dir / module_name
+    if not module_path.exists():
+        # Can't generate a diff if the file doesn't exist — fall
+        # back to a shell with an explanatory review_note.
+        shell = propose(
+            description=description, files=[f"backend/{module_name}"],
+            rationale=rationale, requester=requester,
+        )
+        if shell is not None:
+            shell.review_note = (
+                f"requested by {requester}; diff not generated: "
+                f"module backend/{module_name} not found on disk"
+            )
+            SELF_MODIFIER._save()
+        return shell
+
+    try:
+        code = module_path.read_text(encoding="utf-8")
+    except OSError as e:
+        log.warning("propose_with_diff: read failed: %s", e)
+        return propose(
+            description=description, files=[f"backend/{module_name}"],
+            rationale=rationale, requester=requester,
+        )
+
+    # Truncate following the same head+tail strategy as
+    # analyze_module so we don't drop module-bottom definitions.
+    max_total = 30000
+    if len(code) > max_total:
+        head_chars = 22000
+        tail_chars = max_total - head_chars - 80
+        omitted = len(code) - head_chars - tail_chars
+        code = (
+            f"{code[:head_chars]}\n"
+            f"# ... [{omitted} chars omitted from middle of file] ...\n"
+            f"{code[-tail_chars:]}"
+        )
+
+    user_prompt = (
+        f"OWNER REQUEST:\n{description}\n\n"
+        + (f"RATIONALE:\n{rationale}\n\n" if rationale else "")
+        + f"TARGET MODULE: backend/{module_name}\n\n"
+        + f"SOURCE CODE:\n```python\n{code}\n```\n\n"
+        + "Produce ONE targeted diff implementing the owner's request."
+    )
+
+    try:
+        data = router().call_json(
+            TaskType.TASK_ANALYSIS,
+            _TARGETED_DIFF_SYSTEM,
+            user_prompt,
+            max_tokens=2000,
+            temperature=0.2,
+        )
+    except LLMError as e:
+        log.warning("propose_with_diff: LLM failed: %s", e)
+        shell = propose(
+            description=description, files=[f"backend/{module_name}"],
+            rationale=rationale, requester=requester,
+        )
+        if shell is not None:
+            shell.review_note = (
+                f"requested by {requester}; diff generation failed: "
+                f"{type(e).__name__}: {str(e)[:120]}"
+            )
+            SELF_MODIFIER._save()
+        return shell
+
+    # The system prompt asks for ONE object, but tolerate `improvements`
+    # array shape too (matches the ANALYZE_SYSTEM contract — same
+    # diff schema, just wrapped).
+    if isinstance(data, dict) and "improvements" in data:
+        candidates = data.get("improvements") or []
+    else:
+        candidates = [data] if isinstance(data, dict) else []
+
+    if not candidates:
+        shell = propose(
+            description=description, files=[f"backend/{module_name}"],
+            rationale=rationale, requester=requester,
+        )
+        if shell is not None:
+            shell.review_note = (
+                f"requested by {requester}; LLM returned no diff candidates"
+            )
+            SELF_MODIFIER._save()
+        return shell
+
+    # Take the first candidate. If old_code AND new_code are BOTH
+    # empty, this isn't a valid patch — fall back to shell with note.
+    imp = candidates[0]
+    old_code = str(imp.get("old_code") or "")
+    new_code = str(imp.get("new_code") or "")
+    if not old_code and not new_code:
+        shell = propose(
+            description=description, files=[f"backend/{module_name}"],
+            rationale=rationale, requester=requester,
+        )
+        if shell is not None:
+            shell.review_note = (
+                f"requested by {requester}; LLM produced empty diff "
+                "(both old_code and new_code blank)"
+            )
+            SELF_MODIFIER._save()
+        return shell
+
+    raw_tests = imp.get("test_commands") or []
+    if isinstance(raw_tests, str):
+        raw_tests = [raw_tests]
+
+    proposal = Proposal(
+        module=f"backend/{module_name}",
+        title=imp.get("title", description[:80] or "(no title)"),
+        description=description or imp.get("description", ""),
+        old_code=old_code,
+        new_code=new_code,
+        impact=imp.get("impact", ""),
+        risk=imp.get("risk", "low"),
+        reasoning=rationale or imp.get("reasoning", ""),
+        status="pending",
+        review_note=f"requested by {requester} (diff auto-generated)",
+        test_commands=[str(t) for t in raw_tests if str(t).strip()],
+        success_criteria=imp.get("success_criteria", ""),
+        rollback_plan=imp.get("rollback_plan", ""),
+    )
+    SELF_MODIFIER._proposals.append(proposal)
+    SELF_MODIFIER._save()
+    _fire_proposal_created(proposal)
+    return proposal
+
+
 # ─── Inline-keyboard callback bridge ────────────────────────────────
 
 
@@ -664,6 +865,29 @@ def _register_proposal_callback() -> None:
             if len(parts) < 2:
                 return _tg.CallbackResult(ok=False, toast="malformed apply")
             pid = parts[1]
+            # Empty-diff safeguard (audit 2026-05-28). A proposal
+            # whose `old_code` AND `new_code` are both blank is a
+            # description-only shell — approving it via Telegram
+            # was misleading because no code change actually
+            # follows. Refuse with a clear toast so the owner
+            # asks the agent to regenerate the proposal with a
+            # real diff (or call SELF_MODIFIER.analyze_module).
+            p_check = next(
+                (x for x in SELF_MODIFIER._proposals if x.id == pid),
+                None,
+            )
+            if p_check is not None:
+                old = (p_check.old_code or "").strip()
+                new = (p_check.new_code or "").strip()
+                if not old and not new:
+                    return _tg.CallbackResult(
+                        ok=False,
+                        toast=(
+                            "proposal has no diff yet — ask the "
+                            "agent to regenerate with a target file"
+                        ),
+                        clear_keyboard=False,
+                    )
             # Approve first (no-op if already approved), then apply.
             SELF_MODIFIER.approve(pid, note=f"approved via Telegram by {clicker_id}")
             res = SELF_MODIFIER.apply(pid)

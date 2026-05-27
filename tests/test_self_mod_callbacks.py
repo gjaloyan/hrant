@@ -205,9 +205,14 @@ def test_prop_diff_for_missing_proposal_returns_error(isolated_state, isolated_s
 
 
 def test_prop_apply_fails_cleanly_when_no_diff(isolated_state, isolated_self_mod):
-    """A pending proposal without old_code/new_code can't be applied
-    — the handler should surface SelfModifier.apply's error in the
-    edited message instead of leaving the user wondering."""
+    """A pending proposal without old_code/new_code can't be applied.
+
+    Audit 2026-05-28 added an EARLY refusal at the Telegram callback
+    layer (before approve() runs) so the toast is concrete: "proposal
+    has no diff yet — ask the agent to regenerate". Previously the
+    refusal happened deeper in apply() after approve() had already
+    flipped the status; the new path keeps the proposal at pending
+    until a real diff exists."""
     from backend import tg_interactive, self_modifier
     from backend.roles import set_role
     set_role("telegram:111", "owner")
@@ -217,7 +222,20 @@ def test_prop_apply_fails_cleanly_when_no_diff(isolated_state, isolated_self_mod
         ctx={"clicker_speaker_id": "telegram:111"},
     )
     assert res.ok is False
-    assert "Apply failed" in (res.edited_text or "") or "failed" in (res.toast or "").lower()
+    msg = (res.toast or "") + " " + (res.edited_text or "")
+    assert (
+        "no diff" in msg.lower()
+        or "Apply failed" in msg
+        or "failed" in msg.lower()
+    )
+    # Proposal stays pending — the early refusal must NOT have
+    # flipped status to approved (which would let a later apply
+    # attempt by any caller succeed before the diff is fixed).
+    p_after = next(
+        x for x in self_modifier.SELF_MODIFIER._proposals
+        if x.id == proposal.id
+    )
+    assert p_after.status == "pending"
 
 
 # ─── CallbackResult.followup_text shape ──────────────────────────────

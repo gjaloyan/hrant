@@ -2182,6 +2182,50 @@ def run_unified(
     except Exception as exc:
         log.debug("unified: endpoint check failed: %s", exc)
 
+    # propose_self_modification empty-diff check (audit 2026-05-28).
+    # When the agent claims to have submitted a proposal but the
+    # underlying record has no actual diff (old_code AND new_code
+    # both empty), that's misleading — the agent reported success,
+    # but the owner could approve a shell that won't apply anything.
+    # Cap confidence and flag the contradiction so the WebUI / daily
+    # report explains the dip.
+    try:
+        psm_in_trace = False
+        for _step in (agent._trace or []):
+            tc = getattr(_step, "tool_call", None)
+            if tc is None:
+                continue
+            name = getattr(tc, "name", None)
+            if name == "propose_self_modification":
+                psm_in_trace = True
+                break
+        if psm_in_trace:
+            from . import self_modifier as _smod
+            empty_props: list[str] = []
+            # Check the most-recently-created proposals — there's no
+            # explicit linkage from the tool result back to the
+            # proposal id without parsing the result JSON, so we
+            # scan the latest 3 records (matches typical per-turn cap).
+            for p in (_smod.SELF_MODIFIER._proposals or [])[-3:]:
+                if not (p.old_code or "").strip() and \
+                        not (p.new_code or "").strip():
+                    empty_props.append(p.id)
+            if empty_props:
+                try:
+                    vr.contradictions.append(
+                        "empty_propose_self_modification: proposal(s) "
+                        f"{empty_props} have no diff (old_code AND "
+                        "new_code blank). The agent reported "
+                        "'proposal submitted' but the record is a "
+                        "description-only shell — approve will be a "
+                        "no-op until a real diff is generated."
+                    )
+                except Exception:
+                    pass
+                vr.confidence = min(vr.confidence, 30)
+    except Exception as exc:
+        log.debug("unified: psm empty-diff check failed: %s", exc)
+
     # Goals + conversation persistence + evaluator log.
     try:
         GOALS.tick_interaction()
