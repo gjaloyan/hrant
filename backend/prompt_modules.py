@@ -355,6 +355,18 @@ _M5_BODY = """\
 Scan AVAILABLE SKILLS by description. If a skill matches:
   `load_skill(name)` → read body → apply.
 
+**MANDATORY load**: if the user's request contains an action verb
+(`run`, `launch`, `запусти`, …) AND the catalog has a skill whose
+`triggers` overlap the request OR whose `description` semantically
+matches, you MUST call `load_skill(name)` BEFORE composing any
+domain-specific command. Audit 2026-05-28 caught this: agent
+saw `terminal-bench-run` in the catalog, skipped loading it,
+trial-error'd 5 CLI variations because the skill body's "CLI
+traps" list (--limit not supported, etc.) was never read.
+
+Skill bodies carry hard-won knowledge from prior runs. Reading
+them ONCE is cheaper than 5 retries × 3000 tokens each.
+
 ## Universal fallback — unknown file / unknown task
 
 If no skill matches AND the task is unknown territory (unknown
