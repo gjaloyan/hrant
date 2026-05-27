@@ -162,5 +162,6 @@ def test_default_levers_registered_via_startup(tmp_path: Path, monkeypatch):
     build_scheduler()
     names = LeverRegistry.instance().names()
     # D-09 (4 immune + 15 autonomic) + Phase 11 (FIRE_SCHEDULED_MESSAGES) = 20
-    assert len(names) == 20
+    # 2026-05-27 audit T1 added FIRE_EMBEDDING_BACKFILL → 21.
+    assert len(names) == 21
     clear_registry()

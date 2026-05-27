@@ -321,6 +321,47 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("Consolidation scheduler failed to start: %s", e)
 
+    # Embedder startup probe + coverage report. Silent backend
+    # failures used to hide here — the audit 2026-05-27 found 13/16
+    # notes embedded because llama-cpp was unreachable at note-create
+    # time and nothing logged. Probe + WARN early so the operator
+    # can see it; the FIRE_EMBEDDING_BACKFILL lever fixes the gap
+    # on next tick.
+    try:
+        from .embedder import EMBEDDER
+        from .embedding_backfill import missing_count as _emb_missing
+        EMBEDDER.reset()
+        status = EMBEDDER.status()
+        backend = status.get("backend")
+        if backend in (None, "disabled"):
+            log.warning(
+                "Embedder unavailable (backend=%r, last_error=%r). "
+                "Semantic search disabled; FIRE_EMBEDDING_BACKFILL will "
+                "retry. Configure via /api/memory/embeddings/config.",
+                backend, status.get("last_error"),
+            )
+        else:
+            try:
+                coverage = _emb_missing()
+            except Exception as cov_exc:
+                coverage = {"missing": "?", "embedded": "?", "error": str(cov_exc)}
+            log.info(
+                "Embedder ready: backend=%s model=%s dim=%s "
+                "coverage=%s/%s embedded (missing=%s).",
+                backend, status.get("model"), status.get("dim"),
+                coverage.get("embedded"), coverage.get("total_notes"),
+                coverage.get("missing"),
+            )
+            missing = coverage.get("missing")
+            if isinstance(missing, int) and missing > 0:
+                log.warning(
+                    "Embedder has %d notes without vectors. The "
+                    "FIRE_EMBEDDING_BACKFILL lever will catch them "
+                    "on its next tick.", missing,
+                )
+    except Exception as e:
+        log.warning("Embedder startup probe failed: %s", e)
+
     yield
     # --- shutdown ---
     log.info("Server shutting down — stopping channels...")
