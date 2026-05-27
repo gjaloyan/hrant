@@ -82,6 +82,7 @@ def register_default_autonomic_levers() -> None:
     from .graph_maintenance import FIRE_GRAPH_MAINTENANCE
     from .graph_rebuild import FIRE_GRAPH_REBUILD
     from .integrity_heartbeat import FIRE_INTEGRITY_HEARTBEAT
+    from .log_rotation import FIRE_LOG_ROTATION
     from .memory_consolidation import FIRE_MEMORY_CONSOLIDATION
     from .model_eval import FIRE_MODEL_EVAL
     from .note_curation import FIRE_NOTE_CURATION
@@ -105,6 +106,7 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_MODEL_EVAL)
     register_lever(FIRE_SESSION_ARCHIVE)
     register_lever(FIRE_STALE_PROPOSALS)
+    register_lever(FIRE_LOG_ROTATION)
     register_lever(FIRE_COST_AUDIT)
     register_lever(FIRE_SELF_REFLECTION)
     register_lever(FIRE_FINETUNE_QC)
