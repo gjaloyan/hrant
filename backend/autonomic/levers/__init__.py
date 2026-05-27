@@ -80,6 +80,7 @@ def register_default_autonomic_levers() -> None:
     from .gap_detection import FIRE_GAP_DETECTION
     from .goal_propose import FIRE_GOAL_PROPOSE
     from .graph_maintenance import FIRE_GRAPH_MAINTENANCE
+    from .graph_rebuild import FIRE_GRAPH_REBUILD
     from .integrity_heartbeat import FIRE_INTEGRITY_HEARTBEAT
     from .memory_consolidation import FIRE_MEMORY_CONSOLIDATION
     from .model_eval import FIRE_MODEL_EVAL
@@ -97,6 +98,7 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_CAPABILITY_SCAN)
     register_lever(FIRE_SELF_STUDY)
     register_lever(FIRE_GRAPH_MAINTENANCE)
+    register_lever(FIRE_GRAPH_REBUILD)
     register_lever(FIRE_PROACTIVE_LEARN)
     register_lever(FIRE_NOTE_CURATION)
     register_lever(FIRE_MODEL_EVAL)
