@@ -1261,6 +1261,12 @@ def run_unified(
     # before it can even act. Regular turns start with the empty
     # default and load on demand.
     _po_set_loaded_bundles({"bench"} if supervisor_mode else set())
+    # Reset the per-turn duplicate-call cache so each turn starts
+    # with a clean slate (the cache is what makes the second
+    # `terminal_exec("same cmd")` short-circuit with a DUPLICATE
+    # CALL warning instead of re-running the handler).
+    from .tool_registry import reset_per_turn_call_cache as _ptc_reset
+    _ptc_reset()
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles

@@ -13,8 +13,42 @@ LLM должна это видеть и реагировать, не падат�
 """
 from __future__ import annotations
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
+
+
+# ─── Per-turn duplicate-call cache ────────────────────────────────
+#
+# Tracks (tool_name, canonical_args) → (text, is_error) within a
+# single turn. The second call with identical args is short-
+# circuited with a synthesized "DUPLICATE CALL" result that
+# embeds the prior output. Reset at turn entry via
+# `reset_per_turn_call_cache()` from `run_unified()`.
+#
+# Catches the 2026-05-26 terminal-bench failure mode where the
+# agent issued 17 near-identical `terminal_exec` probes + 2×
+# `load_skill` + 2× `load_tool_bundle` in one turn.
+
+_per_turn_call_cache: ContextVar[dict] = ContextVar(
+    "per_turn_call_cache", default={}
+)
+
+
+def reset_per_turn_call_cache() -> None:
+    """Clear the per-turn cache. Call at turn entry."""
+    _per_turn_call_cache.set({})
+
+
+def _canonical_args(args: Optional[dict]) -> str:
+    """Stable string key for an args dict. `None` and `{}` map to
+    the same key so callers that pass either get deduped together."""
+    if not args:
+        return "{}"
+    try:
+        return json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        return repr(sorted(args.items()))
 
 
 @dataclass
@@ -113,6 +147,25 @@ class ToolRegistry:
         tool = self.tools.get(name)
         if not tool:
             return f"[tool '{name}' not found in registry]", True
+
+        # Per-turn duplicate-call guard. If the exact (name, args)
+        # was already issued this turn, short-circuit with the prior
+        # result + a "DUPLICATE CALL" hint so the LLM sees the
+        # output but doesn't waste tokens / time re-running the
+        # handler. The handler is NOT invoked for duplicates.
+        cache = _per_turn_call_cache.get()
+        cache_key = (name, _canonical_args(arguments))
+        if cache_key in cache:
+            prev_text, prev_is_error = cache[cache_key]
+            synth = (
+                f"[DUPLICATE CALL] You already invoked {name!r} with "
+                f"these exact arguments this turn. The previous result "
+                f"follows; use it instead of re-probing — running the "
+                f"same tool with the same inputs will not change the "
+                f"output.\n\n{prev_text}"
+            )
+            return synth, prev_is_error
+
         try:
             result = tool.handler(**(arguments or {}))
         except TypeError as e:
@@ -127,7 +180,13 @@ class ToolRegistry:
                 text = str(result)
         else:
             text = str(result)
-        return text, _looks_like_error(name, text)
+        is_error = _looks_like_error(name, text)
+        # Store in cache for the rest of this turn. Mutate-then-set
+        # so we don't lose interleaved writes from other tools that
+        # share the ContextVar in this same turn.
+        cache[cache_key] = (text, is_error)
+        _per_turn_call_cache.set(cache)
+        return text, is_error
 
 
 # Patterns at the start of a result string that indicate the tool

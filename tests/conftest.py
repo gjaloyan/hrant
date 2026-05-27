@@ -8,6 +8,23 @@ sys.path.insert(0, str(ROOT))
 
 
 @pytest.fixture(autouse=True)
+def _reset_per_turn_call_cache():
+    """The per-turn duplicate-call cache in tool_registry is a
+    ContextVar — without an explicit reset between pytest tests it
+    accumulates and a test that uses the SAME tool name + args as
+    an earlier test gets a stale 'DUPLICATE CALL' result. The
+    production reset point is `run_unified()` at turn entry; for
+    tests we reset before each test."""
+    try:
+        from backend.tool_registry import reset_per_turn_call_cache
+    except ImportError:
+        return
+    reset_per_turn_call_cache()
+    yield
+    reset_per_turn_call_cache()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_active_model(monkeypatch):
     """Don't let the user's runtime active-model selection leak into tests.
 
