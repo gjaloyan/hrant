@@ -265,10 +265,31 @@ missing", X is a PREREQUISITE, not a success criterion.
 
 ## On launch refusal (`error: prerequisites_unmet`)
 
-Satisfy the prerequisite (generate the missing file, install the
-dep) or `ask_user`. Never retry the same launch unchanged.
-Loosen a prerequisite only when you can show its check_cmd had a
-bug — not as escape hatch.
+First-line action when the gate refuses: **PROBE the filesystem
+for the actual paths the prereq was checking**. Audit 2026-05-28
+caught this: agent wrote `command -v harbor` as prereq, gate
+said "unmet", agent escalated with "Harbor not installed" — but
+harbor was at `.venv/bin/harbor`, just not on global PATH. The
+prereq's check_cmd was WRONG, not the world.
+
+Recovery sequence:
+  1. Look at the failed prereq's check_cmd in the error detail.
+  2. `terminal_exec` to probe what actually exists:
+       `find / -name '<binary>' 2>/dev/null | head -5`
+       `ls -la <suspected/path>`
+       `which <binary>` AND `command -v <binary>`
+  3. If reality differs from the check_cmd → call
+     `define_task_endpoint` again with CORRECTED check_cmds and a
+     new endpoint_id, then `start_background_job` with the new
+     endpoint.
+  4. ONLY if the prereq genuinely can't be satisfied (binary not
+     installed anywhere, credential missing, etc.) → `ask_user`
+     or escalate.
+
+Escalating on `prerequisites_unmet` WITHOUT probing reality is
+the failure mode this rule exists to prevent. Loosening a
+critical prereq away is only OK when you can show concrete
+evidence it had a bug.
 
 ## Supervisor turn (BACKGROUND_JOB_COMPLETED message)
 
