@@ -53,16 +53,17 @@ def test_run_unified_resets_loaded_bundles_at_entry(monkeypatch):
     )
 
 
-def test_supervisor_turn_auto_loads_bench_bundle(monkeypatch):
-    """Supervisor turns need bench-bundle tools (start_background_job
-    for retry, complete_supervisor for done/escalate) immediately
-    available — otherwise the agent burns an iteration on
-    `load_tool_bundle` before it can act on the completion event."""
+def test_supervisor_turn_does_not_auto_load_any_bundle(monkeypatch):
+    """V2 (2026-05-27): the former supervisor → {"bench"} auto-load
+    was retired when start_background_job / define_task_endpoint /
+    complete_supervisor moved to BASE_TOOLS. Supervisor turns now
+    start with the empty bundle set, same as task turns — the
+    needed tools are already always-on."""
     from backend import tool_bundles as _tb
     from backend import context_compressor as _cc
     from backend import unified_agent as _ua
 
-    _tb.set_loaded_bundles(set())  # cold start
+    _tb.set_loaded_bundles({"media"})  # leak from a previous turn
 
     captured: dict = {}
 
@@ -86,10 +87,33 @@ def test_supervisor_turn_auto_loads_bench_bundle(monkeypatch):
     except Exception:
         pass
 
-    assert captured.get("bundles_at_entry") == {"bench"}, (
-        "supervisor turn must start with the bench bundle preloaded; "
+    assert captured.get("bundles_at_entry") == set(), (
+        "supervisor turn must start with NO bundles loaded "
+        "(jobs tools are in BASE_TOOLS now); "
         f"got {captured.get('bundles_at_entry')!r}"
     )
+
+
+def test_jobs_control_tools_are_in_base_schema():
+    """The three former `bench`-bundle members must show up in the
+    cold-start tool schema. Without them, supervisor turns can't
+    retry/complete and any task that needs `start_background_job`
+    would have to load a bundle first."""
+    from backend.tool_bundles import BASE_TOOLS, set_loaded_bundles
+    from backend.tool_registry import get_registry
+
+    set_loaded_bundles(set())
+    registry = get_registry()
+    schema = registry.to_anthropic_list(filter_names=BASE_TOOLS)
+    names = {t["name"] for t in schema}
+    for tool in (
+        "start_background_job", "define_task_endpoint",
+        "complete_supervisor",
+    ):
+        assert tool in names, (
+            f"{tool!r} must be available in base schema for "
+            "supervisor / long-running turns"
+        )
 
 
 def test_current_tool_schema_for_turn_starts_with_base_only():
@@ -132,7 +156,7 @@ def test_current_tool_schema_expands_after_bundle_load():
     )
     from backend.tool_registry import get_registry
 
-    set_loaded_bundles({"bench"})  # simulate handler having run
+    set_loaded_bundles({"admin"})  # simulate handler having run
     try:
         registry = get_registry()
         allowed = set(BASE_TOOLS) | expand_loaded(get_loaded_bundles())
@@ -140,10 +164,10 @@ def test_current_tool_schema_expands_after_bundle_load():
         names = {t["name"] for t in schema}
         # Base still present
         assert "terminal_exec" in names
-        # bench bundle members present
-        for member in TOOL_BUNDLES["bench"]:
+        # admin bundle members present
+        for member in TOOL_BUNDLES["admin"]:
             assert member in names, (
-                f"loaded bundle 'bench' should expose {member!r}"
+                f"loaded bundle 'admin' should expose {member!r}"
             )
     finally:
         set_loaded_bundles(set())

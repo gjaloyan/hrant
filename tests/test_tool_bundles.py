@@ -5,8 +5,12 @@ import pytest
 
 
 def test_bundles_constant_shape():
+    """V2 (2026-05-27): the former `bench` bundle was dissolved.
+    `start_background_job` / `define_task_endpoint` /
+    `complete_supervisor` moved to BASE_TOOLS so supervisor turns
+    work without a bundle dance."""
     from backend.tool_bundles import TOOL_BUNDLES
-    assert set(TOOL_BUNDLES.keys()) == {"bench", "admin", "self", "media"}
+    assert set(TOOL_BUNDLES.keys()) == {"admin", "self", "media"}
     for name, members in TOOL_BUNDLES.items():
         assert isinstance(members, list), f"{name} value must be list"
         assert all(isinstance(m, str) for m in members)
@@ -21,9 +25,13 @@ def test_bundle_descriptions_present_for_every_bundle():
 
 
 def test_base_tools_constant_shape():
+    """V2: jobs-control tools (start_background_job /
+    define_task_endpoint / complete_supervisor) are now in
+    BASE_TOOLS so any turn — including supervisor — can use them
+    without `load_tool_bundle` first."""
     from backend.tool_bundles import BASE_TOOLS
     assert isinstance(BASE_TOOLS, frozenset)
-    assert len(BASE_TOOLS) >= 16
+    assert len(BASE_TOOLS) >= 19
     assert "load_tool_bundle" in BASE_TOOLS, (
         "the meta-tool must be in base — otherwise LLM can't unlock bundles"
     )
@@ -33,6 +41,9 @@ def test_base_tools_constant_shape():
         "save_to_workspace", "save_user_fact", "list_background_jobs",
         "get_background_job", "analyze_image", "run_python",
         "locate_symbol",
+        # V2: jobs control promoted from `bench` bundle to base.
+        "start_background_job", "define_task_endpoint",
+        "complete_supervisor",
     ):
         assert tool in BASE_TOOLS, f"{tool} missing from BASE_TOOLS"
 
@@ -62,13 +73,13 @@ def test_expand_loaded_empty():
 
 def test_expand_loaded_single_bundle():
     from backend.tool_bundles import expand_loaded, TOOL_BUNDLES
-    assert expand_loaded({"bench"}) == set(TOOL_BUNDLES["bench"])
+    assert expand_loaded({"admin"}) == set(TOOL_BUNDLES["admin"])
 
 
 def test_expand_loaded_multiple_bundles_union():
     from backend.tool_bundles import expand_loaded, TOOL_BUNDLES
-    out = expand_loaded({"bench", "self"})
-    assert out == set(TOOL_BUNDLES["bench"]) | set(TOOL_BUNDLES["self"])
+    out = expand_loaded({"admin", "self"})
+    assert out == set(TOOL_BUNDLES["admin"]) | set(TOOL_BUNDLES["self"])
 
 
 def test_expand_loaded_unknown_bundle_ignored():
@@ -83,17 +94,17 @@ def test_contextvar_default_empty():
 
 def test_contextvar_set_and_get_roundtrip():
     from backend.tool_bundles import set_loaded_bundles, get_loaded_bundles
-    set_loaded_bundles({"bench"})
-    assert get_loaded_bundles() == {"bench"}
+    set_loaded_bundles({"admin"})
+    assert get_loaded_bundles() == {"admin"}
     set_loaded_bundles(set())
 
 
 def test_contextvar_returns_copy_not_reference():
     from backend.tool_bundles import set_loaded_bundles, get_loaded_bundles
-    set_loaded_bundles({"bench"})
+    set_loaded_bundles({"admin"})
     snapshot = get_loaded_bundles()
     snapshot.add("admin")
-    assert get_loaded_bundles() == {"bench"}
+    assert get_loaded_bundles() == {"admin"}
     set_loaded_bundles(set())
 
 
@@ -105,13 +116,13 @@ def test_handler_loads_valid_bundle():
     import json
     set_loaded_bundles(set())
     try:
-        raw = _load_tool_bundle_handler(name="bench")
+        raw = _load_tool_bundle_handler(name="admin")
         body = json.loads(raw)
         assert body["ok"] is True
-        assert body["name"] == "bench"
-        assert set(body["added"]) == set(TOOL_BUNDLES["bench"])
+        assert body["name"] == "admin"
+        assert set(body["added"]) == set(TOOL_BUNDLES["admin"])
         assert "next iteration" in body["note"].lower()
-        assert get_loaded_bundles() == {"bench"}
+        assert get_loaded_bundles() == {"admin"}
     finally:
         set_loaded_bundles(set())
 
@@ -124,8 +135,8 @@ def test_handler_idempotent_on_repeat():
     import json
     set_loaded_bundles(set())
     try:
-        _load_tool_bundle_handler(name="bench")
-        raw = _load_tool_bundle_handler(name="bench")
+        _load_tool_bundle_handler(name="admin")
+        raw = _load_tool_bundle_handler(name="admin")
         body = json.loads(raw)
         assert body["ok"] is True
         assert body["added"] == []
@@ -158,9 +169,9 @@ def test_handler_loads_multiple_independent_bundles():
     from backend.tool_bundles import set_loaded_bundles, get_loaded_bundles
     set_loaded_bundles(set())
     try:
-        _load_tool_bundle_handler(name="bench")
         _load_tool_bundle_handler(name="admin")
-        assert get_loaded_bundles() == {"bench", "admin"}
+        _load_tool_bundle_handler(name="self")
+        assert get_loaded_bundles() == {"admin", "self"}
     finally:
         set_loaded_bundles(set())
 

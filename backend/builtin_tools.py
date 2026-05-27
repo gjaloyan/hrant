@@ -1942,22 +1942,23 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="load_tool_bundle",
         description=(
-            "Add a named tool bundle to this turn's loadout. Only 16 "
-            "base tools are loaded by default; call this to unlock a "
-            "niche bundle when the task needs one. The unlocked tools "
-            "are available from the NEXT iteration of this turn. "
-            "Available bundles: bench (long-running jobs / "
-            "benchmarks), admin (config / Telegram-access changes), "
-            "self (propose new skill / code-mod / delegate), media "
-            "(agent_browser, sandbox_exec). Loaded bundles reset at "
-            "turn end."
+            "Add a named tool bundle to this turn's loadout. Base "
+            "tools — including long-running job control "
+            "(start_background_job / define_task_endpoint / "
+            "complete_supervisor) — are always available. Call this "
+            "to unlock a niche bundle. The unlocked tools are "
+            "available from the NEXT iteration of this turn. "
+            "Available bundles: admin (config / Telegram-access "
+            "changes), self (propose new skill / code-mod / "
+            "delegate), media (agent_browser, sandbox_exec). Loaded "
+            "bundles reset at turn end."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "enum": ["bench", "admin", "self", "media"],
+                    "enum": ["admin", "self", "media"],
                     "description": "Bundle id to load.",
                 },
             },

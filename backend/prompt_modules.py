@@ -227,12 +227,14 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
 
 # ─── M4: Job Tracking Policy ──────────────────────────────────────
 #
-# Loads for task + supervisor turns (skips chat). M4 must be in the
-# prompt BEFORE the agent loads the bench bundle — otherwise the
-# agent gets the tools but not the protocol, which was the exact
-# failure mode on the 2026-05-26 terminal-bench turns (17 inspect
-# calls, never `define_task_endpoint`). Cost: ~480 tok on task
-# turns; saves much more on failed long-running launches.
+# Loads for task + supervisor turns (skips chat). M4 must be in
+# the prompt whenever long-running launches are possible —
+# otherwise the agent has the tools (start_background_job /
+# define_task_endpoint / complete_supervisor are always in
+# BASE_TOOLS as of 2026-05-27) but not the protocol, which was
+# the exact failure mode on the 2026-05-26 terminal-bench turns
+# (17 inspect calls, never `define_task_endpoint`). Cost ~480 tok
+# on task turns; saves much more on failed long-running launches.
 
 _M4_BODY = """\
 # JOB TRACKING POLICY

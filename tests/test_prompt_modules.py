@@ -82,19 +82,19 @@ def test_select_modules_filters_by_loaded_bundles(monkeypatch):
     """Bundle predicate matches if ANY of the listed bundles is
     currently loaded — modules can depend on >= 1 bundle."""
     from backend import prompt_modules as pm
-    bench_or_admin = pm.Module(
-        name="bench_or_admin", body="x",
-        requires_bundle=frozenset({"bench", "admin"}),
+    self_or_admin = pm.Module(
+        name="self_or_admin", body="x",
+        requires_bundle=frozenset({"self", "admin"}),
     )
-    monkeypatch.setattr(pm, "MODULES", {"bench_or_admin": bench_or_admin})
-    monkeypatch.setattr(pm, "DEFAULT_ORDER", ["bench_or_admin"])
+    monkeypatch.setattr(pm, "MODULES", {"self_or_admin": self_or_admin})
+    monkeypatch.setattr(pm, "DEFAULT_ORDER", ["self_or_admin"])
 
     assert pm._select_modules(
-        pm.TurnContext(loaded_bundles=frozenset({"bench"}))
-    ) == [bench_or_admin]
+        pm.TurnContext(loaded_bundles=frozenset({"self"}))
+    ) == [self_or_admin]
     assert pm._select_modules(
         pm.TurnContext(loaded_bundles=frozenset({"admin"}))
-    ) == [bench_or_admin]
+    ) == [self_or_admin]
     assert pm._select_modules(
         pm.TurnContext(loaded_bundles=frozenset({"media"}))
     ) == []

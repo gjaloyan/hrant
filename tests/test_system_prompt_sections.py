@@ -26,15 +26,16 @@ def test_default_order_has_ten_known_sections():
     ]
 
 
-def test_tool_bundles_section_mentions_all_four_bundles():
-    """The catalog block must explicitly name all four bundles —
-    otherwise the LLM won't know they exist."""
+def test_tool_bundles_section_mentions_all_bundles():
+    """The catalog block must name every current bundle so the LLM
+    knows what it can unlock. V2 (2026-05-27): the former `bench`
+    bundle was dissolved — its tools live in BASE_TOOLS now."""
     from backend.system_prompt_sections import SECTIONS
+    from backend.tool_bundles import TOOL_BUNDLES
     body = SECTIONS["tool_bundles"]
-    for bundle in ("bench", "admin", "self", "media"):
+    for bundle in TOOL_BUNDLES.keys():
         assert bundle in body, f"bundle {bundle!r} missing from prompt"
     assert "load_tool_bundle" in body
-    assert "16 tools" in body or "base" in body.lower()
 
 
 def test_re_prompt_resilience_section_addresses_refusal_loop():

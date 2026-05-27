@@ -15,11 +15,11 @@ from typing import Final
 
 
 TOOL_BUNDLES: Final[dict[str, list[str]]] = {
-    "bench": [
-        "start_background_job",
-        "define_task_endpoint",
-        "complete_supervisor",
-    ],
+    # The former `bench` bundle was dissolved 2026-05-27:
+    # start_background_job / define_task_endpoint /
+    # complete_supervisor moved to BASE_TOOLS so supervisor turns
+    # and any long-running launch work without a bundle dance.
+    # See the audit follow-up commit.
     "admin": [
         "set_setting",
         "grant_telegram_access",
@@ -42,12 +42,6 @@ TOOL_BUNDLES: Final[dict[str, list[str]]] = {
 
 
 BUNDLE_DESCRIPTIONS: Final[dict[str, str]] = {
-    "bench": (
-        "Launch long-running benchmarks / background jobs "
-        "(start_background_job), define their success criteria + "
-        "prerequisites (define_task_endpoint), finalise supervisor "
-        "turns (complete_supervisor)."
-    ),
     "admin": (
         "Mutate agent configuration (set_setting), manage Telegram "
         "user access (grant / revoke / list / approve_pairing / "
@@ -82,8 +76,12 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "analyze_image",
     # Interaction
     "ask_user", "save_user_fact",
-    # Jobs (read-only — write side is in `bench` bundle)
+    # Jobs — full read+write so supervisor turns + any long-running
+    # launch work without a `load_tool_bundle("bench")` dance.
+    # Moved here 2026-05-27 (the former `bench` bundle is gone).
     "list_background_jobs", "get_background_job",
+    "start_background_job", "define_task_endpoint",
+    "complete_supervisor",
     # Meta — the LLM's discovery hook for bundles
     "load_tool_bundle",
 })
