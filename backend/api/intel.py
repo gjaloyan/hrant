@@ -4,7 +4,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from ..analogy_engine import ANALOGIES
+# analogy_engine retired 2026-05-27 (audit T3.1).
 from ..embedder import EMBEDDER, load_config as load_embedder_config, save_config as save_embedder_config
 from ..embedding_backfill import backfill_embeddings, missing_count
 from ..evaluator import EVALUATOR
@@ -218,10 +218,7 @@ def memory_recall(body: MemoryRecallRequest):
     return {"facts": facts, "block": block}
 
 
-# ---- analogy engine ----
-@router.get("/api/analogies")
-def analogy_list():
-    return {"patterns": ANALOGIES.all_patterns(), "stats": ANALOGIES.stats()}
+# `/api/analogies` endpoint retired 2026-05-27 with analogy_engine.
 
 
 # ---- embeddings / vector store ----

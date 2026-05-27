@@ -44,7 +44,11 @@ from .models import (
     VerificationResult,
 )
 from .dev_capture import redact_prompt, save_dev_capture, new_request_id
-from .analogy_engine import ANALOGIES
+# `from .analogy_engine import ANALOGIES` was retired 2026-05-27
+# (audit T3.1). Pattern extraction fired only in the legacy
+# non-unified Agent.run path; unified_agent never wired it in.
+# The patterns.json file went stale 2026-05-16. Removed module +
+# WebUI endpoint with this commit.
 from .evaluator import EVALUATOR, EvalEntry
 from .goals import GOALS
 from .memory_extractor import MEMORY
@@ -219,7 +223,7 @@ def _capabilities_block(compact: bool = False) -> str:
         # --- AGI modules (ALREADY IMPLEMENTED) ---
         "backend/meta_learner.py": "IMPLEMENTED: failure analysis, pattern extraction, corrective goal creation",
         "backend/evaluator.py": "IMPLEMENTED: per-day evaluation stats, confidence tracking, daily reports",
-        "backend/analogy_engine.py": "IMPLEMENTED: pattern extraction from solutions, cross-domain analogy search, context_block for solver",
+        # analogy_engine retired 2026-05-27 — see commit log.
         "backend/self_modifier.py": "IMPLEMENTED: code analysis, patch proposals (approve/reject/apply), safe self-modification",
         "backend/goals.py": "IMPLEMENTED: goal manager with auto-suggestions from knowledge gaps, proactive learning",
         # --- Tools & skills ---
@@ -1560,15 +1564,7 @@ class Agent(
                 f"Q&A добавлено в finetune queue [{added.metadata.category}]",
             )
 
-        # Extract reusable pattern from high-confidence answers
-        if vr.confidence >= 90 and not vr.contradictions:
-            try:
-                domain = notes[0].frontmatter.category if notes else ""
-                pattern = ANALOGIES.extract_pattern(task, answer, domain)
-                if pattern:
-                    self.progress("pattern", f"extracted: {pattern.pattern[:60]}")
-            except Exception:
-                pass
+        # analogy_engine pattern extraction retired 2026-05-27.
 
     # Шаг 7 — cleanup (нечего выгружать, заметки уже на диске)
     def _cleanup(self) -> None:

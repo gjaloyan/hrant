@@ -72,8 +72,14 @@ def _build_tick(tmp_path: Path):
 
 
 def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
-    """Three consecutive ticks should fire integrity, goal_propose, consolidation
-    in that order — the fall-through cooldown behavior in Layer0Engine.
+    """Three consecutive ticks should fire integrity, goal_propose,
+    capability_scan in that order — the fall-through cooldown
+    behavior in Layer0Engine.
+
+    Audit T3.2 (2026-05-27): the old test asserted consolidation
+    fired third. That rule was retired (dedicated consolidation
+    scheduler handles daily runs). capability_scan is now next
+    after goal_propose.
     """
     # Seed state
     sessions_path = tmp_path / "sessions.json"
@@ -102,11 +108,11 @@ def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
     # Isolate each lever's filesystem access via params injection
     from backend.autonomic.levers.integrity_heartbeat import FIRE_INTEGRITY_HEARTBEAT
     from backend.autonomic.levers.goal_propose import FIRE_GOAL_PROPOSE
-    from backend.autonomic.levers.memory_consolidation import FIRE_MEMORY_CONSOLIDATION
+    from backend.autonomic.levers.capability_scan import FIRE_CAPABILITY_SCAN
 
     orig_int = FIRE_INTEGRITY_HEARTBEAT.run
     orig_goal = FIRE_GOAL_PROPOSE.run
-    orig_mem = FIRE_MEMORY_CONSOLIDATION.run
+    orig_cap = FIRE_CAPABILITY_SCAN.run
 
     def int_run(self, params, context):
         p = dict(params)
@@ -118,12 +124,9 @@ def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
         p.setdefault("gaps_path", str(tmp_path / "gaps.json"))
         return orig_goal(self, p, context)
 
-    def mem_run(self, params, context):
-        p = dict(params)
-        p.setdefault("sessions_path", str(sessions_path))
-        p.setdefault("user_md_path", str(user_md_path))
-        p.setdefault("memory_facts_path", str(facts_path))
-        return orig_mem(self, p, context)
+    def cap_run(self, params, context):
+        # capability_scan reads / writes under cwd; safe to call as-is.
+        return orig_cap(self, params, context)
 
     class _FakeGoal:
         def __init__(self, description: str):
@@ -132,10 +135,8 @@ def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
 
     with patch.object(FIRE_INTEGRITY_HEARTBEAT, "run", int_run), \
          patch.object(FIRE_GOAL_PROPOSE, "run", goal_run), \
-         patch.object(FIRE_MEMORY_CONSOLIDATION, "run", mem_run), \
-         patch("backend.autonomic.levers.memory_consolidation.router") as mock_router, \
+         patch.object(FIRE_CAPABILITY_SCAN, "run", cap_run), \
          patch("backend.autonomic.levers.goal_propose.GOALS") as mock_goals:
-        mock_router.return_value.call_json.return_value = _fake_consolidation_response()
         mock_goals.suggest_from_gaps.side_effect = lambda gaps, max_goals=3: [_FakeGoal(f"Learn about: {g['topic']}") for g in gaps[:max_goals]]
 
         # Three consecutive ticks
@@ -149,20 +150,13 @@ def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
     assert fired_levers == [
         "FIRE_INTEGRITY_HEARTBEAT",
         "FIRE_GOAL_PROPOSE",
-        "FIRE_MEMORY_CONSOLIDATION",
+        "FIRE_CAPABILITY_SCAN",
     ]
 
-    # Verify consolidation wrote to all three memory tiers
-    saved_sessions = json.loads(sessions_path.read_text(encoding="utf-8"))
-    assert saved_sessions["sessions"][0]["consolidated"] is True
-    assert "project plans" in saved_sessions["sessions"][0]["summary"].lower()
-
-    user_md_content = user_md_path.read_text(encoding="utf-8")
-    assert "User works on autonomic agent" in user_md_content
-
-    facts_lines = facts_path.read_text(encoding="utf-8").splitlines()
-    assert len(facts_lines) == 1
-    assert json.loads(facts_lines[0])["summary"] == "agent uses FastAPI and pytest"
+    # Audit T3.2 (2026-05-27): consolidation_tick was retired, so
+    # the per-tier write-assertions for sessions/user.md/facts moved
+    # to the dedicated consolidation-pipeline tests. The order check
+    # above is the meaningful invariant for this scheduler test.
 
 
 def test_reactive_rule_wins_over_scheduled(tmp_path: Path):

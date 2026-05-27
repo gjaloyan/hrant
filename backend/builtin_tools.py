@@ -268,27 +268,45 @@ def _save_user_fact_handler(category: str, fact: str) -> str:
 
 
 def _search_knowledge_handler(query: str, limit: int = 5) -> str:
-    """Hybrid-search across notes + knowledge graph + vector store.
-    Returns a JSON list of `{topic, score, source, snippet}`. Use
-    this BEFORE answering questions about anything you might already
-    have a note on — it's cheaper than reading the whole file and
-    avoids hallucinating about content you've forgotten."""
+    """Hybrid-search across notes + knowledge graph + vector store
+    AND the per-fact vector store (audit T3.3, 2026-05-27). Returns
+    JSON `{results: [...]}` where each item has `topic`/`category`/
+    `source` (notes) or `summary`/`category`/`source="fact"` (facts).
+    Use this BEFORE answering — it surfaces both stored notes and
+    extracted facts."""
     from .hybrid_searcher import HYBRID
+    from .fact_search import search_facts
+    limit_n = max(1, min(int(limit) or 5, 20))
+    out: list[dict] = []
     try:
-        hits = HYBRID.search(query, limit=max(1, min(int(limit) or 5, 20)))
+        for h in HYBRID.search(query, limit=limit_n):
+            entry = h.entry
+            out.append({
+                "topic": entry.topic,
+                "category": entry.category,
+                "path": str(entry.path),
+                "score": round(h.score, 3),
+                "source": h.source,
+            })
     except Exception as e:
-        return json.dumps({"ok": False, "error": str(e), "results": []}, ensure_ascii=False)
-    out = []
-    for h in hits:
-        entry = h.entry
-        out.append({
-            "topic": entry.topic,
-            "category": entry.category,
-            "path": str(entry.path),
-            "score": round(h.score, 3),
-            "source": h.source,
-        })
-    return json.dumps({"ok": True, "query": query, "results": out}, ensure_ascii=False)
+        out.append({"source": "notes_error", "error": str(e)})
+    # Per-fact semantic search runs alongside. Embedder unavailable
+    # → empty list, never raises.
+    try:
+        for f in search_facts(query, limit=limit_n):
+            out.append({
+                "summary": f["summary"],
+                "category": f.get("category"),
+                "score": f["score"],
+                "ts": f.get("ts"),
+                "tags": f.get("tags") or [],
+                "source": "fact",
+            })
+    except Exception as e:
+        out.append({"source": "facts_error", "error": str(e)})
+    return json.dumps(
+        {"ok": True, "query": query, "results": out}, ensure_ascii=False,
+    )
 
 
 def _analyze_image_handler(sha256: str, question: str) -> str:

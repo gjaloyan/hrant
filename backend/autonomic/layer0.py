@@ -109,13 +109,14 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=3600.0,
         ),
-        LayerZeroRule(
-            name="consolidation_tick",
-            predicate=lambda s: True,
-            lever="FIRE_MEMORY_CONSOLIDATION",
-            params={},
-            cooldown_seconds=86400.0,
-        ),
+        # `consolidation_tick` was retired 2026-05-27 (audit T3.2).
+        # The dedicated consolidation scheduler in
+        # `backend/consolidation/scheduler.py` already runs daily +
+        # idle-aware. The layer-0 rule fired ~86 times/day and was
+        # ~99% no-ops ("no_unconsolidated_sessions"), polluting the
+        # lever_log without doing additional work. The lever class
+        # stays registered so it can still be invoked manually via
+        # the autonomic API.
         LayerZeroRule(
             name="capability_scan_tick",
             predicate=lambda s: True,
@@ -204,6 +205,13 @@ def default_rules() -> list[LayerZeroRule]:
             name="goal_executor_tick",
             predicate=lambda s: True,
             lever="FIRE_GOAL_EXECUTOR",
+            params={},
+            cooldown_seconds=86400.0,  # daily
+        ),
+        LayerZeroRule(
+            name="fact_embedding_backfill_tick",
+            predicate=lambda s: True,
+            lever="FIRE_FACT_EMBEDDING_BACKFILL",
             params={},
             cooldown_seconds=86400.0,  # daily
         ),

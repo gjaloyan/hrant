@@ -76,6 +76,7 @@ def register_default_autonomic_levers() -> None:
     from .capability_scan import FIRE_CAPABILITY_SCAN
     from .cost_audit import FIRE_COST_AUDIT
     from .embedding_backfill import FIRE_EMBEDDING_BACKFILL
+    from .fact_embedding_backfill import FIRE_FACT_EMBEDDING_BACKFILL
     from .finetune_qc import FIRE_FINETUNE_QC
     from .gap_detection import FIRE_GAP_DETECTION
     from .goal_executor import FIRE_GOAL_EXECUTOR
@@ -99,6 +100,7 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_GOAL_EXECUTOR)
     register_lever(FIRE_MEMORY_CONSOLIDATION)
     register_lever(FIRE_EMBEDDING_BACKFILL)
+    register_lever(FIRE_FACT_EMBEDDING_BACKFILL)
     register_lever(FIRE_CAPABILITY_SCAN)
     register_lever(FIRE_SELF_STUDY)
     register_lever(FIRE_GRAPH_MAINTENANCE)

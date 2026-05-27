@@ -161,8 +161,10 @@ def test_default_rules_schedule_tick_cooldowns():
     assert rules["integrity_tick"].cooldown_seconds == 300.0
     assert rules["goal_propose_tick"].lever == "FIRE_GOAL_PROPOSE"
     assert rules["goal_propose_tick"].cooldown_seconds == 3600.0
-    assert rules["consolidation_tick"].lever == "FIRE_MEMORY_CONSOLIDATION"
-    assert rules["consolidation_tick"].cooldown_seconds == 86400.0
+    # Audit T3.2 (2026-05-27): consolidation_tick retired — the
+    # dedicated `backend/consolidation/scheduler.py` runs daily +
+    # idle-aware, the layer-0 rule was 99% no-ops.
+    assert "consolidation_tick" not in rules
 
 
 def test_default_rules_schedule_ticks_predicate_always_true():
@@ -171,7 +173,6 @@ def test_default_rules_schedule_ticks_predicate_always_true():
     snap = _snapshot()
     assert rules["integrity_tick"].predicate(snap) is True
     assert rules["goal_propose_tick"].predicate(snap) is True
-    assert rules["consolidation_tick"].predicate(snap) is True
 
 
 def test_default_rules_d04_cooldowns():
@@ -186,20 +187,23 @@ def test_default_rules_d04_cooldowns():
 def test_default_rules_count_after_phase11():
     """D-07 added 18; Phase 11 added scheduled_messages_tick → 19.
     Audit T2.5 added log_rotation_tick → 20.
-    Audit T2.2 added goal_executor_tick → 21."""
+    Audit T2.2 added goal_executor_tick → 21.
+    Audit T3.2 dropped consolidation_tick → 20.
+    Audit T3.3 added fact_embedding_backfill_tick → 21."""
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
     assert len(rules) == 21
 
 
 def test_default_rules_d07_scheduled_rules_present():
-    """D-07 added self_reflection / finetune_qc / gap_detection in
-    that order. After audit T2.x the tail is:
-    self_reflection / finetune_qc / gap_detection / log_rotation /
-    goal_executor / scheduled_messages — D-07 triplet at -6..-3."""
+    """D-07 added self_reflection / finetune_qc / gap_detection.
+    Audit T3.3 final tail: self_reflection / finetune_qc /
+    gap_detection / log_rotation / goal_executor /
+    fact_embedding_backfill / scheduled_messages — D-07 triplet
+    at -7..-4."""
     from backend.autonomic.layer0 import default_rules
     names = [r.name for r in default_rules()]
-    assert names[-6:-3] == [
+    assert names[-7:-4] == [
         "self_reflection_tick", "finetune_qc_tick", "gap_detection_tick",
     ]
     assert names[-1] == "scheduled_messages_tick"

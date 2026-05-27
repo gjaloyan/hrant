@@ -48,8 +48,8 @@ def test_status_lists_all_levers(client):
     data = resp.json()
     assert data["enabled"] is True
     # D-09 had 19; Phase 11 added FIRE_SCHEDULED_MESSAGES → 20;
-    # 2026-05-27 audit T1 added FIRE_EMBEDDING_BACKFILL + FIRE_GRAPH_REBUILD → 25.
-    assert len(data["registered_levers"]) == 25
+    # 2026-05-27 audit T1 added FIRE_EMBEDDING_BACKFILL + FIRE_GRAPH_REBUILD → 26.
+    assert len(data["registered_levers"]) == 26
     assert "FIRE_TOOL_INSTALL" in data["registered_levers"]
     assert "FIRE_SCHEDULED_MESSAGES" in data["registered_levers"]
     assert "FIRE_EMBEDDING_BACKFILL" in data["registered_levers"]
