@@ -203,7 +203,12 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
                                          approve_pairing /
                                          list_pending_pairings /
                                          list_telegram_access
-  multi-step research / review         → delegate(role, task)
+  multi-step research / web survey     → delegate("researcher", task)
+                                         — not an in-loop fetch_url
+                                         chain. >5 web calls in one
+                                         turn = should have delegated.
+  code review / second opinion         → delegate("reviewer", task)
+  explain unfamiliar codebase          → delegate("coder", task)
   send a file to the user              → MEDIA:/absolute/path line
   structural code change requested     → propose_self_modification
                                          (NOT for 1-line tweaks)
@@ -222,6 +227,9 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
   verbatim — the result will not change.
 - After loading a skill or a bundle, USE the new capability that
   same turn. Loading without using is wasted iterations.
+- Heavy web research (>5 pages) belongs in `delegate("researcher",
+  ...)`. Fanning fetch_url in your own loop burns the iteration
+  budget for nothing.
 """
 
 

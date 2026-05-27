@@ -403,12 +403,13 @@ def test_telegram_voice_small_combo():
 
 def test_default_prompt_under_global_budget():
     """The whole composed default-ctx prompt should land well under
-    the legacy 22 KB monolith. Current target: ~10-11 KB (M4 is
-    now always-on for task turns, adding ~480 chars over the bench-
-    gated design). Hard cap 12 KB to catch gross bloat early."""
+    the legacy 22 KB monolith. Current target ~12-13 KB after the
+    2026-05-27 audit added M4 (task/supervisor always-on) and the
+    M3 delegate-by-role table. Hard cap 14 KB to catch gross bloat
+    while leaving room for further per-role decision-tree growth."""
     from backend.prompt_modules import build_prompt
     out = build_prompt()
-    assert len(out) < 12_000, (
+    assert len(out) < 14_000, (
         f"default prompt grew to {len(out)} chars — splits or "
         "trims needed"
     )
