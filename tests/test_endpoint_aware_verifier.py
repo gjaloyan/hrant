@@ -117,6 +117,58 @@ def test_terminal_exec_alone_does_not_count_as_execute():
     ) is False
 
 
+def test_honest_diagnose_then_propose_passes_endpoint_check():
+    """The 2026-05-28 smoke ('can you benchmark yourself? if not,
+    propose how to make it possible') exposed a false-positive:
+    'make' triggered action-verb, but the correct answer was
+    diagnose-then-propose (no execute, no MEDIA). Treating it as
+    endpoint_not_met punished the right behavior. This pattern
+    must pass."""
+    from backend.endpoint_check import endpoint_met
+    answer = (
+        "I cannot benchmark myself directly on Terminal-Bench right "
+        "now, but I can explain why and propose a concrete path.\n\n"
+        "## Option A: minimal adapter (~30 min)\n"
+        "A thin CLI wrapper that accepts Harbor's task JSON...\n\n"
+        "## Option B: full integration\n"
+        "Add a --harbor-mode flag...\n\n"
+        "Recommendation: Option A first."
+    )
+    assert endpoint_met(
+        task="can you benchmark yourself? if not, propose how to "
+             "make it possible",
+        answer=answer,
+        tool_names=[],
+    ) is True
+
+
+def test_honest_diagnose_without_proposal_still_fails():
+    """A bare 'I can't' with no alternative offered is NOT a
+    legitimate diagnose-then-propose response — that's the old
+    failure mode the verifier should still catch."""
+    from backend.endpoint_check import endpoint_met
+    assert endpoint_met(
+        task="run terminal-bench",
+        answer="I cannot do that.",
+        tool_names=[],
+    ) is False
+
+
+def test_russian_diagnose_propose_recognised():
+    """The honest-diagnose pattern works for Russian responses too."""
+    from backend.endpoint_check import endpoint_met
+    answer = (
+        "Я не могу запустить бенч прямо сейчас, потому что нет "
+        "CLI-обёртки. Предлагаю Вариант A — написать тонкий "
+        "адаптер."
+    )
+    assert endpoint_met(
+        task="запусти бенч",
+        answer=answer,
+        tool_names=[],
+    ) is True
+
+
 def test_run_python_alone_does_not_count_as_execute():
     """run_python is the workaround-route that the 2026-05-27 smoke
     test exposed: agent dodged `start_background_job` for "run

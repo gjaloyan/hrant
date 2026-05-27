@@ -91,6 +91,47 @@ def _detect_action_verbs(text: str) -> bool:
     return any(tok in low for tok in _ACTION_VERB_TOKENS)
 
 
+_DIAGNOSTIC_NEGATIONS: tuple[str, ...] = (
+    "i cannot", "i can't", "i can not",
+    "currently not possible", "not currently possible",
+    "not yet possible", "i'm not able", "i am not able",
+    "не могу", "пока не могу",
+)
+_PROPOSAL_CUES: tuple[str, ...] = (
+    "propose", "option a", "option b", "would let", "want me to",
+    "recommend", "i can draft", "i can write", "i can build",
+    "путь a", "путь b", "вариант a", "вариант b", "могу составить",
+    "предлагаю",
+)
+
+
+def _looks_like_honest_diagnostic(answer: str) -> bool:
+    """True when the answer is the legitimate
+    'honestly-diagnose-then-propose' response shape:
+
+      1. Opens with an explicit inability statement ("I cannot X",
+         "не могу X").
+      2. Follows up with a concrete proposal / alternative
+         ("Option A", "Want me to draft…", "I recommend…").
+
+    The 2026-05-28 smoke ("can you benchmark yourself? if not,
+    propose how") exposed a false-positive: my action-verb
+    detector caught "make it possible" in the user's question,
+    but the agent's correct answer was diagnose-then-propose
+    (no execute tool, no MEDIA: line). Treating it as
+    endpoint_not_met punished the right behavior.
+
+    This predicate carves out that shape so honest no-but-here's-
+    a-plan answers pass."""
+    if not answer:
+        return False
+    head = answer.strip()[:300].lower()
+    if not any(p in head for p in _DIAGNOSTIC_NEGATIONS):
+        return False
+    full = answer.lower()
+    return any(p in full for p in _PROPOSAL_CUES)
+
+
 def endpoint_met(
     *, task: str, answer: str, tool_names: list[str],
 ) -> bool:
@@ -99,7 +140,10 @@ def endpoint_met(
     Non-action requests automatically pass (no expectation of
     state change). Action requests require either:
       - at least one execute-class tool call, OR
-      - a `MEDIA:` line in the answer (file delivery convention).
+      - a `MEDIA:` line in the answer (file delivery convention),
+      - OR the answer is a legitimate
+        'honestly-diagnose-then-propose' response (the agent
+        admits inability and offers a concrete alternative).
     """
     if not _detect_action_verbs(task):
         return True
@@ -107,6 +151,8 @@ def endpoint_met(
         if name in _EXECUTE_TOOLS:
             return True
     if answer and "MEDIA:" in answer:
+        return True
+    if _looks_like_honest_diagnostic(answer):
         return True
     return False
 
