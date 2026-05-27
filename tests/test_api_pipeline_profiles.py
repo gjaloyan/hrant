@@ -124,12 +124,18 @@ def test_endpoints_require_owner():
 
 
 def test_system_prompt_sections_endpoint(isolated_store, owner_client):
+    """V2 (2026-05-27): endpoint returns the v2 module catalogue
+    (`modules` key) plus a `sections` alias for WebUI back-compat.
+    The first module is `m1_core_behavior`."""
     r = owner_client.get("/api/pipeline-profiles/system-prompt-sections")
     assert r.status_code == 200
     body = r.json()
-    assert "order" in body and "sections" in body
-    assert "header" in body["order"]
-    assert isinstance(body["sections"]["header"], str)
+    assert "order" in body and "modules" in body
+    assert "m1_core_behavior" in body["order"]
+    assert isinstance(body["modules"]["m1_core_behavior"], str)
+    # `sections` alias still present until WebUI rolls forward.
+    assert "sections" in body
+    assert body["sections"] == body["modules"]
 
 
 def test_history_empty_for_new_profile(isolated_store, owner_client):

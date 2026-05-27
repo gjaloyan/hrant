@@ -86,11 +86,18 @@ def set_active(body: ActiveBody):
 
 @router.get("/api/pipeline-profiles/system-prompt-sections")
 def get_sections():
-    require_owner_for_writes(action="reading prompt-section defaults")
-    from ..system_prompt_sections import DEFAULT_ORDER, SECTIONS
+    """Return the v2 module catalogue. Endpoint name kept for
+    WebUI backward compatibility, but the response is shaped
+    around `prompt_modules.MODULES` (v2) — the legacy SECTIONS
+    dict was retired 2026-05-27."""
+    require_owner_for_writes(action="reading prompt-module defaults")
+    from ..prompt_modules import DEFAULT_ORDER, MODULES
     return {
         "order": list(DEFAULT_ORDER),
-        "sections": dict(SECTIONS),
+        "modules": {name: m.body for name, m in MODULES.items()},
+        # Back-compat alias for WebUI clients that still expect
+        # the v1 key. Drop once the WebUI rolls forward.
+        "sections": {name: m.body for name, m in MODULES.items()},
     }
 
 

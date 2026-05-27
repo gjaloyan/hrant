@@ -88,3 +88,4 @@ _backup_pre_*/
 # at the repo root, we don't want it tracked.
 self_mods/
 deploy/windows/install-service.rendered.ps1
+AGENTS.md

@@ -1,22 +1,22 @@
 """Module-loader for the v2 system-prompt architecture.
 
-The legacy monolithic `system_prompt_sections.py` is being split
-into composable, conditionally-loaded modules (M1-M9). This file
-contains the loader plus M1 (Core Agent Behavior). Subsequent
-modules land in follow-up iterations.
+The live source of the unified-agent rules. M1-M9 modules are
+conditionally loaded per turn via `build_prompt(ctx, overrides)`
+based on a `TurnContext` (turn_type / channel / loaded_bundles /
+model_size). The cutover from the legacy `system_prompt_sections`
+monolith happened 2026-05-27.
 
 A `Module` is loaded for a given `TurnContext` when ALL of its
 `requires_*` predicates match (logical AND). `always_on=True`
 short-circuits the predicate check entirely. Predicate semantics:
 
-  - `requires_turn_type`: ctx.turn_type ∈ set
-  - `requires_channel`:   ctx.channel ∈ set
-  - `requires_bundle`:    ANY of these is in ctx.loaded_bundles
+  - `requires_turn_type`:  ctx.turn_type ∈ set
+  - `requires_channel`:    ctx.channel ∈ set
+  - `requires_bundle`:     ANY of these is in ctx.loaded_bundles
   - `requires_model_size`: ctx.model_size ∈ set
 
-NOT WIRED INTO THE LIVE PROMPT YET. The current per-turn prompt
-goes through `backend.system_prompt_sections.assemble(...)`. The
-v2 cutover lands once M1-M9 are written and reviewed.
+Profile overrides go in `overrides["modules"]`: a name→body map
+where strings REPLACE that module's body and `None` SKIPS it.
 """
 from __future__ import annotations
 

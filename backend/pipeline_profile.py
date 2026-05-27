@@ -316,7 +316,7 @@ def validate(overlay: dict) -> list[str]:
     Reuses existing whitelists:
       - `engine_overrides` -> `runtime_config._ALLOWED` validators
       - `reasoning_overrides.routing` values -> `reasoning_routing.VALID_LEVELS`
-      - `prompt_overrides.sections` keys -> `system_prompt_sections.SECTIONS`
+      - `prompt_overrides.modules` keys -> `prompt_modules.MODULES` (v2)
       - `logging_overrides.root` / `.modules.*` -> stdlib log level names
     """
     errors: list[str] = []
@@ -397,22 +397,22 @@ def validate(overlay: dict) -> list[str]:
         prompt = raw_prompt or {}
     if prompt:
         try:
-            from .system_prompt_sections import SECTIONS
+            from .prompt_modules import MODULES
         except Exception:
-            SECTIONS = {}
-        sections = prompt.get("sections") or {}
-        if not isinstance(sections, dict):
-            errors.append("prompt_overrides.sections: must be a dict")
+            MODULES = {}
+        modules = prompt.get("modules") or {}
+        if not isinstance(modules, dict):
+            errors.append("prompt_overrides.modules: must be a dict")
         else:
-            for name, body in sections.items():
-                if name not in SECTIONS:
+            for name, body in modules.items():
+                if name not in MODULES:
                     errors.append(
-                        f"prompt_overrides.sections.{name}: unknown section"
+                        f"prompt_overrides.modules.{name}: unknown module"
                     )
                     continue
                 if body is not None and not isinstance(body, str):
                     errors.append(
-                        f"prompt_overrides.sections.{name}: must be string or null"
+                        f"prompt_overrides.modules.{name}: must be string or null"
                     )
 
     # Logging.

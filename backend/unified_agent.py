@@ -83,7 +83,9 @@ from .models import (
     ToolCallDetail,
     VerificationResult,
 )
-from .system_prompt_sections import assemble as _assemble_prompt
+# V2 (2026-05-27): the legacy system_prompt_sections module was
+# retired. `_unified_rules_core()` now calls `prompt_modules.build_prompt`
+# directly; the SECTIONS dict + assemble() shim are gone.
 
 
 log = logging.getLogger(__name__)
@@ -106,15 +108,19 @@ def unified_enabled() -> bool:
 # ─── RULES block (the single biggest difference from legacy) ──────
 
 
-# Audit T5 (May 2026) split the original ~14KB rules monolith into a
-# core always-on block + four scenario blocks loaded on signal.
-# Phase 1 (May 2026) further extracted the core into named sections
-# living in `backend/system_prompt_sections.py` — SECTIONS dict +
-# DEFAULT_ORDER + `assemble()`. `_UNIFIED_RULES_CORE` is now the
-# result of `_assemble_prompt()` at import time; the same name is
-# preserved so existing tests that grep for sentences still work.
-# A profile override may replace any section at runtime — see
-# `pipeline_profile.active_overrides()` (Task 2+).
+# RULES surface (2026-05-27 v2 architecture):
+#   - The core block is assembled per-turn by
+#     `prompt_modules.build_prompt(ctx, overrides)` from M1-M9
+#     modules. `_unified_rules_core(ctx)` delegates to that.
+#   - Scenario blocks below (journal-first, media-convention,
+#     file-types, repeated-request, repeat-refusal) are still
+#     appended on demand by `_build_rules_for_turn` because they
+#     trigger on per-turn structural signals (attachments, sticky
+#     pattern, refusal detector), not module predicates.
+#   - `_UNIFIED_RULES_CORE` is the default-context build at import
+#     time; legacy tests that grep it for phrases still work.
+#   - Per-profile overrides go in `prompt_overrides["modules"]`
+#     (see `pipeline_profile.active_overrides()`).
 
 def _classify_model_size(model_name: str | None) -> str:
     """Map an active model ID to one of `small` / `medium` / `large`

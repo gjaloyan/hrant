@@ -242,15 +242,19 @@ def test_validate_reasoning_routing_good_level():
 
 
 def test_validate_prompt_section_unknown_key():
+    """V2 (2026-05-27): override key is `modules`, not `sections`."""
     from backend.pipeline_profile import validate
-    errors = validate({"prompt_overrides": {"sections": {"not_a_section": "x"}}})
+    errors = validate({"prompt_overrides": {"modules": {"not_a_module": "x"}}})
     assert errors
-    assert any("not_a_section" in e for e in errors)
+    assert any("not_a_module" in e for e in errors)
 
 
 def test_validate_prompt_section_null_allowed():
+    """V2: a `None` value in `modules` skips that module — valid."""
     from backend.pipeline_profile import validate
-    errors = validate({"prompt_overrides": {"sections": {"iteration_ceiling": None}}})
+    errors = validate(
+        {"prompt_overrides": {"modules": {"m1_core_behavior": None}}}
+    )
     assert errors == []
 
 

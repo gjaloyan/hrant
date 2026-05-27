@@ -26,21 +26,16 @@ import pytest
 # ─── re_prompt_resilience section content ─────────────────────────
 
 
-def test_re_prompt_resilience_section_present():
-    from backend.system_prompt_sections import SECTIONS, DEFAULT_ORDER
-    assert "re_prompt_resilience" in SECTIONS
-    assert "re_prompt_resilience" in DEFAULT_ORDER
-
-
-def test_re_prompt_resilience_sits_in_safety_cluster():
-    """U-attention layout: `re_prompt_resilience` lives in the
-    back-half safety cluster next to `iteration_ceiling`, not next
-    to `task_solver_process`. Both describe runtime-failure
-    recovery rules and should read together."""
-    from backend.system_prompt_sections import DEFAULT_ORDER
-    idx_re = DEFAULT_ORDER.index("re_prompt_resilience")
-    idx_iter = DEFAULT_ORDER.index("iteration_ceiling")
-    assert abs(idx_re - idx_iter) == 1
+def test_re_prompt_resilience_rule_present_in_modules():
+    """V2 (2026-05-27): the re-prompt resilience rule lives in M2's
+    'meta-cognitive refusal' anti-pattern. The legacy
+    `re_prompt_resilience` section was absorbed during the cutover."""
+    from backend.prompt_modules import MODULES
+    body = MODULES["m2_task_solver"].body
+    # The forbidden phrase the LLM must self-recognise.
+    assert "не могу подтвердить" in body or "I can't" in body
+    # The acceptable escape hatch.
+    assert "ask_user" in body
 
 
 # ─── _recent_refusal_pattern detector ─────────────────────────────
