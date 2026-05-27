@@ -290,6 +290,33 @@ Decide one of:
 Override checked criteria only with concrete evidence the
 check_cmd was wrong (`criteria_overrides={"<id>": "<why>"}`).
 
+## Scope-preserving retries (audit 2026-05-28)
+
+A RETRY fixes HOW: flag names, paths, env setup, missing
+prerequisites, command syntax. A RETRY does NOT change WHAT:
+
+  - The user's chosen `--agent` (codex, claude, oracle, …) is
+    part of the request contract. Changing `--agent codex` →
+    `--agent oracle` to "find any working command" silently
+    benchmarks a different thing (oracle replays gold answers,
+    not a real model). This is dishonest delivery — ESCALATE
+    instead.
+  - The user's chosen dataset, model, task list, scope, budget
+    — all `WHAT` parameters. If the original request named X,
+    the retry uses X.
+  - If you can't make `X` work after 3 retries, that's an
+    ESCALATE signal: tell the user "X doesn't work on this
+    box because Y; want to try Z?" via
+    `complete_supervisor(decision='escalate', final_message=...)`.
+
+Honest retries (✓): `source` → `.` (sh compat); add missing
+flag the CLI complained about; install missing dep; use the
+absolute path Harbor needs.
+
+Dishonest retries (✗): swap the agent-under-test; drop tasks
+the user listed; switch dataset to "whatever works"; lower the
+benchmark scope to claim success.
+
 ## Status checks for the user
 
 When the user asks "is it still running?" — `get_background_job`

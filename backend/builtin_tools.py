@@ -452,6 +452,68 @@ def _load_tool_bundle_handler(name: str) -> str:
 # ─── T6: background-job tool handlers ──────────────────────────────
 
 
+# Flags whose VALUE identifies WHAT is being benchmarked / executed.
+# Changing any of these between parent and retry is a semantic
+# change, not a fix. See `_detect_scope_change` and the
+# scope-preservation gate in `_start_background_job_handler`.
+_SCOPE_FLAGS = (
+    "--agent",
+    "--dataset",
+    "--model",
+    "--task",
+    "--tasks",
+)
+
+
+def _extract_flag_values(command: str) -> dict[str, list[str]]:
+    """Return {flag: [values, ...]} for each `_SCOPE_FLAGS` flag
+    found in `command`. Accepts both `--flag value` and
+    `--flag=value`. Multiple occurrences are preserved (e.g.
+    --task a --task b → {'--task': ['a', 'b']})."""
+    import shlex
+    try:
+        tokens = shlex.split(command or "")
+    except ValueError:
+        # Unparseable shell — fall back to whitespace split. Better
+        # heuristic than crashing.
+        tokens = (command or "").split()
+    out: dict[str, list[str]] = {}
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        # `--flag=value` form
+        if "=" in tok and tok.startswith("--"):
+            flag, _, val = tok.partition("=")
+            if flag in _SCOPE_FLAGS:
+                out.setdefault(flag, []).append(val)
+        elif tok in _SCOPE_FLAGS and i + 1 < len(tokens):
+            out.setdefault(tok, []).append(tokens[i + 1])
+            i += 1
+        i += 1
+    return out
+
+
+def _detect_scope_change(*, parent_command: str, new_command: str) -> str:
+    """Return a short human-readable diff message if the new
+    command changes a SCOPE flag value vs the parent. Returns ""
+    (falsy) if no scope change detected.
+
+    Adds/removes of a scope flag also count as scope changes —
+    going from `--agent codex` to no `--agent` at all silently
+    benchmarks Harbor's default."""
+    p_flags = _extract_flag_values(parent_command)
+    n_flags = _extract_flag_values(new_command)
+    diffs: list[str] = []
+    for flag in _SCOPE_FLAGS:
+        p_vals = sorted(p_flags.get(flag, []))
+        n_vals = sorted(n_flags.get(flag, []))
+        if p_vals != n_vals:
+            diffs.append(
+                f"{flag} {p_vals or '(absent)'} → {n_vals or '(absent)'}"
+            )
+    return "; ".join(diffs)
+
+
 def _start_background_job_handler(
     command: str,
     label: str = "",
@@ -528,6 +590,40 @@ def _start_background_job_handler(
     # context route DMs back to the user who triggered the tool call.
     if not inherit_original_speaker:
         inherit_original_speaker = speaker_id or ""
+
+    # Scope-preservation gate (audit 2026-05-28). When `parent_job_id`
+    # is set, the new command is a RETRY of the parent. Retries may
+    # fix HOW (flag names, paths, syntax) but MUST NOT change WHAT
+    # (the user's chosen agent / dataset / model). The 2026-05-28
+    # smoke chain dropped `--agent codex` → `--agent oracle` to
+    # "find any working command" and silently benchmarked the wrong
+    # thing. This gate refuses such retries with a structured error
+    # that tells the supervisor to ESCALATE instead.
+    if effective_parent:
+        parent_for_scope = _bg.STORE.get(effective_parent)
+        if parent_for_scope is not None:
+            scope_violation = _detect_scope_change(
+                parent_command=parent_for_scope.command or "",
+                new_command=command or "",
+            )
+            if scope_violation:
+                return json.dumps({
+                    "ok": False,
+                    "error": "scope_change_in_retry",
+                    "detail": (
+                        "A RETRY (parent_job_id set) must not change "
+                        "the WHAT of the original request — only the "
+                        "HOW. Detected change: " + scope_violation
+                        + ". If the original tool/agent/dataset can't "
+                        "be made to work, ESCALATE via "
+                        "complete_supervisor(decision='escalate', ...) "
+                        "and tell the user what's broken and what "
+                        "alternative you suggest. Don't silently "
+                        "benchmark a different thing."
+                    ),
+                    "parent_command": (parent_for_scope.command or "")[:300],
+                    "new_command": (command or "")[:300],
+                }, ensure_ascii=False)
 
     # Phase 3a pre-flight gate. If the endpoint defines
     # `prerequisites`, run their check_cmds NOW (before spawning
