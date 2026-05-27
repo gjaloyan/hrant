@@ -2083,6 +2083,46 @@ def run_unified(
         except Exception as e:
             log.debug("unified: verifier failed: %s", e)
 
+    # Endpoint-aware cap (2026-05-27 audit T2.1). The legacy verifier
+    # measures CLAIM-verifiability, not REQUEST-delivery. For action-
+    # verb requests ("run X", "запусти Y", "send Z") require that
+    # the trace contains at least one execute-class tool call OR
+    # the answer delivers a file via MEDIA:. Otherwise clip the
+    # confidence at 30 so the meta_learner sees the turn as a low-
+    # confidence failure even when every claim was verifiable.
+    try:
+        from .endpoint_check import (
+            cap_confidence_for_endpoint, endpoint_met,
+        )
+        _trace_tool_names: list[str] = []
+        for _step in (agent._trace or []):
+            tc = getattr(_step, "tool_call", None)
+            if tc and isinstance(tc, dict):
+                name = tc.get("name")
+                if isinstance(name, str):
+                    _trace_tool_names.append(name)
+        _was_met = endpoint_met(
+            task=task, answer=answer or "", tool_names=_trace_tool_names,
+        )
+        if not _was_met:
+            _capped = cap_confidence_for_endpoint(
+                task=task, answer=answer or "",
+                tool_names=_trace_tool_names, confidence=vr.confidence,
+            )
+            if _capped != vr.confidence:
+                # Surface the reason so the WebUI / daily report
+                # explains the dip.
+                try:
+                    vr.contradictions.append(
+                        "endpoint_not_met: action-verb request without "
+                        "execute-class tool call or MEDIA: delivery"
+                    )
+                except Exception:
+                    pass
+                vr.confidence = _capped
+    except Exception as exc:
+        log.debug("unified: endpoint check failed: %s", exc)
+
     # Goals + conversation persistence + evaluator log.
     try:
         GOALS.tick_interaction()
