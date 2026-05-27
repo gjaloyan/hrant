@@ -1356,6 +1356,7 @@ def _propose_skill_handler(
 
 def _propose_self_modification_handler(
     description: str, files: str = "", rationale: str = "",
+    prompt: str = "",
 ) -> str:
     """Request a self-modification proposal. OWNER-only. Triggers
     the self_modifier subsystem which generates a diff, sandboxes
@@ -1382,10 +1383,19 @@ def _propose_self_modification_handler(
         # code would be applied. This routes the common case
         # through the diff generator.
         if file_list:
+            # Fold `prompt` (optional technical-spec detail) into
+            # rationale so the LLM's _TARGETED_DIFF_SYSTEM prompt
+            # sees it. The 2026-05-28 live test caught an agent
+            # passing `prompt=` with the full code spec; without
+            # this fold the param was rejected as unexpected.
+            combined_rationale = (rationale or "")
+            if prompt:
+                sep = "\n\n" if combined_rationale else ""
+                combined_rationale += f"{sep}TECHNICAL SPEC:\n{prompt}"
             proposal = self_modifier.propose_with_diff(
                 description=description or "",
                 module=file_list[0],
-                rationale=rationale or "",
+                rationale=combined_rationale,
                 requester=speaker_id or "webui:default",
             )
         else:
@@ -2254,6 +2264,17 @@ def register_builtin_tools() -> None:
                 "rationale": {
                     "type": "string",
                     "description": "WHY this change is being proposed.",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Optional technical detail / spec for the "
+                        "diff. If you have a concrete code outline "
+                        "(\"add cmd_solve handler that calls "
+                        "UnifiedAgent.run_turn ...\"), put it here. "
+                        "Folded into the LLM's diff-generation "
+                        "context alongside description + rationale."
+                    ),
                 },
             },
             "required": ["description"],
