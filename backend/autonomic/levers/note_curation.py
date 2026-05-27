@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -41,7 +41,7 @@ class FIRE_NOTE_CURATION(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        index_path = Path(params.get("index_path") or DEFAULT_INDEX_PATH)
+        index_path = resolve_knowledge_path(params.get("index_path") or DEFAULT_INDEX_PATH)
         max_per_tick = int(params.get("max_per_tick", 2))
 
         if not index_path.exists():

@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -38,7 +38,7 @@ class FIRE_SELF_REFLECTION(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        log_path = Path(params.get("log_path") or DEFAULT_LOG_PATH)
+        log_path = resolve_knowledge_path(params.get("log_path") or DEFAULT_LOG_PATH)
 
         try:
             stats = META_LEARNER.stats()

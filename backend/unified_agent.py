@@ -2247,6 +2247,26 @@ def run_unified(
     except Exception:
         pass
 
+    # Audit T3 follow-up (2026-05-27). The MetaLearner.analyze_failure
+    # path was DEFINED but NEVER CALLED from anywhere — leaving the
+    # whole learning loop dead since the unified-loop cutover. Wire
+    # it here: on low-confidence turns, log the failure so
+    # MetaLearner.stats() / extract_patterns() / FIRE_SELF_REFLECTION /
+    # FIRE_GOAL_PROPOSE actually have material to work on. Best-effort
+    # — never let analysis crash the user-facing reply.
+    if vr.confidence < 60 and not supervisor_mode:
+        try:
+            MEMORY  # noqa: B018 — just ensures the module import succeeded
+            from .meta_learner import META_LEARNER as _ML
+            _ML.analyze_failure(
+                question=task,
+                answer=answer or "",
+                verification=vr,
+                intent="unified",
+            )
+        except Exception as exc:
+            log.debug("unified: META_LEARNER.analyze_failure failed: %s", exc)
+
     # NOTE: `question_payload` and the `answer = "❓ …"` overwrite
     # for the AskUserQuestion path are resolved EARLIER (right after
     # `_record_llm_call`) so the question text propagates into

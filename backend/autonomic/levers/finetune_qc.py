@@ -9,7 +9,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -42,8 +42,8 @@ class FIRE_FINETUNE_QC(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        queue_path = Path(params.get("queue_path") or DEFAULT_QUEUE_PATH)
-        log_path = Path(params.get("log_path") or DEFAULT_LOG_PATH)
+        queue_path = resolve_knowledge_path(params.get("queue_path") or DEFAULT_QUEUE_PATH)
+        log_path = resolve_knowledge_path(params.get("log_path") or DEFAULT_LOG_PATH)
 
         if not queue_path.exists():
             return LeverReport(

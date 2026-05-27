@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,

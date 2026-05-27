@@ -60,6 +60,17 @@ DAILY_COST_CAP_USD: float = float(
 )
 
 
+# Minimum confidence required to PROMOTE a fact from the LLM
+# extraction output into memory_facts.jsonl + the knowledge graph.
+# Audit 2026-05-27 found daily consolidation was producing only
+# ~4 facts/day with threshold=0.8 hardcoded; lowering to 0.65 lets
+# medium-confidence material through while still filtering noise.
+# Override via env for experimentation.
+PROMOTE_CONFIDENCE_THRESHOLD: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_PROMOTE_THRESHOLD", 0.65)
+)
+
+
 # ─── Paths ────────────────────────────────────────────────────────────
 
 

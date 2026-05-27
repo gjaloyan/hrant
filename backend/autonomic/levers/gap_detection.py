@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -40,8 +40,8 @@ class FIRE_GAP_DETECTION(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        gaps_path = Path(params.get("gaps_path") or DEFAULT_GAPS_PATH)
-        log_path = Path(params.get("log_path") or DEFAULT_LOG_PATH)
+        gaps_path = resolve_knowledge_path(params.get("gaps_path") or DEFAULT_GAPS_PATH)
+        log_path = resolve_knowledge_path(params.get("log_path") or DEFAULT_LOG_PATH)
         actionable_threshold = int(params.get("actionable_threshold", ACTIONABLE_THRESHOLD))
 
         if not gaps_path.exists():

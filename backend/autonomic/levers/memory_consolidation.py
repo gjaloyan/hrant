@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -65,9 +65,9 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        sessions_path = Path(params.get("sessions_path") or DEFAULT_SESSIONS_PATH)
-        user_md_path = Path(params.get("user_md_path") or DEFAULT_USER_MD_PATH)
-        facts_path = Path(params.get("memory_facts_path") or DEFAULT_FACTS_PATH)
+        sessions_path = resolve_knowledge_path(params.get("sessions_path") or DEFAULT_SESSIONS_PATH)
+        user_md_path = resolve_knowledge_path(params.get("user_md_path") or DEFAULT_USER_MD_PATH)
+        facts_path = resolve_knowledge_path(params.get("memory_facts_path") or DEFAULT_FACTS_PATH)
         max_sessions = int(params.get("max_sessions", 5))
 
         sessions_blob = self._load_sessions(sessions_path)

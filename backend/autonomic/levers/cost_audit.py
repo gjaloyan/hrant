@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -37,8 +37,8 @@ class FIRE_COST_AUDIT(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        state_path = Path(params.get("router_state_path") or DEFAULT_ROUTER_STATE_PATH)
-        log_path = Path(params.get("log_path") or DEFAULT_LOG_PATH)
+        state_path = resolve_knowledge_path(params.get("router_state_path") or DEFAULT_ROUTER_STATE_PATH)
+        log_path = resolve_knowledge_path(params.get("log_path") or DEFAULT_LOG_PATH)
         budget = float(params.get("daily_budget_usd", DEFAULT_DAILY_BUDGET_USD))
 
         if not state_path.exists():

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -38,8 +38,8 @@ class FIRE_SESSION_ARCHIVE(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        sessions_path = Path(params.get("sessions_path") or DEFAULT_SESSIONS_PATH)
-        history_dir = Path(params.get("history_dir") or DEFAULT_HISTORY_DIR)
+        sessions_path = resolve_knowledge_path(params.get("sessions_path") or DEFAULT_SESSIONS_PATH)
+        history_dir = resolve_knowledge_path(params.get("history_dir") or DEFAULT_HISTORY_DIR)
         max_per_tick = int(params.get("max_per_tick", 10))
         cutoff_days = int(params.get("cutoff_days", SESSION_ARCHIVE_DAYS))
 

@@ -11,7 +11,7 @@ from typing import Any
 
 import psutil
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -43,10 +43,10 @@ class FIRE_CAPABILITY_SCAN(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        tools_dir = Path(params.get("tools_dir") or DEFAULT_TOOLS_DIR)
-        skills_dir = Path(params.get("skills_dir") or DEFAULT_SKILLS_DIR)
-        channels_path = Path(params.get("channels_path") or DEFAULT_CHANNELS_PATH)
-        self_root = Path(params.get("self_root") or DEFAULT_SELF_ROOT)
+        tools_dir = resolve_knowledge_path(params.get("tools_dir") or DEFAULT_TOOLS_DIR)
+        skills_dir = resolve_knowledge_path(params.get("skills_dir") or DEFAULT_SKILLS_DIR)
+        channels_path = resolve_knowledge_path(params.get("channels_path") or DEFAULT_CHANNELS_PATH)
+        self_root = resolve_knowledge_path(params.get("self_root") or DEFAULT_SELF_ROOT)
 
         tools_written = self._scan_tools(tools_dir, self_root / "tools")
         skills_written = self._scan_skills(skills_dir, self_root / "skills")

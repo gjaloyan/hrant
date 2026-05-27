@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -60,8 +60,8 @@ class FIRE_SELF_STUDY(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        backend_root = Path(params.get("backend_root") or DEFAULT_BACKEND_ROOT)
-        self_root = Path(params.get("self_root") or DEFAULT_SELF_ROOT)
+        backend_root = resolve_knowledge_path(params.get("backend_root") or DEFAULT_BACKEND_ROOT)
+        self_root = resolve_knowledge_path(params.get("self_root") or DEFAULT_SELF_ROOT)
         max_modules = int(params.get("max_modules", 3))
         modules_dir = self_root / "modules"
         modules_dir.mkdir(parents=True, exist_ok=True)

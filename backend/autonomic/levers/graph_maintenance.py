@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..lever import Lever
+from ..lever import Lever, resolve_knowledge_path
 from ..types import (
     Cost,
     LeverCategory,
@@ -36,8 +36,8 @@ class FIRE_GRAPH_MAINTENANCE(Lever):
 
     def run(self, params: dict[str, Any], context: dict[str, Any]) -> LeverReport:
         started = utcnow()
-        graph_path = Path(params.get("graph_path") or DEFAULT_GRAPH_PATH)
-        index_path = Path(params.get("index_path") or DEFAULT_INDEX_PATH)
+        graph_path = resolve_knowledge_path(params.get("graph_path") or DEFAULT_GRAPH_PATH)
+        index_path = resolve_knowledge_path(params.get("index_path") or DEFAULT_INDEX_PATH)
 
         if not graph_path.exists():
             return self._skip(params, started, "empty_graph")

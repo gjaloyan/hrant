@@ -456,7 +456,8 @@ def run(
         fact = _digest_mod.DigestFact(
             text=text, related_topics=topics, confidence=conf, category=category,
         )
-        if conf < 0.8:
+        from .config import PROMOTE_CONFIDENCE_THRESHOLD
+        if conf < PROMOTE_CONFIDENCE_THRESHOLD:
             fact.reason_if_skipped = "low_confidence"
         elif text.lower() in existing:
             fact.reason_if_skipped = "duplicate"
