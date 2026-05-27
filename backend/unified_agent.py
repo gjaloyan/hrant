@@ -1254,7 +1254,13 @@ def run_unified(
     # have set it; without this reset the next turn would start
     # with stale bundles loaded.
     from .tool_bundles import set_loaded_bundles as _po_set_loaded_bundles
-    _po_set_loaded_bundles(set())
+    # Supervisor turns ALWAYS need the bench bundle: `start_background_job`
+    # for retries, `complete_supervisor` for done/escalate, and
+    # `define_task_endpoint` for any child-job setup. Pre-loading
+    # avoids the agent burning an iteration on `load_tool_bundle`
+    # before it can even act. Regular turns start with the empty
+    # default and load on demand.
+    _po_set_loaded_bundles({"bench"} if supervisor_mode else set())
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles

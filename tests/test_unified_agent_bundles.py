@@ -53,6 +53,45 @@ def test_run_unified_resets_loaded_bundles_at_entry(monkeypatch):
     )
 
 
+def test_supervisor_turn_auto_loads_bench_bundle(monkeypatch):
+    """Supervisor turns need bench-bundle tools (start_background_job
+    for retry, complete_supervisor for done/escalate) immediately
+    available — otherwise the agent burns an iteration on
+    `load_tool_bundle` before it can act on the completion event."""
+    from backend import tool_bundles as _tb
+    from backend import context_compressor as _cc
+    from backend import unified_agent as _ua
+
+    _tb.set_loaded_bundles(set())  # cold start
+
+    captured: dict = {}
+
+    def _spy_stop(*args, **kwargs):
+        captured["bundles_at_entry"] = _tb.get_loaded_bundles()
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(_cc, "maybe_compact", _spy_stop)
+
+    try:
+        _ua.run_unified(
+            agent=None,
+            task="BACKGROUND_JOB_COMPLETED: j-test",
+            project="default",
+            attachments=None,
+            channel="webui",
+            speaker_id="webui:default",
+            supervisor_mode=True,
+            supervisor_job_id="j-test",
+        )
+    except Exception:
+        pass
+
+    assert captured.get("bundles_at_entry") == {"bench"}, (
+        "supervisor turn must start with the bench bundle preloaded; "
+        f"got {captured.get('bundles_at_entry')!r}"
+    )
+
+
 def test_current_tool_schema_for_turn_starts_with_base_only():
     """At cold start (no bundles loaded), the schema includes only
     BASE_TOOLS members — bundle-tier tools are filtered out."""
