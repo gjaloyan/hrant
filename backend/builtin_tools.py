@@ -618,6 +618,49 @@ def _start_background_job_handler(
     }, ensure_ascii=False)
 
 
+def _acknowledge_provider_issue_handler(
+    error_id: str = "", resolution: str = "",
+) -> str:
+    """Mark a provider-side LLM failure as explained/resolved.
+    Backs the `acknowledge_provider_issue` tool. Audit 2026-05-28."""
+    eid = (error_id or "").strip()
+    res = (resolution or "").strip()
+    if not eid:
+        return json.dumps({
+            "ok": False, "error": "error_id is required",
+        }, ensure_ascii=False)
+    if not res:
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "resolution is required — write the audit-trail "
+                "note. Empty resolutions defeat the self-surface "
+                "mechanism."
+            ),
+        }, ensure_ascii=False)
+    try:
+        from .provider_error_log import acknowledge
+    except Exception as exc:
+        return json.dumps({
+            "ok": False, "error": f"import_failed: {exc}",
+        }, ensure_ascii=False)
+    ok = acknowledge(eid, resolution=res)
+    if not ok:
+        return json.dumps({
+            "ok": False,
+            "error": f"unknown error_id {eid!r}; nothing to acknowledge",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "error_id": eid,
+        "resolution": res,
+        "note": (
+            "This issue will no longer appear in UNRESOLVED "
+            "AGENT-SIDE FAILURES on the next turn."
+        ),
+    }, ensure_ascii=False)
+
+
 def _define_task_endpoint_handler(
     task_summary: str,
     user_goal_verbatim: str,
@@ -2523,6 +2566,44 @@ def register_builtin_tools() -> None:
             "required": ["task_summary", "user_goal_verbatim", "success_criteria"],
         },
         handler=_define_task_endpoint_handler,
+    )
+
+    reg.register_func(
+        name="acknowledge_provider_issue",
+        description=(
+            "Mark a provider-side LLM failure as explained to the user. "
+            "After you describe a recent UNRESOLVED FAILURE (from the "
+            "system-prompt block) AND propose a concrete fix (top up "
+            "credits / swap provider / `propose_self_modification` "
+            "for a code-level safeguard), call this with the failure's "
+            "`error_id` and a one-line `resolution`. Subsequent turns "
+            "will no longer see the issue in the UNRESOLVED block.\n\n"
+            "DO NOT use this to silently dismiss an issue without "
+            "explaining it — the resolution string is the audit "
+            "trail. Owner-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "error_id": {
+                    "type": "string",
+                    "description": (
+                        "The `pe_…` id from the UNRESOLVED AGENT-SIDE "
+                        "FAILURES block in this turn's system prompt."
+                    ),
+                },
+                "resolution": {
+                    "type": "string",
+                    "description": (
+                        "One-line summary of how the issue was "
+                        "explained / what fix was proposed. Becomes "
+                        "the audit-trail record."
+                    ),
+                },
+            },
+            "required": ["error_id", "resolution"],
+        },
+        handler=_acknowledge_provider_issue_handler,
     )
 
     reg.register_func(

@@ -31,7 +31,7 @@ def test_base_tools_constant_shape():
     without `load_tool_bundle` first."""
     from backend.tool_bundles import BASE_TOOLS
     assert isinstance(BASE_TOOLS, frozenset)
-    assert len(BASE_TOOLS) >= 19
+    assert len(BASE_TOOLS) >= 20
     assert "load_tool_bundle" in BASE_TOOLS, (
         "the meta-tool must be in base — otherwise LLM can't unlock bundles"
     )

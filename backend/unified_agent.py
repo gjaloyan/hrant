@@ -1577,6 +1577,45 @@ def run_unified(
     )
     system_parts.append(f"---\n\n{_rules_for_turn}")
     system_parts.append(f"---\n\n{perms}")
+
+    # Self-surface unresolved provider failures (audit 2026-05-28).
+    # When the active LLM provider returned 402 / 401 / 5xx during
+    # an earlier turn (especially silent supervisor turns), this
+    # block tells the agent that something failed AND that it should
+    # explain to the user + propose a fix (config change, model
+    # swap, or self-modification). Skipped for supervisor turns —
+    # those are non-user-facing.
+    if not supervisor_mode:
+        try:
+            from .provider_error_log import recent_unresolved
+            unresolved = recent_unresolved(within_hours=24)
+        except Exception:
+            unresolved = []
+        if unresolved:
+            issue_lines = [
+                "# UNRESOLVED AGENT-SIDE FAILURES",
+                "",
+                "The following provider failures happened on recent turns "
+                "and have NOT been explained to the user. If the user's "
+                "current message looks related (e.g. asking why something "
+                "didn't work, or checking on a background job that should "
+                "have completed), include the diagnosis at the top of your "
+                "answer + suggest a concrete fix (top up credits / switch "
+                "model / add fallback provider / propose a code change via "
+                "`propose_self_modification`). After explaining, call "
+                "`acknowledge_provider_issue(error_id, resolution)` so the "
+                "same issue is not re-surfaced next turn.",
+                "",
+            ]
+            for r in unresolved[-5:]:
+                ctx = r.get("context") or {}
+                issue_lines.append(
+                    f"- id={r.get('id')!r} | provider={r.get('provider')} "
+                    f"model={r.get('model')} | HTTP {r.get('status_code')} "
+                    f"({(ctx.get('category') or 'unknown')}): "
+                    f"{(r.get('message') or '')[:120]}"
+                )
+            system_parts.append("---\n\n" + "\n".join(issue_lines))
     # Supervisor-mode preamble. The user-visible chat rules above
     # ("answer in Russian / no preamble / ...") still apply but the
     # supervisor block OVERRIDES the "ask before acting" / "DM the

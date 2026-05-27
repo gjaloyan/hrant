@@ -82,6 +82,10 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "list_background_jobs", "get_background_job",
     "start_background_job", "define_task_endpoint",
     "complete_supervisor",
+    # Self-surface acknowledgement (audit 2026-05-28). Always-on so
+    # the agent can mark UNRESOLVED AGENT-SIDE FAILURES from the
+    # system-prompt block as explained on any turn.
+    "acknowledge_provider_issue",
     # Meta — the LLM's discovery hook for bundles
     "load_tool_bundle",
 })

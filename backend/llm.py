@@ -3069,6 +3069,49 @@ class DualModelRouter:
         except Exception:
             pass
 
+    def _capture_terminal_llm_error(
+        self, exc: Exception, *, active=None,
+    ) -> None:
+        """Persist a structured record of an unrecoverable LLM call.
+
+        Called from the terminal `raise primary_err` paths in
+        `call()` / `call_with_tools()` — the points where the
+        failover chain has been exhausted and the agent will see
+        an LLMError. The error_log is what `run_unified()` reads
+        on the NEXT user-facing turn to self-surface the failure
+        and let the agent explain + propose a fix.
+
+        Best-effort: a failure in this hook never crashes the
+        outer call — the user still gets the original LLMError.
+        """
+        try:
+            from .provider_error_log import (
+                classify_llm_error,
+                log_provider_error,
+            )
+            info = classify_llm_error(str(exc))
+            provider = "unknown"
+            model = "unknown"
+            if active is not None:
+                provider = (
+                    getattr(active, "provider_name", None)
+                    or type(active).__name__
+                )
+                model = getattr(active, "model", None) or "unknown"
+            log_provider_error(
+                provider=str(provider),
+                model=str(model),
+                status_code=int(info.get("status_code") or 0),
+                message=str(info.get("message") or "")[:300],
+                context={
+                    "category": info.get("category"),
+                    "active_cfg_hash": self._active_cfg_hash,
+                },
+            )
+        except Exception:
+            # Never let logging crash an already-failing path.
+            pass
+
     def _track_active_model_call(
         self,
         *,
@@ -3509,6 +3552,10 @@ class DualModelRouter:
             except Exception as e:
                 log.warning("failover chain in A/B path crashed: %s", e)
             self._api_cache = (time.time(), False)
+            # Audit follow-up 2026-05-28: persist a self-aware error
+            # record so the next user-facing turn can surface this
+            # failure with diagnosis + suggested fix.
+            self._capture_terminal_llm_error(primary_err, active=active)
             raise primary_err
 
     def call_json(self, task_type: TaskType, system: str, user: str, **kw) -> dict:
@@ -3689,9 +3736,11 @@ class DualModelRouter:
                 self.state["total_b_calls"] += 1
             self._save_state()
             return out
-        except LLMError:
+        except LLMError as e:
             if choice == "a":
                 self._api_cache = (time.time(), False)
+            # Audit follow-up 2026-05-28: terminal-error self-surface.
+            self._capture_terminal_llm_error(e, active=active)
             raise
 
 
