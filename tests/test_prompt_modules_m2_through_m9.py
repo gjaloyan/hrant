@@ -134,15 +134,19 @@ def test_m3_warns_against_verbatim_retry():
 # ─── M4: Job Tracking Policy ──────────────────────────────────────
 
 
-def test_m4_loads_for_bench_bundle():
+def test_m4_loads_for_task_and_supervisor():
+    """M4 must be in the prompt BEFORE the agent loads the bench
+    bundle — otherwise it has the tools but not the protocol.
+    That's what broke on the 2026-05-26 terminal-bench turns."""
     from backend.prompt_modules import build_prompt, TurnContext
-    out = build_prompt(TurnContext(loaded_bundles=frozenset({"bench"})))
-    assert "JOB TRACKING" in out
+    for tt in ("task", "supervisor"):
+        out = build_prompt(TurnContext(turn_type=tt))
+        assert "JOB TRACKING" in out, f"M4 missing for {tt!r}"
 
 
-def test_m4_does_not_load_for_base_bundle_only():
+def test_m4_does_not_load_for_chat():
     from backend.prompt_modules import build_prompt, TurnContext
-    out = build_prompt(TurnContext(loaded_bundles=frozenset()))
+    out = build_prompt(TurnContext(turn_type="chat"))
     assert "JOB TRACKING" not in out
 
 
@@ -339,9 +343,9 @@ def test_m9_forbids_parallel_tool_calls():
 
 
 def test_default_task_turn_loads_expected_modules():
-    """Default ctx = task, webui, no bundles, large. Must include
-    M1+M2+M3+M5+M6+M7_webui+M8 and exclude M4 (no bench bundle),
-    M7 for other channels, M9 (large model)."""
+    """Default ctx = task, webui, no bundles, large. Includes
+    M1+M2+M3+M4+M5+M6+M7_webui+M8 (M4 now always-on for task) and
+    excludes M7 for other channels + M9 (large model)."""
     from backend.prompt_modules import build_prompt
     out = build_prompt()
     # Present:
@@ -349,6 +353,7 @@ def test_default_task_turn_loads_expected_modules():
         "CORE AGENT BEHAVIOR",
         "TASK SOLVER",
         "TOOL USE",
+        "JOB TRACKING",
         "SKILL MANAGEMENT",
         "USER INTERACTION",
         "OUTPUT FORMAT — WebUI",
@@ -357,7 +362,6 @@ def test_default_task_turn_loads_expected_modules():
         assert marker in out, f"missing {marker!r} in default ctx"
     # Absent:
     for marker in (
-        "JOB TRACKING",
         "OUTPUT FORMAT — Telegram",
         "OUTPUT FORMAT — Voice",
         "SMALL-MODEL",
@@ -375,14 +379,11 @@ def test_chat_turn_excludes_solver_and_job_tracking():
     assert "JOB TRACKING" not in out
 
 
-def test_supervisor_turn_with_bench_loads_m2_and_m4():
-    """A supervisor turn handling a background job needs both M2
-    discipline and M4 supervisor protocol."""
+def test_supervisor_turn_loads_m2_and_m4():
+    """Supervisor turns need both M2 discipline and M4 protocol —
+    regardless of bundle state."""
     from backend.prompt_modules import build_prompt, TurnContext
-    out = build_prompt(TurnContext(
-        turn_type="supervisor",
-        loaded_bundles=frozenset({"bench"}),
-    ))
+    out = build_prompt(TurnContext(turn_type="supervisor"))
     assert "TASK SOLVER" in out
     assert "JOB TRACKING" in out
 
@@ -402,11 +403,12 @@ def test_telegram_voice_small_combo():
 
 def test_default_prompt_under_global_budget():
     """The whole composed default-ctx prompt should land well under
-    the legacy 22 KB monolith and ideally under 10 KB (the post-
-    audit value of `system_prompt_sections`)."""
+    the legacy 22 KB monolith. Current target: ~10-11 KB (M4 is
+    now always-on for task turns, adding ~480 chars over the bench-
+    gated design). Hard cap 12 KB to catch gross bloat early."""
     from backend.prompt_modules import build_prompt
     out = build_prompt()
-    assert len(out) < 10_000, (
+    assert len(out) < 12_000, (
         f"default prompt grew to {len(out)} chars — splits or "
         "trims needed"
     )

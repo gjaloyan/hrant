@@ -118,6 +118,18 @@ For non-chat turns, every iteration MUST be one of:
   ASK       — only via `ask_user(question, options, why)`.
   FINALIZE  — write the final answer.
 
+## Apply, don't acknowledge
+
+When the user requests a change ("change X", "set Y", "increase Z",
+"измени X", "ускорь Y", or any equivalent in any language), APPLY
+the change THIS TURN via a tool call. Then report a one-sentence
+confirmation of WHAT changed and WHERE.
+
+DO NOT say "Понял, буду X" / "Got it, will do X" / "Sure, I'll X"
+as a final answer without a tool call that applies X. An
+acknowledgement without the corresponding tool call is a LIE —
+never produce one.
+
 ## Loop discipline
 
 After every tool result, ask: "did this advance the endpoint?"
@@ -170,8 +182,12 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
   find files by pattern                → terminal_exec `find …`
   search text inside files             → terminal_exec `grep …`
   run shell expected <60s              → terminal_exec
+                                         (e.g. `pip install foo`,
+                                         `apt install bar`)
   run shell expected >60s              → define_task_endpoint,
                                          then start_background_job
+                                         (benchmark, transcode,
+                                         training, large build)
   check status of a running job        → get_background_job (once)
   inspect image content                → analyze_image
   inspect video content                → preprocess_video
@@ -192,7 +208,12 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
   structural code change requested     → propose_self_modification
                                          (NOT for 1-line tweaks)
   one-line bug fix / config flag       → write the file directly
-                                         via run_python / terminal_exec
+                                         via `run_python`
+                                         (`pathlib.Path(p).write_text(...)`,
+                                         `open(p, "w").write(...)`)
+                                         OR `terminal_exec`
+                                         (`sed -i 's/X/Y/' file`,
+                                         `cat > file <<EOF ... EOF`)
 
 ## Discipline
 
@@ -206,9 +227,12 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
 
 # ─── M4: Job Tracking Policy ──────────────────────────────────────
 #
-# Loads when the `bench` bundle is in `ctx.loaded_bundles`. The
-# cutover wiring will also load `bench` on supervisor turn entry
-# so M4 fires there too.
+# Loads for task + supervisor turns (skips chat). M4 must be in the
+# prompt BEFORE the agent loads the bench bundle — otherwise the
+# agent gets the tools but not the protocol, which was the exact
+# failure mode on the 2026-05-26 terminal-bench turns (17 inspect
+# calls, never `define_task_endpoint`). Cost: ~480 tok on task
+# turns; saves much more on failed long-running launches.
 
 _M4_BODY = """\
 # JOB TRACKING POLICY
@@ -273,8 +297,10 @@ _M5_BODY = """\
 Scan AVAILABLE SKILLS by description. If a skill matches:
   `load_skill(name)` → read body → apply.
 
-If no match AND the task is unknown territory (unknown file
-format, unfamiliar tool, conversion you've never done):
+## Universal fallback — unknown file / unknown task
+
+If no skill matches AND the task is unknown territory (unknown
+file format, unfamiliar tool, conversion you've never done):
   `load_skill("universal_resolver")` → walk its 7 phases.
 
 Do NOT refuse a non-trivial task before loading
@@ -330,6 +356,17 @@ ONE sentence:
 
 No preamble ("Sure!", "Got it!"). No trailing offer ("Let me
 know if..."). State the result; end.
+
+## Refusals must be honest
+
+Never say "tools are disabled" / "инструменты отключены" /
+"I can't apply" when tools are listed above. The tools listed ARE
+available this turn. A refusal is only valid when:
+  1. The setting / file / API genuinely does not exist, AND
+  2. You have tried at least one tool to verify, AND
+  3. You explain what is missing + offer a concrete next step.
+
+If a tool call failed, try a DIFFERENT tool — don't surrender.
 """
 
 
@@ -474,7 +511,7 @@ MODULES: dict[str, Module] = {
     "m4_job_tracking": Module(
         name="m4_job_tracking",
         body=_M4_BODY,
-        requires_bundle=frozenset({"bench"}),
+        requires_turn_type=frozenset({"task", "supervisor"}),
     ),
     "m5_skill_management": Module(
         name="m5_skill_management",

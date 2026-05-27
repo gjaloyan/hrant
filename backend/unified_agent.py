@@ -116,17 +116,52 @@ def unified_enabled() -> bool:
 # A profile override may replace any section at runtime — see
 # `pipeline_profile.active_overrides()` (Task 2+).
 
-def _unified_rules_core() -> str:
-    """Live system-prompt body. Reads the active pipeline profile's
-    `prompt_overrides` (5s in-process cache, invalidated on switch)
-    and assembles the section dict into a single string. Falls back
-    to defaults if the profile system is unavailable (tests, boot
-    race)."""
+def _classify_model_size(model_name: str | None) -> str:
+    """Map an active model ID to one of `small` / `medium` / `large`
+    for the prompt-module `requires_model_size` predicate.
+
+    Frontier-class names (Claude 4.x, GPT-4.x/5, Gemini 2.x, Mistral
+    Large, Command R+) → `large`. Mid-tier (Haiku, GPT-4-mini, Llama
+    70B, Mistral medium) → `medium`. Local small (Llama 7-13B,
+    Gemma, Phi, Qwen <14B) → `small`. Unknown → `large` (safe
+    default — small-model module is opt-in, not opt-out)."""
+    if not model_name:
+        return "large"
+    n = model_name.lower()
+    # Explicit small-model identifiers used in local setups.
+    small_markers = (
+        "7b", "8b", "13b", "phi-", "gemma-2b", "gemma-7b",
+        "llama-3.2-1b", "llama-3.2-3b", "qwen2.5-7b", "qwen2.5-3b",
+        "tinyllama", "stablelm",
+    )
+    if any(m in n for m in small_markers):
+        return "small"
+    medium_markers = ("haiku", "mini", "70b", "mistral-medium")
+    if any(m in n for m in medium_markers):
+        return "medium"
+    return "large"
+
+
+def _unified_rules_core(ctx=None) -> str:
+    """Live system-prompt body for a given TurnContext.
+
+    Reads the active pipeline profile's `prompt_overrides` (5s
+    in-process cache, invalidated on switch). The overrides dict
+    may carry a `modules` key (v2 path, used by `build_prompt`) and
+    historically a `sections` key (v1 path, used by `assemble`). v2
+    is authoritative now; `sections` is silently ignored.
+
+    `ctx=None` returns the default-context prompt, which is what
+    the import-time `_UNIFIED_RULES_CORE` constant snapshots."""
+    from .prompt_modules import build_prompt, TurnContext
+    if ctx is None:
+        ctx = TurnContext()
     try:
         from .pipeline_profile import active_overrides
-        return _assemble_prompt(active_overrides().get("prompt_overrides"))
+        overrides = active_overrides().get("prompt_overrides")
     except Exception:
-        return _assemble_prompt()
+        overrides = None
+    return build_prompt(ctx, overrides)
 
 
 # Back-compat: tests that grep `_UNIFIED_RULES_CORE` still work
@@ -492,6 +527,7 @@ def _recent_refusal_pattern(
 
 def _build_rules_for_turn(
     *,
+    ctx=None,
     has_attachments: bool = False,
     sticky_fired: bool = False,
     repeat_refusal: bool = False,
@@ -520,7 +556,7 @@ def _build_rules_for_turn(
     triggers it. We trust the LLM more than a Russian-plus-English
     bug-keyword regex.
     """
-    parts = [_unified_rules_core(), _RULES_JOURNAL_FIRST]
+    parts = [_unified_rules_core(ctx), _RULES_JOURNAL_FIRST]
     if has_attachments:
         parts.append(_RULES_FILE_TYPES)
         # MEDIA convention is most useful alongside an inbound
@@ -1499,7 +1535,25 @@ def run_unified(
     _repeat_refusal = _recent_refusal_pattern(
         session_key=skey, speaker_id=speaker_id,
     )
+    # Derive the TurnContext for v2 prompt-module loader. The fields
+    # decide which conditional modules fire (M2 / M4 / M7 / M9).
+    from .prompt_modules import TurnContext as _PromptCtx
+    from .tool_bundles import get_loaded_bundles as _get_loaded_bundles
+    _channel_norm = channel if channel in ("webui", "telegram", "voice", "cli", "api") else "webui"
+    try:
+        from .llm import router as _router_for_size
+        _active_llm = getattr(_router_for_size(), "_active_llm", None)
+        _active_model = getattr(_active_llm, "model", None) if _active_llm else None
+    except Exception:
+        _active_model = None
+    _turn_ctx = _PromptCtx(
+        turn_type="supervisor" if supervisor_mode else "task",
+        channel=_channel_norm,  # type: ignore[arg-type]
+        loaded_bundles=frozenset(_get_loaded_bundles()),
+        model_size=_classify_model_size(_active_model),  # type: ignore[arg-type]
+    )
     _rules_for_turn = _build_rules_for_turn(
+        ctx=_turn_ctx,
         has_attachments=bool(attachments),
         sticky_fired=False,
         repeat_refusal=_repeat_refusal,
