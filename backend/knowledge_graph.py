@@ -126,8 +126,25 @@ class KnowledgeGraph:
     def _save(self) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            # Preserve any v2 schema fields (version / nodes / edges_v2)
+            # that a previous migration wrote. Without this, the next
+            # legacy save() strips them — undoing the migration and
+            # making graph_rebuild lever skip again. Round-trip is the
+            # cheapest reconciliation while the two writers coexist.
+            preserved: dict = {}
+            if self.path.exists():
+                try:
+                    existing = json.loads(self.path.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict):
+                        for key in ("version", "nodes", "edges_v2"):
+                            if key in existing:
+                                preserved[key] = existing[key]
+                except (OSError, ValueError):
+                    pass
+            body: dict = {"edges": self._edges}
+            body.update(preserved)
             self.path.write_text(
-                json.dumps({"edges": self._edges}, ensure_ascii=False, indent=2),
+                json.dumps(body, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
