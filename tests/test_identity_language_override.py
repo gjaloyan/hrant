@@ -17,7 +17,12 @@ def test_preamble_has_no_language_override_when_section_empty(tmp_path):
     assert "LANGUAGE OVERRIDE" not in pre
 
 
-def test_preamble_appends_language_override_when_set(tmp_path):
+def test_preamble_appends_language_override_when_set(tmp_path, monkeypatch):
+    # The profile-pinned LANGUAGE OVERRIDE only applies when the global
+    # response_language is "mirror" (otherwise the config-pinned
+    # RESPONSE LANGUAGE block wins — see test_response_language.py).
+    from backend.config import CONFIG
+    monkeypatch.setitem(CONFIG._data, "response_language", "mirror")
     idm = IdentityManager(base_dir=tmp_path)
     idm.add_user_fact("Respond in Russian.", category="language")
     pre = idm.preamble()
