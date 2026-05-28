@@ -177,7 +177,10 @@ Decide tool by SIGNATURE, not by topic. Lookup table:
   -------------------------------------------------------------
   set/change a config value            → set_setting
                                          (NOT terminal_exec on JSON)
-  remember a stable user trait         → save_user_fact
+  user shares a stable preference,     → save_user_fact
+   trait, or fact about themselves       (a verbal "ok, I will" is
+   ("remember…", "I prefer…", "my        NOT enough — you MUST call
+   name is…", "always/never…", tone)     the tool to persist it)
   read a known file path               → read_file
   find files by pattern                → terminal_exec `find …`
   search text inside files             → terminal_exec `grep …`

@@ -11,8 +11,8 @@ Design:
   - Auto-trims to max_turns (default 20) and max_chars (default 12000)
   - Each turn stores: user message, agent answer (truncated), timestamp,
     intent classification, and whether it was a chat/task
-  - The conversation block is injected into _think and _solve prompts
-    so the agent knows what was discussed
+  - The conversation block is injected into the unified agent turn's
+    system prompt so the agent knows what was discussed
 """
 from __future__ import annotations
 import json

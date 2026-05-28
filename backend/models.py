@@ -221,7 +221,7 @@ class LLMCallDetail(BaseModel):
     `user_redacted` are length-capped — see `verifier.detect_false_*`
     docstring for the same trade-off.
     """
-    label: str = ""                   # e.g. "_solve", "_think", "_verify"
+    label: str = ""                   # free-text call-site label, e.g. "_verify"
     task_type: str = ""               # TaskType.value, e.g. "complex_solving"
     model: str = ""                   # provider's model id at call time
     system_redacted: str = ""         # system prompt, file blobs replaced with markers

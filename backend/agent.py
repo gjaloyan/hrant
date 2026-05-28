@@ -379,12 +379,12 @@ class Agent(
         max_goals: int = 5,
         for_self_analysis: bool = False,
     ) -> str:
-        """Common per-turn context block used by chat / think / solve.
+        """Common per-turn context block (state snapshot).
 
         Soul / identity / user profile / name+language overrides are
-        already in the system prompt via `_with_identity`. THIS block
-        carries the per-turn state that tells the model "what we are
-        doing right now":
+        already in the system prompt via `IDENTITY.preamble()`. THIS
+        block carries the per-turn state that tells the model "what we
+        are doing right now":
 
           - CORE memory (long-term persistent facts)
           - CURRENT PROJECT (active workspace, if any)
