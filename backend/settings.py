@@ -11,7 +11,7 @@ That's 4-6 LLM calls + 4-6 tool calls for a one-word user request.
 And every config has its own quirks (TTS uses `backend.voice` /
 `edge_tts.voice` / `edge_tts.voice_ru`; transcriber uses
 `backend` + per-backend block; response language lives in
-`user_profile.md` under `## Язык общения`, not in JSON).
+`user_profile.md` under `## Language`, not in JSON).
 
 `SettingsRouter` is the abstraction:
   - `SETTINGS.list_settings()` enumerates every mutable setting,
@@ -313,7 +313,7 @@ def _response_language_get() -> Optional[str]:
 
 
 def _response_language_set(value: Optional[str]) -> None:
-    """Rewrites the `## Язык общения` section of the default
+    """Rewrites the `## Language` section of the default
     user_profile.md with the new value. None / empty clears the pin."""
     from .identity import IDENTITY
     path = IDENTITY.user_path
@@ -321,7 +321,9 @@ def _response_language_set(value: Optional[str]) -> None:
     # Find or create the section. We keep it simple: scan for the
     # section header, replace its body (until next `## ` heading or
     # EOF) with the new value.
-    section_headers = ("## Язык общения", "## Language", "## Язык")
+    # Accept legacy Russian headers when locating an existing section,
+    # but write new sections under the English header.
+    section_headers = ("## Language", "## Язык общения", "## Язык")
     lines = text.splitlines()
     start = -1
     for i, ln in enumerate(lines):
@@ -334,10 +336,13 @@ def _response_language_set(value: Optional[str]) -> None:
             if lines[j].startswith("## "):
                 end = j
                 break
+    # Preserve the existing header spelling on rewrite; default to the
+    # English header when creating the section fresh.
+    header = lines[start].strip() if start >= 0 else "## Language"
     new_body = []
     if value:
         new_body = [f"- {value}"]
-    new_section = ["## Язык общения", ""] + new_body + [""]
+    new_section = [header, ""] + new_body + [""]
     if start >= 0:
         out_lines = lines[:start] + new_section + lines[end:]
     else:

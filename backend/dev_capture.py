@@ -39,8 +39,8 @@ _SECTION_FILES: tuple[tuple[str, str], ...] = (
     ("# SOUL",                      "knowledge/identity/soul.md"),
     ("# IDENTITY",                  "knowledge/identity/identity.md"),
     ("# USER PROFILE",              "knowledge/identity/user.md"),
-    ("# AGENT NAME OVERRIDE",       "<derived from identity.md ## Имя>"),
-    ("# LANGUAGE OVERRIDE",         "<derived from user.md ## Язык общения>"),
+    ("# AGENT NAME OVERRIDE",       "<derived from identity.md ## Name>"),
+    ("# LANGUAGE OVERRIDE",         "<derived from user.md ## Language>"),
     ("# CORE MEMORY",               "knowledge/core_memory.md"),
     ("CORE MEMORY:",                "knowledge/core_memory.md"),  # _think variant
     ("# CURRENT PROJECT",           "<knowledge/projects/.current>"),

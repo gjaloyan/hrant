@@ -1,9 +1,9 @@
-"""FinetuneStore — CRUD для finetune_queue.jsonl + детектор категорий.
+"""FinetuneStore — CRUD for finetune_queue.jsonl + category detector.
 
-Формат хранения (jsonl) — OpenAI chat-style:
+Storage format (jsonl) — OpenAI chat-style:
 {"id": "...", "messages": [...], "metadata": {...}}
 
-ID — стабильный 12-символьный sha1 от user+assistant+timestamp, присваивается при add().
+ID — stable 12-character sha1 of user+assistant+timestamp, assigned on add().
 """
 from __future__ import annotations
 import hashlib
@@ -28,7 +28,7 @@ FINETUNE_SYSTEM_PROMPT = (
 
 
 # ------------ category detection ------------
-# (patterns — regex с границами слов, чтобы "какое" не матчило "как")
+# (patterns — regex with word boundaries so "какое" does not match "как")
 _TROUBLESHOOT_PAT = re.compile(
     r"\b(не\s+работает|ошибк|проблем|падает|drops?|error|fails?|not\s+working|"
     r"debug|диагностик|чинит|сбой|зависает|пропада)",
@@ -74,7 +74,7 @@ def _hash_id(user: str, assistant: str, ts: str) -> str:
 
 
 def _clean_answer(text: str) -> str:
-    """Убирает ⚠️-префикс и лишние метаданные из ответа."""
+    """Strips the ⚠️ prefix and extra metadata from the answer."""
     if not text:
         return text
     text = re.sub(r"^⚠️[^\n]*\n+", "", text).strip()
@@ -88,7 +88,7 @@ class FinetuneStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             self.path.touch()
-        self.confidence_threshold: int = 85  # см. FINETUNE_PIPELINE.md
+        self.confidence_threshold: int = 85  # see FINETUNE_PIPELINE.md
 
     # Read CONFIG.knowledge live so a Settings/Engine PUT for
     # `finetune_min_examples` actually applies without restart.
@@ -190,7 +190,7 @@ class FinetuneStore:
         is_verified: bool,
         project: str | None,
     ) -> FinetunePair | None:
-        """Автосбор по правилам Этапа 1 FINETUNE_PIPELINE.md."""
+        """Auto-collection according to Stage 1 rules in FINETUNE_PIPELINE.md."""
         if not is_verified:
             return None
         if confidence < self.confidence_threshold:
@@ -217,7 +217,7 @@ class FinetuneStore:
         project: str | None = None,
         source_notes: list[str] | None = None,
     ) -> FinetunePair:
-        """User-verified correction — категория 'correction', confidence = 100."""
+        """User-verified correction — category 'correction', confidence = 100."""
         return self.add(
             question=question,
             answer=corrected_answer,
@@ -267,7 +267,7 @@ class FinetuneStore:
         return self.path.read_text(encoding="utf-8") if self.path.exists() else ""
 
 
-# ленивый синглтон
+# lazy singleton
 _store: FinetuneStore | None = None
 
 

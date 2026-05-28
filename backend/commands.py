@@ -1,4 +1,4 @@
-"""Разбор естественно-языковых команд управления памятью и проектами."""
+"""Parsing of natural-language memory and project management commands."""
 from __future__ import annotations
 import re
 from dataclasses import dataclass
@@ -45,7 +45,7 @@ PATTERNS: list[tuple[str, re.Pattern]] = [
     ("ft_versions",     re.compile(r"^\s*(?:model\s+versions|finetune\s+versions)\s*$", re.I)),
     ("ft_learn_this",   re.compile(r"^\s*(?:learn\s+this\s+to\s+model|\u0437\u0430\u043f\u043e\u043c\u043d\u0438\s+\u0432\s+\u043c\u043e\u0434\u0435\u043b\u044c)\s*$", re.I)),
     ("show_mode",       re.compile(r"^\s*(?:mode|\u0440\u0435\u0436\u0438\u043c)\s*$", re.I)),
-    # correction: "неправильно, правильно: <текст>" или "correction: <текст>"
+    # correction: "неправильно, правильно: <текст>" or "correction: <text>"
     ("ft_correct",      re.compile(r"^\s*(?:\u043d\u0435\u043f\u0440\u0430\u0432\u0438\u043b\u044c\u043d\u043e[,\s]+\u043f\u0440\u0430\u0432\u0438\u043b\u044c\u043d\u043e|correction|wrong[,\s]+correct)[:\s]+(.+)$", re.I | re.S)),
 
     ("status",          re.compile(r"^\s*(?:статус|status)\s*$", re.I)),

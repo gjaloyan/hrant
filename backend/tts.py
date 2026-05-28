@@ -47,12 +47,12 @@ DEFAULT_OPENAI_TTS_MODEL = "tts-1"
 DEFAULT_OPENAI_TTS_VOICE = "alloy"
 
 
-# Cyrillic Unicode block (Russian, Ukrainian, Bulgarian, Serbian…).
+# Cyrillic Unicode block (Russian, Ukrainian, Bulgarian, Serbian, etc.).
 # `[А-яЁё]` covers the full block including the accented letter forms.
 # Detection is text-content based, NOT user-language-preference based —
 # the user could switch language mid-conversation and the agent might
-# answer in whichever language fits the question. Picking voice from
-# the answer's actual content is the only thing that produces correct
+# answer in whichever language fits the question. Picking the voice from
+# the answer's actual content is the only approach that produces correct
 # pronunciation regardless of `user.md` preferences.
 _CYRILLIC_RE = re.compile(r"[А-яЁё]")
 

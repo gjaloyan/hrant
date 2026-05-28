@@ -88,7 +88,7 @@ def finetune_correction(body: CorrectionRequest):
 
 @router.post("/api/finetune/start")
 def finetune_start():
-    """Запуск пайплайна с потоком прогресса."""
+    """Start the pipeline with a progress stream."""
     require_owner_for_writes(action="starting fine-tune pipeline")
     from ..finetune_pipeline import FineTunePipeline
 
@@ -159,7 +159,7 @@ def finetune_export_cloud():
             "package_dir": str(pkg),
             "files": files,
             "tag": pkg.name.replace("cloud_export_", ""),
-            "instructions": f"Скачай {pkg.name}/, залей на GPU, запусти train_script.py",
+            "instructions": f"Download {pkg.name}/, upload to GPU, run train_script.py",
         }
     except Exception as e:
         raise HTTPException(400, str(e))

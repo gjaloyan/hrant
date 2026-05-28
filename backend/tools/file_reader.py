@@ -4,7 +4,7 @@ redirect to `analyze_image` for visual questions).
 Whitelist of text-like extensions intentionally broad — the audit
 on "what file types can Hrant handle?" found .csv / .html / .css /
 .sh / .c / .cpp / .rs / .go / .java / .h / .toml / .ini / .xml all
-silently rejected as «неподдерживаемый формат» even though they're
+silently rejected as "unsupported format" even though they're
 just plain text. Same fix here: read as utf-8.
 """
 from __future__ import annotations
@@ -70,7 +70,7 @@ def read_file(
     """
     p = Path(path)
     if not p.exists():
-        return f"[файл не найден: {path}]"
+        return f"[file not found: {path}]"
     suffix = p.suffix.lower()
     if not suffix:
         # Extension-less files — match on stem (Dockerfile / Makefile
@@ -97,7 +97,7 @@ def read_file(
         try:
             from pypdf import PdfReader
         except ImportError:
-            return "[pypdf не установлен]"
+            return "[pypdf not installed]"
         try:
             reader = PdfReader(str(p))
             text = "\n".join((page.extract_text() or "") for page in reader.pages)
@@ -109,7 +109,7 @@ def read_file(
         try:
             import docx  # python-docx
         except ImportError:
-            return "[python-docx не установлен]"
+            return "[python-docx not installed]"
         try:
             doc = docx.Document(str(p))
             return "\n".join(par.text for par in doc.paragraphs)[:max_chars]

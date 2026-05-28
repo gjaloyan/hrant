@@ -1,8 +1,8 @@
-"""Регистрация встроенных инструментов в глобальный ToolRegistry.
+"""Registration of built-in tools into the global ToolRegistry.
 
-Импорт этого модуля имеет побочный эффект — все builtin tools
-попадают в REGISTRY. Делается из `backend/__init__.py`, чтобы любой
-модуль, импортирующий backend, получал готовый реестр.
+Importing this module has a side effect — all builtin tools get
+registered into REGISTRY. It's done from `backend/__init__.py` so that
+any module importing backend gets a ready-to-use registry.
 """
 from __future__ import annotations
 import json
@@ -36,11 +36,11 @@ from .tools.agent_browser import (
 
 # ---------- in-session TTL cache ----------
 class _TTLCache:
-    """Тривиальный LRU+TTL кэш для результатов web-вызовов.
+    """Trivial LRU+TTL cache for web-call results.
 
-    Смысл: в рамках одной сессии агент часто переспрашивает один и тот же
-    запрос (и тулуз-луп сам может дёрнуть fetch_url дважды). Это экономит
-    латентность и не даёт уйти в пустые повторы.
+    Rationale: within one session the agent often re-asks the same
+    query (and the tool-use loop itself may call fetch_url twice). This
+    saves latency and avoids empty repeats.
     """
 
     def __init__(self, max_size: int = 128, ttl_seconds: float = 600.0):
@@ -49,7 +49,7 @@ class _TTLCache:
         self._data: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
 
     def _key(self, name: str, args: dict[str, Any]) -> str:
-        # Стабильный ключ: имя + сериализованные аргументы.
+        # Stable key: name + serialized arguments.
         return f"{name}:{json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)}"
 
     def get(self, name: str, args: dict[str, Any]) -> str | None:
@@ -61,7 +61,7 @@ class _TTLCache:
         if time.monotonic() > expiry:
             self._data.pop(k, None)
             return None
-        # Обновляем порядок (LRU).
+        # Update ordering (LRU).
         self._data.move_to_end(k)
         return value
 
@@ -79,12 +79,12 @@ class _TTLCache:
         return {"size": len(self._data), "max_size": self.max_size, "ttl": self.ttl}
 
 
-# Singleton — один кэш на процесс. Тесты могут сбросить его через WEB_CACHE.clear().
+# Singleton — one cache per process. Tests can reset it via WEB_CACHE.clear().
 WEB_CACHE = _TTLCache()
 
 
 def _is_error_result(text: str) -> bool:
-    """Эвристика: не кэшируем ответы-ошибки, чтобы transient-сбой не залип."""
+    """Heuristic: don't cache error responses, so a transient failure doesn't stick."""
     if not text:
         return True
     head = text.lstrip()[:32]
@@ -1788,11 +1788,11 @@ def _list_telegram_access_handler(role: str = "") -> str:
     )
 
 
-# ---------- регистрация ----------
+# ---------- registration ----------
 def register_builtin_tools() -> None:
     reg = get_registry()
     if "web_search" in reg.tools:
-        return  # уже зарегистрировано — идемпотентно
+        return  # already registered — idempotent
 
     reg.register_func(
         name="web_search",

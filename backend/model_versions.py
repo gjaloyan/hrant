@@ -1,4 +1,4 @@
-"""Реестр версий модели: knowledge/model_versions.json."""
+"""Model version registry: knowledge/model_versions.json."""
 from __future__ import annotations
 import json
 from datetime import datetime
@@ -12,9 +12,9 @@ from .models import ModelVersion, ModelVersionsState
 
 class ModelVersionRegistry:
     """
-    Реестр версий fine-tune модели (локальная Qwen-цепочка).
-    Claude остаётся оркестратором в CONFIG.llm — он НЕ отслеживается здесь.
-    v0 — базовая inference-модель (qwen2.5:7b-instruct), v1+ — дообученные версии.
+    Registry of fine-tune model versions (local Qwen chain).
+    Claude remains the orchestrator in CONFIG.llm — it is NOT tracked here.
+    v0 — base inference model (qwen2.5:7b-instruct), v1+ — fine-tuned versions.
     """
 
     def __init__(self, path: Optional[Path] = None):
@@ -33,7 +33,7 @@ class ModelVersionRegistry:
                 model_id=base_id,
                 created=datetime.now().isoformat(timespec="seconds"),
                 examples_count=0,
-                notes="базовая модель (до fine-tune)",
+                notes="base model (before fine-tune)",
             )
             state = ModelVersionsState(current="v0", versions=[base])
             self._write(state)
@@ -64,7 +64,7 @@ class ModelVersionRegistry:
 
     def register(self, tag: str, model_id: str, examples_count: int, notes: str = "") -> ModelVersion:
         state = self._read()
-        # заменить если уже есть
+        # replace if already present
         state.versions = [v for v in state.versions if v.tag != tag]
         version = ModelVersion(
             tag=tag,
@@ -80,25 +80,25 @@ class ModelVersionRegistry:
     def switch(self, tag: str) -> str:
         state = self._read()
         if not any(v.tag == tag for v in state.versions):
-            return f"✗ версия '{tag}' не найдена"
+            return f"✗ version '{tag}' not found"
         state.current = tag
         self._write(state)
-        return f"✓ переключено на {tag}"
+        return f"✓ switched to {tag}"
 
     def rollback(self) -> str:
         state = self._read()
         if not state.rollback_enabled:
-            return "✗ rollback отключён"
+            return "✗ rollback disabled"
         tags = [v.tag for v in state.versions]
         if state.current not in tags or len(tags) < 2:
-            return "✗ нет предыдущей версии"
+            return "✗ no previous version"
         idx = tags.index(state.current)
         if idx == 0:
-            return "✗ уже на самой ранней версии"
+            return "✗ already on the earliest version"
         prev = tags[idx - 1]
         state.current = prev
         self._write(state)
-        return f"✓ откат на {prev}"
+        return f"✓ rolled back to {prev}"
 
     def next_tag(self) -> str:
         state = self._read()

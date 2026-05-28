@@ -6,7 +6,7 @@ to male" the agent had no idea:
   - what voice it's CURRENTLY using
   - that `tts_config.json` exists and is editable
   - that `terminal_exec` / `write_note` / `run_python` can mutate it
-So it replied "Понял, буду мужским голосом" and saved a preference
+So it replied "Understood, I will use a male voice" and saved a preference
 fact — without changing anything. The user got the same female
 voice on the next reply.
 
@@ -156,7 +156,7 @@ def _active_model() -> dict[str, Any]:
 
 def _response_language(speaker_id: str | None) -> str:
     """Pinned response language for the speaker (from user_profile.md
-    `## Язык общения` section). Empty = no pin → mirror user's
+    `## Язык общения` section). Empty = no pin → mirrors the user's
     input language."""
     try:
         from .identity import IDENTITY
@@ -320,7 +320,7 @@ def render_snapshot(state: dict[str, Any]) -> str:
         "- NEVER claim tools are unavailable, disabled, or refused. The "
         "tools listed above ARE available this turn. If a previous tool "
         "call failed, try a DIFFERENT tool — don't surrender with "
-        "\"инструменты отключены\" / \"can't apply\" / \"tools off\". "
+        "\"tools disabled\" / \"can't apply\" / \"tools off\". "
         "Refusal is only valid for non-existent settings (not in the "
         "MUTABLE SETTINGS list AND not patchable via terminal_exec / "
         "run_python). Even then: explain what's missing and offer a "

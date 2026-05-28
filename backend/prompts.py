@@ -230,7 +230,7 @@ Categories:
            DO NOT classify as "preference" when the user just asks the
            assistant to remember a TEMPORARY state, follow-up, todo, or
            project status — phrases like "remember to come back", "remind
-           me later", "запомни что я сейчас иду", "wait for me to fix this".
+           me later", "note that I am stepping away now", "wait for me to fix this".
            These are tasks (event memory), not user-profile facts.
 
   "task" — everything else: questions requiring knowledge, explanation,

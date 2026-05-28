@@ -88,7 +88,7 @@ class IntentClassifierMixin:
             return "chat"
 
         marker = self._attachment_marker()
-        user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{marker}{trimmed}"
+        user_prompt = f"USER MESSAGE:\n{marker}{trimmed}"
         t0 = _t.monotonic()
         usage_before = TOKENS.request_usage()
         try:

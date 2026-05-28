@@ -1,8 +1,8 @@
-"""ModelEvaluator: прогоняет тесты на старой и новой моделях, сравнивает.
+"""ModelEvaluator: runs tests on the old and new models and compares them.
 
-Тестовый набор — JSON: [{"question": "...", "expected": "..."}, ...]
-По умолчанию: knowledge/eval_set.json
-Оценка — fuzz.token_set_ratio между реальным и ожидаемым ответом.
+Test set — JSON: [{"question": "...", "expected": "..."}, ...]
+Default location: knowledge/eval_set.json
+Score — fuzz.token_set_ratio between the actual and expected answer.
 """
 from __future__ import annotations
 import json
@@ -17,7 +17,7 @@ from .models import EvaluationResult
 
 
 def _llm_for(model_id: str) -> BaseLLM:
-    """claude* → Anthropic (берём настройки из model_a), иначе Ollama (из model_b)."""
+    """claude* → Anthropic (using settings from model_a), otherwise Ollama (from model_b)."""
     if model_id.lower().startswith("claude"):
         cfg = dict(CONFIG.model_a)
         cfg["model"] = model_id
@@ -57,7 +57,7 @@ class ModelEvaluator:
                 new_score=0.0,
                 improvement=0.0,
                 should_upgrade=False,
-                details=[{"warn": "eval_set.json пуст — добавь тесты"}],
+                details=[{"warn": "eval_set.json is empty — add tests"}],
             )
         old_llm = _llm_for(old_model)
         new_llm = _llm_for(new_model)

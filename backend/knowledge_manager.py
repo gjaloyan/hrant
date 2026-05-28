@@ -1,4 +1,4 @@
-"""CRUD для заметок + index.json + access_log + finetune_queue."""
+"""CRUD for notes + index.json + access_log + finetune_queue."""
 from __future__ import annotations
 import json
 import re
@@ -34,14 +34,14 @@ class KnowledgeManager:
             (self.base / sub).mkdir(exist_ok=True)
         self.index_path = self.base / "index.json"
         self.access_log_path = self.base / "access_log.json"
-        # gap-лог: темы, которые пользователь спрашивал, а у нас их не было
-        # в базе в момент запроса (нам пришлось учить на лету). Это сигнал
-        # "чем пользователь интересуется, но мы к этому не готовы заранее".
+        # gap-log: topics the user asked about that we didn't have in the
+        # knowledge base at query time (we had to learn them on the fly).
+        # This signals what the user is interested in but we weren't prepared for.
         self.gaps_path = self.base / "gaps.json"
         self.finetune_path = self.base / "finetune_queue.jsonl"
         self.core_path = self.base / "core_memory.md"
-        # История версий заметок: snapshot предыдущего содержимого перед
-        # каждой перезаписью. Даёт возможность откатиться и посмотреть diff.
+        # Note version history: snapshot of previous content before each
+        # overwrite. Allows rollback and diff viewing.
         self.history_dir = self.base / "_history"
         self.history_dir.mkdir(parents=True, exist_ok=True)
         if not self.index_path.exists():
@@ -50,16 +50,16 @@ class KnowledgeManager:
             self._write_json(self.access_log_path, {})
         if not self.core_path.exists():
             self.core_path.write_text(
-                "# Core Memory\n\n*Постоянные факты, всегда в контексте.*\n",
+                "# Core Memory\n\n*Permanent facts, always in context.*\n",
                 encoding="utf-8",
             )
 
     # ---------- version history ----------
     def _snapshot_note(self, path: Path) -> Optional[Path]:
-        """Сохраняет текущее содержимое заметки в _history/<slug>/<ts>.md.
+        """Save the current note content to _history/<slug>/<ts>.md.
 
-        Возвращает путь к снапшоту или None, если заметки ещё нет на диске.
-        Любая ошибка ловится — версионирование не должно ломать сохранение.
+        Returns the snapshot path, or None if the note doesn't exist on disk yet.
+        Any error is caught — versioning must not break the save operation.
         """
         if not path.exists():
             return None
@@ -72,7 +72,7 @@ class KnowledgeManager:
         folder.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         snap = folder / f"{ts}.md"
-        # На случай микросекундных коллизий в тестах/скриптах добавляем суффикс.
+        # Guard against microsecond-level collisions in tests/scripts by appending a suffix.
         i = 1
         while snap.exists():
             snap = folder / f"{ts}_{i}.md"
@@ -84,10 +84,10 @@ class KnowledgeManager:
         return snap
 
     def list_versions(self, topic: str) -> list[dict]:
-        """Список снапшотов заметки, от новых к старым.
+        """List note snapshots from newest to oldest.
 
-        Возвращает [{timestamp, path, size}], где timestamp в формате
-        'YYYY-MM-DD HH:MM:SS'. Пустой список, если истории нет.
+        Returns [{timestamp, path, size}] where timestamp is in
+        'YYYY-MM-DD HH:MM:SS' format. Empty list if no history exists.
         """
         slug = _slug(topic)
         folder = self.history_dir / slug
@@ -106,7 +106,7 @@ class KnowledgeManager:
         return out
 
     def get_version(self, topic: str, index: int = 0) -> Optional[str]:
-        """Читает N-ю сверху версию (0 = самая свежая). None, если нет."""
+        """Read the N-th version from the top (0 = most recent). None if absent."""
         versions = self.list_versions(topic)
         if not versions or index >= len(versions) or index < 0:
             return None
@@ -167,7 +167,7 @@ class KnowledgeManager:
             project=project,
         )
         note = Note(frontmatter=fm, body=body, path=str(path))
-        # Снимок старой версии до перезаписи (если это не первое сохранение).
+        # Snapshot the old version before overwriting (skipped on first save).
         if existing is not None:
             self._snapshot_note(path)
         path.write_text(note.to_markdown(), encoding="utf-8")
@@ -366,11 +366,11 @@ class KnowledgeManager:
             return {}
 
     def log_miss(self, topic: str) -> int:
-        """Регистрирует: тему спросили — у нас её не было в базе.
+        """Record that a topic was asked about but was not in the knowledge base.
 
-        Хранит {slug: {"topic": str, "count": int, "last": "YYYY-MM-DD HH:MM"}}.
-        Возвращает новый счётчик промахов для этой темы. Любая I/O ошибка
-        гасится — gap-лог не должен ломать основной поток.
+        Stores {slug: {"topic": str, "count": int, "last": "YYYY-MM-DD HH:MM"}}.
+        Returns the updated miss count for this topic. Any I/O error is silenced —
+        the gap-log must not break the main flow.
         """
         topic = (topic or "").strip()
         if not topic:
@@ -379,7 +379,7 @@ class KnowledgeManager:
         try:
             data = self._read_gaps()
             entry = data.get(key) or {"topic": topic, "count": 0, "last": ""}
-            entry["topic"] = topic  # обновляем «каноничную» форму
+            entry["topic"] = topic  # update the canonical form
             entry["count"] = int(entry.get("count", 0)) + 1
             entry["last"] = _now()
             data[key] = entry
@@ -389,12 +389,12 @@ class KnowledgeManager:
             return 0
 
     def hot_gaps(self, threshold: int = 1, limit: int = 20) -> list[dict]:
-        """Возвращает темы, промахнувшиеся ≥ threshold раз.
+        """Return topics that missed the knowledge base >= threshold times.
 
-        Отсортированы по count убыванию. Каждый элемент:
+        Sorted by count descending. Each item:
         {"topic": str, "count": int, "last": str, "has_note_now": bool}.
-        `has_note_now=True` означает, что тему в итоге удалось изучить и
-        заметка уже в базе — пользователю можно её показать как "закрытую".
+        `has_note_now=True` means the topic was eventually learned and a note
+        now exists — it can be shown to the user as "resolved".
         """
         data = self._read_gaps()
         idx = self._read_index()
@@ -413,10 +413,10 @@ class KnowledgeManager:
         return items[:limit]
 
     def open_gaps(self, threshold: int = 1, limit: int = 20) -> list[dict]:
-        """Только незакрытые пробелы: темы, которые всё ещё не в базе.
+        """Only unresolved gaps: topics that still have no note in the knowledge base.
 
-        Полезно для "пробелов", которые стоит проактивно изучить
-        (фоновый режим, /gaps команда, подсказка в UI).
+        Useful for gaps worth proactively learning
+        (background mode, /gaps command, UI hint).
         """
         return [g for g in self.hot_gaps(threshold, limit=limit * 3) if not g["has_note_now"]][:limit]
 

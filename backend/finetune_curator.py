@@ -1,4 +1,4 @@
-"""Автоматическая курация finetune-примеров: quality score + дедуп."""
+"""Automatic curation of finetune examples: quality score + deduplication."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -36,7 +36,7 @@ class FinetuneDataCurator:
         meta = pair.metadata
         score = 0.0
 
-        # длина ответа
+        # answer length
         if 50 < len(answer) < 2000:
             score += 0.2
 
@@ -44,17 +44,17 @@ class FinetuneDataCurator:
         if meta.confidence >= 85:
             score += 0.2
 
-        # grounded в заметках
+        # grounded in notes
         if meta.source_notes:
             score += 0.2
 
-        # бонус категории
+        # category bonus
         if meta.category in ("correction", "troubleshooting"):
             score += 0.3
         elif meta.category in ("factual_qa", "procedure"):
             score += 0.2
 
-        # manual boost — отдельный бонус
+        # manual boost — separate bonus
         if meta.boosted:
             score += 0.1
 
@@ -68,7 +68,7 @@ class FinetuneDataCurator:
         return False
 
     def apply_boosting(self, curated: list[FinetunePair]) -> list[FinetunePair]:
-        """Важные примеры (corrections/troubleshooting/boosted) повторяются 2-3x."""
+        """Important examples (corrections/troubleshooting/boosted) are repeated 2-3x."""
         out: list[FinetunePair] = []
         for p in curated:
             out.append(p)

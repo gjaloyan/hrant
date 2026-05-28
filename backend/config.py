@@ -1,15 +1,15 @@
-"""Загрузчик config.yaml + .env + система MODE-пресетов.
+"""Loader for config.yaml + .env + the MODE preset system.
 
-Режимы работы агента (устанавливается `mode:` в config.yaml):
+Agent operating modes (set via `mode:` in config.yaml):
 
-  1. local_full     — локальный Qwen через Ollama + локальный fine-tune на GPU
-  2. cloud_finetune — локальный Qwen через Ollama + fine-tune на арендованной cloud GPU
-  3. local_cpu      — маленький локальный Qwen через CPU (1.5B/3B), тренировка экспериментальна
-  4. cloud_only     — только облачный API (Claude / GPT-5.x / Gemini / OpenRouter),
-                    без локальных моделей, только сбор данных в finetune_queue
+  1. local_full     — local Qwen via Ollama + local fine-tune on GPU
+  2. cloud_finetune — local Qwen via Ollama + fine-tune on a rented cloud GPU
+  3. local_cpu      — small local Qwen on CPU (1.5B/3B), training is experimental
+  4. cloud_only     — cloud API only (Claude / GPT-5.x / Gemini / OpenRouter),
+                    no local models, only collects data into finetune_queue
                     (legacy alias: `claude_only` — still accepted on load)
 
-Пресет задаёт разумные дефолты; любой ключ можно переопределить явно в yaml.
+The preset sets sensible defaults; any key can be overridden explicitly in yaml.
 """
 from __future__ import annotations
 import os
@@ -41,7 +41,7 @@ except paths.DataDirMissing:
     CONFIG_PATH = paths.repo_root() / "config.yaml"  # sentinel; won't exist
 
 
-# -------- пресеты режимов --------
+# -------- mode presets --------
 _COMMON_MODEL_A = {
     "provider": "anthropic",
     "model": "claude-sonnet-4-5",
@@ -52,7 +52,7 @@ _COMMON_MODEL_A = {
 }
 
 MODE_PRESETS: dict[str, dict] = {
-    # ───────── 1. Локальный полный стек (GPU обязателен) ─────────
+    # ───────── 1. Full local stack (GPU required) ─────────
     "local_full": {
         "model_a": _COMMON_MODEL_A,
         "model_b": {
@@ -98,7 +98,7 @@ MODE_PRESETS: dict[str, dict] = {
         },
     },
 
-    # ───────── 2. Cloud fine-tune (нет локального GPU) ─────────
+    # ───────── 2. Cloud fine-tune (no local GPU) ─────────
     "cloud_finetune": {
         "model_a": _COMMON_MODEL_A,
         "model_b": {
@@ -142,19 +142,19 @@ MODE_PRESETS: dict[str, dict] = {
             },
             "validation": {"split": 0.1, "min_examples": 50, "max_examples": 5000},
             "cloud_recipe": {
-                "notes": "Запусти train_script.py на арендованной GPU (RunPod/Vast.ai/Colab Pro).",
+                "notes": "Run train_script.py on a rented GPU (RunPod/Vast.ai/Colab Pro).",
                 "gpu_recommended": "RTX 3090 / A10 / A100",
                 "vram_min_gb": 12,
             },
         },
     },
 
-    # ───────── 3. Маленькая локальная модель на CPU ─────────
+    # ───────── 3. Small local model on CPU ─────────
     "local_cpu": {
         "model_a": _COMMON_MODEL_A,
         "model_b": {
             "provider": "ollama",
-            "model": "qwen2.5:1.5b-instruct",  # маленькая модель для CPU
+            "model": "qwen2.5:1.5b-instruct",  # small model for CPU
             "base_url": "http://localhost:11434",
             "max_tokens": 1500,
             "temperature": 0.3,
@@ -162,7 +162,7 @@ MODE_PRESETS: dict[str, dict] = {
         },
         "router": {
             "fallback_to_local": True,
-            # для CPU-модели shift отключён: 1.5B слабовата для сложных задач
+            # shift disabled for CPU model: 1.5B is too weak for complex tasks
             "auto_shift_after_finetune": False,
             "daily_api_budget_usd": 5.0,
             "estimated_cost_per_call_usd": 0.01,
@@ -171,7 +171,7 @@ MODE_PRESETS: dict[str, dict] = {
         },
         "finetune": {
             "enabled": True,
-            "training_location": "local_cpu",   # экспериментально / медленно
+            "training_location": "local_cpu",   # experimental / slow
             "provider": "ollama",
             "base_model": "unsloth/Qwen2.5-1.5B-Instruct-bnb-4bit",
             "inference_model": "qwen2.5:1.5b-instruct",
@@ -187,19 +187,19 @@ MODE_PRESETS: dict[str, dict] = {
                 "max_seq_length": 1024,
             },
             "validation": {"split": 0.1, "min_examples": 50, "max_examples": 2000},
-            "cpu_warning": "CPU-тренировка 1.5B может занять 10+ часов на 50 примерах. "
-                           "Рассмотри mode: cloud_finetune.",
+            "cpu_warning": "CPU training for 1.5B can take 10+ hours on 50 examples. "
+                           "Consider mode: cloud_finetune.",
         },
     },
 
-    # ───────── 4. Только облако (любой API-only LLM), без локальной модели ─────────
+    # ───────── 4. Cloud only (any API-only LLM), no local model ─────────
     # Renamed from `claude_only` (2026-05-20): mode is provider-agnostic
     # — the active model is pinned via active_model.json and may be
     # Claude, GPT-5.x, Gemini, etc. Keeping the legacy name was
     # misleading once the agent moved off Claude as the default.
     "cloud_only": {
         "model_a": _COMMON_MODEL_A,
-        "model_b": None,   # локальная модель выключена
+        "model_b": None,   # local model disabled
         "router": {
             "fallback_to_local": False,
             "auto_shift_after_finetune": False,
@@ -209,7 +209,7 @@ MODE_PRESETS: dict[str, dict] = {
             "shift_schedule": {},
         },
         "finetune": {
-            # Данные собираем даже в этом режиме — пригодятся, если перейдёшь на другой mode
+            # Data is collected even in this mode — useful if you switch to another mode later
             "enabled": False,
             "training_location": "disabled",
             "confidence_threshold": 85,
@@ -314,7 +314,7 @@ _COMMON_OTHER = {
         "rollback_enabled": True,
         "eval_on_upgrade": True,
     },
-    # Список MCP-серверов. По умолчанию пуст. Пример:
+    # List of MCP servers. Empty by default. Example:
     #   mcp_servers:
     #     - name: filesystem
     #       command: npx
@@ -325,7 +325,7 @@ _COMMON_OTHER = {
 
 
 def _deep_merge(base: dict, overlay: dict) -> dict:
-    """Рекурсивно объединяет overlay в base. Overlay всегда побеждает."""
+    """Recursively merge overlay into base. Overlay always wins."""
     out = dict(base)
     for k, v in (overlay or {}).items():
         if k in out and isinstance(out[k], dict) and isinstance(v, dict):
@@ -354,12 +354,12 @@ class Config:
         mode = raw.get("mode", "local_full")
         if mode not in MODE_PRESETS:
             raise ValueError(
-                f"Неизвестный mode '{mode}'. "
-                f"Доступны: {', '.join(MODE_PRESETS.keys())}"
+                f"Unknown mode '{mode}'. "
+                f"Available: {', '.join(MODE_PRESETS.keys())}"
             )
         self._mode = mode
 
-        # Применяем: common → preset → user
+        # Apply: common → preset → user
         merged = _deep_merge(_COMMON_OTHER, MODE_PRESETS[mode])
         merged = _deep_merge(merged, {k: v for k, v in raw.items() if k != "mode"})
         self._data = merged
@@ -395,7 +395,7 @@ class Config:
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
 
-    # ---- режим ----
+    # ---- mode ----
     @property
     def mode(self) -> str:
         return self._mode
@@ -403,14 +403,14 @@ class Config:
     def is_mode(self, *modes: str) -> bool:
         return self._mode in modes
 
-    # ---- секции ----
+    # ---- sections ----
     @property
     def model_a(self) -> dict:
         return self._data.get("model_a") or {}
 
     @property
     def model_b(self) -> dict | None:
-        """Возвращает None если локальная модель выключена (claude_only)."""
+        """Returns None when the local model is disabled (cloud_only mode)."""
         cfg = self._data.get("model_b")
         return cfg if cfg else None
 
@@ -448,7 +448,7 @@ class Config:
 
     @property
     def mcp_servers(self) -> list[dict]:
-        """Список конфигов MCP-серверов из config.yaml. Может быть пустым."""
+        """List of MCP server configs from config.yaml. May be empty."""
         return list(self._data.get("mcp_servers") or [])
 
     @property

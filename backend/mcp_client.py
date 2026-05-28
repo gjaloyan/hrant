@@ -1,26 +1,28 @@
 """MCP (Model Context Protocol) client integration.
 
-Подключаемся к одному или нескольким MCP-серверам по stdio, спрашиваем у них
-список инструментов, и регистрируем каждый инструмент как обычный Tool в
-ToolRegistry. Дальше LLM работает с MCP-инструментами ровно так же, как с
-встроенными или скилловыми — через единый tool-use loop.
+Connects to one or more MCP servers over stdio, queries them for their
+tool list, and registers each tool as a regular Tool in ToolRegistry.
+The LLM then works with MCP tools exactly the same way as with
+built-in or skill tools — through the unified tool-use loop.
 
-Архитектурное решение: MCP официальный SDK асинхронный, а наш агент
-синхронный. Чтобы не переписывать весь стек, используем подход
-«persistent background thread with its own event loop»:
+Architectural decision: the official MCP SDK is async, but our agent
+is synchronous. Rather than rewriting the whole stack, we use the
+"persistent background thread with its own event loop" approach:
 
-  * При старте поднимаем daemon-thread с asyncio loop.
-  * `connect()` шлёт корутину в этот loop через `asyncio.run_coroutine_threadsafe`
-    и блокируется до завершения. Сессия и стеки контекстов хранятся в полях
-    клиента, чтобы переживать вызовы.
-  * Каждый `call_tool()` шлёт следующую корутину в тот же loop и блокируется
-    до результата.
+  * On startup we spin up a daemon thread with an asyncio loop.
+  * `connect()` submits the coroutine to that loop via
+    `asyncio.run_coroutine_threadsafe` and blocks until done.
+    The session and context stacks are stored as instance fields
+    so they survive across calls.
+  * Each `call_tool()` submits the next coroutine to the same loop
+    and blocks until the result is ready.
 
-Это даёт честный полнофункциональный MCP клиент при синхронном API наружу.
+This gives a fully-functional MCP client with a synchronous external API.
 
-Если зависимость `mcp` не установлена — модуль импортируется без падения,
-но `MCPManager.connect_all()` молча пропускает все серверы и логирует
-причину. Это удобно для dev-окружения, где MCP может не понадобиться.
+If the `mcp` dependency is not installed, the module imports without
+crashing, but `MCPManager.connect_all()` silently skips all servers
+and logs the reason. This is convenient for dev environments where
+MCP may not be needed.
 """
 from __future__ import annotations
 import asyncio
@@ -30,7 +32,7 @@ from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-# Опциональная зависимость — если её нет, MCP просто отключён.
+# Optional dependency — if not installed, MCP is simply disabled.
 try:
     from mcp import ClientSession, StdioServerParameters
     from mcp.client.stdio import stdio_client
@@ -53,7 +55,7 @@ class MCPServerConfig:
 
 # ---------- background event loop ----------
 class _BackgroundLoop:
-    """Один thread с asyncio loop, чтобы держать MCP-сессии живыми."""
+    """Single thread with an asyncio loop to keep MCP sessions alive."""
 
     def __init__(self):
         self.loop: Optional[asyncio.AbstractEventLoop] = None
@@ -89,10 +91,10 @@ _LOOP = _BackgroundLoop()
 
 # ---------- single connected server ----------
 class MCPServer:
-    """Одна сессия с одним MCP-сервером.
+    """A single session with one MCP server.
 
-    Внутри держит async context-stack: stdio_client → ClientSession.
-    После connect() сессия живёт до disconnect().
+    Internally holds an async context stack: stdio_client → ClientSession.
+    After connect() the session lives until disconnect().
     """
 
     def __init__(self, cfg: MCPServerConfig):
@@ -117,7 +119,7 @@ class MCPServer:
         )
         await self._session.initialize()
         listed = await self._session.list_tools()
-        # listed.tools — список объектов Tool с .name, .description, .inputSchema
+        # listed.tools — list of Tool objects with .name, .description, .inputSchema
         self._tools_cache = [
             {
                 "name": t.name,
@@ -132,7 +134,7 @@ class MCPServer:
         if self._session is None:
             raise RuntimeError(f"MCP server {self.cfg.name!r} is not connected")
         result = await self._session.call_tool(name, arguments=arguments or {})
-        # result.content — список TextContent / ImageContent блоков
+        # result.content — list of TextContent / ImageContent blocks
         chunks: list[str] = []
         for block in getattr(result, "content", []) or []:
             text = getattr(block, "text", None)
@@ -171,9 +173,9 @@ class MCPServer:
 
 # ---------- manager ----------
 class MCPManager:
-    """Управляет всеми MCP-серверами и регистрирует их инструменты.
+    """Manages all MCP servers and registers their tools.
 
-    Использование:
+    Usage:
         mgr = MCPManager(get_registry())
         mgr.connect_all(server_configs)
     """
@@ -181,17 +183,17 @@ class MCPManager:
     def __init__(self, registry: Optional[ToolRegistry] = None):
         self.registry = registry or get_registry()
         self.servers: dict[str, MCPServer] = {}
-        # Имена инструментов, которые мы добавили в реестр (для disconnect).
+        # Names of tools we added to the registry (needed for disconnect).
         self._registered_tool_names: set[str] = set()
 
     def available(self) -> bool:
         return _MCP_AVAILABLE
 
     def connect_all(self, configs: list[MCPServerConfig]) -> dict[str, str]:
-        """Подключает все серверы. Возвращает {name: status_message}.
+        """Connect all servers. Returns {name: status_message}.
 
-        Идемпотентно: повторный вызов безопасен. Сервер, который уже подключён,
-        не переподключается.
+        Idempotent: repeated calls are safe. A server that is already
+        connected is not reconnected.
         """
         results: dict[str, str] = {}
         if not _MCP_AVAILABLE:
@@ -220,8 +222,8 @@ class MCPManager:
     def _register_tools(self, server_name: str, server: MCPServer, tools: list[dict]) -> None:
         for spec in tools:
             tool_name = spec["name"]
-            # Пространство имён, чтобы не сталкиваться с builtin/skill-инструментами
-            # с тем же именем.
+            # Namespace prefix to avoid collisions with builtin/skill tools
+            # that share the same short name.
             namespaced = f"mcp_{server_name}__{tool_name}"
             if namespaced in self.registry.tools:
                 continue
@@ -249,5 +251,5 @@ class MCPManager:
         self.servers.clear()
 
 
-# Глобальный singleton — заполняется на старте агента
+# Global singleton — populated at agent startup.
 MCP = MCPManager()

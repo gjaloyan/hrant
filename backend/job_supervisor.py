@@ -5,7 +5,7 @@ finishes, the agent's previous behaviour was passive — a DM saying
 "job X done, exit=Y, stderr=Z" landed in Telegram, and that was it.
 The agent only re-engaged when the user typed `status?` again, at
 which point it would re-discover the failure and ask permission to
-fix it ("Напиши `restart` и я перезапущу").
+fix it ("Write `restart` and I will restart it").
 
 The pattern was:
   - "I started the benchmark."     (user does nothing)

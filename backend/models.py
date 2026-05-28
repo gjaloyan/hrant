@@ -1,4 +1,4 @@
-"""Pydantic-модели данных."""
+"""Pydantic data models."""
 from __future__ import annotations
 from datetime import datetime
 from typing import Literal, Optional
@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 Category = Literal["fundamentals", "profession", "projects", "personal"]
 Confidence = Literal["unverified", "partial", "verified"]
 
-# Категории для fine-tune примеров (см. FINETUNE_PIPELINE.md)
+# Categories for fine-tune examples (see FINETUNE_PIPELINE.md)
 FinetuneCategory = Literal[
     "factual_qa",
     "troubleshooting",
@@ -238,7 +238,7 @@ class AgentAnswer(BaseModel):
     learned_topics: list[str] = []
     used_topics: list[str] = []
     project: Optional[str] = None
-    # True — если агент пошёл по короткой chat-ветке (small-talk, приветствие).
+    # True — if the agent took the short chat branch (small-talk, greeting).
     is_chat: bool = False
     token_usage: Optional[TokenUsage] = None
     thinking_trace: list[ThinkingStep] = []
@@ -325,7 +325,7 @@ class FinetuneMetadata(BaseModel):
 
 class FinetunePair(BaseModel):
     """OpenAI-style fine-tune example."""
-    id: str = ""          # стабильный короткий hash (вычисляется при сохранении)
+    id: str = ""          # stable short hash (computed on save)
     messages: list[ChatMessage]
     metadata: FinetuneMetadata = FinetuneMetadata()
 

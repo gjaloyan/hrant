@@ -1,15 +1,15 @@
-"""Реестр инструментов для Anthropic Tool Use API.
+"""Tool registry for the Anthropic Tool Use API.
 
-Tool в нашем понимании — это пара (Anthropic JSON-Schema definition,
-Python callable). Реестр умеет:
+A Tool, as we define it, is a pair of (Anthropic JSON-Schema definition,
+Python callable). The registry can:
 
-  * регистрировать локальные Python-функции (декоратором или явно);
-  * регистрировать внешние инструменты (skills, MCP), не зная об их природе;
-  * отдавать список tool-definitions в формате Anthropic;
-  * выполнять tool_use блок и возвращать tool_result.
+  * register local Python functions (via decorator or explicitly);
+  * register external tools (skills, MCP) without knowing their nature;
+  * return the list of tool-definitions in Anthropic format;
+  * execute a tool_use block and return the tool_result.
 
-Все ошибки выполнения превращаются в tool_result с `is_error=true` —
-LLM должна это видеть и реагировать, не падать.
+All execution errors are converted into a tool_result with `is_error=true` —
+the LLM must see this and react, not crash.
 """
 from __future__ import annotations
 import json
@@ -138,7 +138,7 @@ class Tool:
     description: str
     input_schema: dict[str, Any]
     handler: Callable[..., Any]
-    # Источник инструмента — для логов и отладки.
+    # Tool source — for logging and debugging.
     # "builtin" | "skill:<name>" | "mcp:<server>"
     origin: str = "builtin"
 
@@ -156,7 +156,7 @@ class ToolRegistry:
 
     def register(self, tool: Tool) -> None:
         if tool.name in self.tools:
-            raise ValueError(f"tool '{tool.name}' уже зарегистрирован")
+            raise ValueError(f"tool '{tool.name}' is already registered")
         self.tools[tool.name] = tool
 
     def register_func(
@@ -210,10 +210,10 @@ class ToolRegistry:
         return out
 
     def execute(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:
-        """Выполнить инструмент. Возвращает (текст_результата, is_error).
+        """Execute a tool. Returns (result_text, is_error).
 
-        Любая ошибка ловится и форматируется как текст — LLM должна её
-        прочитать и решить, что делать дальше (повторить, спросить, прекратить).
+        Any error is caught and formatted as text — the LLM must read it
+        and decide what to do next (retry, ask, abort).
 
         2026-05-23 audit follow-up (Important #6): pre-fix, only handlers
         that RAISED were tagged is_error=True. Most production tools
@@ -325,7 +325,7 @@ def _looks_like_error(name: str, text: str) -> bool:
     return False
 
 
-# Глобальный реестр. Тесты могут создать локальный экземпляр и подменить.
+# Global registry. Tests may create a local instance and substitute it.
 REGISTRY = ToolRegistry()
 
 
@@ -334,7 +334,7 @@ def get_registry() -> ToolRegistry:
 
 
 def reset_registry() -> ToolRegistry:
-    """Сбросить глобальный реестр (нужно тестам и при горячей перезагрузке)."""
+    """Reset the global registry (needed by tests and hot-reload)."""
     global REGISTRY
     REGISTRY = ToolRegistry()
     return REGISTRY

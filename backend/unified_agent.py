@@ -238,7 +238,7 @@ Constraints:
 
 Example final answer after processing a video:
 
-  Готово — логотип убран. Длительность сохранена, аудио без re-encode.
+  Done — logo removed. Duration preserved, audio kept without re-encode.
 
   MEDIA:/home/hrant/.hrant/data/workspace/outbox/clip_no_logo.mp4"""
 

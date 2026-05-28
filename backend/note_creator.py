@@ -8,53 +8,53 @@ from .llm import TaskType, router
 from .models import Category, Note
 from .tools.web_search import fetch_url, web_search
 
-NOTE_SYSTEM = """Ты — аккуратный ведущий технических заметок.
-Задача: сжать сырые источники в краткую структурированную заметку в формате ниже.
-Только ключевые факты, цифры, ограничения — БЕЗ воды и обобщений.
-Пиши на русском языке."""
+NOTE_SYSTEM = """You are a precise technical note-taker.
+Task: compress raw sources into a concise structured note in the format below.
+Key facts, numbers, and constraints ONLY — no filler or vague generalities.
+Write the response in Russian."""
 
 NOTE_TEMPLATE = """# {topic}
 
-## Что это
-(краткое, фактическое определение)
+## What it is
+(brief, factual definition)
 
-## Ключевые параметры
-(цифры, лимиты, спецификации)
+## Key parameters
+(numbers, limits, specifications)
 
-## Практические заметки
-(реальные советы по применению)
+## Practical notes
+(real usage tips)
 
-## Частые ошибки
-(что идёт не так и как починить)
+## Common mistakes
+(what goes wrong and how to fix it)
 
 ## Причинно-следственные связи
-(формат: причина -> следствие)
+(format: cause -> effect)
 - X causes Y
 - A enables B
 
-## Связанные темы
-- [[тема1]]
-- [[тема2]]
+## Related topics
+- [[topic1]]
+- [[topic2]]
 """
 
 
 def _build_prompt(topic: str, sources_text: str, depth: str) -> str:
-    detail = "подробно, с примерами и числами" if depth == "deep" else "кратко, только самое главное"
-    return f"""Тема: {topic}
-Уровень детализации: {detail}
+    detail = "in depth, with examples and numbers" if depth == "deep" else "brief, key points only"
+    return f"""Topic: {topic}
+Detail level: {detail}
 
-Используй приведённые источники. Создай заметку строго по шаблону:
+Use the provided sources. Create a note strictly following this template:
 
 {NOTE_TEMPLATE}
 
-Источники:
+Sources:
 \"\"\"
 {sources_text}
 \"\"\"
 
-Верни ТОЛЬКО тело заметки (без frontmatter), начиная с "# {topic}".
-В конце добавь секцию "## keywords_extracted:" и перечисли через запятую
-5-10 ключевых слов для поиска."""
+Return ONLY the note body (no frontmatter), starting with "# {topic}".
+At the end add a section "## keywords_extracted:" and list comma-separated
+5-10 search keywords."""
 
 
 import re as _re
@@ -130,7 +130,7 @@ def learn_topic(
     project: str | None = None,
     max_sources: int = 3,
 ) -> Note:
-    """Исследовать тему в вебе и создать заметку."""
+    """Research a topic on the web and create a note."""
     results = web_search(topic, max_results=max_sources)
     sources_text_parts: list[str] = []
     source_urls: list[str] = []
@@ -140,7 +140,7 @@ def learn_topic(
         sources_text_parts.append(f"### {r.title}\n{r.url}\n{r.snippet}\n\n{page}")
 
     if not sources_text_parts:
-        sources_text = f"(веб-источники недоступны — используй общие знания о теме '{topic}')"
+        sources_text = f"(web sources unavailable — use general knowledge about the topic '{topic}')"
     else:
         sources_text = "\n\n---\n\n".join(sources_text_parts)
 
@@ -170,7 +170,7 @@ def learn_topic(
     try:
         note_slug = _slug(topic)
         triples = extract_relations_from_note_body(body, topic)
-        # Extract causal edges from "## Причинно-следственные связи" section
+        # Extract causal edges from the "## Причинно-следственные связи" section
         triples.extend(_extract_causal_edges(body))
         # Also link keywords as entities
         for kw in (keywords or []):

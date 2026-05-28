@@ -1,14 +1,14 @@
 """Dual-model router: Claude Sonnet (brain) + Qwen 7B (apprentice).
 
-Логика выбора провайдера на каждый вызов:
-  1. TaskType ∈ MODEL_A_TASKS → кандидат = A (Claude)
-  2. TaskType ∈ MODEL_B_TASKS → кандидат = B (Qwen)
-  3. verification + always_use_model_a=true → жёстко A (override)
-  4. shift_schedule (auto_shift_after_finetune) → часть A-задач случайно уходит на B
-  5. daily_api_budget_usd превышен → fallback на B
-  6. Claude API недоступен → fallback на B (если fallback_to_local=true)
+Provider-selection logic on each call:
+  1. TaskType ∈ MODEL_A_TASKS → candidate = A (Claude)
+  2. TaskType ∈ MODEL_B_TASKS → candidate = B (Qwen)
+  3. verification + always_use_model_a=true → hard A (override)
+  4. shift_schedule (auto_shift_after_finetune) → some A-tasks randomly go to B
+  5. daily_api_budget_usd exceeded → fallback to B
+  6. Claude API unavailable → fallback to B (if fallback_to_local=true)
 
-State (per-day счётчики и суммарные вызовы) персистится в knowledge/router_state.json.
+State (per-day counters and total calls) is persisted in knowledge/router_state.json.
 """
 from __future__ import annotations
 import json
@@ -569,7 +569,7 @@ MODEL_B_TASKS = {
 }
 
 
-# ---------- базовый парсер JSON ----------
+# ---------- base JSON parser ----------
 def _parse_json_response(raw: str) -> dict:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -579,14 +579,14 @@ def _parse_json_response(raw: str) -> dict:
     start = raw.find("{")
     end = raw.rfind("}")
     if start == -1 or end == -1:
-        raise LLMError(f"LLM вернул не-JSON: {raw[:200]}")
+        raise LLMError(f"LLM returned non-JSON: {raw[:200]}")
     try:
         return json.loads(raw[start : end + 1])
     except json.JSONDecodeError as e:
-        raise LLMError(f"Ошибка парсинга JSON: {e}\n{raw[:300]}") from e
+        raise LLMError(f"JSON parse error: {e}\n{raw[:300]}") from e
 
 
-# ---------- провайдеры ----------
+# ---------- providers ----------
 def _resolve_attachments(refs: list[str] | None) -> list[tuple]:
     """Resolve a list of sha256 ids to (meta, bytes) tuples.
 
@@ -1178,7 +1178,7 @@ class AnthropicLLM(BaseLLM):
         key_env = cfg.get("api_key_env", "ANTHROPIC_API_KEY")
         self.api_key = os.getenv(key_env)
         if not self.api_key:
-            raise LLMError(f"Не задан {key_env} в окружении/.env")
+            raise LLMError(f"{key_env} is not set in the environment/.env")
         self.model = cfg["model"]
         self.default_max = cfg.get("max_tokens", 2000)
         self.default_temp = cfg.get("temperature", 0.3)
@@ -1300,7 +1300,7 @@ class AnthropicLLM(BaseLLM):
                     return block.get("text", "")
             return data["content"][0]["text"]
         except (KeyError, IndexError) as e:
-            raise LLMError(f"Неожиданный формат ответа: {data}") from e
+            raise LLMError(f"Unexpected response format: {data}") from e
 
     # ---------- tool-use loop ----------
     def complete_with_tools(
@@ -1320,15 +1320,15 @@ class AnthropicLLM(BaseLLM):
     ) -> str:
         """Multi-turn tool-use loop.
 
-        Шаги:
-          1. Отправляем messages + tools.
-          2. Если LLM вернула stop_reason=tool_use, исполняем все tool_use
-             блоки и кладём tool_result обратно в messages.
-          3. Повторяем до stop_reason=end_turn (или max_iterations).
+        Steps:
+          1. Send messages + tools.
+          2. If the LLM returns stop_reason=tool_use, execute all
+             tool_use blocks and put tool_result back into messages.
+          3. Repeat until stop_reason=end_turn (or max_iterations).
 
-        Возвращает финальный текст ассистента (склеенные text-блоки).
-        Безопасно деградирует, если tools пустые или модель сразу
-        возвращает текст. `attachments` (sha256 list) attach images on
+        Returns the final assistant text (concatenated text blocks).
+        Degrades safely when tools is empty or the model returns text
+        immediately. `attachments` (sha256 list) attach images on
         the first user turn.
 
         Phase 2 (2026-05-23): `tools_provider`, when set, is called
@@ -1386,7 +1386,7 @@ class AnthropicLLM(BaseLLM):
             content_blocks = data.get("content", [])
             stop_reason = data.get("stop_reason", "end_turn")
 
-            # Собираем текст и tool_use блоки
+            # Collect text and tool_use blocks
             text_parts: list[str] = []
             tool_uses: list[dict] = []
             for block in content_blocks:
@@ -1406,7 +1406,7 @@ class AnthropicLLM(BaseLLM):
             if stop_reason != "tool_use" or not tool_uses:
                 return final_text
 
-            # Кладём ответ ассистента (со всеми блоками) и tool_result в messages
+            # Put the assistant reply (with all blocks) and tool_result into messages
             messages.append({"role": "assistant", "content": content_blocks})
             tool_results = []
             for tu in tool_uses:
@@ -2969,7 +2969,7 @@ def _supports_tools(
 class DualModelRouter:
     def __init__(self, state_path: Path | None = None):
         self.cfg_a = CONFIG.model_a
-        self.cfg_b = CONFIG.model_b      # может быть None (cloud_only)
+        self.cfg_b = CONFIG.model_b      # may be None (cloud_only)
         self.cfg_router = CONFIG.router
         self.cfg_verification = CONFIG.verification
         self.mode = CONFIG.mode
@@ -2979,7 +2979,7 @@ class DualModelRouter:
         self._active_llm: BaseLLM | None = None
         self._active_cfg_hash: str = ""  # to detect changes
         self._api_cache: tuple[float, bool] = (0.0, True)
-        # Если model_b выключен (cloud_only) — сразу помечаем как недоступный
+        # If model_b is disabled (cloud_only) — mark it unavailable right away
         self._ollama_cache: tuple[float, bool] = (9e18, self.cfg_b is not None)
 
         if state_path is None:
@@ -3015,8 +3015,8 @@ class DualModelRouter:
     def model_b(self) -> OllamaLLM:
         if self.cfg_b is None:
             raise LLMError(
-                f"Model B выключен в режиме mode: {self.mode}. "
-                "Переключи mode в config.yaml на local_full / cloud_finetune / local_cpu."
+                f"Model B is disabled in mode: {self.mode}. "
+                "Switch mode in config.yaml to local_full / cloud_finetune / local_cpu."
             )
         if self._model_b is None:
             self._model_b = OllamaLLM(self.cfg_b)
@@ -3247,7 +3247,7 @@ class DualModelRouter:
             out["active_model"] = active
         return out
 
-    # ---- вспомогательное ----
+    # ---- helpers ----
     def _api_available(self) -> bool:
         ttl = self.cfg_router.get("api_ping_cache_seconds", 60)
         ts, ok = self._api_cache
@@ -3262,8 +3262,8 @@ class DualModelRouter:
         return ok
 
     def _ollama_available(self) -> bool:
-        """Проверка, что локальная Ollama запущена и отвечает."""
-        # В режиме cloud_only локальная модель выключена
+        """Check that the local Ollama is running and responding."""
+        # In cloud_only mode the local model is disabled
         if self.cfg_b is None:
             return False
         ttl = self.cfg_router.get("api_ping_cache_seconds", 60)
@@ -3280,7 +3280,7 @@ class DualModelRouter:
         return ok
 
     def _current_shift_pct_b(self) -> float:
-        """Возвращает % A-задач, которые должны уйти на B (исходя из текущей версии Qwen)."""
+        """Return the % of A-tasks that should go to B (based on the current Qwen version)."""
         if not self.cfg_router.get("auto_shift_after_finetune", False):
             return 0.0
         schedule = self.cfg_router.get("shift_schedule") or {}
@@ -3306,7 +3306,7 @@ class DualModelRouter:
         return float(schedule[best].get("model_b_pct", 0))
 
     def _pick(self, task_type: TaskType) -> tuple[str, str]:
-        """Возвращает (provider, reason)."""
+        """Return (provider, reason)."""
         # 1) hard override: verification → A
         if (
             task_type == TaskType.VERIFICATION
@@ -3314,7 +3314,7 @@ class DualModelRouter:
         ):
             choice, reason = "a", "verification: forced A"
         else:
-            # 2) база по task set
+            # 2) base on task set
             if task_type in MODEL_A_TASKS:
                 choice, reason = "a", f"{task_type.value}: default A"
             elif task_type in MODEL_B_TASKS:
@@ -3322,7 +3322,7 @@ class DualModelRouter:
             else:
                 choice, reason = "a", f"{task_type.value}: unknown → A"
 
-            # 3) shift_schedule — часть A-задач уходит на B (только если B доступен)
+            # 3) shift_schedule — some A-tasks go to B (only if B is available)
             if choice == "a":
                 pct_b = self._current_shift_pct_b()
                 if (
@@ -3333,7 +3333,7 @@ class DualModelRouter:
                     choice = "b"
                     reason = f"shift_schedule: {pct_b:.0f}% → B"
 
-            # 4) budget — fallback только если Ollama поднят
+            # 4) budget — fallback only if Ollama is up
             if choice == "a":
                 budget = self.cfg_router.get("daily_api_budget_usd", 0.0) or 0.0
                 if budget > 0 and self.state["api_cost_today"] >= budget:
@@ -3356,24 +3356,24 @@ class DualModelRouter:
                 and self._ollama_available()
             ):
                 choice = "b"
-                reason = "Claude API недоступен → fallback B"
+                reason = "Claude API unavailable → fallback B"
             else:
                 raise LLMError(
-                    "Claude API недоступен, Qwen/Ollama также недоступен "
-                    "(или fallback_to_local=false)"
+                    "Claude API unavailable, Qwen/Ollama also unavailable "
+                    "(or fallback_to_local=false)"
                 )
 
-        # 6) если выбран B, но Ollama down — эскалация на A (если A доступен)
+        # 6) if B was chosen but Ollama is down — escalate to A (if A is available)
         if choice == "b" and not self._ollama_available():
             if self._api_available():
                 choice = "a"
                 reason = f"{reason} → Ollama down, escalate A"
             else:
-                raise LLMError("Обе модели недоступны (Claude API и Ollama)")
+                raise LLMError("Both models unavailable (Claude API and Ollama)")
 
         return choice, reason
 
-    # ---- публичные вызовы ----
+    # ---- public calls ----
     def call(
         self,
         task_type: TaskType,
@@ -3561,7 +3561,7 @@ class DualModelRouter:
     def call_json(self, task_type: TaskType, system: str, user: str, **kw) -> dict:
         raw = self.call(
             task_type,
-            system + "\n\nОтвечай ТОЛЬКО валидным JSON, без markdown-обёрток.",
+            system + "\n\nReply with ONLY valid JSON, no markdown wrappers.",
             user,
             **kw,
         )
@@ -3756,6 +3756,6 @@ def router() -> DualModelRouter:
 
 
 def reset_router() -> None:
-    """Сбросить singleton (нужно для тестов и после смены конфига)."""
+    """Reset the singleton (needed for tests and after a config change)."""
     global _router
     _router = None

@@ -1,7 +1,7 @@
 """FineTunePipeline: prepare_dataset → train (Unsloth) → register (Ollama).
 
-Требует для реального обучения: unsloth, trl, transformers, datasets, ollama CLI.
-Все импорты — только внутри методов, чтобы модуль был импортируем без этих зависимостей.
+Requires for real training: unsloth, trl, transformers, datasets, ollama CLI.
+All imports are inside methods so the module is importable without these dependencies.
 """
 from __future__ import annotations
 import json
@@ -38,7 +38,7 @@ def _default_config() -> dict:
 
 
 def _output_prefix(cfg: dict) -> str:
-    """output_prefix — новое имя; output_model — legacy с суффиксом '-v1'."""
+    """output_prefix — new name; output_model — legacy with '-v1' suffix."""
     if cfg.get("output_prefix"):
         return cfg["output_prefix"]
     legacy = cfg.get("output_model", "qwen-agent")
@@ -58,24 +58,24 @@ class FineTunePipeline:
 
     # -------- step 1 --------
     def prepare_dataset(self) -> tuple[Path, Path, int]:
-        """Курация + split train/val. Возвращает (train_path, val_path, n_total)."""
-        self.progress("prepare", "читаю очередь")
+        """Curation + split train/val. Returns (train_path, val_path, n_total)."""
+        self.progress("prepare", "reading queue")
         examples = self.store.list_all()
         if not examples:
-            raise RuntimeError("finetune_queue пуст — нечего обучать")
+            raise RuntimeError("finetune_queue is empty — nothing to train on")
 
-        self.progress("curate", f"курирую {len(examples)} примеров")
+        self.progress("curate", f"curating {len(examples)} examples")
         good = self.curator.curate(examples)
         if not good:
-            raise RuntimeError("после курации 0 пригодных примеров")
+            raise RuntimeError("0 usable examples after curation")
 
         min_ex = self.config["validation"]["min_examples"]
         if len(good) < min_ex:
             raise RuntimeError(
-                f"нужно минимум {min_ex} пригодных примеров, сейчас {len(good)}"
+                f"need at least {min_ex} usable examples, currently {len(good)}"
             )
 
-        self.progress("boost", "boosting важных примеров")
+        self.progress("boost", "boosting important examples")
         boosted = self.curator.apply_boosting(good)
 
         split = self.config["validation"]["split"]
@@ -93,7 +93,7 @@ class FineTunePipeline:
 
         self.progress(
             "prepared",
-            f"train={len(train)} val={len(val)} (boosted из {len(good)} уникальных)",
+            f"train={len(train)} val={len(val)} (boosted from {len(good)} unique)",
         )
         return train_path, val_path, len(good)
 
@@ -176,16 +176,16 @@ model.save_pretrained_gguf(
         return path
 
     def train_with_unsloth(self, train_path: Path, val_path: Path) -> Path:
-        self.progress("train", "генерирую train_script.py")
+        self.progress("train", "generating train_script.py")
         script = self._write_train_script(train_path, val_path)
 
-        self.progress("train", "запускаю python train_script.py (может занять часы)")
+        self.progress("train", "running python train_script.py (may take hours)")
         result = subprocess.run(
             ["python", str(script)], capture_output=True, text=True
         )
         if result.returncode != 0:
             raise RuntimeError(f"training failed: {result.stderr[-2000:]}")
-        self.progress("train", "обучение завершено")
+        self.progress("train", "training complete")
         return self.models_dir / f"{_output_prefix(self.config)}-gguf"
 
     # -------- step 3: ollama --------
@@ -217,7 +217,7 @@ model.save_pretrained_gguf(
             examples_count=count,
             notes=f"fine-tune from {self.config['base_model']}",
         )
-        self.progress("register", f"зарегистрирована {tag}={versioned}")
+        self.progress("register", f"registered {tag}={versioned}")
         return versioned
 
     # -------- orchestrator --------
@@ -225,48 +225,48 @@ model.save_pretrained_gguf(
         loc = CONFIG.training_location
         if not CONFIG.finetune_enabled:
             raise RuntimeError(
-                f"fine-tune выключен в режиме mode: {CONFIG.mode}. "
-                "Используй 'finetune export' для выгрузки данных."
+                f"fine-tune is disabled in mode: {CONFIG.mode}. "
+                "Use 'finetune export' to export the data."
             )
         if loc == "disabled":
             raise RuntimeError(
-                f"training_location=disabled в mode: {CONFIG.mode}. "
-                "Данные собираются, но обучение не запускается."
+                f"training_location=disabled in mode: {CONFIG.mode}. "
+                "Data is being collected, but training will not start."
             )
         if loc == "cloud":
             raise RuntimeError(
-                "training_location=cloud — запусти 'finetune export-cloud' "
-                "для подготовки пакета и загрузи на арендованную GPU. "
-                "После обучения: 'finetune import-gguf <путь_к_gguf>'."
+                "training_location=cloud — run 'finetune export-cloud' "
+                "to prepare the package and upload to a rented GPU. "
+                "After training: 'finetune import-gguf <path_to_gguf>'."
             )
         if loc == "local_cpu":
             warn = self.config.get("cpu_warning", "")
-            self.progress("warning", f"CPU training запущен. {warn}")
+            self.progress("warning", f"CPU training started. {warn}")
 
         train_path, val_path, _ = self.prepare_dataset()
         gguf = self.train_with_unsloth(train_path, val_path)
         tag = VERSIONS.next_tag()
         model_name = self.register_with_ollama(gguf, tag)
-        self.progress("done", f"модель {model_name} готова, тег {tag}")
+        self.progress("done", f"model {model_name} is ready, tag {tag}")
         return model_name
 
     # -------- cloud export --------
     def export_for_cloud(self) -> Path:
         """
-        Готовит пакет для запуска fine-tune на арендованной GPU:
+        Prepares a package for running fine-tune on a rented GPU:
         train.jsonl, val.jsonl, train_script.py, config.json, README_CLOUD.md.
-        Возвращает путь к директории пакета.
+        Returns the path to the package directory.
         """
         train_path, val_path, n_total = self.prepare_dataset()
         tag = VERSIONS.next_tag()
         pkg = self.models_dir / f"cloud_export_{tag}"
         pkg.mkdir(parents=True, exist_ok=True)
 
-        # копируем train/val
+        # copy train/val
         for src in (train_path, val_path):
             (pkg / src.name).write_bytes(src.read_bytes())
 
-        # готовим train_script (ref-версия, runnable на cloud GPU)
+        # prepare train_script (reference version, runnable on cloud GPU)
         script_src = self._write_train_script(
             pkg / "train.jsonl", pkg / "val.jsonl"
         )
@@ -280,54 +280,54 @@ model.save_pretrained_gguf(
             encoding="utf-8",
         )
 
-        # инструкция
+        # instructions
         recipe = self.config.get("cloud_recipe", {}) or {}
         prefix = _output_prefix(self.config)
         readme = f"""# Cloud Fine-Tune Package ({tag})
 
-Всего примеров: **{n_total}**
+Total examples: **{n_total}**
 Base model: `{self.config["base_model"]}`
 Target name: `{prefix}-{tag}`
 
-## Требования
+## Requirements
 - GPU: {recipe.get("gpu_recommended", "RTX 3090 / A10 / A100")}
 - VRAM: ≥ {recipe.get("vram_min_gb", 12)} GB
 - pip: `unsloth trl transformers datasets`
 
-## Запуск (на RunPod / Vast.ai / Colab Pro)
+## Running (on RunPod / Vast.ai / Colab Pro)
 
 ```bash
 pip install unsloth trl transformers datasets
 python train_script.py
 ```
 
-После завершения появится `{prefix}-gguf/unsloth.Q4_K_M.gguf` — скачай этот файл.
+After completion `{prefix}-gguf/unsloth.Q4_K_M.gguf` will appear — download that file.
 
-## Импорт обратно (локально)
+## Importing back (locally)
 
 ```bash
-# скопируй gguf в локальную папку и запусти REPL-команду:
+# copy the gguf to a local folder and run the REPL command:
 hrant chat 'finetune import-gguf /path/to/unsloth.Q4_K_M.gguf --tag {tag}'
 ```
 
-Это зарегистрирует модель в Ollama как `{prefix}-{tag}`.
+This will register the model in Ollama as `{prefix}-{tag}`.
 
-## Заметки
+## Notes
 {recipe.get("notes", "—")}
 """
         (pkg / "README_CLOUD.md").write_text(readme, encoding="utf-8")
 
-        self.progress("export", f"пакет готов: {pkg}")
+        self.progress("export", f"package ready: {pkg}")
         return pkg
 
     # -------- gguf import --------
     def import_gguf(self, gguf_path: Path | str, *, tag: str | None = None) -> str:
-        """Импортирует уже обученный gguf (из облака) в локальную Ollama."""
+        """Imports an already-trained gguf (from the cloud) into local Ollama."""
         src = Path(gguf_path)
         if not src.exists():
-            raise FileNotFoundError(f"gguf не найден: {gguf_path}")
+            raise FileNotFoundError(f"gguf not found: {gguf_path}")
 
-        # Если передан файл — используем его директорию; если директория — ищем gguf внутри
+        # If a file was passed — use its directory; if a directory — look for gguf inside it
         gguf_dir = src if src.is_dir() else src.parent
 
         if tag is None:
@@ -359,7 +359,7 @@ hrant chat 'finetune import-gguf /path/to/unsloth.Q4_K_M.gguf --tag {tag}'
             examples_count=self.store.count(),
             notes=f"imported from {src}",
         )
-        self.progress("import", f"зарегистрирована {tag}={versioned}")
+        self.progress("import", f"registered {tag}={versioned}")
         return versioned
 
     # -------- openai export --------
@@ -367,6 +367,6 @@ hrant chat 'finetune import-gguf /path/to/unsloth.Q4_K_M.gguf --tag {tag}'
         train_path, _, _ = self.prepare_dataset()
         self.progress(
             "export",
-            "готов train.jsonl — загрузи через openai api fine_tunes.create -t train.jsonl -m gpt-4o-mini",
+            "train.jsonl is ready — upload via openai api fine_tunes.create -t train.jsonl -m gpt-4o-mini",
         )
         return train_path

@@ -1359,7 +1359,7 @@ class TelegramBot:
                     except Exception as e:
                         log.warning("Telegram video download failed: %s", e)
 
-                # Video note ("кружочек") — square, no caption, always
+                # Video note ("circle video") — square, no caption, always
                 # mp4. Same handling as msg.video.
                 if getattr(msg, "video_note", None):
                     try:

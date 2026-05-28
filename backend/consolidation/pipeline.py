@@ -55,7 +55,7 @@ Examples of good lines:
 Rules:
 - Russian or English, match the user's language.
 - Skip greetings, small talk, agent reasoning, tool failures.
-- Refer to the user as "the user" or "пользователь", not "you".
+- Refer to the user as "the user" (or the equivalent in the response language), not "you".
 - Do NOT include facts the agent learned about itself."""
 
 

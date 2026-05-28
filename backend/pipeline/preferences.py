@@ -37,14 +37,14 @@ class PreferenceHandlerMixin:
           - `acknowledgment` — short warm confirmation in the user's
             preferred language.
 
-        On LLM failure: returns ("reject", task, "Запомнил в
-        контексте разговора.") — does NOT blindly stuff raw input
+        On LLM failure: returns ("reject", task, "Remembered in the
+        conversation context.") — does NOT blindly stuff raw input
         into user.md. That was a real bug that produced "User will
         fix everything..." rows in user.md.
         """
         from ..agent import IDENTITY, router, TOKENS
 
-        self.progress("preference", "запоминаю предпочтение")
+        self.progress("preference", "remembering preference")
         # Surface USER PROFILE so the extractor can pick the right
         # language for the acknowledgment AND make a confident
         # reject/keep decision.
@@ -62,7 +62,7 @@ class PreferenceHandlerMixin:
                 f"{PREFERENCE_EXTRACTOR_SYSTEM}"
             )
 
-        user_prompt = f"СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ:\n{task.strip()}"
+        user_prompt = f"USER MESSAGE:\n{task.strip()}"
         try:
             t0 = _t.monotonic()
             usage_before = TOKENS.request_usage()
@@ -83,12 +83,12 @@ class PreferenceHandlerMixin:
                 usage_before=usage_before,
             )
         except LLMError:
-            return "reject", task.strip(), "Запомнил в контексте разговора."
+            return "reject", task.strip(), "Remembered in the conversation context."
 
         category = str(data.get("category", "about_user")).strip().lower()
         valid_profile = ("language", "style", "about_user", "rule")
         fact = str(data.get("fact", "")).strip() or task.strip()
-        ack = str(data.get("acknowledgment", "")).strip() or "Запомнил."
+        ack = str(data.get("acknowledgment", "")).strip() or "Remembered."
 
         if category == "reject" or category not in valid_profile:
             # Conversation-scoped memory only. CONVERSATION.add_turn
@@ -96,10 +96,10 @@ class PreferenceHandlerMixin:
             # to write here.
             self.progress(
                 "preference_skipped",
-                "не сохраняю в user.md (не профильный факт)",
+                "not saving to user.md (not a profile fact)",
             )
             return "reject", fact, ack
 
         IDENTITY.add_user_fact(fact, category=category, speaker_id=speaker_id)  # type: ignore[arg-type]
-        self.progress("preference_saved", f"записано в user.md → {category}")
+        self.progress("preference_saved", f"written to user.md → {category}")
         return category, fact, ack

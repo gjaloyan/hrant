@@ -1,12 +1,12 @@
-"""Skills system: декларативные плагины для агента.
+"""Skills system: declarative plugins for the agent.
 
-Скилл — это директория `backend/skills/<name>/` с двумя возможными файлами:
+A skill is a directory `backend/skills/<name>/` with two possible files:
 
-  SKILL.md   (обязательно)  — фронтматтер + инструкции для LLM
-  handler.py (опционально)  — Python-модуль с функцией `register(registry)`,
-                              которая добавляет инструменты в ToolRegistry.
+  SKILL.md   (required)   — frontmatter + instructions for the LLM
+  handler.py (optional)   — Python module with a `register(registry)` function
+                            that adds tools to the ToolRegistry.
 
-Структура SKILL.md:
+SKILL.md structure:
 
   ---
   name: pdf_summary
@@ -18,13 +18,12 @@
   ---
 
   # PDF Summary
-  Подробные инструкции для LLM в свободной форме: как пользоваться,
-  какие шаги, какие инструменты звать, в каком формате отдавать ответ.
+  Detailed instructions for the LLM in free form: how to use,
+  which steps to follow, which tools to call, and in what format to return the answer.
 
-Скилл может регистрировать инструменты — тогда они становятся
-доступны в обычном tool-use loop. Может и не регистрировать —
-тогда это просто блок инструкций, который подмешивается в system prompt
-при матче.
+A skill may register tools — in that case they become available in the
+ordinary tool-use loop. It may also register nothing — in that case it is
+simply an instruction block that gets injected into the system prompt on match.
 """
 from __future__ import annotations
 import importlib.util
@@ -48,7 +47,7 @@ class Skill:
     description: str
     triggers: list[str] = field(default_factory=list)
     when_to_use: str = ""
-    body: str = ""           # содержимое после frontmatter
+    body: str = ""           # content after the frontmatter
     path: Path = field(default_factory=Path)
     # Phase 12B: which tier this skill came from. "builtin" = ships
     # with the engine repo (backend/skills/), "user" = installed by
@@ -87,12 +86,12 @@ class Skill:
         return False
 
     def system_block(self, missing_tools: Optional[list[str]] = None) -> str:
-        """Блок, который подмешивается в system prompt при активации.
+        """Block that gets injected into the system prompt on activation.
 
-        `missing_tools`, если передан и непустой, добавляет видимое
-        предупреждение сверху — модель должна либо установить
-        недостающее через `terminal_exec`, либо пивотнуться,
-        а не звать заведомо отсутствующий бинарь.
+        If `missing_tools` is provided and non-empty, a visible warning is
+        prepended — the model must either install the missing items via
+        `terminal_exec` or pivot to a different approach rather than calling
+        a binary that is known to be absent.
         """
         parts = [f"## SKILL: {self.name}", self.description.strip()]
         if missing_tools:
@@ -111,7 +110,7 @@ class Skill:
 
 
 def _parse_skill_md(path: Path) -> Optional[Skill]:
-    """Парсит SKILL.md. Возвращает None, если файл невалидный."""
+    """Parse SKILL.md. Returns None if the file is invalid."""
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---"):
         return None
@@ -233,8 +232,8 @@ def _tool_is_available(name: str, registry: Optional[ToolRegistry] = None) -> bo
 # skill's metadata bag (name + description + tags + triggers +
 # when_to_use). Implemented as TF-IDF cosine — no new dependencies,
 # no embeddings, no model download, no API call. It catches paraphrases
-# that share vocabulary with the skill metadata (e.g. user types "слить
-# логотип на видео" and the skill body mentions "logo" + "video" +
+# that share vocabulary with the skill metadata (e.g. user types "remove
+# logo from video" and the skill body mentions "logo" + "video" +
 # "delogo"), but NOT pure synonym pairs ("movie" ↔ "video") — that
 # requires real embeddings, which we'd add only once the catalogue
 # grows past ~30 skills and the keyword approach starts missing.
@@ -392,8 +391,8 @@ class _SemanticIndex:
 
 
 def _load_handler(skill_dir: Path, registry: ToolRegistry) -> None:
-    """Если рядом с SKILL.md лежит handler.py с функцией register(registry) —
-    вызываем её. Это даёт скиллу возможность добавить свои tools."""
+    """If a handler.py with a register(registry) function sits next to SKILL.md,
+    call it. This gives the skill a chance to add its own tools."""
     handler_path = skill_dir / "handler.py"
     if not handler_path.exists():
         return
@@ -406,7 +405,7 @@ def _load_handler(skill_dir: Path, registry: ToolRegistry) -> None:
     try:
         spec.loader.exec_module(module)  # type: ignore[union-attr]
     except Exception as e:
-        # Не падаем — скилл просто не будет иметь инструментов.
+        # Do not crash — the skill will simply have no tools.
         print(f"[skills] handler load error in {skill_dir.name}: {e}")
         return
     register = getattr(module, "register", None)

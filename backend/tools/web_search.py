@@ -1,4 +1,4 @@
-"""Веб-поиск: Tavily (если есть ключ), иначе заглушка через DuckDuckGo HTML."""
+"""Web search: Tavily (when a key is available), otherwise a fallback via DuckDuckGo HTML."""
 from __future__ import annotations
 import os
 import re
@@ -45,14 +45,14 @@ def _tavily(query: str, max_results: int) -> list[WebResult]:
 
 
 def _unwrap_ddg_url(url: str) -> str:
-    """DDG HTML-страница отдаёт ссылки вида //duckduckgo.com/l/?uddg=<encoded>.
+    """DDG HTML pages return links of the form //duckduckgo.com/l/?uddg=<encoded>.
 
-    Это редирект-обёртка. Мы хотим конечный URL, иначе последующий fetch_url
-    упирается в DDG (rate-limit, лишний хоп, поломанные source-чекеры).
+    This is a redirect wrapper. We want the final URL; otherwise a subsequent
+    fetch_url hits DDG (rate-limit, extra hop, broken source-checkers).
     """
     if not url:
         return url
-    # Бывает с протокол-relative: //duckduckgo.com/l/?uddg=...
+    # Can occur with protocol-relative URLs: //duckduckgo.com/l/?uddg=...
     if url.startswith("//"):
         url = "https:" + url
     try:
@@ -71,7 +71,7 @@ def _unwrap_ddg_url(url: str) -> str:
 
 
 def _duckduckgo(query: str, max_results: int) -> list[WebResult]:
-    """Резервный вариант: HTML-парсинг DDG (без ключей)."""
+    """Fallback: DDG HTML scraping (no API keys required)."""
     try:
         r = httpx.get(
             "https://duckduckgo.com/html/",

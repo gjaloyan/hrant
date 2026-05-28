@@ -1,4 +1,4 @@
-"""Поиск по базе знаний: keyword + fuzzy."""
+"""Knowledge base search: keyword + fuzzy."""
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -38,9 +38,9 @@ class Searcher:
             return 0.95
         if q in (k.lower() for k in entry.keywords):
             return 0.9
-        # fuzzy по topic
+        # fuzzy match on topic
         topic_ratio = fuzz.ratio(q, entry.topic.lower()) / 100.0
-        # max fuzzy по keywords
+        # max fuzzy match on keywords
         kw_ratio = 0.0
         for kw in entry.keywords:
             kw_ratio = max(kw_ratio, fuzz.partial_ratio(q, kw.lower()) / 100.0)
