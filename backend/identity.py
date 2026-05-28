@@ -1,17 +1,20 @@
-"""Управление идентичностью агента: soul.md, identity.md, user.md.
+"""Agent identity management: soul.md, identity.md, user.md.
 
-Три файла всегда лежат в `knowledge/identity/` и всегда подгружаются в контекст:
+These three files always live in `knowledge/identity/` and are always
+loaded into context:
 
-  * soul.md     — характер, ценности, стиль общения. Редактируется человеком
-                  (или самим агентом при осознанном изменении).
-  * identity.md — кто я, что умею, чего не делаю. Якорь самоопределения.
-  * user.md     — что я знаю о пользователе: язык общения, предпочтения,
-                  персональные факты, правила взаимодействия. Обновляется
-                  автоматически, когда пользователь сообщает о себе или
-                  просит о себе запомнить.
+  * soul.md     — character, values, communication style. Edited by a
+                  human (or by the agent itself on a deliberate change).
+  * identity.md — who I am, what I can do, what I don't do. The anchor
+                  of self-definition.
+  * user.md     — what I know about the user: communication language,
+                  preferences, personal facts, interaction rules.
+                  Updated automatically when the user shares something
+                  about themselves or asks to be remembered.
 
-Дефолтные файлы создаются при первом запуске. Пользователь может править их
-вручную — агент уважает ручные правки и не перезаписывает файлы целиком.
+The default files are created on first launch. The user may edit them
+by hand — the agent respects manual edits and never rewrites the files
+wholesale.
 """
 from __future__ import annotations
 from datetime import datetime
@@ -24,31 +27,31 @@ UserFactCategory = Literal["language", "style", "about_user", "rule"]
 
 _DEFAULT_SOUL = """\
 # Soul
-*Характер, ценности и тон агента. Всегда в контексте.*
+*Character, values, and tone of the agent. Always in context.*
 
-## Роль
-Я — self-learning AI-ассистент и компаньон пользователя.
-Не просто инструмент, а напарник, который помогает, учится и растёт
-вместе с пользователем.
+## Role
+I am a self-learning AI assistant and companion to the user.
+Not just a tool, but a partner who helps, learns, and grows
+together with the user.
 
-## Характер
-- Тёплый и человечный, без фальшивой вежливости.
-- Прямой и честный: если чего-то не знаю — говорю прямо.
-- Любознательный: мне интересно разобраться глубоко.
-- Уважительный к пользователю, его времени и его выбору.
+## Character
+- Warm and human, without fake politeness.
+- Direct and honest: if I don't know something, I say so plainly.
+- Curious: I genuinely want to understand things deeply.
+- Respectful of the user, their time, and their choices.
 
-## Стиль общения
-- По умолчанию кратко, развёрнуто — только когда это реально нужно.
-- Без клише «конечно!», «отличный вопрос!», длинных оговорок.
-- Язык общения повторяет язык пользователя.
-- На болтовню — по-человечески, одно-два предложения.
-- На задачу — структурно, с опорой на источники.
+## Communication style
+- Brief by default; go into detail only when it's truly needed.
+- No clichés like "of course!", "great question!", or long disclaimers.
+- Mirror the user's language: reply in whatever language the user writes in.
+- For small talk — respond like a human, in one or two sentences.
+- For tasks — be structured and ground answers in sources.
 
-## Принципы
-- Отвечаю только на основе того, что знаю. Предположения честно помечаю.
-- Запоминаю факты о пользователе и применяю их.
-- Запоминаю предпочтения в общении и следую им без напоминаний.
-- Учусь из каждого диалога, но не превращаю каждую реплику в исследование.
+## Principles
+- I answer only based on what I know. I flag assumptions honestly.
+- I remember facts about the user and apply them.
+- I remember communication preferences and follow them without reminders.
+- I learn from every dialogue, but I don't turn every remark into research.
 """
 
 _DEFAULT_IDENTITY = """\
@@ -92,30 +95,53 @@ _DEFAULT_IDENTITY = """\
 
 _DEFAULT_USER = """\
 # User Profile
-*Что я знаю о пользователе. Обновляется автоматически, когда пользователь
-сообщает что-то о себе или о том, как с ним общаться.*
+*What I know about the user. Updated automatically when the user
+shares something about themselves or about how to communicate with them.*
 
-## Язык общения
-(пока не указано)
+## Language
+(not specified)
 
-## Стиль и тон
-(пока не указано)
+## Style and tone
+(not specified)
 
-## О пользователе
-(пока не указано)
+## About the user
+(not specified)
 
-## Правила взаимодействия
-(пока не указано)
+## Interaction rules
+(not specified)
 """
 
 
-# Раздел user.md → заголовок, куда сыпать факты этой категории.
+# Canonical (English) section header that each fact category is written
+# under in user.md.
 _SECTION_BY_CATEGORY: dict[str, str] = {
-    "language": "## Язык общения",
-    "style": "## Стиль и тон",
-    "about_user": "## О пользователе",
-    "rule": "## Правила взаимодействия",
+    "language": "## Language",
+    "style": "## Style and tone",
+    "about_user": "## About the user",
+    "rule": "## Interaction rules",
 }
+
+# Legacy Russian headers from profiles created before the English
+# migration. The section extractors and add_user_fact accept these so
+# existing on-disk user_profile.md files keep working with no data
+# migration — a fact for an old profile lands under its existing
+# Russian header instead of spawning a duplicate English section.
+_LEGACY_HEADERS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
+    "language": ("## Язык общения", "## Язык"),
+    "style": ("## Стиль и тон",),
+    "about_user": ("## О пользователе",),
+    "rule": ("## Правила взаимодействия",),
+}
+
+# Empty-section placeholders, English (current) + Russian (legacy).
+_PLACEHOLDERS = ("(not specified)", "(пока не указано)")
+
+
+def _acceptable_headers(category: str) -> tuple[str, ...]:
+    """All header spellings a category may appear under in a profile,
+    English first (preferred for new writes) then legacy Russian."""
+    primary = _SECTION_BY_CATEGORY.get(category, _SECTION_BY_CATEGORY["about_user"])
+    return (primary, *_LEGACY_HEADERS_BY_CATEGORY.get(category, ()))
 
 
 _DEFAULT_SPEAKER_FOR_LEGACY_USER_MD = "webui:default"
@@ -200,7 +226,7 @@ class IdentityManager:
         self.user_path = self.dir / "user.md"
         self.profiles_dir = self.dir / "profiles"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
-        # История каждого user-profile файла: per-file timestamped
+        # History for each user-profile file: per-file timestamped
         # snapshots. The original layout used `_history/user_*.md` for
         # the single user.md; we keep that path for `webui:default` and
         # add `_history/<sanitized>_*.md` for other speakers.
@@ -248,7 +274,7 @@ class IdentityManager:
         return snap
 
     def list_user_versions(self) -> list[dict]:
-        """История версий user.md, от новых к старым."""
+        """Version history of user.md, newest first."""
         if not self.history_dir.exists():
             return []
         out: list[dict] = []
@@ -271,7 +297,7 @@ class IdentityManager:
         if not self.user_path.exists():
             self.user_path.write_text(_DEFAULT_USER, encoding="utf-8")
 
-    # ---------- чтение ----------
+    # ---------- read ----------
     def soul(self) -> str:
         return self.soul_path.read_text(encoding="utf-8")
 
@@ -348,7 +374,7 @@ class IdentityManager:
         """Pull the body of the first matching `## <header>` section.
 
         Empty if no matching header is found, the section is empty, or
-        the section holds only the `(пока не указано)` placeholder.
+        the section holds only an empty placeholder.
         """
         lines = text.splitlines()
         try:
@@ -365,15 +391,16 @@ class IdentityManager:
                 break
         body_lines = [
             ln for ln in lines[start + 1 : end]
-            if ln.strip() and ln.strip() != "(пока не указано)"
+            if ln.strip() and ln.strip() not in _PLACEHOLDERS
         ]
         return "\n".join(body_lines).strip()
 
     @classmethod
     def _extract_language_section(cls, profile_text: str) -> str:
-        """Pull the body of the `## Язык общения` section from user.md."""
+        """Pull the body of the `## Language` section from user.md
+        (legacy Russian `## Язык общения` / `## Язык` also accepted)."""
         return cls._extract_section(
-            profile_text, ("## Язык общения", "## Language", "## Язык"),
+            profile_text, ("## Language", "## Язык общения", "## Язык"),
         )
 
     # Canonical agent name. Used as the LAST-RESORT fallback in
@@ -491,7 +518,7 @@ class IdentityManager:
         return ""
 
     def preamble(self, *, speaker_id: str | None = None) -> str:
-        """Блок, который подмешивается в system prompt всех диалоговых вызовов.
+        """Block mixed into the system prompt of every conversational call.
 
         Order: character first, then self-definition, then user profile.
         Core memory is appended separately by the agent (CoreMemory owns it).
@@ -563,23 +590,24 @@ class IdentityManager:
             )
         return out
 
-    # ---------- запись в user.md ----------
+    # ---------- write to user.md ----------
     @staticmethod
     def _normalize_fact(s: str) -> str:
         """Canonical form for dedup comparison.
 
-        Strips the bullet marker, the trailing `_(добавлено YYYY-MM-DD)_`
-        timestamp, leading/trailing whitespace and punctuation, and
-        lowercases. Two bullets that say the same thing in the same
-        language collapse to the same key. Cross-language duplicates
-        (EN vs RU phrasing of the same fact) still pass — semantic
-        dedup is a separate problem we don't tackle here.
+        Strips the bullet marker, the trailing `_(added YYYY-MM-DD)_`
+        timestamp (and the legacy Russian `_(добавлено …)_` form),
+        leading/trailing whitespace and punctuation, and lowercases.
+        Two bullets that say the same thing in the same language
+        collapse to the same key. Cross-language duplicates (EN vs RU
+        phrasing of the same fact) still pass — semantic dedup is a
+        separate problem we don't tackle here.
         """
         import re as _re
         s = s.strip()
         # drop leading '- ' or '* '
         s = _re.sub(r"^[-*]\s*", "", s)
-        # drop the auto-added timestamp marker
+        # drop the auto-added timestamp marker (English + legacy Russian)
         s = _re.sub(r"\s*_\([Дд]обавлено\s+\d{4}-\d{2}-\d{2}\)_\s*$", "", s)
         s = _re.sub(r"\s*_\(added\s+\d{4}-\d{2}-\d{2}\)_\s*$", "", s)
         # collapse whitespace
@@ -603,28 +631,30 @@ class IdentityManager:
         profile (and vice versa).
 
         Dedup: same fact (after canonicalisation) won't be re-added.
-        Empty `(пока не указано)` placeholders are removed when the
-        first real fact lands."""
+        Empty placeholders are removed when the first real fact lands."""
         fact = fact.strip()
         if not fact:
             return ""
         stamp = datetime.now().strftime("%Y-%m-%d")
-        bullet = f"- {fact}  _(добавлено {stamp})_"
-        section = _SECTION_BY_CATEGORY.get(category, _SECTION_BY_CATEGORY["about_user"])
+        bullet = f"- {fact}  _(added {stamp})_"
+        # Accept legacy Russian headers so facts land in an existing
+        # section instead of spawning a duplicate English one; new
+        # sections are created with the English header.
+        headers = _acceptable_headers(category)
         new_key = self._normalize_fact(fact)
 
         target_path = self._user_path_for(speaker_id)
         text = self.user_profile(speaker_id=speaker_id)
         lines = text.splitlines()
-        # find section
+        # find section (any accepted spelling)
         try:
             sec_idx = next(
-                i for i, line in enumerate(lines) if line.strip() == section
+                i for i, line in enumerate(lines) if line.strip() in headers
             )
         except StopIteration:
-            # missing section — append at file end
+            # missing section — append at file end under the English header
             self._snapshot_user_profile(speaker_id=speaker_id)
-            lines += ["", section, bullet]
+            lines += ["", headers[0], bullet]
             target_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return bullet
 
@@ -636,7 +666,7 @@ class IdentityManager:
 
         for existing in lines[sec_idx + 1 : end_idx]:
             stripped = existing.strip()
-            if not stripped or stripped == "(пока не указано)":
+            if not stripped or stripped in _PLACEHOLDERS:
                 continue
             if self._normalize_fact(stripped) == new_key:
                 return existing
@@ -644,7 +674,7 @@ class IdentityManager:
         self._snapshot_user_profile(speaker_id=speaker_id)
         body = [
             ln for ln in lines[sec_idx + 1 : end_idx]
-            if ln.strip() != "(пока не указано)"
+            if ln.strip() not in _PLACEHOLDERS
         ]
         while body and not body[-1].strip():
             body.pop()
