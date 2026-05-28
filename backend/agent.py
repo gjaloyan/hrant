@@ -736,15 +736,9 @@ def _bootstrap_mcp() -> None:
 
 # ---------- agent ----------
 from .pipeline.critic import SelfCriticMixin  # noqa: E402
-from .pipeline.intent import IntentClassifierMixin  # noqa: E402
-from .pipeline.preferences import PreferenceHandlerMixin  # noqa: E402
-from .pipeline.thinking import ThinkingMixin  # noqa: E402
 
 
 class Agent(
-    IntentClassifierMixin,
-    PreferenceHandlerMixin,
-    ThinkingMixin,
     SelfCriticMixin,
 ):
     def __init__(self, progress: Optional[ProgressCB] = None):
@@ -1073,12 +1067,6 @@ class Agent(
             f"{path_block}\n\n"
         )
 
-    # Step 1.5 — intent classification (chat | preference | task)
-    # `_classify_intent` is provided by IntentClassifierMixin
-    # (backend/pipeline/intent.py). The mixin reads `self._t0` /
-    # `self._llm_calls` etc. from this Agent instance — extracted
-    # here for code-organisation, no behaviour change.
-
     # Quick chat reply: one LLM call with identity preamble.
     def _chat_reply(self, task: str, core: str) -> str:
         self.progress("chat", "chatting...")
@@ -1150,25 +1138,6 @@ class Agent(
                 pass
             return "I am a self-learning AI agent. The API is currently unavailable, but ask again later — I will tell you more."
         return "The API is currently unavailable. Please try again in a minute — I will be ready to help."
-
-    # `_save_preference` is provided by PreferenceHandlerMixin
-    # (backend/pipeline/preferences.py). Extracted from this file
-    # for code organisation — behaviour unchanged.
-
-    # Step 2 — universal thinking
-    # `_think` is provided by ThinkingMixin
-    # (backend/pipeline/thinking.py). Extracted from this file
-    # for code organisation — behaviour unchanged.
-
-    # Backward-compat shim: tests that mock _analyze still work.
-    def _analyze(self, task: str, core: str) -> TaskAnalysis:
-        t = self._think(task, core)
-        return TaskAnalysis(
-            required_topics=t.required_topics,
-            plan=t.plan,
-            confidence=t.confidence,
-            reasoning=t.reasoning,
-        )
 
     # Step 3
     def _ensure_knowledge(
