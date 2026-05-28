@@ -86,7 +86,7 @@ def test_api_down_falls_back_to_b(router):
     r.cfg_router["fallback_to_local"] = True
     out = r.call(TaskType.COMPLEX_SOLVING, "sys", "x")
     assert out.startswith("B:")
-    assert r.state["last_reason"].startswith("Claude API недоступен")
+    assert r.state["last_reason"].startswith("Claude API unavailable")
 
 
 def test_api_down_no_fallback_raises(router):
@@ -181,7 +181,7 @@ def test_both_models_down_raises(router):
     r, fa, fb = router
     r._api_cache = (9e18, False)
     r._ollama_cache = (9e18, False)
-    with pytest.raises(LLMError, match="Qwen/Ollama также недоступен"):
+    with pytest.raises(LLMError, match="Qwen/Ollama also unavailable"):
         r.call(TaskType.COMPLEX_SOLVING, "sys", "x")
 
 
@@ -199,7 +199,7 @@ def test_b_task_both_down_raises(router):
     r, fa, fb = router
     r._ollama_cache = (9e18, False)
     r._api_cache = (9e18, False)
-    with pytest.raises(LLMError, match="Обе модели недоступны"):
+    with pytest.raises(LLMError, match="Both models unavailable"):
         r.call(TaskType.SIMPLE_LOOKUP, "sys", "x")
 
 

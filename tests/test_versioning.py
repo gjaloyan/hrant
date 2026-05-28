@@ -94,7 +94,7 @@ def test_user_profile_history_created_on_fact_add(tmp_kb, tmp_path):
     oldest_path = v2[-1]["path"]
     from pathlib import Path
     oldest_text = Path(oldest_path).read_text(encoding="utf-8")
-    assert "пока не указано" in oldest_text
+    assert "(not specified)" in oldest_text
 
     # Следующий — уже с первым фактом, без второго.
     middle_text = Path(v2[0]["path"]).read_text(encoding="utf-8")

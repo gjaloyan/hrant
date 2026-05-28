@@ -89,7 +89,7 @@ def test_capabilities_compact_keeps_tool_names():
     """Compact still has to list tools — the model needs to know
     which ones it can call. Just trims descriptions and source map."""
     short = _capabilities_block(compact=True)
-    assert "Инструменты (tools)" in short
+    assert "## Tools" in short
     # Common builtin tool names must be present
     assert "read_file" in short
     assert "calc" in short or "calc" in short.lower()

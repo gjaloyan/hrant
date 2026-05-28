@@ -97,7 +97,7 @@ def test_user_override_router_budget(tmp_path):
 
 
 def test_unknown_mode_raises(tmp_path):
-    with pytest.raises(ValueError, match="Неизвестный mode"):
+    with pytest.raises(ValueError, match="Unknown mode"):
         Config(path=_write_config(tmp_path, "nonsense"))
 
 

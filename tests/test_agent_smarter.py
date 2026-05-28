@@ -97,14 +97,14 @@ def test_notes_block_truncates_oversized_notes(tmp_kb):
         body=big, path="",
     )
     out = agent._notes_block([n1], max_total_chars=2000)
-    assert "[обрезано для контекста]" in out
+    assert "[truncated for context]" in out
     # Должно быть сильно короче исходного
     assert len(out) < len(big)
 
 
 def test_notes_block_empty_returns_placeholder(tmp_kb):
     agent = Agent()
-    assert "нет загруженных заметок" in agent._notes_block([])
+    assert "(no notes loaded)" in agent._notes_block([])
 
 
 def test_notes_block_dedupes_by_slug(tmp_kb):
