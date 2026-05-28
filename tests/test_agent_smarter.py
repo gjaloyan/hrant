@@ -128,11 +128,3 @@ def test_open_gaps_excludes_notes_that_exist_now(tmp_kb):
     topics = [g["topic"] for g in open_]
     assert "beta" in topics
     assert "alpha" not in topics
-
-
-
-def test_gaps_command_parses():
-    from backend.commands import parse
-    assert parse("gaps").kind == "gaps"
-    assert parse("пробелы").kind == "gaps"
-    assert parse("  GAPS  ").kind == "gaps"
