@@ -1,187 +1,181 @@
-# English Agent + LLM-Only Intent Routing — Design
+# English Agent + Remove Dead Legacy Intent Routing — Design
 
 **Date:** 2026-05-28
-**Status:** approved (design), pending implementation plan
-**Sub-project:** 1 of 5 (see "Program context" below)
+**Status:** approved (design, revised), pending implementation plan
+**Sub-project:** 1 of 5 (see "Program context")
+
+> **REVISED 2026-05-28:** The original design assumed keyword intent
+> routing was live and planned to replace it with a strengthened LLM
+> classifier. Exploration during planning showed the production agent
+> already runs the **unified single-tool-loop** path (`run_unified`),
+> where the LLM sees all tools and decides everything — there is NO
+> separate intent classifier in the live path. The legacy classifier /
+> regex routers still exist as **dead code** (kept "for
+> reverter-friendliness", `agent.py:1727-1736`) but `Agent.run` never
+> calls them. So "remove keyword intent routing" = **delete that dead
+> legacy code**, not build a classifier.
 
 ## Program context
 
-This is the first sub-project of a larger initiative: make the Hrant agent
-fully English and remove keyword/regex matching everywhere in favor of LLM
-semantic decisions. The full program (each piece shipped and tested on its
-own, in order):
+First sub-project of the initiative to make Hrant fully English and
+remove keyword/regex matching in favor of LLM semantic decisions. Full
+program (each piece shipped + tested on its own, in order):
 
-1. **English agent + LLM-only intent routing** ← THIS SPEC
-2. Remove keyword command parser from the interactive REPL (`commands.py`,
-   `repl.py::handle_command`).
-3. Replace verifier claim-detection regex (`verifier.py` `_IDENT_PATTERNS`,
-   `_FALSE_ABSENCE_PATTERNS`; `endpoint_check.py` verb lists) with LLM
-   judgment.
+1. **English agent + remove dead legacy intent routing** ← THIS SPEC
+2. Remove keyword command parser from the interactive REPL
+   (`commands.py`, `repl.py::handle_command`).
+3. Replace verifier claim-detection regex (`verifier.py`,
+   `endpoint_check.py`) with LLM judgment.
 4. Language-agnostic search: drop stopword keyword lists
-   (`knowledge_graph.py` `_QUERY_STOPWORDS`, `skills.py`
-   `_SEMANTIC_STOPWORDS`) in favor of embedding-based retrieval.
+   (`knowledge_graph.py`, `skills.py`) for embedding retrieval.
 5. Switch the prod agent's response-language directive to English.
 
-**Hard constraint (user, 2026-05-28):** do NOT translate accumulated data —
-core memory, user profiles, and knowledge-base notes stay in their original
-language. The agent reads them as-is and answers in English (LLMs handle this
-cross-lingually). Only persona/behavior and code become English.
+**Hard constraint (user, 2026-05-28):** do NOT translate accumulated
+data — core memory, user profiles, knowledge-base notes stay in their
+original language. The agent reads them as-is and answers in English
+(LLMs handle this cross-lingually). Only persona/behavior and code
+become English.
+
+## Current architecture (verified)
+
+`Agent.run` (`backend/agent.py:1736-1750`) unconditionally sets
+`self._mode = "unified"` and returns `unified_agent.run_unified(...)`.
+The unified turn is a single `router.call_with_tools(...)` loop: the
+LLM sees all tools and decides chat vs tool-use vs `save_user_fact` vs
+refuse, etc. There is no intent classification, no preference branch,
+no pipeline-tier selection, no regex routing in this path.
+
+The legacy pipeline is **dead but still present**:
+- `Agent` still inherits `IntentClassifierMixin` (`pipeline/intent.py`),
+  `PreferenceHandlerMixin` (`pipeline/preferences.py`),
+  `ThinkingMixin` (`pipeline/thinking.py`) — wired at
+  `agent.py:739-748`.
+- `agent.py` still defines the routing regexes (`_ARITHMETIC_*`,
+  `_CHITCHAT_RE`, `_MICRO_ACK_RE`, `_PROFILE_RECALL_RE`,
+  `_DIRECTIVE_VERBS_RE`, `_SYSTEM_ATTRIBUTE_RE`, `_SELF_QUESTION_RE`,
+  `_SELF_ANALYSIS_HINT_RE`, `_DEEP_AGENT_HINT_RE`) + their
+  `_looks_like_*` helpers + `_pick_pipeline_mode` + `_chat_fallback`.
+- `prompts.py` still defines `INTENT_CLASSIFIER_SYSTEM` and
+  `PREFERENCE_EXTRACTOR_SYSTEM`.
+- None are reached from `run_unified`. The `agent.py:1727` comment
+  explicitly schedules them for a "later cleanup sprint".
+
+`SelfCriticMixin` (`pipeline/critic.py`, `_verify`) is **live** — the
+unified path runs the verifier post-hoc. It is NOT in scope here
+(its regexes are sub-project #3).
 
 ## Goal
 
-The agent always responds in English, and the intent decision
-(chat / preference / task, plus task depth) is made solely by the LLM
-intent classifier — no regex or keyword fast-path anywhere in the intent
-path.
+The agent always responds in English, and the dead legacy
+keyword/regex intent-routing code is removed — finishing the cleanup
+the codebase already anticipates, so the LLM-decides architecture is
+the only code that exists, not just the only code that runs.
 
-## Background: current architecture
+## Approach (chosen, revised)
 
-`pipeline/intent.py::_classify_intent` already calls an LLM classifier
-(`INTENT_CLASSIFIER_SYSTEM`) that returns `{chat, preference, task}` and is
-the documented "source of truth." Before that call, several regex/keyword
-fast-paths short-circuit it (a pure cost optimization that also patched
-cases where the classifier was observed to misroute):
-
-- `len(msg) > 300 → task` (length heuristic, not a keyword)
-- arithmetic regex → task (classifier sometimes answered "2+2" from training
-  data as chat)
-- system-directive regex → task (classifier sometimes labelled "change voice"
-  as preference → saved a fact, applied nothing)
-- chitchat regex → chat
-- profile-recall regex → chat (classifier sometimes routed "what's my color"
-  to task → 4 LLM calls)
-
-The regexes live in `agent.py` (`_ARITHMETIC_RE`, `_ARITHMETIC_WORDS_RE`,
-`_ARITHMETIC_DIGIT_RE`, `_MICRO_ACK_RE`, `_CHITCHAT_RE`, `_PROFILE_RECALL_RE`,
-`_DIRECTIVE_VERBS_RE`, `_SYSTEM_ATTRIBUTE_RE`, `_SELF_QUESTION_RE`,
-`_SELF_ANALYSIS_HINT_RE`, `_DEEP_AGENT_HINT_RE`) with `_looks_like_*`
-wrappers. Production callers: `pipeline/intent.py` and `agent.py`.
-
-## Approach (chosen)
-
-- **A1 — language switch:** a new config flag, read by the system-prompt
-  assembler. No memory/profile/soul.md edits.
-- **B1 — intent routing:** delete the regex fast-paths and the now-unused
-  helpers; strengthen `INTENT_CLASSIFIER_SYSTEM` so the classifier reliably
-  covers the cases the fast-paths patched; the classifier becomes the sole
-  intent decider.
-
-Rejected: B2 (fold intent into the main agent turn, no separate classifier)
-— a much larger rewrite of the tiered pipeline; YAGNI for now.
+- **A1 — language switch:** new config flag `response_language`, read
+  by `IdentityManager.preamble()` (the single system-prompt block all
+  `run_unified` call sites use). Emits a high-priority English
+  instruction that overrides the soul's "mirror the user's language"
+  line. No memory/profile/soul.md edits.
+- **B — delete dead legacy routing:** remove the unused mixins, regex
+  constants, helper functions, and dead prompt strings — each gated on
+  a grep proving no live caller remains.
 
 ## Components
 
 ### 1. Language switch (A1)
 
-- Add `response_language: "en"` to config (`backend/config.py` + config.yaml
-  default), with a typed accessor.
-- The system-prompt assembler injects, at high priority, an instruction:
-  *"Always respond in English, regardless of the language of the user's
-  message. This overrides any soul-level rule about mirroring the user's
-  language."*
-- Placement must out-weight the soul's "mirror the user's language" line
-  (end-of-prompt / explicit override, mirroring the existing LANGUAGE
-  OVERRIDE block in `identity.py::preamble`).
-- Default value is English; the flag exists so the behavior is configurable
-  rather than hard-coded.
+- Add a `response_language` property to `Config` (`backend/config.py`),
+  reading `self._data.get("response_language")` and defaulting to
+  `"en"`. Empty string / `"mirror"` means "mirror the user's language"
+  (legacy behavior) for future flexibility.
+- In `IdentityManager.preamble()` (`backend/identity.py`): when
+  `CONFIG.response_language` resolves to a concrete language (e.g.
+  `"en"`), append a final, highest-priority block:
+  *"# RESPONSE LANGUAGE — respond ONLY in English, regardless of the
+  language of the user's message. This overrides any soul-level rule
+  about mirroring the user's language and any profile language pin."*
+  When the flag is `mirror`/empty, preamble behaves exactly as today
+  (including the existing profile LANGUAGE OVERRIDE block).
+- Because the config flag is authoritative, when it is set the
+  profile-derived LANGUAGE OVERRIDE is skipped to avoid a conflicting
+  directive.
 
-### 2. Remove keyword intent routing (B1)
+### 2. Delete dead legacy intent/preference/thinking routing
 
-- In `pipeline/intent.py::_classify_intent`, remove the arithmetic,
-  system-directive, chitchat, and profile-recall fast-path branches. Keep the
-  `len > 300 → task` length guard (not a keyword).
-- Delete from `agent.py` the regex constants and `_looks_like_*` helpers that
-  exist solely for intent routing, after confirming each has no remaining
-  caller. Symbols whose only use was routing are removed; any with a
-  non-routing caller are handled in §4.
+After confirming (via grep) that `run_unified` and all live callers do
+not reference them:
+- Remove `IntentClassifierMixin`, `PreferenceHandlerMixin`,
+  `ThinkingMixin` from the `Agent` base list (`agent.py:739-748`) and
+  delete the files `pipeline/intent.py`, `pipeline/preferences.py`,
+  `pipeline/thinking.py`.
+- Delete from `agent.py`: `_pick_pipeline_mode`, `_chat_fallback`, the
+  routing regex constants and their `_looks_like_*` helpers, and the
+  now-unused `PIPELINE_*` tier constants, after grep confirms no live
+  use.
+- Delete `INTENT_CLASSIFIER_SYSTEM` and `PREFERENCE_EXTRACTOR_SYSTEM`
+  from `prompts.py` (and their `__all__` entries) once their only
+  consumers (the deleted mixins) are gone.
+- Update `pipeline/__init__.py` docstring + any `pipeline_profile` or
+  cheatsheet references that name the removed mixins.
 
-### 3. Strengthen the classifier
+### 3. Keep (explicitly out of deletion)
 
-In `INTENT_CLASSIFIER_SYSTEM` (`backend/prompts.py`), add explicit rules and
-a few-shot block covering the cases the fast-paths used to patch:
+`pipeline/critic.py` (`SelfCriticMixin._verify`) — live in the unified
+post-hoc step; untouched here. `memory_extractor`, verifier, KG,
+goals, autonomic — all live; untouched.
 
-- arithmetic / "compute this" → **task** (so the solver can run `calc` /
-  `run_python` instead of answering from memory)
-- system directive ("change voice to male", "switch model to X", "set
-  language to Y") → **task** (apply via tools, not save as a preference)
-- profile recall ("what is my favorite color", "do you remember my brother's
-  name") → **chat** (answer from profile + recent context, no full pipeline)
-- greetings / thanks / short acks → **chat**
+## Data flow (after change)
 
-Extend the classifier's JSON output with a `depth` field
-(`"normal" | "deep"`) that replaces the `_DEEP_AGENT_HINT_RE` /
-`_SELF_ANALYSIS_HINT_RE` keyword tier-selection. The orchestrator reads
-`depth` to choose deep_agent vs task_mode for `task` intents.
-
-Output schema: `{"intent": "chat|preference|task", "depth": "normal|deep",
-"recall": true|false, "reason": "..."}`. `depth` is only meaningful for
-`task`; `recall` is true when the turn is a profile-recall question (used in
-§4 to skip memory extraction).
-
-### 4. Decoupling (these uses are NOT plain routing)
-
-- `_looks_like_profile_recall` is also used in `agent.py:1595` to **skip
-  memory extraction** on recall turns (so recall answers don't get
-  re-stored as duplicate facts). Replacement: the classifier's `recall`
-  output field (see §3 schema) is threaded to the extraction step, which
-  skips when `recall` is true — instead of calling the deleted regex.
-- `_chat_fallback` (used when the classifier LLM is unavailable) currently
-  keyword-matches the message. Replacement: when the LLM is down there is no
-  semantics to use, so return a fixed generic reply / default to a safe
-  chat response — no keyword guessing.
-
-### 5. Data flow (after change)
-
-```
-user message
-  → _classify_intent
-       len>300 → task (depth from a cheap default or classifier)
-       else → LLM classifier → {intent, depth, recall}
-  → branch:
-       chat        → fast_chat tier
-       preference  → preference extractor (unchanged)
-       task        → depth=="deep" ? deep_agent : task_mode
-  → system prompt always carries the English-language instruction
-  → memory extraction skipped when classifier marks the turn as recall
-```
+Unchanged from today's live behavior (single unified tool-loop). The
+only runtime difference: every assembled system prompt now carries the
+English-language directive. The deletions remove code that `run()`
+already never executed, so live behavior is otherwise identical.
 
 ## Error handling
 
-- Classifier `LLMError` propagates to `Agent.run` (unchanged), which chooses
-  the graceful path. With fast-paths gone, a down classifier means no
-  heuristic routing; the fallback returns a generic reply rather than
-  keyword-guessing.
-- Malformed classifier JSON → default `intent="task"`, `depth="normal"`
-  (current behavior for unknown intent).
+No new runtime paths. Deletions are pure removal of unreachable code;
+the safety check is "tests + a full import still pass", not new
+error handling. The language block is unconditional string assembly
+in `preamble()` with no new failure mode.
 
 ## Testing
 
-- **Unit (`tests/`):** mock the classifier LLM; assert `_classify_intent`
-  returns the right `{intent, depth}` for representative inputs — arithmetic,
-  system directive, profile recall, greeting, stable fact, generic task — in
-  both English and Russian inputs.
-- **Regression cleanup:** remove/replace tests that asserted the deleted
-  regex fast-paths or `_looks_like_*` helpers.
-- **Language test:** with `response_language="en"`, a Russian user message
-  yields an English answer (mock or live).
-- **Prod smoke:** send EN and RU messages; confirm English replies and
-  correct routing ("2+2" → task → calc; "привет"/"hi" → chat;
-  "what's my favorite color" → chat).
-- Cost note: every turn now incurs one classification call (acceptable —
-  agent has free-work budget, no hard token limit).
+- **Language unit test:** with `CONFIG.response_language = "en"`,
+  `IDENTITY.preamble()` contains the English-response directive; with
+  `response_language = "mirror"`, it does not (and the legacy
+  profile-language behavior is unchanged).
+- **Dead-code removal safety:** a grep/import test — after deletion,
+  `import backend` and `import backend.agent` succeed, and there are
+  zero references to the deleted symbols (`_classify_intent`,
+  `_pick_pipeline_mode`, `INTENT_CLASSIFIER_SYSTEM`, etc.) outside
+  comments/specs.
+- **Regression cleanup:** delete or rewrite tests that exercised the
+  legacy classifier / regex routers / `_save_preference` /
+  `_chat_fallback` — they test code that no longer exists. (These are
+  legacy-path tests, not unified-path tests.)
+- **Full suite:** `pytest -q` green (modulo the known Windows-timing
+  flakies).
+- **Prod smoke:** send an English and a Russian message; both get an
+  English reply; a tool-requiring request ("run X") still triggers a
+  tool call (confirming the unified loop is unaffected).
 
 ## Out of scope (other sub-projects)
 
 REPL command parser (#2), verifier claim-detection regex (#3), search
-stopwords (#4), prod soul.md/profile/notes (#5, and per the hard constraint
-the prod data is never translated — only the language directive changes).
+stopwords (#4), prod soul.md/profile/notes (#5 — and per the hard
+constraint prod data is never translated, only the language directive
+is switched, which #1 already delivers via the config flag).
 
 ## Risks
 
-- The classifier may still misroute arithmetic or directives (the exact
-  reason the fast-paths existed). Mitigation: explicit rules + few-shot in the
-  prompt, plus the prod smoke test before relying on it. If misrouting
-  persists, the fallback is to add classifier examples, not to reintroduce
-  keyword gates.
-- Latency: one extra classification call on messages that previously
-  short-circuited. Accepted.
+- **Hidden live reference to "dead" code.** Mitigation: every deletion
+  task greps for callers first; the import + full-suite tests catch any
+  missed reference before commit.
+- **Language directive not strong enough** to override a Russian soul
+  line on prod. Mitigation: place it last with explicit "this
+  overrides soul + profile" wording; verify with the prod smoke test
+  (Russian input → English output).
+- Negligible runtime risk otherwise — the change is a config-driven
+  prompt line plus removal of unreachable code.
