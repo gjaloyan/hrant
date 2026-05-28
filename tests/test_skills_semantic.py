@@ -2,7 +2,8 @@
 
 Pinned behaviour:
   - `_semantic_tokenize` lowercases, splits underscores/hyphens,
-    drops stopwords (English + Russian) and short tokens.
+    and drops tokens shorter than 2 chars (length filter only; no
+    stopword list — common words are down-weighted by TF-IDF IDF).
   - `_SemanticIndex.build(skills)` indexes (name + description +
     tags + triggers + when_to_use) per skill. `search(query)` returns
     top-K (name, score) pairs above min_score, ranked by cosine.
@@ -67,13 +68,16 @@ def test_tokenize_splits_underscore_and_hyphen():
     ]
 
 
-def test_tokenize_drops_stopwords_english():
-    """'a', 'the', 'is' should not survive."""
+def test_tokenize_keeps_common_words_no_stopword_filter():
+    """No stopword list: common words survive; only 1-char tokens are dropped
+    by the length filter. TF-IDF IDF down-weights them at index time."""
     toks = _semantic_tokenize("the video is a movie")
     assert "video" in toks
     assert "movie" in toks
-    assert "the" not in toks
-    assert "is" not in toks
+    # Common English words now survive (no stopword list)
+    assert "the" in toks
+    assert "is" in toks
+    # Single-char token "a" is still dropped by the length filter
     assert "a" not in toks
 
 
@@ -176,7 +180,7 @@ def test_index_search_empty_query():
     idx = _SemanticIndex()
     idx.build([_mk("vid", description="video", tags=["video"])])
     assert idx.search("") == []
-    # Pure stopwords also yield no hits.
+    # Words with no vocabulary overlap with the index yield no hits.
     assert idx.search("the and a is") == []
 
 

@@ -238,22 +238,6 @@ def _tool_is_available(name: str, registry: Optional[ToolRegistry] = None) -> bo
 # requires real embeddings, which we'd add only once the catalogue
 # grows past ~30 skills and the keyword approach starts missing.
 
-_SEMANTIC_STOPWORDS = frozenset({
-    # English
-    "a", "an", "the", "and", "or", "but", "of", "in", "on", "to", "from",
-    "with", "for", "by", "at", "is", "are", "was", "were", "be", "been",
-    "this", "that", "these", "those", "it", "its", "as", "if", "do", "does",
-    "did", "have", "has", "had", "will", "would", "can", "could", "should",
-    "i", "you", "he", "she", "we", "they", "me", "my", "your", "our", "their",
-    # Russian
-    "и", "в", "на", "с", "со", "по", "до", "от", "у", "о", "об", "за",
-    "из", "к", "не", "что", "как", "это", "тот", "так", "вот", "там",
-    "то", "я", "ты", "он", "она", "мы", "вы", "они", "мне", "тебе",
-    "мой", "твой", "наш", "ваш", "их", "его", "её", "ну", "же", "ли",
-    "бы", "был", "была", "было", "был", "есть", "быть",
-})
-
-
 def _semantic_tokenize(text: str) -> list[str]:
     """Tokenize for the semantic index.
 
@@ -262,8 +246,11 @@ def _semantic_tokenize(text: str) -> list[str]:
       2. Replace underscores and hyphens with spaces (so
          `video_overlay_remove` yields three tokens, not one).
       3. Extract alphanumeric runs as tokens (Unicode-aware).
-      4. Drop tokens shorter than 2 chars or in the stopword list.
+      4. Drop tokens shorter than 2 chars.
 
+    No stopword list is used. Common words are down-weighted by TF-IDF IDF
+    automatically (language-agnostic), so an explicit stopword list is
+    unnecessary and would only bias against non-EN/RU languages.
     No stemming — added cost > marginal recall for our catalogue size.
     """
     if not text:
@@ -273,7 +260,7 @@ def _semantic_tokenize(text: str) -> list[str]:
     return [
         tok
         for tok in _re.findall(r"\w+", text)
-        if len(tok) >= 2 and tok not in _SEMANTIC_STOPWORDS
+        if len(tok) >= 2
     ]
 
 

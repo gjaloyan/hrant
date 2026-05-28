@@ -28,32 +28,6 @@ from typing import Optional
 from .config import CONFIG
 
 
-# Stop words filtered out of query entity extraction. Picking the
-# question-marker subset matters most ("what is the X" → keep "X", drop
-# the rest). Bilingual because notes and queries mix EN + RU.
-_QUERY_STOPWORDS: frozenset[str] = frozenset({
-    # English
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "what", "when", "where", "who", "whom", "why", "how", "which",
-    "of", "to", "in", "on", "at", "for", "with", "by", "from", "as",
-    "and", "or", "but", "so", "if", "then", "than",
-    "this", "that", "these", "those", "it", "its",
-    "i", "me", "my", "you", "your", "we", "our", "they", "them", "their",
-    "do", "does", "did", "doing", "have", "has", "had", "having",
-    "can", "could", "would", "should", "will", "shall", "may", "might",
-    "not", "no", "none", "any", "some", "all", "each", "every",
-    "about", "into", "over", "under", "between", "through",
-    # Russian
-    "что", "кто", "когда", "где", "куда", "откуда", "почему", "зачем", "как",
-    "и", "или", "но", "а", "же", "ли", "не", "ни",
-    "в", "во", "на", "над", "под", "за", "перед", "у", "о", "об", "к",
-    "с", "со", "из", "по", "при", "до", "после", "для", "без",
-    "это", "то", "тот", "та", "те", "этот", "эта",
-    "я", "ты", "мы", "вы", "он", "она", "они", "его", "её", "их",
-    "быть", "был", "была", "было", "были",
-    "есть", "нет", "уже", "ещё",
-})
-
 
 def _is_valid_at(edge: dict, as_of: Optional[str]) -> bool:
     """Return True if the edge is valid at `as_of` (ISO date/datetime str).
@@ -439,9 +413,13 @@ class KnowledgeGraph:
         Strategy:
           - Keep the full lowered query as one candidate (catches multi-word
             entities like "global interpreter lock" stored verbatim as edges).
-          - Drop stop words ("what is the X" → keep "X", drop the rest).
-          - Keep tokens >= 4 chars and bigrams of non-stop-words.
+          - Keep tokens >= 4 chars (length filter is language-agnostic).
+          - Keep bigrams whose combined length exceeds 5 chars.
           - Deduplicate while preserving order so direct hits stay first.
+
+        No stopword list is used. Token candidates are matched against actual
+        graph entities, so noise words simply don't match any entity and are
+        harmless. This makes the function language-agnostic.
         """
         results: list[str] = []
         seen: set[str] = set()
@@ -458,16 +436,14 @@ class KnowledgeGraph:
 
         words = [w for w in re.split(r"[\s,;.?!]+", q) if w]
 
-        # Significant single words (filter stop words)
+        # Significant single words (length-filtered)
         for w in words:
-            if len(w) >= 4 and w not in _QUERY_STOPWORDS:
+            if len(w) >= 4:
                 _push(w)
 
-        # Bigrams of non-stopword pairs (rejects "is the", "of the", ...)
+        # Bigrams (length-filtered)
         for i in range(len(words) - 1):
             a, b = words[i], words[i + 1]
-            if a in _QUERY_STOPWORDS or b in _QUERY_STOPWORDS:
-                continue
             bigram = f"{a} {b}"
             if len(bigram) > 5:
                 _push(bigram)
