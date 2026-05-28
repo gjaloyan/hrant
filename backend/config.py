@@ -439,6 +439,15 @@ class Config:
         return self._data.get("search", {})
 
     @property
+    def response_language(self) -> str:
+        """Language the agent must answer in, regardless of the user's
+        input language. "en" (default) -> always English. "mirror" or
+        "" -> mirror the user's input language (legacy soul behavior).
+        Does NOT translate stored memory/knowledge -- only the reply."""
+        v = self._data.get("response_language")
+        return (v if v is not None else "en").strip() or "en"
+
+    @property
     def server(self) -> dict:
         return self._data.get("server", {})
 

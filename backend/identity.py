@@ -577,17 +577,33 @@ class IdentityManager:
                 "\"Hrant запомнит\"). Your name is for OTHERS to use; "
                 "you refer to yourself as 'I' / 'я'.\n"
             )
-        lang_body = self._extract_language_section(profile_text)
-        if lang_body:
+        from .config import CONFIG
+        forced = CONFIG.response_language
+        if forced and forced.lower() not in ("mirror", ""):
+            # Config-pinned response language wins over both the soul's
+            # "mirror the user's language" line and any profile pin.
+            lang_name = {"en": "English"}.get(forced.lower(), forced)
             out += (
-                "\n# LANGUAGE OVERRIDE\n"
-                "User profile pins the response language below. "
-                "This OVERRIDES the soul-level rule about mirroring the "
-                "user's input language. Even if the current user message "
-                "is in a different language, respond in the language "
-                "specified here:\n"
-                f"{lang_body}\n"
+                "\n# RESPONSE LANGUAGE\n"
+                f"respond ONLY in {lang_name}, regardless of the language "
+                "of the user's message. This OVERRIDES any soul-level rule "
+                "about mirroring the user's language and any profile "
+                "language pin. Stored notes/profile may be in other "
+                "languages -- read them, but always reply in "
+                f"{lang_name}.\n"
             )
+        else:
+            lang_body = self._extract_language_section(profile_text)
+            if lang_body:
+                out += (
+                    "\n# LANGUAGE OVERRIDE\n"
+                    "User profile pins the response language below. "
+                    "This OVERRIDES the soul-level rule about mirroring the "
+                    "user's input language. Even if the current user message "
+                    "is in a different language, respond in the language "
+                    "specified here:\n"
+                    f"{lang_body}\n"
+                )
         return out
 
     # ---------- write to user.md ----------
