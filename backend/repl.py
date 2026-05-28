@@ -4,7 +4,7 @@ Entered via `hrant chat` (the unified CLI dispatcher routes here
 through `backend/cli.py:cmd_chat`).
 
     hrant chat                   # interactive chat
-    hrant chat 'твой вопрос'      # one-shot query
+    hrant chat 'your question'     # one-shot query
 """
 from __future__ import annotations
 import sys
@@ -24,49 +24,49 @@ from backend.project_mode import PROJECTS
 
 
 HELP = """\
-Команды (на русском или английском):
+Commands (in Russian or English):
 
-  Память:
-    запомни <факт>                  — добавить в core memory
-    забудь про <текст>              — удалить из core memory
-    покажи core memory              — показать core
-    что ты знаешь?                  — список всех тем
-    что ты знаешь о <тема>?         — показать заметку
-    удали знания о <тема>           — удалить заметку
-    изучи <тема>                    — быстрое исследование
-    изучи глубоко <тема>            — подробное исследование
-    краткая заметка <текст>         — без исследования
+  Memory:
+    запомни <fact>                  — add to core memory
+    забудь про <text>               — remove from core memory
+    покажи core memory              — show core memory
+    что ты знаешь?                  — list all topics
+    что ты знаешь о <topic>?        — show note
+    удали знания о <topic>          — delete note
+    изучи <topic>                   — quick research
+    изучи глубоко <topic>           — deep research
+    краткая заметка <text>          — save note without research
 
-  Проекты:
-    начать проект <имя>
+  Projects:
+    начать проект <name>
     завершить проект
-    контекст проекта <текст>
-    решили <что> потому что <почему>
-    проблема: <проблема> → <решение>
+    контекст проекта <text>
+    решили <what> потому что <why>
+    проблема: <problem> → <solution>
 
   Fine-tuning:
-    finetune status                  — статистика очереди + готовность
-    finetune review                  — список curated-примеров
-    finetune start                   — запустить полный пайплайн (local_full / local_cpu)
-    finetune export-cloud            — пакет для запуска на арендованной GPU (cloud_finetune)
-    finetune import-gguf <путь> [--tag vN] — импорт gguf обратно в Ollama
-    finetune compare                 — сравнить старую и новую модель
-    finetune switch <tag>            — переключить версию
-    finetune rollback                — откат
-    finetune export                  — экспорт сырого jsonl
-    model versions                   — список версий
-    learn this to model              — добавить последний Q&A в очередь
-    неправильно, правильно: <текст>  — записать correction
-    mode                             — показать текущий режим работы
+    finetune status                  — queue statistics + readiness
+    finetune review                  — list curated examples
+    finetune start                   — run full pipeline (local_full / local_cpu)
+    finetune export-cloud            — package for running on rented GPU (cloud_finetune)
+    finetune import-gguf <path> [--tag vN] — import gguf back into Ollama
+    finetune compare                 — compare old and new model
+    finetune switch <tag>            — switch version
+    finetune rollback                — rollback
+    finetune export                  — export raw jsonl
+    model versions                   — list versions
+    learn this to model              — add last Q&A to queue
+    неправильно, правильно: <text>   — record correction
+    mode                             — show current operating mode
 
-  Прочее:
-    статус                          — общая статистика
-    пробелы / gaps                  — темы, которых не было в базе в момент вопроса
-    whoami / capabilities           — мои инструменты, навыки, исходный код
-    help / помощь                   — эта справка
-    exit / quit                     — выход
+  Other:
+    статус                          — general statistics
+    пробелы / gaps                  — topics not found in the knowledge base at query time
+    whoami / capabilities           — my tools, skills, source code
+    help / помощь                   — this help
+    exit / quit                     — exit
 
-Всё остальное обрабатывается как обычный вопрос — агент запускает полный цикл.
+Everything else is treated as a regular question — the agent runs the full cycle.
 """
 
 
@@ -95,7 +95,7 @@ def _progress(event: str, msg: str) -> None:
 
 
 def _print_answer(res: AgentAnswer) -> None:
-    # Лёгкий вывод для small-talk: без рамки и без футера с верификацией.
+    # Lightweight output for small-talk: no box and no verification footer.
     if res.is_chat:
         print(f"\n{res.answer}\n")
         return
@@ -105,24 +105,24 @@ def _print_answer(res: AgentAnswer) -> None:
     print("=" * 60)
     vr = res.verification
     badge = "🟢" if vr.confidence >= 90 else ("🟡" if vr.confidence >= 70 else "🔴")
-    print(f"{badge} уверенность: {vr.confidence}%")
+    print(f"{badge} confidence: {vr.confidence}%")
     if res.used_topics:
-        print(f"📂 использованы темы: {', '.join(res.used_topics)}")
+        print(f"📂 topics used: {', '.join(res.used_topics)}")
     if res.learned_topics:
-        print(f"📚 изучено нового: {', '.join(res.learned_topics)}")
+        print(f"📚 newly learned: {', '.join(res.learned_topics)}")
     if vr.unverified_claims:
-        print(f"⚠️  не подтверждено: {len(vr.unverified_claims)} утверждений")
+        print(f"⚠️  unverified: {len(vr.unverified_claims)} claims")
         for c in vr.unverified_claims[:5]:
             print(f"    · {c}")
     if vr.contradictions:
-        print(f"❌ противоречия: {len(vr.contradictions)}")
+        print(f"❌ contradictions: {len(vr.contradictions)}")
         for c in vr.contradictions[:5]:
             print(f"    · {c}")
     print()
 
 
 def handle_command(text: str, agent: Agent, last: dict) -> bool:
-    """Возвращает True если команда обработана (без запуска агента)."""
+    """Returns True if the command was handled (without running the agent)."""
     cmd = parse(text)
     k = cmd.kind
 
@@ -136,15 +136,15 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
             cats[t.category] = cats.get(t.category, 0) + 1
         ft = finetune_store()
         cur = VERSIONS.current()
-        print(f"📊 статус:")
+        print(f"📊 status:")
         print(f"   🎛  mode: {CONFIG.mode} (training: {CONFIG.training_location})")
-        print(f"   тем всего: {len(topics)}")
+        print(f"   topics total: {len(topics)}")
         for c, n in cats.items():
             print(f"   · {c}: {n}")
-        print(f"   core memory: ~{CORE.tokens()} токенов / {CORE.max_tokens}")
-        print(f"   finetune queue: {ft.count()} пар (готовность: {'да' if ft.ready() else 'нет'})")
+        print(f"   core memory: ~{CORE.tokens()} tokens / {CORE.max_tokens}")
+        print(f"   finetune queue: {ft.count()} pairs (ready: {'yes' if ft.ready() else 'no'})")
         print(f"   finetune version: {cur.tag if cur else '—'} ({cur.model_id if cur else '—'})")
-        print(f"   текущий проект: {PROJECTS.current or '—'}")
+        print(f"   current project: {PROJECTS.current or '—'}")
         print(f"   🧠 Model A: {CONFIG.model_a.get('model')}")
         print(f"   📖 Model B: {CONFIG.model_b.get('model')}")
         try:
@@ -158,7 +158,7 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
             if rs.get("last_reason"):
                 print(f"   last routing: {rs['last_reason']}")
         except Exception as e:
-            print(f"   router: ошибка ({e})")
+            print(f"   router: error ({e})")
         return True
 
     if k == "show_core":
@@ -167,17 +167,17 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
     if k == "gaps":
         gaps = KM.hot_gaps(threshold=1)
         if not gaps:
-            print("(пробелов нет — все запрошенные темы были в базе)")
+            print("(no gaps — all requested topics were in the knowledge base)")
             return True
         open_ = [g for g in gaps if not g["has_note_now"]]
         closed = [g for g in gaps if g["has_note_now"]]
-        print(f"\n📍 Пробелы знаний (всего {len(gaps)}):")
+        print(f"\n📍 Knowledge gaps (total {len(gaps)}):")
         if open_:
-            print(f"\n  ⚠️  ещё не изучено ({len(open_)}):")
+            print(f"\n  ⚠️  not yet studied ({len(open_)}):")
             for g in open_:
                 print(f"    · {g['topic']}  ×{g['count']}  ({g['last']})")
         if closed:
-            print(f"\n  ✓ закрыто on-demand ({len(closed)}):")
+            print(f"\n  ✓ closed on-demand ({len(closed)}):")
             for g in closed[:10]:
                 print(f"    · {g['topic']}  ×{g['count']}")
         print()
@@ -211,7 +211,7 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
     if k == "list":
         topics = KM.list_topics()
         if not topics:
-            print("(база знаний пуста)"); return True
+            print("(knowledge base is empty)"); return True
         by_cat: dict[str, list] = {}
         for t in topics:
             by_cat.setdefault(t.category, []).append(t)
@@ -224,28 +224,28 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
     if k == "show":
         note = KM.get_note(cmd.arg)
         if not note:
-            print(f"(нет заметки о '{cmd.arg}')"); return True
+            print(f"(no note found for '{cmd.arg}')"); return True
         print(f"\n--- {note.frontmatter.topic} ---")
-        print(f"категория: {note.frontmatter.category}")
-        print(f"источник: {note.frontmatter.source}")
-        print(f"уверенность: {note.frontmatter.confidence}")
-        print(f"обращений: {note.frontmatter.access_count}\n")
+        print(f"category: {note.frontmatter.category}")
+        print(f"source: {note.frontmatter.source}")
+        print(f"confidence: {note.frontmatter.confidence}")
+        print(f"accesses: {note.frontmatter.access_count}\n")
         print(note.body); print()
         return True
 
     if k == "delete":
         ok = KM.delete_note(cmd.arg)
-        print("✓ удалено" if ok else "✗ не найдено")
+        print("✓ deleted" if ok else "✗ not found")
         return True
 
     if k in ("learn", "learn_deep"):
         depth = "deep" if k == "learn_deep" else "quick"
-        print(f"📖 изучаю '{cmd.arg}' ({depth})...")
+        print(f"📖 studying '{cmd.arg}' ({depth})...")
         try:
             note = learn_topic(cmd.arg, depth=depth, project=PROJECTS.current)
-            print(f"✓ создана заметка: {note.path}")
+            print(f"✓ note created: {note.path}")
         except Exception as e:
-            print(f"✗ ошибка: {e}")
+            print(f"✗ error: {e}")
         return True
 
     if k == "quick_note":
@@ -257,7 +257,7 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
             source="user_quick_note",
             confidence="verified",
         )
-        print(f"✓ сохранено: {note.frontmatter.topic}")
+        print(f"✓ saved: {note.frontmatter.topic}")
         return True
 
     if k == "start_project":
@@ -276,10 +276,10 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
         examples = ft.list_all()
         curated = FinetuneDataCurator().curate(examples)
         print(f"📊 finetune:")
-        print(f"   всего: {len(examples)}")
-        print(f"   после курации: {len(curated)}")
-        print(f"   порог готовности: {ft.min_required}")
-        print(f"   готов к обучению: {'✓' if ft.ready() else '✗'}")
+        print(f"   total: {len(examples)}")
+        print(f"   after curation: {len(curated)}")
+        print(f"   readiness threshold: {ft.min_required}")
+        print(f"   ready for training: {'✓' if ft.ready() else '✗'}")
         for cat, n in ft.count_by_category().items():
             print(f"   · {cat}: {n}")
         return True
@@ -295,7 +295,7 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
 
     if k == "ft_export":
         out = finetune_store().export_jsonl()
-        print(out or "(пусто)")
+        print(out or "(empty)")
         return True
 
     if k == "ft_versions":
@@ -323,7 +323,7 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
         pipe = FineTunePipeline(progress=_ftprog)
         try:
             name = pipe.run_full_pipeline()
-            print(f"✓ модель {name} готова")
+            print(f"✓ model {name} is ready")
         except Exception as e:
             print(f"✗ {e}")
         return True
@@ -337,10 +337,10 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
         pipe = FineTunePipeline(progress=_ftprog)
         try:
             pkg = pipe.export_for_cloud()
-            print(f"✓ пакет готов: {pkg}")
-            print(f"  файлы: {', '.join(sorted(p.name for p in pkg.iterdir()))}")
-            print(f"  дальше: залей папку на GPU, запусти train_script.py")
-            print(f"  потом:  finetune import-gguf <путь_к_unsloth.Q4_K_M.gguf>")
+            print(f"✓ package ready: {pkg}")
+            print(f"  files: {', '.join(sorted(p.name for p in pkg.iterdir()))}")
+            print(f"  next: upload the folder to GPU, run train_script.py")
+            print(f"  then: finetune import-gguf <path_to_unsloth.Q4_K_M.gguf>")
         except Exception as e:
             print(f"✗ {e}")
         return True
@@ -354,20 +354,20 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
         pipe = FineTunePipeline(progress=_ftprog)
         try:
             name = pipe.import_gguf(cmd.arg, tag=cmd.arg2 or None)
-            print(f"✓ зарегистрирована: {name}")
+            print(f"✓ registered: {name}")
         except Exception as e:
             print(f"✗ {e}")
         return True
 
     if k == "show_mode":
-        print(f"🎛  режим работы: {CONFIG.mode}")
+        print(f"🎛  operating mode: {CONFIG.mode}")
         print(f"    finetune enabled: {CONFIG.finetune_enabled}")
         print(f"    training location: {CONFIG.training_location}")
         print(f"    Model A: {CONFIG.model_a.get('model')}")
-        print(f"    Model B: {(CONFIG.model_b or {}).get('model') if CONFIG.model_b else '— (выключен)'}")
+        print(f"    Model B: {(CONFIG.model_b or {}).get('model') if CONFIG.model_b else '— (disabled)'}")
         print()
-        print("    Доступные режимы: local_full | cloud_finetune | local_cpu | claude_only")
-        print("    Чтобы сменить — отредактируй 'mode:' в config.yaml и перезапусти.")
+        print("    Available modes: local_full | cloud_finetune | local_cpu | claude_only")
+        print("    To switch — edit 'mode:' in config.yaml and restart.")
         return True
 
     if k == "ft_compare":
@@ -375,24 +375,24 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
 
         state = VERSIONS.list()
         if len(state.versions) < 2:
-            print("✗ нужно минимум 2 версии модели")
+            print("✗ need at least 2 model versions")
             return True
         old = state.versions[-2].model_id
         new = state.versions[-1].model_id
-        print(f"сравниваю {old} vs {new}...")
+        print(f"comparing {old} vs {new}...")
         res = ModelEvaluator().compare(old, new)
         print(f"  old: {res.old_score:.3f}")
         print(f"  new: {res.new_score:.3f}")
         print(f"  improvement: {res.improvement:+.3f}")
-        print(f"  upgrade recommended: {'да' if res.should_upgrade else 'нет'}")
+        print(f"  upgrade recommended: {'yes' if res.should_upgrade else 'no'}")
         return True
 
     if k == "ft_learn_this":
         if "result" not in last:
-            print("(ещё не было ответов)")
+            print("(no answers yet)")
             return True
         if "task" not in last:
-            print("(нет последнего вопроса)")
+            print("(no last question available)")
             return True
         res: AgentAnswer = last["result"]
         finetune_store().add(
@@ -403,12 +403,12 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
             project=res.project,
             verified=True,
         )
-        print("✓ Q&A добавлено в finetune queue")
+        print("✓ Q&A added to finetune queue")
         return True
 
     if k == "ft_correct":
         if "result" not in last or "task" not in last:
-            print("(нет последнего ответа для коррекции)")
+            print("(no last answer available for correction)")
             return True
         corrected = cmd.arg
         finetune_store().add_correction(
@@ -418,23 +418,23 @@ def handle_command(text: str, agent: Agent, last: dict) -> bool:
             project=last["result"].project,
             source_notes=last["result"].used_topics,
         )
-        print("✓ correction записан в finetune queue")
+        print("✓ correction saved to finetune queue")
         return True
 
     if k == "verify_last":
         if "result" not in last:
-            print("(ещё не было ответов)"); return True
+            print("(no answers yet)"); return True
         _print_answer(last["result"])
         return True
 
     if k == "confidence":
         if "result" not in last:
-            print("(ещё не было ответов)"); return True
+            print("(no answers yet)"); return True
         vr = last["result"].verification
-        print(f"уверенность: {vr.confidence}%")
-        print(f"  подтверждено: {len(vr.verified_claims)}")
-        print(f"  не подтверждено: {len(vr.unverified_claims)}")
-        print(f"  противоречия: {len(vr.contradictions)}")
+        print(f"confidence: {vr.confidence}%")
+        print(f"  verified: {len(vr.verified_claims)}")
+        print(f"  unverified: {len(vr.unverified_claims)}")
+        print(f"  contradictions: {len(vr.contradictions)}")
         return True
 
     return False
@@ -454,14 +454,14 @@ def main() -> None:
         return
 
     print("🧠 Self-Learning Agent — CLI MVP")
-    print("   help — справка   |   exit — выход")
+    print("   help — help   |   exit — exit")
     if PROJECTS.current:
-        print(f"   активный проект: {PROJECTS.current}")
+        print(f"   active project: {PROJECTS.current}")
     while True:
         try:
             text = input("\n> ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nпока.")
+            print("\nbye.")
             return
         if not text:
             continue
