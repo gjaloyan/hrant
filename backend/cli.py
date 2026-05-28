@@ -669,9 +669,13 @@ def cmd_provider_test(args: argparse.Namespace) -> int:
         _print_err(f"test crashed: {e}")
         return 1
     if result.get("ok"):
-        _print_ok(f"connected ({result.get('latency_ms', '?')}ms)")
+        _print_ok(result.get("message") or "connected")
         if result.get("model"):
             print(f"  model: {result['model']}")
+        models = result.get("models")
+        if models:
+            shown = ", ".join(m for m in models if m)
+            print(f"  models: {shown[:200]}")
         return 0
     _print_err(result.get("error") or "test failed")
     return 1
