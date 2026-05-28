@@ -1,23 +1,22 @@
-﻿"""Главный цикл агента.
+﻿"""Main agent loop.
 
-Агент сначала классифицирует входящее сообщение на три категории:
+The agent first classifies the incoming message into three categories:
 
-  * chat       — короткий small-talk (приветствие, прощание, благодарность,
-                 «как дела», «кто ты»). Один тёплый ответ, никакого анализа
-                 тем, заметок и верификации.
-  * preference — пользователь сообщает, как с ним общаться или что о нём
-                 запомнить («отвечай на русском», «меня зовут Армен»,
-                 «будь краткой», «не добавляй оговорок»). Мы извлекаем
-                 структурированный факт и сохраняем его в user.md, отвечаем
-                 коротким подтверждением.
-  * task       — всё остальное: реальная задача, вопрос, код, расчёт.
-                 Запускается полный 7-шаговый цикл с анализом тем, поиском
-                 в базе знаний, верификацией и автосбором опыта.
+  * chat       — short small-talk (greeting, farewell, gratitude,
+                 "how are you", "who are you"). One warm reply, no topic
+                 analysis, no notes, no verification.
+  * preference — the user communicates how to interact or what to remember
+                 about them ("answer in Russian", "my name is Armen",
+                 "be brief", "don't add disclaimers"). We extract a
+                 structured fact and save it to user.md, reply with a short
+                 confirmation.
+  * task       — everything else: a real task, question, code, calculation.
+                 The full 7-step cycle runs: topic analysis, knowledge-base
+                 search, verification, and experience collection.
 
-Идея в том, чтобы «глубокое мышление» включалось только когда оно
-действительно нужно. Бытовые реплики обрабатываются тепло и быстро;
-инструкции о поведении — запоминаются и исполняются; задачи — решаются
-строго на основе знаний.
+The idea is that "deep thinking" only kicks in when it is actually needed.
+Casual exchanges are handled warmly and quickly; behavioural instructions
+are remembered and applied; tasks are solved strictly from knowledge.
 """
 from __future__ import annotations
 import os
@@ -62,13 +61,13 @@ from .skills import SKILLS
 from .tool_registry import get_registry
 from .verifier import verify
 
-# ---------- системные промпты ----------
+# ---------- system prompts ----------
 #
-# Промпты живут в backend/prompts.py (легче редактировать без скролла через
-# 2000-строчный agent.py). Re-import — тестовые/каналовые `from backend.agent
-# import SOLVER_SYSTEM_BASE` продолжают работать. Identity preamble +
-# capabilities блок добавляются в runtime через `_with_identity()` +
-# `_capabilities_block()` ниже.
+# Prompts live in backend/prompts.py (easier to edit without scrolling
+# through the 2000-line agent.py). Re-import keeps test/channel callers
+# that do `from backend.agent import SOLVER_SYSTEM_BASE` working. The
+# identity preamble and capabilities block are added at runtime via
+# `_with_identity()` and `_capabilities_block()` below.
 from .prompts import (  # noqa: E402
     CHAT_SYSTEM_BASE,
     INTENT_CLASSIFIER_SYSTEM,
@@ -116,8 +115,8 @@ def _with_identity(
     *,
     speaker_id: str | None = None,
 ) -> str:
-    """Склеивает identity preamble + agent state snapshot +
-    per-speaker permissions с конкретным system-промптом шага.
+    """Stitches identity preamble + agent state snapshot +
+    per-speaker permissions together with a specific step's system prompt.
 
     `speaker_id` selects which user_profile and role/permission
     block to inject. Default None falls back to the WebUI speaker
@@ -126,7 +125,7 @@ def _with_identity(
     The STATE SNAPSHOT block (`backend.self_state`) is what gives
     the agent line-of-sight to its own current settings — active
     TTS voice, active model, config file paths, tools registered.
-    Without it, "change your voice to male" became "Понял" + a
+    Without it, "change your voice to male" became "Understood" + a
     stored preference fact + no actual change; with it, the LLM
     sees the current voice + config path + the `set_setting`
     tool it can use to mutate the file.
@@ -153,12 +152,12 @@ def _with_identity(
 
 
 def _capabilities_block(compact: bool = False) -> str:
-    """Динамический блок «MY CAPABILITIES» для system prompt.
+    """Dynamic "MY CAPABILITIES" block for the system prompt.
 
-    Перечисляет конкретные вещи, которые агент имеет и умеет прямо сейчас:
-    зарегистрированные tools, загруженные skills, подключённые MCP серверы,
-    и карту своего исходного кода на диске — чтобы при вопросах о себе агент
-    знал, куда смотреть (read_file), а не фантазировал.
+    Lists the concrete things the agent has and can do right now:
+    registered tools, loaded skills, connected MCP servers, and a map
+    of its own source code on disk — so that when asked about itself
+    the agent knows where to look (read_file) instead of hallucinating.
 
     `compact=True` skips the source map (~2-3 KB) and trims tool
     descriptions to 60 chars. Used for paths that don't need to know
@@ -174,7 +173,7 @@ def _capabilities_block(compact: bool = False) -> str:
     # --- Tools ---
     tools = registry.tools
     if tools:
-        lines.append("\n## Инструменты (tools)")
+        lines.append("\n## Tools")
         desc_cap = 60 if compact else 100
         for name, tool in sorted(tools.items()):
             origin_label = f"  [{tool.origin}]" if tool.origin != "builtin" else ""
@@ -182,7 +181,7 @@ def _capabilities_block(compact: bool = False) -> str:
 
     # --- Skills ---
     if SKILLS.skills:
-        lines.append("\n## Навыки (skills)")
+        lines.append("\n## Skills")
         for sk in SKILLS.skills:
             triggers = ", ".join(sk.triggers[:5]) if sk.triggers else "—"
             desc_cap = 60 if compact else 80
@@ -190,7 +189,7 @@ def _capabilities_block(compact: bool = False) -> str:
 
     # --- MCP ---
     if MCP.servers and not compact:
-        lines.append("\n## Подключённые MCP-серверы")
+        lines.append("\n## Connected MCP servers")
         for srv_name, srv in MCP.servers.items():
             tool_count = len([t for t in tools if t.startswith(f"mcp_{srv_name}__")])
             lines.append(f"- `{srv_name}` ({tool_count} tools)")
@@ -201,11 +200,11 @@ def _capabilities_block(compact: bool = False) -> str:
         # think don't need it and pay for those ~3k chars on every turn.
         return "\n".join(lines)
 
-    # --- Source map (для вопросов о себе) ---
+    # --- Source map (for self-referential questions) ---
     root = Path(__file__).resolve().parent.parent
-    lines.append("\n## Мой исходный код (source map)")
-    lines.append(f"Корневая директория: `{root}`")
-    lines.append("Ключевые файлы:")
+    lines.append("\n## My source code (source map)")
+    lines.append(f"Root directory: `{root}`")
+    lines.append("Key files:")
     source_map = {
         # --- Core pipeline ---
         "backend/agent.py": "main agent loop: classify → think → solve → self-critic retry → verify",
@@ -255,15 +254,15 @@ def _capabilities_block(compact: bool = False) -> str:
     }
     for path, desc in source_map.items():
         lines.append(f"- `{path}` — {desc}")
-    lines.append("\nЧтобы узнать, как я устроен — зови `read_file` на любой из этих файлов.")
-    lines.append("НЕ делай утверждений о своём коде, не прочитав файл.")
+    lines.append("\nTo learn how I am built, call `read_file` on any of these files.")
+    lines.append("Do NOT make claims about your own code without reading the file first.")
 
     return "\n".join(lines)
 
 
-# Быстрый фильтр для самых очевидных случаев — без единого LLM-вызова.
-# Сознательно узкий: ловит только бесспорную болтовню, всё неоднозначное
-# уходит в LLM-классификатор.
+# Quick filter for the most obvious cases — without a single LLM call.
+# Deliberately narrow: only catches unambiguous small-talk; anything
+# ambiguous goes to the LLM classifier.
 # Arithmetic detector — any expression with two numbers (incl. decimals,
 # percent, parentheses) and a binary operator. We don't try to be a full
 # calculator parser; just enough that "2+2", "15 * 3", "(5+3)/2", "10%
@@ -280,7 +279,7 @@ _ARITHMETIC_RE = re.compile(
     re.IGNORECASE,
 )
 
-# Word-form arithmetic ("сколько будет два плюс два", "calculate 2+2",
+# Word-form arithmetic (e.g. "сколько будет два плюс два", "calculate 2+2",
 # "10 процентов от 250"). Triggers ONLY when the message ALSO contains
 # at least one digit — keeps conversational uses of the words ("просто
 # минус один") from misfiring.
@@ -316,7 +315,7 @@ def _looks_like_arithmetic(s: str) -> bool:
 
     Two complementary detectors:
       - symbolic form (`2+2`, `15 * 3`, `sqrt(16)`)
-      - word form ("сколько будет 25 умножить на 3", "calculate 12 times 4")
+      - word form (e.g. "сколько будет 25 умножить на 3", "calculate 12 times 4")
     Word form requires at least one digit to fire so generic prose with
     "minus" / "plus" doesn't trigger.
     """
@@ -396,7 +395,7 @@ _CHITCHAT_RE = re.compile(
 
 
 # Profile-recall questions — "what is my X" / "do you remember Y" /
-# "что моё X" / "помнишь Y" / etc. The agent already has user
+# "what is my X" / "do you remember Y" / etc. The agent already has user
 # profile + recent conversation in its fast_chat context, so these
 # don't need the full task_mode pipeline (think → notes → solve →
 # verify). Pre-fix, the LLM intent classifier consistently labelled
@@ -415,8 +414,8 @@ _PROFILE_RECALL_RE = re.compile(
     r"|do\s+you\s+(?:remember|know|recall)\s+(?:my|that\s+i|what\s+i)\b"
     r"|what\s+did\s+i\s+(?:tell|say|mention)\b"
     r"|tell\s+me\s+(?:about\s+myself|my\s+\w+)\b"
-    # Russian: "что мой/моя/моё/мои X", "помнишь(/-ите) мой X",
-    # "что ты обо мне знаешь", "что я тебе говорил"
+    # Russian: "что мой/моя/моё/мои X" (what is my X), "помнишь(/-ите) мой X" (do you remember my X),
+    # "что ты обо мне знаешь" (what do you know about me), "что я тебе говорил" (what did I tell you)
     r"|что\s+(?:мо[яийё]|мои)\s+\w+"
     r"|какой\s+(?:мо[яийё]|мои)\s+\w+"
     r"|помн(?:ишь|ите)\s+(?:мо[яийё]|мои|что\s+я)\b"
@@ -439,15 +438,15 @@ def _looks_like_profile_recall(text: str) -> bool:
 
 # Directive verbs that mean "go DO something with a setting / config",
 # NOT "save this as my preference". Pre-fix, "измени голос на мужской"
-# routed to preference → saved to user_profile.md → no actual change.
-# `_handle_preference` and the LLM classifier both saw it as
-# "preference" because the wording ("change X") superficially matches
-# how users phrase preferences. This regex catches the imperative-
+# (change voice to male) routed to preference → saved to user_profile.md
+# → no actual change. `_handle_preference` and the LLM classifier both
+# saw it as "preference" because the wording ("change X") superficially
+# matches how users phrase preferences. This regex catches the imperative-
 # directive shape and forces it onto the task path where tools fire.
 #
 # Pattern intent:
 #   - Imperative verb at the start of the message
-#   - Optionally addressed to the agent ("ты", "you")
+#   - Optionally addressed to the agent ("ты" / "you")
 #   - The thing being changed is a setting / property / state attribute
 #     ("голос", "voice", "language", "model", "config", "voice id",
 #     "tone", "speed", "voice_id", ...)
@@ -468,7 +467,7 @@ _DIRECTIVE_VERBS_RE = re.compile(
     r"give\s+(?:me\s+)?(?:a\s+|the\s+)?[a-z]+\s+(?:voice|model|setting))\b"
     # Russian directives — most-common imperative forms the user
     # actually types in chat (the production audit caught
-    # "измени голос на мужской" repeated 4 times).
+    # "измени голос на мужской" (change voice to male) repeated 4 times).
     r"|(?:пожалуйста\s+)?(?:измен[иьяет]+|"
     r"смени|поменя[йли]+|"
     r"переключ[иьи]+|перенастро[йли]+|"
@@ -476,8 +475,8 @@ _DIRECTIVE_VERBS_RE = re.compile(
     r"поста[вьи]+|постав[ьи]+|"
     r"включ[иьи]+|выключ[иьи]+|"
     r"настро[йли]+|"
-    # Раз / умень / ускор / замедл — also caught in 2nd audit:
-    # "увеличь скорость", "ускорь голос", "замедли".
+    # Increase/decrease/speed-up/slow-down — also caught in 2nd audit:
+    # "увеличь скорость" (increase speed), "ускорь голос" (speed up voice), "замедли" (slow down).
     r"увелич[ьитл]+|уменьш[итеь]+|"
     r"ускор[ьитл]+|замедл[ьитл]+|"
     r"вырубай|вруби|выруби)\b"
@@ -513,10 +512,10 @@ def _looks_like_system_directive(text: str) -> bool:
     agent escalates to tool use instead of just saving a fact.
 
     Examples that match:
-      "Измени голос на мужской"           → change voice
-      "switch model to gpt-4o"            → change model
-      "поставь язык русский"              → change language
-      "Set the TTS voice to a male voice" → change voice
+      "Измени голос на мужской" (change voice to male) → change voice
+      "switch model to gpt-4o"                         → change model
+      "поставь язык русский" (set language to Russian) → change language
+      "Set the TTS voice to a male voice"              → change voice
 
     Examples that DON'T match (still preferences):
       "I prefer male voice"     → no directive verb
@@ -572,8 +571,8 @@ def _looks_like_system_setting_preference(text: str) -> bool:
     return True
 
 
-# Детектор вопросов агента о самом себе — используется в _chat_reply,
-# чтобы подмешать capabilities block даже в лёгком режиме.
+# Detector for questions about the agent itself — used in _chat_reply
+# to inject the capabilities block even in the lightweight path.
 _SELF_QUESTION_RE = re.compile(
     r"(?:"
     r"кто\s*ты|что\s*ты\s*(?:умеешь|можешь|такое)|что\s*ты\s*за\s*(?:агент|бот|ии)"
@@ -632,7 +631,7 @@ _SELF_ANALYSIS_HINT_RE = re.compile(
 #                   - thinking picks question_type=="self_analysis"
 #                   - thinking returns subtasks (decomposition needed)
 #                   - thinking.confidence < 60 (uncertain plan → verify)
-#                   - task contains explicit "review/audit/исследуй"
+#                   - task contains explicit "review/audit/исследуй" (investigate)
 #                     keywords (recognised pre-think for early routing)
 PIPELINE_FAST_CHAT = "fast_chat"
 PIPELINE_TASK_MODE = "task_mode"
@@ -700,7 +699,7 @@ def _looks_like_self_analysis_request(text: str) -> bool:
     return bool(_SELF_ANALYSIS_HINT_RE.search(text))
 
 
-# ---------- тип колбэка для прогресса ----------
+# ---------- progress callback type ----------
 ProgressCB = Callable[..., None]  # (event, message, tool_call: ToolCallDetail|None=None)
 
 
@@ -708,9 +707,9 @@ def _noop(_evt: str, _msg: str, _tc: "ToolCallDetail | None" = None) -> None:
     pass
 
 
-# Лениво подключаем MCP-серверы один раз на процесс. Если в config.yaml ничего
-# не задано — это no-op. Делаем модульно (а не в Agent.__init__), чтобы тесты
-# с замоканным агентом не пытались поднимать subprocess.
+# Lazily connect MCP servers once per process. If nothing is configured in
+# config.yaml this is a no-op. Done at module level (not in Agent.__init__)
+# so tests with a mocked agent do not attempt to spin up subprocesses.
 _mcp_bootstrap_done = False
 
 
@@ -735,7 +734,7 @@ def _bootstrap_mcp() -> None:
     MCP.connect_all(configs)
 
 
-# ---------- агент ----------
+# ---------- agent ----------
 from .pipeline.critic import SelfCriticMixin  # noqa: E402
 from .pipeline.intent import IntentClassifierMixin  # noqa: E402
 from .pipeline.preferences import PreferenceHandlerMixin  # noqa: E402
@@ -868,9 +867,9 @@ class Agent(
         except Exception:
             pass
 
-    # Шаг 1
+    # Step 1
     def _load_core(self) -> str:
-        self.progress("core", "загружаю core memory")
+        self.progress("core", "loading core memory")
         return CORE.read()
 
     @staticmethod
@@ -1074,13 +1073,13 @@ class Agent(
             f"{path_block}\n\n"
         )
 
-    # Шаг 1.5 — классификация намерения (chat | preference | task)
+    # Step 1.5 — intent classification (chat | preference | task)
     # `_classify_intent` is provided by IntentClassifierMixin
     # (backend/pipeline/intent.py). The mixin reads `self._t0` /
     # `self._llm_calls` etc. from this Agent instance — extracted
     # here for code-organisation, no behaviour change.
 
-    # Быстрый chat-ответ: один LLM-вызов с identity preamble.
+    # Quick chat reply: one LLM call with identity preamble.
     def _chat_reply(self, task: str, core: str) -> str:
         self.progress("chat", "chatting...")
         system = _with_identity(
@@ -1129,13 +1128,13 @@ class Agent(
         """Offline fallback for simple chat when LLM is unavailable."""
         t = task.strip().lower()
         if any(w in t for w in ("привет", "hello", "hi ", "hey", "хай", "салют")):
-            return "Привет! API временно недоступен, но я на связи. Спроси что-нибудь позже или попробуй ещё раз."
+            return "Hi! The API is temporarily unavailable, but I am here. Try again in a moment."
         if any(w in t for w in ("пока", "bye", "до свидания", "goodbye")):
-            return "Пока! До встречи."
+            return "Goodbye! Talk soon."
         if any(w in t for w in ("спасибо", "thanks", "thank")):
-            return "Пожалуйста!"
+            return "You're welcome!"
         if any(w in t for w in ("как дела", "как ты", "how are you")):
-            return "API сейчас перегружен, но в целом я в порядке. Попробуй ещё раз через минуту."
+            return "The API is currently overloaded, but otherwise I'm fine. Please try again in a minute."
         if _is_self_question(task):
             # Answer from identity files — no LLM needed
             try:
@@ -1146,11 +1145,11 @@ class Agent(
                          if l.strip() and not l.startswith("#")]
                 short = " ".join(lines[:5]) if lines else ""
                 if short:
-                    return f"{short}\n\n_(API недоступен — ответ из identity.md)_"
+                    return f"{short}\n\n_(API unavailable — answer from identity.md)_"
             except Exception:
                 pass
-            return "Я — самообучающийся AI-агент. API сейчас недоступен, но спроси позже — расскажу подробнее."
-        return "Сейчас API недоступен. Попробуй повторить через минуту — я буду готов помочь."
+            return "I am a self-learning AI agent. The API is currently unavailable, but ask again later — I will tell you more."
+        return "The API is currently unavailable. Please try again in a minute — I will be ready to help."
 
     # `_save_preference` is provided by PreferenceHandlerMixin
     # (backend/pipeline/preferences.py). Extracted from this file
@@ -1171,7 +1170,7 @@ class Agent(
             reasoning=t.reasoning,
         )
 
-    # Шаг 3
+    # Step 3
     def _ensure_knowledge(
         self,
         topics: list[str],
@@ -1190,7 +1189,7 @@ class Agent(
         loaded: list[Note] = []
         learned: list[str] = []
         loaded_slugs: set[str] = set()
-        # Дедуп входного списка тем
+        # Deduplicate the input topic list
         unique_topics = list(dict.fromkeys(t.strip() for t in topics if t and t.strip()))
         for topic in unique_topics:
             # min_raw_score: rejects weak matches where the KB has
@@ -1218,7 +1217,7 @@ class Agent(
             if not allow_learning:
                 self.progress("skip_learn", f"skipped (self-analysis): {topic}")
                 continue
-            self.progress("learning", f"изучаю: {topic}")
+            self.progress("learning", f"learning: {topic}")
             try:
                 note = learn_topic(topic, depth="quick", project=project)
                 note_slug = _slug(note.frontmatter.topic)
@@ -1226,23 +1225,23 @@ class Agent(
                     loaded.append(note)
                     loaded_slugs.add(note_slug)
                 learned.append(topic)
-                self.progress("learned", f"создана заметка: {topic}")
+                self.progress("learned", f"note created: {topic}")
             except Exception as e:
-                self.progress("error", f"не удалось изучить {topic}: {e}")
+                self.progress("error", f"failed to learn {topic}: {e}")
         return loaded, learned
 
-    # вспомогательно: собрать текст заметок
+    # helper: collect note text
     def _notes_block(self, notes: list[Note], max_total_chars: int = 12000) -> str:
-        """Собирает блок заметок для контекста с мягким ограничением.
+        """Assembles the notes block for context with a soft size cap.
 
-        Если суммарный размер заметок превышает cap — режем самые длинные
-        (по строкам с конца), чтобы уложиться. Это избавляет от blow-up
-        контекста, когда анализатор попросил 6 больших тем сразу.
+        If the combined size of the notes exceeds the cap, the longest
+        notes are trimmed (from the end) to fit. This prevents context
+        blow-up when the analyser requested 6 large topics at once.
         """
         if not notes:
-            return "(нет загруженных заметок)"
+            return "(no notes loaded)"
 
-        # Дедуп по slug на всякий случай.
+        # Deduplicate by slug just in case.
         seen: set[str] = set()
         unique: list[Note] = []
         for n in notes:
@@ -1252,16 +1251,16 @@ class Agent(
             seen.add(s)
             unique.append(n)
 
-        # Простая стратегия: равная квота на заметку.
+        # Simple strategy: equal quota per note.
         quota = max(400, max_total_chars // max(1, len(unique)))
         parts: list[str] = []
         for n in unique:
             body = n.body
             if len(body) > quota:
-                body = body[:quota].rstrip() + "\n… [обрезано для контекста]"
+                body = body[:quota].rstrip() + "\n… [truncated for context]"
             parts.append(
                 f"### {n.frontmatter.topic} "
-                f"(источник: {n.frontmatter.source or 'внутренний'})\n{body}"
+                f"(source: {n.frontmatter.source or 'internal'})\n{body}"
             )
         return "\n\n".join(parts)
 
@@ -1538,7 +1537,7 @@ class Agent(
     # (backend/pipeline/critic.py). Extracted from this file for
     # code organisation — behaviour unchanged.
 
-    # Шаг 6
+    # Step 6
     def _learn_from_experience(
         self,
         task: str,
@@ -1547,9 +1546,9 @@ class Agent(
         vr: VerificationResult,
         project: str | None,
     ) -> None:
-        self.progress("experience", "сохраняю опыт")
-        # access_count уже ведётся в KM.get_note
-        # Автосбор в finetune queue: confidence ≥ 85%, заметки есть, verified
+        self.progress("experience", "saving experience")
+        # access_count is already tracked in KM.get_note
+        # Auto-collect into finetune queue: confidence >= 85%, notes present, verified
         added = finetune_store().maybe_add_from_agent(
             question=task,
             answer=answer,
@@ -1561,14 +1560,14 @@ class Agent(
         if added:
             self.progress(
                 "finetune",
-                f"Q&A добавлено в finetune queue [{added.metadata.category}]",
+                f"Q&A added to finetune queue [{added.metadata.category}]",
             )
 
         # analogy_engine pattern extraction retired 2026-05-27.
 
-    # Шаг 7 — cleanup (нечего выгружать, заметки уже на диске)
+    # Step 7 — cleanup (nothing to unload, notes are already on disk)
     def _cleanup(self) -> None:
-        self.progress("cleanup", "готово")
+        self.progress("cleanup", "done")
 
     def _extract_memories(
         self,
@@ -1621,7 +1620,7 @@ class Agent(
         except Exception:
             pass  # goal tracking is best-effort
 
-    # ---------- публичный вход ----------
+    # ---------- public entry point ----------
     def _get_token_usage(self) -> TokenUsage:
         """Capture token usage for the current request."""
         u = TOKENS.request_usage()
