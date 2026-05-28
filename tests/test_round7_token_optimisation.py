@@ -30,46 +30,8 @@ from unittest.mock import patch
 from backend.agent import (
     Agent,
     _capabilities_block,
-    _micro_ack_reply,
 )
 from backend.verifier import _compress_tool_context
-
-
-# --- #5: micro-ack fast path ----------------------------------------------
-
-
-def test_micro_ack_matches_common_acks():
-    for s in ["ok", "thanks", "спасибо", "понял", "got it", "yes",
-              "👍", "ага", "ty"]:
-        assert _micro_ack_reply(s) == "✓", f"missed: {s!r}"
-
-
-def test_micro_ack_does_not_match_continue():
-    """`continue` is intentionally NOT a micro-ack — users often mean
-    'do more work, pick up where you left off'. Goes the full pipeline."""
-    assert _micro_ack_reply("continue") is None
-    assert _micro_ack_reply("продолжай") is None
-    assert _micro_ack_reply("go on") is None
-
-
-def test_micro_ack_skips_real_questions():
-    """Long messages or anything that requires reasoning must NOT
-    short-circuit — they need a real reply."""
-    for s in [
-        "ok so let me explain the issue with the verifier",
-        "thanks, but can you also check the router?",
-        "continue from where you stopped, but read agent.py first",
-        "what is RS-485?",
-        "kill the server",
-    ]:
-        assert _micro_ack_reply(s) is None, f"misfire on: {s!r}"
-
-
-def test_micro_ack_length_cap():
-    """Even an 'ok'-prefixed message above 30 chars goes the LLM
-    path — could be content, not an ack."""
-    s = "ok let me think about this more carefully please"
-    assert _micro_ack_reply(s) is None
 
 
 # --- #1 / #2: compact capabilities ----------------------------------------

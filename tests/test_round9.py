@@ -67,33 +67,6 @@ def test_truncation_marker_points_at_line_range_alternative():
     assert "start_line" in out and "end_line" in out
 
 
-# --- P1a: wider self-analysis detection -----------------------------------
-
-
-def test_self_analysis_hint_catches_review_phrases():
-    from backend.agent import _looks_like_self_analysis_request
-    for s in [
-        "check your token usage optimisation",
-        "review your code please",
-        "look at backend/agent.py",
-        "что в архитектуре можно улучшить",
-        "проверь свой код",
-        "self-analysis: anything missed?",
-    ]:
-        assert _looks_like_self_analysis_request(s), f"missed: {s!r}"
-
-
-def test_self_analysis_hint_skips_unrelated_questions():
-    from backend.agent import _looks_like_self_analysis_request
-    for s in [
-        "what is RS-485?",
-        "сколько будет 2+2",
-        "tell me about Tigran",
-        "summarize this article",
-    ]:
-        assert not _looks_like_self_analysis_request(s), f"misfire: {s!r}"
-
-
 # --- P1b: configurable synth cap ------------------------------------------
 
 

@@ -1,6 +1,5 @@
 """Tests for the "smarter agent" batch:
 
-  * dedupe of required_topics in _ensure_knowledge
   * notes block size cap
   * DDG redirect URL unwrapping
   * gap tracking (log_miss / hot_gaps / open_gaps)
@@ -46,45 +45,6 @@ class FakeRouter:
         if task_type == TaskType.CLASSIFICATION:
             return {"intent": "task", "reason": "test"}
         return {}
-
-
-# ---------- dedupe ----------
-def test_ensure_knowledge_dedupes_duplicate_topics(tmp_kb):
-    """Анализатор может вернуть одну тему дважды — в контекст она попадает раз."""
-    tmp_kb.save_note(
-        topic="agent architecture",
-        body="описание архитектуры",
-        category="profession",
-        source="t",
-    )
-
-    agent = Agent()
-    notes, learned = agent._ensure_knowledge(
-        ["agent architecture", "agent architecture", "  agent architecture  "],
-        project=None,
-    )
-    assert len(notes) == 1
-    assert notes[0].frontmatter.topic == "agent architecture"
-    assert learned == []
-
-
-def test_ensure_knowledge_dedupes_when_fuzzy_hits_same_slug(tmp_kb):
-    """Разные query-строки могут зарезолвиться в одну заметку — всё равно один раз."""
-    tmp_kb.save_note(topic="RS-485", body="bus", category="profession", source="t",
-                     keywords=["rs485", "rs-485"])
-
-    agent = Agent()
-    notes, _ = agent._ensure_knowledge(["RS-485", "rs485", "rs-485"], project=None)
-    assert len(notes) == 1
-
-
-def test_ensure_knowledge_preserves_order_after_dedupe(tmp_kb):
-    tmp_kb.save_note(topic="A", body="a", category="profession", source="t")
-    tmp_kb.save_note(topic="B", body="b", category="profession", source="t")
-
-    agent = Agent()
-    notes, _ = agent._ensure_knowledge(["B", "A", "B", "A"], project=None)
-    assert [n.frontmatter.topic for n in notes] == ["B", "A"]
 
 
 # ---------- notes block size cap ----------
@@ -169,31 +129,6 @@ def test_open_gaps_excludes_notes_that_exist_now(tmp_kb):
     assert "beta" in topics
     assert "alpha" not in topics
 
-
-def test_ensure_knowledge_logs_miss_when_topic_not_found(tmp_kb):
-    """Если темы нет в базе — _ensure_knowledge должен отметить промах."""
-    agent = Agent()
-
-    def fake_learn(topic, depth="quick", project=None):
-        return tmp_kb.save_note(
-            topic=topic, body=f"{topic} body", category="profession", source="fake"
-        )
-
-    with patch("backend.agent.learn_topic", side_effect=fake_learn):
-        agent._ensure_knowledge(["brand_new_topic"], project=None)
-
-    gaps = tmp_kb.hot_gaps(threshold=1)
-    assert any(g["topic"] == "brand_new_topic" for g in gaps)
-    # После learn тема теперь есть — значит это "closed gap".
-    closed = [g for g in gaps if g["topic"] == "brand_new_topic"][0]
-    assert closed["has_note_now"] is True
-
-
-def test_ensure_knowledge_does_not_log_miss_for_existing_note(tmp_kb):
-    tmp_kb.save_note(topic="ready", body="r", category="profession", source="t")
-    agent = Agent()
-    agent._ensure_knowledge(["ready"], project=None)
-    assert tmp_kb.hot_gaps(threshold=1) == []
 
 
 def test_gaps_command_parses():

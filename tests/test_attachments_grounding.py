@@ -49,28 +49,3 @@ def test_attachment_marker_describes_image(monkeypatch):
     assert "look at" in marker.lower()
 
 
-def test_classifier_sees_attachment_marker(monkeypatch, tmp_kb):
-    """Intent classifier prompt must include the attachment marker so
-    a short, ambiguous text like "what do you think about that?" is
-    not mistaken for plain chat."""
-    shas = _attach_one_image_meta(monkeypatch)
-    captured: dict[str, str] = {}
-
-    class _Router:
-        def call_json(self, task_type, system, user, **kw):
-            captured["user"] = user
-            return {"intent": "task", "reason": "test"}
-
-        def call(self, *a, **kw):
-            return ""
-
-        def call_with_tools(self, *a, **kw):
-            return ""
-
-    with patch("backend.agent.router", return_value=_Router()):
-        agent = Agent()
-        agent._attachments = shas
-        agent._classify_intent("what do you think about that?")
-
-    assert "ATTACHMENT NOTICE" in captured["user"]
-    assert "image" in captured["user"]

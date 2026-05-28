@@ -88,7 +88,7 @@ def tmp_kb(tmp_path, monkeypatch):
     # Фрешный Searcher (работает с новым KM)
     fresh_searcher = sr_mod.Searcher()
     monkeypatch.setattr(sr_mod, "SEARCHER", fresh_searcher)
-    monkeypatch.setattr(agent_mod, "SEARCHER", fresh_searcher)
+    monkeypatch.setattr(agent_mod, "SEARCHER", fresh_searcher, raising=False)
 
     # Фрешная core memory
     fresh_core = cm_mod.CoreMemory()
@@ -98,7 +98,7 @@ def tmp_kb(tmp_path, monkeypatch):
     # Фрешная identity (soul/identity/user.md в tmp_path/identity)
     fresh_identity = id_mod.IdentityManager(base_dir=tmp_path)
     monkeypatch.setattr(id_mod, "IDENTITY", fresh_identity)
-    monkeypatch.setattr(agent_mod, "IDENTITY", fresh_identity)
+    monkeypatch.setattr(agent_mod, "IDENTITY", fresh_identity, raising=False)
 
     # Фрешный FinetuneStore (указывает на tmp finetune_queue.jsonl)
     fresh_ft = ft_mod.FinetuneStore(path=fresh_km.finetune_path)

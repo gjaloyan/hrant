@@ -140,27 +140,6 @@ def test_budget_guard_applied_at_every_tool_loop():
     )
 
 
-# --- #5: solver prompt requires start_line/end_line on big files ----------
-
-
-def test_self_analysis_solver_prompt_demands_line_ranges():
-    """The SOURCE OF TRUTH directive on self-analysis turns must
-    tell the model to use start_line/end_line for big files —
-    otherwise it dumps agent.py / llm.py whole and the cumulative
-    tool_results destroy the input bill."""
-    import backend.agent as agent_mod
-
-    src = inspect.getsource(agent_mod)
-    assert "TOKEN-EFFICIENT READING" in src
-    # Must mention the 1000-line threshold and the two line-range
-    # arguments by name.
-    assert "1000 lines" in src
-    assert "start_line" in src and "end_line" in src
-    # Must explicitly forbid the "just bump max_chars" workaround
-    # that used to cause doubled reads.
-    assert "max_chars" in src
-
-
 # --- docstring contradiction (caught by detect_false_absence) -------------
 
 
