@@ -137,119 +137,6 @@ _IDENT_PATTERNS = (
 )
 
 
-# Patterns the agent uses when proposing to "add" something that's
-# allegedly missing. Each pattern has the candidate identifier in
-# group 1. We anchor on lowercase verbs / negation phrasings in EN +
-# RU; the trailing identifier is matched permissively (Python-shape).
-_FALSE_ABSENCE_PATTERNS = (
-    # add/create X (verb-first, identifier follows)
-    re.compile(r"\b(?:add|added|adding|create|creating)\s+(?:a\s+|an\s+|the\s+)?[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
-    # missing/not-implemented X (verb-first, identifier follows)
-    re.compile(r"\b(?:missing|absent|not\s+implemented|not\s+called|not\s+invoked|not\s+handled|not\s+used)\s*[:`']?\s*([A-Za-z_]\w{2,})", re.IGNORECASE),
-    # X is missing / X doesn't exist (identifier-first)
-    re.compile(r"[`']?(?:[\w.]*\.)?([A-Za-z_]\w{2,})[`']?\s+(?:is\s+missing|doesn['’]?t\s+exist|isn['’]?t\s+(?:there|defined|implemented|called)|not\s+called|not\s+invoked|is\s+not\s+called)", re.IGNORECASE),
-    re.compile(r"\b(?:there['’]?s\s+no|no\s+such)\s+[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
-    re.compile(r"\b(?:fix\s*:?\s*add|recommend(?:ation)?\s*:?\s*add|TODO\s*:?\s*add)\s+[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
-    # Russian: добавь/создай X (verb-first)
-    re.compile(r"\b(?:добав(?:ь|ить|им|лен)|создать?|реализовать)\s+[`']?([A-Za-z_]\w{2,})", re.IGNORECASE),
-    # Russian: identifier-first — `X не вызывается`, `Foo.bar не реализован`,
-    # `mod.func не существует`. Allows a dotted prefix; group 1 captures
-    # the trailing identifier (the part that's in EXTRACTED IDENTIFIERS).
-    re.compile(r"[`']?(?:[\w.]*\.)?([A-Za-z_]\w{2,})[`']?\s+не\s+(?:вызыва(?:ется|ют)|реализован|обрабатыва(?:ется|ют)|существует|использует(?:ся|ют))", re.IGNORECASE),
-)
-
-
-def detect_false_absence_contradictions(
-    answer: str,
-    identifiers: list[str],
-) -> list[str]:
-    """Deterministic catch for the 'agent suggests adding X when X is
-    already in the code' hallucination. Scans the answer for common
-    "add/missing X" phrasings, checks each candidate against the set
-    of identifiers extracted from tool output, and returns one
-    contradiction string per match.
-
-    LLM-side verification (the prompt rules in VERIFIER_SYSTEM) is
-    still the primary path, but Sonnet has been observed missing these
-    even with explicit guidance. This is the belt to that suspenders.
-    Empty list when there's no overlap, so quiet on healthy answers.
-    """
-    if not answer or not identifiers:
-        return []
-
-    def _norm(s: str) -> str:
-        """Canonical form for cross-matching identifiers in answer text
-        against identifiers extracted from source. Both sides may use
-        different conventions for the SAME concept:
-          - `FILE_CACHE` (module const) vs `_file_cache` (private dict)
-          - `TokenTracker` (class) vs `_token_tracker` (instance var)
-          - `web_search` (snake) vs `WebSearch` (Pascal) vs `_webSearch`
-        Lowercase + strip ALL underscores collapses snake_case,
-        SCREAMING_CASE, _private, and CamelCase to one bucket, so
-        "add `_token_tracker`" matches `TokenTracker` in extracted.
-        """
-        return s.replace("_", "").lower()
-
-    def _looks_like_code_identifier(s: str) -> bool:
-        """A candidate from the answer must look code-shaped before
-        we treat it as an identifier reference. Otherwise plain
-        English words ("tool", "view", "logic") collide with class
-        names like `Tool`, `View`, `Logic` after case-normalization
-        and produce a false-positive contradiction. A real identifier
-        usually has at least one of:
-          - an underscore (snake / SCREAMING_CASE / _private)
-          - an internal uppercase (PascalCase / camelCase, NOT just
-            a capitalized first word in prose like "Tool")
-          - a digit
-        Plus a length floor — a 3-letter lowercase word is too
-        likely to be prose."""
-        if not s or len(s) < 4:
-            return False
-        if "_" in s:
-            return True
-        if any(ch.isdigit() for ch in s):
-            return True
-        # Internal uppercase: a capital letter at any position other
-        # than the first. `Tool` (just sentence-cased) -> False.
-        # `TokenTracker`, `webSearch` -> True.
-        for i, ch in enumerate(s):
-            if i > 0 and ch.isupper():
-                return True
-        return False
-
-    norm_to_original: dict[str, str] = {}
-    for ident in identifiers:
-        if ident and _looks_like_code_identifier(ident):
-            norm_to_original.setdefault(_norm(ident), ident)
-    seen: set[str] = set()
-    out: list[str] = []
-    for pattern in _FALSE_ABSENCE_PATTERNS:
-        for m in pattern.finditer(answer):
-            candidate = m.group(1)
-            if not _looks_like_code_identifier(candidate):
-                continue
-            key = _norm(candidate)
-            if key in norm_to_original and key not in seen:
-                seen.add(key)
-                source_form = norm_to_original[key]
-                # Snippet of surrounding context for the verifier UI.
-                start = max(0, m.start() - 40)
-                end = min(len(answer), m.end() + 40)
-                snippet = answer[start:end].replace("\n", " ").strip()
-                # Show both names if they differ — clarifies that the
-                # match was case/underscore-normalized.
-                ref = (
-                    f"'{candidate}' (matches '{source_form}')"
-                    if candidate != source_form
-                    else f"'{candidate}'"
-                )
-                out.append(
-                    f"Answer claims {ref} is missing or proposes adding it, "
-                    f"but it is already present in the code per tool output. "
-                    f"Context: …{snippet}…"
-                )
-    return out
-
 
 def _extract_code_identifiers(tool_context: str, *, max_idents: int = 200) -> list[str]:
     """Pull class / function / attr names from tool output.
@@ -647,28 +534,10 @@ Available topics: {', '.join(used_topics)}"""
     unverified = list(data.get("unverified_claims", []))
     contradictions = list(data.get("contradictions", []))
 
-    # Belt-and-suspenders: deterministic detector for the
-    # "agent claims X is missing, but X is in the code" pattern.
-    # The LLM verifier was observed missing these even with the
-    # negative-existence rule + EXTRACTED IDENTIFIERS list spelled
-    # out for it (Sonnet, real session). Anything caught here is
-    # promoted to a contradiction; if the LLM also caught it, we
-    # dedup so the same issue doesn't double-count toward confidence.
-    auto_contradictions = detect_false_absence_contradictions(answer, extracted_idents)
-    if auto_contradictions:
-        existing_lower = {c.lower() for c in contradictions}
-        for c in auto_contradictions:
-            # Cheap dedup: if the auto detector and the LLM both flagged
-            # the same identifier, the LLM's natural-language version
-            # already covers it. Match on the quoted identifier word.
-            ident_token = c.split("'")[1] if "'" in c else ""
-            if ident_token and any(
-                ident_token.lower() in c_existing.lower() for c_existing in contradictions
-            ):
-                continue
-            if c.lower() not in existing_lower:
-                contradictions.append(c)
-                existing_lower.add(c.lower())
+    # False-absence detection ("agent proposes adding X that already
+    # exists") is handled by the VERIFIER_SYSTEM prompt itself (the
+    # negative-existence rule, Steps 1-5) given the EXTRACTED
+    # IDENTIFIERS list in the prompt — no deterministic keyword backup.
     confidence = _compute_confidence(
         len(verified), len(unverified), len(contradictions)
     )
