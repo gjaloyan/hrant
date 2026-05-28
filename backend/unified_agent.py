@@ -638,6 +638,21 @@ def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
     )
 
 
+def _turn_tool_names(agent) -> list[str]:
+    """Names of tools actually called this turn, read from the trace."""
+    out: list[str] = []
+    for _step in (getattr(agent, "_trace", None) or []):
+        tc = getattr(_step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None)
+        if name is None and isinstance(tc, dict):
+            name = tc.get("name")
+        if isinstance(name, str):
+            out.append(name)
+    return out
+
+
 # Keyword-based refusal detection (`_REFUSAL_OPENER_RE`,
 # `_POLICY_REFUSAL_KEYWORDS_RE`, `_is_policy_refusal`) was removed
 # on 2026-05-21 along with the rewriter it powered
@@ -1997,6 +2012,40 @@ def run_unified(
     # status report so the human knows what was tried and what
     # input is missing.
     answer = _rewrite_xml_tool_call_dump(answer, agent)
+
+    # Self-correction: catch a claimed-but-unperformed action (e.g.
+    # "I've saved that…" with no save_user_fact call). Language-agnostic
+    # LLM judgment that also sees the tools actually called, then ONE
+    # corrective re-prompt. No keyword matching; supervisor turns skip.
+    if not supervisor_mode and (answer or "").strip():
+        from .endpoint_check import unbacked_action_claim
+        _claim = unbacked_action_claim(task, answer, _turn_tool_names(agent))
+        if _claim:
+            agent.progress("self_correct", f"unbacked claim — re-prompting: {_claim[:70]}")
+            _corrective = (
+                f'Your previous answer claimed: "{_claim}". But no tool call '
+                f"this turn actually performed it (tools called: "
+                f"{', '.join(_turn_tool_names(agent)) or 'none'}). Either call "
+                f"the correct tool NOW to actually do it, then confirm in one "
+                f"sentence; or rewrite your final answer to state honestly that "
+                f"you did not do it. Never claim an action you did not perform."
+            )
+            try:
+                answer = router().call_with_tools(
+                    TaskType.COMPLEX_SOLVING,
+                    system_prompt,
+                    f"{task}\n\n[SELF-CORRECTION REQUIRED]\n{_corrective}",
+                    tools=_current_tool_schema_for_turn(),
+                    tools_provider=_current_tool_schema_for_turn,
+                    execute_tool=_execute_with_progress,
+                    max_tokens=2000,
+                    max_iterations=6,
+                    on_tool_call=_on_tool_call,
+                )
+                answer = _rewrite_xml_tool_call_dump(answer, agent)
+            except LLMError:
+                pass  # keep the original answer if the corrective call fails
+
     # 2026-05-21: refusal-rewriter dropped. The previous version
     # ran a ~25-keyword regex over the answer head ("не могу",
     # "I can't", "tools are not available") and a second regex to

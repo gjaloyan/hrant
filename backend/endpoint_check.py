@@ -91,6 +91,43 @@ def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:
     return _llm_endpoint_met(task, answer)
 
 
+_CLAIM_CHECK_SYSTEM = """You verify whether an assistant's answer claims an action it did NOT actually perform.
+
+You are given the user's request, the assistant's answer, and the EXACT list of tools the assistant actually called this turn.
+
+The assistant "claims an action" when its answer states or implies it DID something with an effect beyond merely replying — e.g. "I've saved/remembered…", "I've set/changed/updated…", "I ran/executed…", "I created/deleted…", "done", "I'll remember this" (as if persisted).
+
+A claim is BACKED only if a corresponding tool call is present in the tool list (save_user_fact for remembering a fact, set_setting for a config change, terminal_exec for running a command, write_file/save_to_workspace for creating a file, etc.). Merely promising or asserting it in prose is NOT backing.
+
+Return strictly JSON:
+  {"unbacked_claim": "<short description of the claimed-but-unbacked action, or an empty string if every claimed action is backed by a tool call, or if no action was claimed>"}
+
+Judge in the user's own language. A purely informational answer (a fact, explanation, opinion, small talk) claims no action -> empty string."""
+
+
+def unbacked_action_claim(task: str, answer: str, tool_names: list[str]) -> str:
+    """LLM judgment: did the answer claim an action NOT backed by a tool
+    call this turn? Returns a short description of the unbacked claim, or
+    "" when every claim is backed / no action claimed. Language-agnostic,
+    no keyword matching. Fails OPEN ("") so a judge/infra failure never
+    fabricates a correction."""
+    if not (answer or "").strip():
+        return ""
+    from .llm import router, TaskType
+    tools_desc = ", ".join(t for t in (tool_names or []) if t) or "(none)"
+    try:
+        data = router().call_json(
+            TaskType.CLASSIFICATION,
+            _CLAIM_CHECK_SYSTEM,
+            f"USER REQUEST:\n{task}\n\nASSISTANT ANSWER:\n{answer}\n\n"
+            f"TOOLS ACTUALLY CALLED THIS TURN: {tools_desc}",
+            max_tokens=150, temperature=0.0,
+        )
+        return str(data.get("unbacked_claim", "") or "").strip()
+    except Exception:
+        return ""
+
+
 # Cap applied when endpoint is missed. 30 is below the "low_confidence"
 # threshold (~50) used by the daily report — a flag the
 # meta_learner / human reviewer will see as needing attention.
