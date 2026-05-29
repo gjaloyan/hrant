@@ -98,13 +98,9 @@ def test_stats_today_resets_on_date_change(monkeypatch):
     )
     assert tt.stats_today()["input_tokens"] == 1000
 
-    # Simulate the calendar rolling forward by patching `date.today()`.
-    class _FakeDate(datetime.date):
-        @classmethod
-        def today(cls):
-            return datetime.date(2099, 1, 1)
-
-    monkeypatch.setattr(llm_mod, "date", _FakeDate)
+    # Simulate the calendar rolling forward by patching the UTC day key
+    # (the counter is keyed by `_utc_today()`, not local `date.today()`).
+    monkeypatch.setattr(llm_mod, "_utc_today", lambda: "2099-01-01")
     # The next record() should detect the date change and reset.
     tt.record(
         task_type="task",

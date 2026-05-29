@@ -17,7 +17,7 @@ import os
 import random
 import threading
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
@@ -84,6 +84,19 @@ class CallRecord:
         }
 
 
+def _utc_today() -> str:
+    """Canonical day key for the daily token counter: the UTC calendar
+    day. `record()` and the no-tz `stats_today()` view both use this so
+    the counter's day and the queried day always agree. Previously the
+    counter was keyed by `date.today()` (server-LOCAL date) while
+    `stats_today` compared against a UTC day — near the UTC midnight
+    boundary they disagreed and the daily view returned spurious zeros.
+    A `tz=`-qualified `stats_today` still reports the operator's local
+    calendar day (and zeros when it straddles the UTC counter day, as
+    documented)."""
+    return datetime.now(timezone.utc).date().isoformat()
+
+
 class TokenTracker:
     """Tracks token usage across all LLM calls."""
 
@@ -133,7 +146,7 @@ class TokenTracker:
         # `~/.hrant/data/knowledge/tokens_today.json` and is touched
         # on every record() call (cheap: ~one tiny JSON write per
         # API call, ≪ 1 ms). Auto-restored on __init__.
-        self._today_date = date.today().isoformat()
+        self._today_date = _utc_today()
         self._today_input = 0
         self._today_output = 0
         self._today_cost = 0.0
@@ -204,7 +217,7 @@ class TokenTracker:
             # Audit follow-up — daily counters. Reset on date change
             # (UTC). The first call after midnight zeroes the buckets
             # so /api/tokens/today reflects the new day cleanly.
-            today = date.today().isoformat()
+            today = _utc_today()
             if today != self._today_date:
                 self._today_date = today
                 self._today_input = 0
@@ -456,9 +469,9 @@ class TokenTracker:
                         local_now = _dt.datetime.now(_dt.timezone.utc)
                     today_view = local_now.date().isoformat()
                 except Exception:
-                    today_view = date.today().isoformat()
+                    today_view = _utc_today()
             else:
-                today_view = date.today().isoformat()
+                today_view = _utc_today()
             in_ = self._today_input
             out = self._today_output
             cost = self._today_cost
