@@ -1372,15 +1372,22 @@ class AnthropicLLM(BaseLLM):
                     current_tools = tools
             else:
                 current_tools = tools
+            # Prompt caching: wrap the system prompt in a content-block list
+            # and mark the last tool with cache_control so the
+            # system+tools prefix is cached across tool-loop iterations.
+            # Only costs cache_creation on the first iteration; all
+            # subsequent iterations pay the much-cheaper cache_read rate.
+            cached_system = _build_cached_system_blocks(system)
+            cached_tools = _apply_cache_control_to_tools(current_tools) if current_tools else current_tools
             payload = {
                 "model": self.model,
                 "max_tokens": max_tokens or self.default_max,
                 "temperature": temperature if temperature is not None else self.default_temp,
-                "system": system,
+                "system": cached_system,
                 "messages": messages,
             }
-            if current_tools:
-                payload["tools"] = current_tools
+            if cached_tools:
+                payload["tools"] = cached_tools
             t0 = time.time()
             data = self._post(payload)
             duration_ms = int((time.time() - t0) * 1000)
@@ -1464,7 +1471,7 @@ class AnthropicLLM(BaseLLM):
             "model": self.model,
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
-            "system": system,
+            "system": _build_cached_system_blocks(system),
             "messages": _curate_synth_messages_anthropic(messages),
         }
         try:
@@ -1497,6 +1504,76 @@ from typing import Callable as _Callable, Tuple as _Tuple
 
 ToolExecutor = _Callable[[str, dict], _Tuple[str, bool]]
 ToolCallCB = _Callable[[str, dict, str, bool], None]
+
+
+# ---------- prompt-caching helpers ----------
+
+def _is_anthropic_model(model: str) -> bool:
+    """Return True when the model string indicates an Anthropic/Claude model.
+
+    Covers:
+      - Native AnthropicLLM models (e.g. "claude-3-5-sonnet-20241022")
+      - OpenRouter Anthropic models (e.g. "anthropic/claude-sonnet-4-5")
+      - Bedrock Anthropic cross-region prefixes (e.g. "us.anthropic.claude-…")
+    """
+    m = model.lower()
+    return "claude" in m or m.startswith("anthropic/") or m.startswith("anthropic.")
+
+
+def _build_cached_system_blocks(system: str) -> list[dict]:
+    """Convert a plain system string to an Anthropic content-block list with
+    a cache breakpoint on the last (and only) block.
+
+    Anthropic docs (2024-10): set cache_control on a content block to mark
+    the boundary up to which the prefix should be cached.  We put it on the
+    single text block that comprises the system prompt so the ENTIRE system
+    prompt is cached.
+    """
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
+def _apply_cache_control_to_tools(tools: list[dict]) -> list[dict]:
+    """Return a shallow copy of the tools list with cache_control added to the
+    last entry.
+
+    Anthropic docs (2024-10): placing cache_control on the last tool in the
+    tools array marks the system+tools prefix as a cache boundary, so every
+    subsequent iteration that sends the same system+tools pays cache-read cost
+    instead of input-token cost.
+    """
+    if not tools:
+        return tools
+    out = list(tools)          # shallow copy — do not mutate caller's list
+    last = dict(out[-1])       # copy the last tool
+    last["cache_control"] = {"type": "ephemeral"}
+    out[-1] = last
+    return out
+
+
+def _apply_openrouter_anthropic_cache(messages: list[dict], system: str) -> list[dict]:
+    """Return a NEW messages list where the system turn's content is a
+    parts-array with cache_control.
+
+    OpenRouter passes Anthropic prompt-caching when the system message content
+    is structured as a content-parts array with cache_control on the last
+    element (mirrors the native Anthropic format, routed transparently).
+    Reference: https://openrouter.ai/docs/prompt-caching#anthropic-models
+
+    Only called when the model is in the Anthropic family (gated by caller).
+    Does NOT mutate the input list.
+    """
+    if not messages:
+        return messages
+    first = messages[0]
+    if first.get("role") != "system":
+        return messages
+    new_system_msg = {
+        "role": "system",
+        "content": [
+            {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+        ],
+    }
+    return [new_system_msg] + messages[1:]
 
 
 class OpenAICompatibleLLM(BaseLLM):
@@ -1671,8 +1748,20 @@ class OpenAICompatibleLLM(BaseLLM):
         static_oai_tools = _to_oai_tools(tools) if tools_provider is None else None
 
         first_user = self._build_user_content(user, attachments)
+        # Prompt caching for Anthropic models via OpenRouter: structure the
+        # system message content as a parts-array with cache_control so
+        # OpenRouter forwards the cache breakpoint to Anthropic.
+        # OpenRouter docs: https://openrouter.ai/docs/prompt-caching#anthropic-models
+        # For non-Anthropic models (OpenAI, DeepSeek, etc.) the plain string
+        # is left unchanged — those providers auto-cache a stable prefix.
+        if _is_anthropic_model(self.model):
+            system_content: "str | list[dict]" = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
+        else:
+            system_content = system
         messages = [
-            {"role": "system", "content": system},
+            {"role": "system", "content": system_content},
             {"role": "user", "content": first_user},
         ]
         final_text = ""
