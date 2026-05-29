@@ -1550,6 +1550,28 @@ def _apply_cache_control_to_tools(tools: list[dict]) -> list[dict]:
     return out
 
 
+def _openai_usage_to_record(usage: dict) -> dict:
+    """Normalize an OpenAI-compatible `usage` block into the dict
+    TokenTracker.record expects, surfacing prompt-cache info that
+    OpenRouter/OpenAI nest under `prompt_tokens_details`.
+
+    OpenAI semantics differ from Anthropic: `prompt_tokens` INCLUDES the
+    cached + cache-write tokens, while TokenTracker expects `input_tokens`
+    to be the NON-cached portion with cache read/write counted separately.
+    Splitting them keeps the cost accurate and makes the cache savings
+    visible (cached prompt tokens bill ~10x cheaper)."""
+    prompt = usage.get("prompt_tokens", 0) or 0
+    ptd = usage.get("prompt_tokens_details") or {}
+    cached = ptd.get("cached_tokens", 0) or 0
+    cache_write = ptd.get("cache_write_tokens", 0) or 0
+    return {
+        "input_tokens": max(0, prompt - cached - cache_write),
+        "output_tokens": usage.get("completion_tokens", 0) or 0,
+        "cache_read_input_tokens": cached,
+        "cache_creation_input_tokens": cache_write,
+    }
+
+
 def _apply_openrouter_anthropic_cache(messages: list[dict], system: str) -> list[dict]:
     """Return a NEW messages list where the system turn's content is a
     parts-array with cache_control.
@@ -1704,10 +1726,7 @@ class OpenAICompatibleLLM(BaseLLM):
                 task_type=_task_type,
                 model=self.model,
                 provider=self.provider_name,
-                usage={
-                    "input_tokens": usage.get("prompt_tokens", 0),
-                    "output_tokens": usage.get("completion_tokens", 0),
-                },
+                usage=_openai_usage_to_record(usage),
                 duration_ms=duration_ms,
                 prompt_preview=user[:300],
             )
@@ -1796,10 +1815,7 @@ class OpenAICompatibleLLM(BaseLLM):
                     task_type=f"{_task_type}:tool_iter_{_iter}",
                     model=self.model,
                     provider=self.provider_name,
-                    usage={
-                        "input_tokens": usage.get("prompt_tokens", 0),
-                        "output_tokens": usage.get("completion_tokens", 0),
-                    },
+                    usage=_openai_usage_to_record(usage),
                     duration_ms=duration_ms,
                     prompt_preview=user[:300] if _iter == 0 else f"(tool iteration {_iter})",
                 )
