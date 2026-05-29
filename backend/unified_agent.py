@@ -2015,17 +2015,22 @@ def run_unified(
 
     # Self-correction: catch a claimed-but-unperformed action (e.g.
     # "I've saved that…" with no save_user_fact call). Language-agnostic
-    # LLM judgment that also sees the tools actually called, then ONE
-    # corrective re-prompt. No keyword matching; supervisor turns skip.
-    if not supervisor_mode and (answer or "").strip():
+    # LLM judgment, then ONE corrective re-prompt. No keyword matching;
+    # supervisor turns skip.
+    #
+    # Cost gate: only run the judge when the turn called ZERO tools. The
+    # hallucinated-action failure mode always has an empty tool trace —
+    # the agent just talked. Turns that called any tool did real work, so
+    # their claims are almost always backed; skip the extra LLM judge
+    # there to keep the common path cheap.
+    if not supervisor_mode and (answer or "").strip() and not _turn_tool_names(agent):
         from .endpoint_check import unbacked_action_claim
-        _claim = unbacked_action_claim(task, answer, _turn_tool_names(agent))
+        _claim = unbacked_action_claim(task, answer, [])
         if _claim:
             agent.progress("self_correct", f"unbacked claim — re-prompting: {_claim[:70]}")
             _corrective = (
-                f'Your previous answer claimed: "{_claim}". But no tool call '
-                f"this turn actually performed it (tools called: "
-                f"{', '.join(_turn_tool_names(agent)) or 'none'}). Either call "
+                f'Your previous answer claimed: "{_claim}". But you called no '
+                f"tool this turn, so nothing actually performed it. Either call "
                 f"the correct tool NOW to actually do it, then confirm in one "
                 f"sentence; or rewrite your final answer to state honestly that "
                 f"you did not do it. Never claim an action you did not perform."
