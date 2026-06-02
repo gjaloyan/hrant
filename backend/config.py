@@ -440,12 +440,21 @@ class Config:
 
     @property
     def response_language(self) -> str:
-        """Language the agent must answer in, regardless of the user's
-        input language. "en" (default) -> always English. "mirror" or
-        "" -> mirror the user's input language (legacy soul behavior).
-        Does NOT translate stored memory/knowledge -- only the reply."""
+        """Language for the user-facing FINAL ANSWER. The agent's
+        internal reasoning, tool inputs, and structured outputs always
+        stay in English regardless of this flag — consistent cognition
+        across multilingual users (see IdentityManager.preamble).
+
+        "mirror" (default) / "" -> reply in whatever language the user
+        wrote in. A profile-pinned language (USER PROFILE Language
+        section) wins over mirroring.
+
+        An explicit code like "en" / "ru" / "fr" -> deployment-level
+        override forcing the reply language regardless of user input or
+        profile pin. Does NOT translate stored memory/knowledge — only
+        the reply."""
         v = self._data.get("response_language")
-        return (v if v is not None else "en").strip() or "en"
+        return (v if v is not None else "mirror").strip() or "mirror"
 
     @property
     def server(self) -> dict:

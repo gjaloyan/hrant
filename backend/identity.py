@@ -578,32 +578,45 @@ class IdentityManager:
                 "you refer to yourself as 'I' / 'я'.\n"
             )
         from .config import CONFIG
-        forced = CONFIG.response_language
-        if forced and forced.lower() not in ("mirror", ""):
-            # Config-pinned response language wins over both the soul's
-            # "mirror the user's language" line and any profile pin.
-            lang_name = {"en": "English"}.get(forced.lower(), forced)
+        forced = (CONFIG.response_language or "mirror").lower()
+        lang_body = self._extract_language_section(profile_text)
+        out += (
+            "\n# RESPONSE LANGUAGE\n"
+            "Think, plan, and reason internally in clean ENGLISH — "
+            "your private deliberation, tool inputs, structured outputs, "
+            "scratch work, and debug text all stay English. Keeps "
+            "cognition consistent across multilingual users.\n\n"
+        )
+        if forced not in ("mirror", ""):
+            # Explicit deployment-level override (opt-in via config).
+            lang_name = {
+                "en": "English", "ru": "Russian", "fr": "French",
+                "de": "German", "es": "Spanish", "it": "Italian",
+                "pt": "Portuguese", "zh": "Chinese", "ja": "Japanese",
+                "uk": "Ukrainian", "hy": "Armenian", "tr": "Turkish",
+            }.get(forced, forced)
             out += (
-                "\n# RESPONSE LANGUAGE\n"
-                f"respond ONLY in {lang_name}, regardless of the language "
-                "of the user's message. This OVERRIDES any soul-level rule "
-                "about mirroring the user's language and any profile "
-                "language pin. Stored notes/profile may be in other "
-                "languages -- read them, but always reply in "
-                f"{lang_name}.\n"
+                f"Write your final user-facing answer ONLY in {lang_name}, "
+                "regardless of the user's input language or any profile "
+                "language pin. This is a deployment-level override.\n"
+            )
+        elif lang_body:
+            # Profile-pinned reply language wins over mirroring.
+            out += (
+                "Write your final user-facing answer in the language "
+                "pinned in the USER PROFILE Language section below — "
+                "that pin wins over mirroring:\n"
+                f"{lang_body}\n"
             )
         else:
-            lang_body = self._extract_language_section(profile_text)
-            if lang_body:
-                out += (
-                    "\n# LANGUAGE OVERRIDE\n"
-                    "User profile pins the response language below. "
-                    "This OVERRIDES the soul-level rule about mirroring the "
-                    "user's input language. Even if the current user message "
-                    "is in a different language, respond in the language "
-                    "specified here:\n"
-                    f"{lang_body}\n"
-                )
+            # Default: mirror the user's input language.
+            out += (
+                "Write your final user-facing answer in the SAME language "
+                "the user wrote their last message in (mirror it). "
+                "Russian -> Russian, English -> English, French -> French, "
+                "and so on. Always think in English internally; only the "
+                "user-facing reply switches language.\n"
+            )
         return out
 
     # ---------- write to user.md ----------
