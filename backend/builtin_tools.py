@@ -1084,9 +1084,18 @@ def _complete_supervisor_handler(
                     "unmet": [r.to_dict() for r in blocking],
                     "endpoint_id": job.endpoint_id,
                 }, ensure_ascii=False)
-    # Send the final DM to the user via the Telegram channel.
-    # Fail-soft: if DM can't be sent (no chat_id, transport down) we
-    # still mark terminal so the chain doesn't loop.
+    # Deliver the final DM to the user. Path picked per channel:
+    #   • Telegram (original_chat_id set) → push via _send_with_buttons
+    #     so the user sees it directly in their chat.
+    #   • Web UI / CLI / API (no chat_id but speaker_id present) →
+    #     append a synthetic turn to the conversation log so the next
+    #     time the user opens the session they SEE the agent's final
+    #     answer. Pre-fix the final_message lived only in
+    #     supervisor_history (internal audit) and the WebUI session
+    #     showed nothing — the user had no way to know the chain
+    #     terminated.
+    # Either path is fail-soft: we still mark_terminal after, so the
+    # chain doesn't loop on a delivery glitch.
     dm_status = "skipped"
     if final_message and job.original_chat_id:
         try:
@@ -1117,6 +1126,44 @@ def _complete_supervisor_handler(
         except Exception as e:
             log.warning("complete_supervisor DM dispatch failed: %s", e)
             dm_status = f"error:{type(e).__name__}"
+    elif final_message and (job.original_speaker_id or "").strip():
+        # Non-Telegram channel (WebUI / CLI / API). Stash the message
+        # as a synthetic assistant turn keyed by speaker_id so the user
+        # sees the supervisor's final answer when they next open this
+        # session. The synthetic "user side" of the turn names the
+        # background job so the conversation log is self-explanatory.
+        try:
+            from .conversation import CONVERSATION
+            CONVERSATION.add_turn(
+                f"[background job {job.job_id} ({job.label or '?'}) "
+                f"completed; supervisor decision: {decision_norm}]",
+                final_message,
+                intent="supervisor",
+                is_chat=False,
+                confidence=70,
+                topics_used=[],
+                channel="supervisor",
+                speaker_id=job.original_speaker_id,
+                session_key=job.original_speaker_id,
+            )
+            dm_status = "queued_to_session"
+        except Exception as e:
+            log.warning(
+                "complete_supervisor session-log fallback failed: %s", e,
+            )
+            dm_status = f"error:{type(e).__name__}"
+        # Side-publish to LogBus so any open SSE clients (WebUI Logs
+        # tab) see the supervisor decision in real time even without
+        # opening the chat session.
+        try:
+            from .log_bus import publish_supervisor_event as _pub_sup
+            _pub_sup(
+                job_id=job_id,
+                decision=decision_norm,
+                message=(final_message[:500] if final_message else ""),
+            )
+        except Exception:
+            pass
     _jsup.mark_terminal(
         job_id, decision=decision_norm, reason=reason or "",
     )

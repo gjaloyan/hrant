@@ -433,6 +433,13 @@ def run_terminal(
 
     timeout = max(1, min(int(timeout_seconds or DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS))
     start = _time.monotonic()
+    # Prefer /bin/bash on POSIX so commands using bash features (set -o
+    # pipefail, [[ ]], arrays, process substitution, here-strings) work
+    # idiomatically. Default shell=True on Linux runs `/bin/sh -c ...`
+    # which on Debian/Ubuntu is dash — same bash-isms there silently
+    # fail (e.g. `set: Illegal option -o pipefail`, exit 2 before any
+    # real work). Falls back to default sh when /bin/bash is missing.
+    _shell_exe = "/bin/bash" if os.path.exists("/bin/bash") else None
     try:
         proc = subprocess.run(
             command,
@@ -440,6 +447,7 @@ def run_terminal(
             capture_output=True,
             timeout=timeout,
             shell=True,
+            executable=_shell_exe,
             check=False,
             env=os.environ.copy(),
         )

@@ -41,13 +41,17 @@ def _isolate_token_counter_file(tmp_path, monkeypatch):
 
 def test_stats_today_zero_at_start():
     """A fresh TokenTracker has zero daily counters under today's
-    date — not None, not yesterday."""
-    from backend.llm import TokenTracker
-    from datetime import date
+    date — not None, not yesterday.
+
+    The day key is UTC (record() and stats_today() both use
+    `_utc_today()` so the daily bucket doesn't tear across the local
+    midnight boundary). The test asserts against UTC to match.
+    """
+    from backend.llm import TokenTracker, _utc_today
 
     tt = TokenTracker()
     s = tt.stats_today()
-    assert s["date"] == date.today().isoformat()
+    assert s["date"] == _utc_today()
     assert s["input_tokens"] == 0
     assert s["output_tokens"] == 0
     assert s["total_tokens"] == 0
@@ -337,7 +341,8 @@ def test_daily_counters_ignore_stale_file_from_yesterday(
 
     tt = TokenTracker()
     s = tt.stats_today()
-    assert s["date"] == date.today().isoformat()
+    from backend.llm import _utc_today as _ut
+    assert s["date"] == _ut()
     assert s["input_tokens"] == 0
     assert s["output_tokens"] == 0
     assert s["llm_calls"] == 0
@@ -416,12 +421,11 @@ def test_daily_counter_flush_swallows_errors(tmp_path, monkeypatch):
 def test_stats_today_default_tz_returns_utc_view():
     """Backwards-compat: stats_today() without a tz arg keeps the
     UTC behavior — `date` field is UTC's today."""
-    from backend.llm import TokenTracker
-    from datetime import date
+    from backend.llm import TokenTracker, _utc_today
 
     tt = TokenTracker()
     s = tt.stats_today()
-    assert s["date"] == date.today().isoformat()
+    assert s["date"] == _utc_today()
     # No counter_date mismatch field on the default path.
     assert "counter_date" not in s
 

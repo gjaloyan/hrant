@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import secrets
 import shlex
 import subprocess
@@ -379,6 +380,22 @@ def start_job(
     )
     STORE.add(job)
 
+    # Prefer bash on POSIX so commands using bash features
+    # (`set -o pipefail`, `[[ ]]`, here-strings, process substitution,
+    # arrays) work out of the box. Default `shell=True` on Linux runs
+    # `/bin/sh -c "..."` which on Debian/Ubuntu is `dash` — the LLM
+    # writes bash-isms idiomatically and they would silently fail under
+    # dash (e.g. `Illegal option -o pipefail`, exit 2 before any work).
+    # Falls back to the default shell when `/bin/bash` is missing
+    # (alpine, minimal containers).
+    _shell_exe: Optional[str] = None
+    try:
+        _candidate = "/bin/bash"
+        if os.path.exists(_candidate):
+            _shell_exe = _candidate
+    except Exception:
+        _shell_exe = None
+
     def _runner() -> None:
         nonlocal job
         proc: Optional[subprocess.Popen] = None
@@ -388,6 +405,7 @@ def start_job(
             proc = subprocess.Popen(
                 command,
                 shell=True,
+                executable=_shell_exe,
                 cwd=(cwd or None),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
