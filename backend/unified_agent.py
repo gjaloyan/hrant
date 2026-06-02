@@ -1865,6 +1865,16 @@ def run_unified(
     # is module-level for tests + audit visibility.
     _recent_tool_hashes: list[str] = []
 
+    # Action-drift detector (audit follow-up 2026-06-03). Token-smart
+    # mid-turn guard: count consecutive read-only tools without a
+    # single execute-class action. When the count crosses the
+    # threshold, inject a marker telling the LLM "stop investigating,
+    # take action or write the blocker". Complements the end-of-turn
+    # self-correction (which only fires AFTER the final answer is
+    # composed): drift catches the bloat mid-flow so the agent
+    # doesn't burn 40 read_files before snapping out of it.
+    _drift_state = {"consecutive_readonly": 0, "marker_fired": 0}
+
     # AskUserQuestion follow-up: when the agent calls the `ask_user`
     # tool, the handler persists a PendingQuestion and returns a
     # sentinel JSON with `awaiting_input=True`. We detect that in
@@ -2011,6 +2021,52 @@ def run_unified(
         except Exception:
             marker_budget = ""
 
+        # Action-drift marker. The end-of-turn self-correction (in
+        # `_decide_self_correction`) only inspects the FINAL answer,
+        # so a turn that drifts through 40 read-only probes still
+        # pays for 40 LLM round-trips before the corrective re-prompt
+        # fires. Mid-turn marker injects a nudge inline so the LLM
+        # can short-circuit the drift on the NEXT iteration. Token-
+        # smart: this is text added to a tool result, not a fresh LLM
+        # call.
+        marker_drift = ""
+        try:
+            from .endpoint_check import _EXECUTE_TOOLS as _EXEC_T
+            if not is_error and name in _EXEC_T:
+                _drift_state["consecutive_readonly"] = 0
+            elif not is_error:
+                _drift_state["consecutive_readonly"] += 1
+            cur = _drift_state["consecutive_readonly"]
+            # Fire at 6 (first warning) and 12 (stronger). Beyond
+            # that the end-of-turn self-correction will catch it
+            # anyway; flooding markers wastes input tokens.
+            if cur == 6 and _drift_state["marker_fired"] == 0:
+                _drift_state["marker_fired"] = 1
+                marker_drift = (
+                    "\n\n⚠️ **ACTION DRIFT** — 6 consecutive "
+                    "read-only tool calls without a single "
+                    "execute-class action (set_setting, save_user_fact, "
+                    "start_background_job, schedule_message, "
+                    "complete_supervisor, ask_user, …). Investigation "
+                    "without action is the long-giveup failure mode. "
+                    "Decide NOW: take the action the user asked for, "
+                    "or call `ask_user(...)` with a concrete blocker. "
+                    "Do not run another read / grep / locate / journalctl."
+                )
+            elif cur == 12 and _drift_state["marker_fired"] < 2:
+                _drift_state["marker_fired"] = 2
+                marker_drift = (
+                    "\n\n🛑 **STILL DRIFTING (12 read-only calls)** — "
+                    "the prior ACTION DRIFT warning was ignored. "
+                    "Stop investigating. Either spawn the action "
+                    "with `start_background_job` / `set_setting` / "
+                    "the appropriate execute-class tool NOW, or "
+                    "exit via `ask_user` with 2-3 concrete options "
+                    "naming the blocker. No more probes."
+                )
+        except Exception:
+            marker_drift = ""
+
         # T3: no-progress detector — hash the FULL raw_result head
         # (before truncation) so identical-with-noise outputs still
         # match. Marker appended OUTSIDE truncation so it survives.
@@ -2049,6 +2105,8 @@ def run_unified(
             out_parts.append(marker_budget.lstrip())
         if marker_nopr:
             out_parts.append(marker_nopr.lstrip())
+        if marker_drift:
+            out_parts.append(marker_drift.lstrip())
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 
