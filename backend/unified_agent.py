@@ -1230,6 +1230,97 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
     return "\n".join(lines)
 
 
+# ─── Self-correction gating ────────────────────────────────────────
+
+
+def _decide_self_correction(
+    *,
+    task: str,
+    answer: str,
+    turn_tools: list[str],
+) -> tuple[str, str]:
+    """Decide whether the just-finished turn needs a corrective re-prompt.
+
+    Returns `(tag, corrective_text)`. Empty `corrective_text` ("") means
+    no correction needed. The `tag` is a short label for telemetry
+    (logged via `agent.progress`).
+
+    Two failure modes are covered, both decided by an LLM judge:
+
+      (A) ZERO-tool turn that CLAIMS an action — the agent just talked,
+          said "I saved it" / "done" with no save_user_fact / no
+          set_setting. `unbacked_action_claim` catches it.
+
+      (B) TOOLFUL turn that did NOT deliver — the agent ran a long
+          investigation (read_file, terminal_exec, locate_symbol, …)
+          and then gave up with a meta-cognitive "I can't confirm" /
+          "no verifiable result", without taking the action the user
+          asked for (e.g. `start_background_job` for a bench task).
+          Detected via the same `endpoint_met` judge the post-hoc
+          verifier already uses to cap confidence — but here we
+          re-prompt the LLM to either DO the thing or escalate
+          honestly with concrete alternatives.
+
+    The toolful branch only fires when no execute-class tool was
+    called. A turn that already called `start_background_job`,
+    `set_setting`, `complete_supervisor`, etc. is considered to have
+    taken action; we don't second-guess it.
+    """
+    if not (answer or "").strip():
+        return "", ""
+    from .endpoint_check import (
+        _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
+        endpoint_met,
+        unbacked_action_claim,
+    )
+    if not turn_tools:
+        claim = unbacked_action_claim(task, answer, [])
+        if not claim:
+            return "", ""
+        corrective = (
+            f'Your previous answer claimed: "{claim}". But you called no '
+            f"tool this turn, so nothing actually performed it. Either call "
+            f"the correct tool NOW to actually do it, then confirm in one "
+            f"sentence; or rewrite your final answer to state honestly that "
+            f"you did not do it. Never claim an action you did not perform."
+        )
+        return f"unbacked claim — {claim[:60]}", corrective
+    if any(t in _ENDPOINT_EXECUTE_TOOLS for t in turn_tools):
+        return "", ""
+    if endpoint_met(task=task, answer=answer, tool_names=turn_tools):
+        return "", ""
+    shown = ", ".join(turn_tools[:6])
+    if len(turn_tools) > 6:
+        shown += f", … (+{len(turn_tools) - 6} more)"
+    corrective = (
+        f"Your previous turn called {len(turn_tools)} tool(s) "
+        f"({shown}) but ALL of them were read-only (inspection, "
+        f"reads, greps). You delivered no state-changing action "
+        f"AND did not honestly state a concrete blocker. This is "
+        f"the long-investigation giveup failure mode.\n\n"
+        f"Pick ONE of two paths NOW:\n"
+        f"  (a) Take the actual action — `start_background_job` "
+        f"for any long-running task (benchmarks, builds, "
+        f"transcodes; the supervisor will iterate fixes/retries "
+        f"up to 10 times on completion automatically, so you do "
+        f"NOT need to babysit it in this turn), `set_setting` "
+        f"for config, `save_user_fact`/`save_to_workspace` for "
+        f"persistence, `terminal_exec` for short executions, "
+        f"`schedule_message` for delivery, etc. Spawn the work "
+        f"and end the turn with a short status line.\n"
+        f"  (b) Honestly escalate — rewrite the final answer to "
+        f"name the SPECIFIC blocker (missing credential, "
+        f"ambiguous spec, dependency you can't install) AND "
+        f"propose 1-3 concrete alternatives the user can pick "
+        f"from via `ask_user`.\n\n"
+        f"Do not end this turn with another investigation summary."
+    )
+    return (
+        f"toolful no-deliver — {len(turn_tools)} read-only tools",
+        corrective,
+    )
+
+
 # ─── Main entry point ──────────────────────────────────────────────
 
 
@@ -2013,28 +2104,17 @@ def run_unified(
     # input is missing.
     answer = _rewrite_xml_tool_call_dump(answer, agent)
 
-    # Self-correction: catch a claimed-but-unperformed action (e.g.
-    # "I've saved that…" with no save_user_fact call). Language-agnostic
-    # LLM judgment, then ONE corrective re-prompt. No keyword matching;
-    # supervisor turns skip.
-    #
-    # Cost gate: only run the judge when the turn called ZERO tools. The
-    # hallucinated-action failure mode always has an empty tool trace —
-    # the agent just talked. Turns that called any tool did real work, so
-    # their claims are almost always backed; skip the extra LLM judge
-    # there to keep the common path cheap.
-    if not supervisor_mode and (answer or "").strip() and not _turn_tool_names(agent):
-        from .endpoint_check import unbacked_action_claim
-        _claim = unbacked_action_claim(task, answer, [])
-        if _claim:
-            agent.progress("self_correct", f"unbacked claim — re-prompting: {_claim[:70]}")
-            _corrective = (
-                f'Your previous answer claimed: "{_claim}". But you called no '
-                f"tool this turn, so nothing actually performed it. Either call "
-                f"the correct tool NOW to actually do it, then confirm in one "
-                f"sentence; or rewrite your final answer to state honestly that "
-                f"you did not do it. Never claim an action you did not perform."
-            )
+    # Self-correction: catch two failure modes via ONE corrective re-prompt.
+    # See `_decide_self_correction` for the gating logic; both decisions
+    # are LLM judgments (language-agnostic, no keyword lists). Supervisor
+    # turns skip both — they're internal plumbing.
+    if not supervisor_mode and (answer or "").strip():
+        _turn_tools = _turn_tool_names(agent)
+        _correction_tag, _corrective = _decide_self_correction(
+            task=task, answer=answer, turn_tools=_turn_tools,
+        )
+        if _corrective:
+            agent.progress("self_correct", f"{_correction_tag} — re-prompting")
             try:
                 answer = router().call_with_tools(
                     TaskType.COMPLEX_SOLVING,

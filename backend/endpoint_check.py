@@ -36,6 +36,7 @@ _EXECUTE_TOOLS: frozenset[str] = frozenset({
     "start_background_job",
     "define_task_endpoint",
     "complete_supervisor",
+    "kick_supervisor",
     "schedule_message",
     "grant_telegram_access",
     "revoke_telegram_access",

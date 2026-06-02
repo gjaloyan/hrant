@@ -81,7 +81,7 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # Moved here 2026-05-27 (the former `bench` bundle is gone).
     "list_background_jobs", "get_background_job",
     "start_background_job", "define_task_endpoint",
-    "complete_supervisor",
+    "complete_supervisor", "kick_supervisor",
     # Self-surface acknowledgement (audit 2026-05-28). Always-on so
     # the agent can mark UNRESOLVED AGENT-SIDE FAILURES from the
     # system-prompt block as explained on any turn.

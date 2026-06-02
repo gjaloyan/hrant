@@ -1129,6 +1129,83 @@ def _complete_supervisor_handler(
     }, ensure_ascii=False)
 
 
+def _kick_supervisor_handler(job_id: str, reason: str = "") -> str:
+    """Force-trigger a supervisor turn for an already-finished job.
+
+    The supervisor turn normally fires automatically from
+    `_fire_done` on completion. This tool exposes the same entry
+    point so the LLM can drive the autonomic loop explicitly — e.g.
+    re-open a finished job to apply a fresh fix after the original
+    supervisor had marked it terminal, or kick a job whose
+    automatic callback was lost across a service restart.
+
+    Rules:
+      - `job_id` must be a known finished job (status in {done,
+        error, interrupted, killed}). Running jobs are rejected —
+        the supervisor will already fire when they complete.
+      - If the job is already `supervisor_terminal`, we clear the
+        terminal flag first so the supervisor can re-engage. The
+        retry counter is preserved.
+      - Owner-only.
+      - Returns immediately. The supervisor turn runs on a fresh
+        daemon thread (same path as the automatic on-completion
+        callback).
+
+    `reason` is a short note appended to the supervisor history so
+    later audits know this was an LLM-driven manual trigger."""
+    from .roles import current_speaker, is_owner
+    from .tools import background_jobs as _bg
+    from . import job_supervisor as _jsup
+    speaker_id = current_speaker()
+    if not is_owner(speaker_id):
+        return json.dumps({
+            "ok": False,
+            "error": "permission denied — kick_supervisor is owner-only",
+        }, ensure_ascii=False)
+    job = _bg.STORE.get(job_id)
+    if job is None:
+        return json.dumps({
+            "ok": False,
+            "error": f"no job with id {job_id!r}",
+        }, ensure_ascii=False)
+    if job.status == "running":
+        return json.dumps({
+            "ok": False,
+            "error": (
+                f"job {job_id} is still running — supervisor will fire "
+                "automatically on completion. To wait, end the turn; the "
+                "supervisor turn lands as a synthetic message."
+            ),
+            "status": job.status,
+        }, ensure_ascii=False)
+    if job.supervisor_terminal:
+        job.supervisor_terminal = False
+        job.supervisor_history = list(job.supervisor_history or []) + [{
+            "decision": "kick_reopen",
+            "reason": (reason or "")[:300],
+            "at": __import__("time").time(),
+        }]
+        _bg.STORE.update(job)
+    try:
+        _jsup.on_job_completed(job)
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"kick_supervisor error: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "job_id": job_id,
+        "status": job.status,
+        "note": (
+            "Supervisor turn dispatched on a daemon thread. It will "
+            "diagnose the result and either deliver the final DM, spawn "
+            "a retry child, or escalate. Do not poll this turn — let the "
+            "supervisor turn run."
+        ),
+    }, ensure_ascii=False)
+
+
 def _list_background_jobs_handler(status: str = "", limit: int = 20) -> str:
     """List background jobs, optionally filtered by status
     ('running' / 'done' / 'error' / 'interrupted' / 'killed').
@@ -2498,12 +2575,23 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="start_background_job",
         description=(
-            "Spawn a shell command in the background. Returns a "
-            "job_id immediately; owner gets a Telegram DM on "
-            "completion. USE INSTEAD of `terminal_exec` for anything "
-            "expected to run >~60s (benchmarks, transcodes, builds, "
-            "trainings). DO NOT poll status in the same turn. "
-            "OWNER-only."
+            "Spawn a shell command in the background AND open the "
+            "autonomic supervisor loop on its completion. Returns a "
+            "job_id immediately; owner gets a Telegram DM on the "
+            "FINAL terminal decision (after retries).\n\n"
+            "USE INSTEAD of `terminal_exec` for anything expected to "
+            "run >~60s (benchmarks, transcodes, builds, trainings).\n\n"
+            "This IS the autonomic loop entry point: when the job "
+            "finishes, a supervisor turn re-engages with full tool "
+            "access; it reads the logs, classifies success/"
+            "fixable-failure/hard-blocked, and either delivers the "
+            "DM, calls start_background_job again with `parent_job_id` "
+            "set (silent retry), or escalates. Up to 10 silent "
+            "retry attempts are allowed per chain.\n\n"
+            "DO NOT poll status, DO NOT call `terminal_exec` to "
+            "babysit the same task, DO NOT investigate further in "
+            "this turn after spawning. Spawn and end the turn with "
+            "one short status line. OWNER-only."
         ),
         input_schema={
             "type": "object",
@@ -2906,6 +2994,46 @@ def register_builtin_tools() -> None:
             "required": ["decision", "final_message"],
         },
         handler=_complete_supervisor_handler,
+    )
+
+    reg.register_func(
+        name="kick_supervisor",
+        description=(
+            "Force-trigger the autonomic supervisor turn for an "
+            "already-finished background job. Use this when you want "
+            "to re-open the loop on a job whose original supervisor "
+            "marked it terminal (e.g. you have a fresh fix for a job "
+            "that escalated earlier) OR when an automatic completion "
+            "callback was lost (service restart, crash). For RUNNING "
+            "jobs this is rejected — the supervisor will fire on its "
+            "own when the job ends. OWNER-only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "job_id": {
+                    "type": "string",
+                    "description": (
+                        "The job_id from start_background_job. Must "
+                        "refer to a finished job (status in "
+                        "{done, error, interrupted, killed})."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Short note recorded in the supervisor "
+                        "history so later audits can see this was an "
+                        "LLM-driven manual kick (e.g. 'reopening to "
+                        "apply OPENROUTER_API_KEY fix' / 'reviewing "
+                        "after service restart')."
+                    ),
+                    "default": "",
+                },
+            },
+            "required": ["job_id"],
+        },
+        handler=_kick_supervisor_handler,
     )
 
     reg.register_func(
