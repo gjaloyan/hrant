@@ -440,6 +440,20 @@ def run_terminal(
     # fail (e.g. `set: Illegal option -o pipefail`, exit 2 before any
     # real work). Falls back to default sh when /bin/bash is missing.
     _shell_exe = "/bin/bash" if os.path.exists("/bin/bash") else None
+    # Inherit current env + auto-inject provider keys so short shell
+    # commands that touch external APIs (curl with $OPENROUTER_API_KEY,
+    # `harbor preflight`, etc.) see the same credentials the agent
+    # uses for its own LLM calls. Same auto-collect helper as
+    # start_background_job. Defensive: never fail the exec if the
+    # helper crashes.
+    _env = os.environ.copy()
+    try:
+        from .background_jobs import _collect_provider_env as _cpe
+        for k, v in (_cpe() or {}).items():
+            if k not in _env or not _env.get(k, "").strip():
+                _env[k] = v
+    except Exception:
+        pass
     try:
         proc = subprocess.run(
             command,
@@ -449,7 +463,7 @@ def run_terminal(
             shell=True,
             executable=_shell_exe,
             check=False,
-            env=os.environ.copy(),
+            env=_env,
         )
     except FileNotFoundError as e:
         elapsed = int((_time.monotonic() - start) * 1000)

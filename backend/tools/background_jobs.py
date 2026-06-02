@@ -333,6 +333,51 @@ def _tail_bytes(data: bytes) -> str:
     return tail.decode("utf-8", errors="replace")
 
 
+def _collect_provider_env() -> dict[str, str]:
+    """Build a {VAR: key} dict from every enabled configured provider
+    whose ``key_env_default`` is known. The supervisor and any
+    LLM-spawned bench / SDK subprocess inherit these via env so they
+    can authenticate the SAME way the agent authenticates itself —
+    without the agent having to manually `export OPENROUTER_API_KEY=...`
+    before every `harbor run`.
+
+    Only fills variables that are NOT already in the current process
+    environment (we never overwrite an operator-set value). Empty /
+    missing keys are skipped. Safe-by-default: if `providers.get_api_key`
+    raises (corrupt config, missing file), we silently return an empty
+    dict — the bg-job still launches, just without the auto-inject.
+    """
+    out: dict[str, str] = {}
+    try:
+        from .. import providers as _p
+    except Exception:
+        return out
+    try:
+        configured = _p.get_providers()
+        types = getattr(_p, "PROVIDER_TYPES", {}) or {}
+    except Exception:
+        return out
+    for prov in configured or []:
+        try:
+            if not prov.get("enabled", True):
+                continue
+            t = prov.get("type") or ""
+            env_name = (prov.get("api_key_env") or "").strip()
+            if not env_name:
+                env_name = ((types.get(t) or {}).get("key_env_default") or "").strip()
+            if not env_name:
+                continue
+            if env_name in os.environ and os.environ[env_name].strip():
+                continue
+            key = _p.get_api_key(prov) or ""
+            if not key.strip():
+                continue
+            out[env_name] = key
+        except Exception:
+            continue
+    return out
+
+
 def start_job(
     *,
     command: str,
@@ -349,6 +394,7 @@ def start_job(
     total_units: Optional[int] = None,
     progress_probe_cmd: str = "",
     endpoint_id: str = "",
+    extra_env: Optional[dict[str, str]] = None,
 ) -> BackgroundJob:
     """Spawn `command` in a background thread; return immediately
     with the BackgroundJob record (status='running'). On completion
@@ -418,6 +464,23 @@ def start_job(
     except Exception:
         _shell_exe = None
 
+    # Compose subprocess env. Always inherit the current process env
+    # (so PATH, HOME, etc. work). Layer on auto-collected provider
+    # keys (OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, …)
+    # so bench / SDK subprocesses authenticate the SAME way the
+    # agent does, without manual `export` ceremonies in the command.
+    # Caller-provided `extra_env` wins last (explicit > auto).
+    _auto_env = _collect_provider_env()
+    _job_env: dict[str, str] = dict(os.environ)
+    _job_env.update(_auto_env)
+    if extra_env:
+        _job_env.update({str(k): str(v) for k, v in extra_env.items()})
+    if _auto_env:
+        log.info(
+            "background-job %s: auto-injected provider env vars: %s",
+            job_id, ", ".join(sorted(_auto_env.keys())),
+        )
+
     def _runner() -> None:
         nonlocal job
         proc: Optional[subprocess.Popen] = None
@@ -429,6 +492,7 @@ def start_job(
                 shell=True,
                 executable=_shell_exe,
                 cwd=(cwd or None),
+                env=_job_env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
             )
