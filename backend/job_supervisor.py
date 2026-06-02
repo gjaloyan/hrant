@@ -270,11 +270,14 @@ def _run_supervisor_turn(job: BackgroundJob) -> None:
     refreshed = STORE.get(job.job_id)
     if refreshed and not refreshed.supervisor_terminal:
         # Did a retry child get spawned? The child carries
-        # parent_job_id pointing at this job.
+        # parent_job_id pointing at this job. Use a parent-id
+        # lookup (no list-cap) — the previous limit=50 heuristic
+        # silently dropped real children once the registry grew past
+        # 50 jobs, falsely marking the parent `degraded` even though
+        # the supervisor turn HAD spawned a retry.
         children = [
-            j for j in STORE.list(limit=50)
-            if j.parent_job_id == job.job_id
-            and j.started_at >= job.finished_at - 1
+            j for j in STORE.find_children(job.job_id)
+            if j.started_at >= (job.finished_at or 0) - 1
         ]
         if not children:
             log.warning(

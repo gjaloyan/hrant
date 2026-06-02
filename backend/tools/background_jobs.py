@@ -266,6 +266,28 @@ class BackgroundJobStore:
                 1 for r in self._load() if r.get("status") == "running"
             )
 
+    def find_children(self, parent_job_id: str) -> list[BackgroundJob]:
+        """Return ALL jobs whose `parent_job_id` matches. Walks the
+        full registry (no `limit` cap) — the previous supervisor
+        end-of-turn check used `list(limit=50)` and silently dropped
+        retry children whose parent had aged past the 50-most-recent
+        window, causing the chain to be marked `degraded` even
+        though a real retry had been spawned.
+
+        Newest-first ordering so the immediate retry child surfaces
+        before older same-parent attempts (the supervisor only cares
+        whether ANY child was spawned, but the ordering helps audits)."""
+        if not (parent_job_id or "").strip():
+            return []
+        with _STORE_LOCK:
+            rows = self._load()
+        children = [
+            BackgroundJob.from_dict(r) for r in rows
+            if (r.get("parent_job_id") or "") == parent_job_id
+        ]
+        children.sort(key=lambda j: j.started_at, reverse=True)
+        return children
+
 
 STORE = BackgroundJobStore()
 
