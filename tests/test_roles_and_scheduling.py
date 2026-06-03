@@ -319,3 +319,29 @@ def test_schedule_message_owner_can_schedule_anywhere(isolated_kb):
     body = json.loads(out)
     assert body["ok"] is True
     assert body["target_speaker"] == "telegram:222"
+
+
+def test_bench_harness_speaker_is_implicit_owner():
+    """The Harbor terminal-bench endpoint always runs as
+    `webui:bench-harness`. That speaker MUST resolve to owner so the
+    in-trial agent can call execute-class tools (terminal_exec,
+    start_background_job, set_setting, ...). The endpoint is
+    loopback-only, so the trust boundary is the socket, not the
+    file-based role list."""
+    from backend.roles import role_of, is_owner
+    assert role_of("webui:bench-harness") == "owner"
+    assert is_owner("webui:bench-harness") is True
+
+
+def test_bench_harness_owner_status_survives_missing_roles_file(tmp_path, monkeypatch):
+    """Even with no roles.json on disk (fresh install, corrupt file),
+    bench-harness must still resolve to owner — the implicit set is
+    a process-level constant, not a file-loaded list."""
+    from backend import roles
+    # Point the loader at a non-existent dir so _load() returns the
+    # defaults — bench-harness must still be owner.
+    monkeypatch.setattr(
+        "backend.roles._roles_path",
+        lambda: tmp_path / "definitely-not-here" / "roles.json",
+    )
+    assert roles.role_of("webui:bench-harness") == "owner"

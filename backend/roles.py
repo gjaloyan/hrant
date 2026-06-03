@@ -113,6 +113,20 @@ def _save(state: dict) -> None:
     tmp.replace(p)
 
 
+# Implicit owners — process-level trust labels that bypass the
+# file-based gate. `DEFAULT_SPEAKER` covers the WebUI box owner;
+# `webui:bench-harness` covers the Harbor terminal-bench endpoint
+# (`POST /api/exec-protocol` always runs as this speaker; the
+# endpoint itself is loopback-only, so the trust boundary is the
+# socket — not the file-based role list). Adding more entries here
+# REQUIRES a corresponding loopback-only / process-internal call
+# path; never add a speaker the agent could see from a real chat.
+_IMPLICIT_OWNERS: frozenset[str] = frozenset({
+    DEFAULT_SPEAKER,
+    "webui:bench-harness",
+})
+
+
 def role_of(speaker_id: str | None) -> Role:
     """The role of a given speaker. Unknown speakers default to
     `guest`. The WebUI default speaker is always owner.
@@ -124,6 +138,8 @@ def role_of(speaker_id: str | None) -> Role:
     without a separate background job."""
     import time
     sid = normalize_speaker(speaker_id)
+    if sid in _IMPLICIT_OWNERS:
+        return "owner"
     state = _load()
     if sid in state["owner_speaker_ids"]:
         return "owner"
