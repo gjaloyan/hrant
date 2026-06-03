@@ -60,7 +60,7 @@ def test_remote_path_calls_callback_when_var_set(monkeypatch):
         posted["calls"].append({"url": url, "json": json, "timeout": timeout})
         return _FakeResp()
 
-    monkeypatch.setattr("backend.tools.terminal_exec.requests.post", fake_post)
+    monkeypatch.setattr("backend.tools.terminal_exec.httpx.post", fake_post)
 
     def fake_run(*a, **kw):
         raise AssertionError("subprocess.run must NOT be called in remote mode")
@@ -80,6 +80,33 @@ def test_remote_path_calls_callback_when_var_set(monkeypatch):
     assert call["url"] == "http://127.0.0.1:42891/exec"
     assert call["json"]["command"] == "ls -la"
     assert call["json"]["timeout_sec"] == 15
+    assert call["json"]["cwd"] == ""
+
+
+def test_remote_path_forwards_explicit_cwd(monkeypatch):
+    """`cwd` MUST be forwarded verbatim when explicitly provided —
+    container task scripts often run under a non-default working dir."""
+    from backend.tools import terminal_exec as te
+    posted = {"json": None}
+
+    class _FakeResp:
+        status_code = 200
+        def json(self):
+            return {"stdout": "", "stderr": "", "return_code": 0}
+        def raise_for_status(self):
+            pass
+
+    def fake_post(url, json=None, timeout=None):
+        posted["json"] = json
+        return _FakeResp()
+
+    monkeypatch.setattr("backend.tools.terminal_exec.httpx.post", fake_post)
+    token = te._REMOTE_EXEC_CALLBACK.set("http://127.0.0.1:42891/exec")
+    try:
+        te.run_terminal("pwd", cwd="/tmp")
+    finally:
+        te._REMOTE_EXEC_CALLBACK.reset(token)
+    assert posted["json"]["cwd"] == "/tmp"
 
 
 def test_remote_callback_failure_returns_ok_false(monkeypatch):
@@ -87,12 +114,12 @@ def test_remote_callback_failure_returns_ok_false(monkeypatch):
     with the exception preserved in `error`; the agent loop can then
     treat it as a failed `terminal_exec` and react."""
     from backend.tools import terminal_exec as te
-    import requests as _req
+    import httpx as _hx
 
     def fake_post(url, json=None, timeout=None):
-        raise _req.ConnectionError("simulated")
+        raise _hx.ConnectError("simulated")
 
-    monkeypatch.setattr("backend.tools.terminal_exec.requests.post", fake_post)
+    monkeypatch.setattr("backend.tools.terminal_exec.httpx.post", fake_post)
     token = te._REMOTE_EXEC_CALLBACK.set("http://127.0.0.1:42891/exec")
     try:
         result = te.run_terminal("ls")
@@ -112,7 +139,7 @@ def test_catastrophic_denylist_still_blocks_in_remote_mode(monkeypatch):
     def fake_post(url, json=None, timeout=None):
         raise AssertionError("denylist must short-circuit before HTTP")
 
-    monkeypatch.setattr("backend.tools.terminal_exec.requests.post", fake_post)
+    monkeypatch.setattr("backend.tools.terminal_exec.httpx.post", fake_post)
     token = te._REMOTE_EXEC_CALLBACK.set("http://127.0.0.1:42891/exec")
     try:
         result = te.run_terminal("rm -rf /")

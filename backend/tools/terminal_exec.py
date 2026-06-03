@@ -58,7 +58,7 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
-import requests
+import httpx
 
 
 # Output cap (stdout + stderr combined). Anything past this is
@@ -482,7 +482,7 @@ def run_terminal(
     callback_url = _REMOTE_EXEC_CALLBACK.get()
     if callback_url:
         try:
-            resp = requests.post(
+            resp = httpx.post(
                 callback_url,
                 json={
                     "command": command,
@@ -493,7 +493,7 @@ def run_terminal(
             )
             resp.raise_for_status()
             data = resp.json()
-        except Exception as e:
+        except (httpx.HTTPError, ValueError) as e:
             elapsed = int((_time.monotonic() - start) * 1000)
             return TerminalResult(
                 ok=False, command=command, exit_code=-1,
