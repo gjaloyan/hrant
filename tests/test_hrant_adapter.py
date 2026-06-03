@@ -127,8 +127,7 @@ def test_adapter_run_posts_task_to_endpoint_and_writes_output(tmp_path, monkeypa
     fakes returning a final answer, the adapter writes it to output_file."""
     mod = _import_adapter()
     env = _FakeEnvironment()
-    out_file = tmp_path / "trial-output.txt"
-    ctx = _FakeContext(out_file)
+    ctx = _FakeContext(tmp_path / "unused.txt")
 
     import aiohttp
 
@@ -170,7 +169,7 @@ def test_adapter_run_posts_task_to_endpoint_and_writes_output(tmp_path, monkeypa
     assert posted["body"]["task"] == "solve a thing"
     assert posted["body"]["callback_url"].startswith("http://127.0.0.1:")
     assert "session_id" in posted["body"]
-    assert out_file.read_text() == "FINAL ANSWER from agent"
+    assert (tmp_path / "agent_output.txt").read_text() == "FINAL ANSWER from agent"
 
 
 def test_adapter_callback_forwards_to_environment_exec(tmp_path, monkeypatch):
@@ -179,8 +178,7 @@ def test_adapter_callback_forwards_to_environment_exec(tmp_path, monkeypatch):
     and return the result as JSON."""
     mod = _import_adapter()
     env = _FakeEnvironment()
-    out_file = tmp_path / "trial-output.txt"
-    ctx = _FakeContext(out_file)
+    ctx = _FakeContext(tmp_path / "unused.txt")
 
     captured: dict = {}
 

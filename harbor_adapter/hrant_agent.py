@@ -16,8 +16,11 @@ How it works:
   - Our /exec handler forwards command/cwd/timeout to
     environment.exec (Harbor's docker-exec primitive) and returns
     {stdout, stderr, return_code}.
-  - When Hrant emits its final answer, we write it to
-    context.paths.output_file and shut the aiohttp server down.
+  - When Hrant emits its final answer, we shut the aiohttp server
+    down. Scoring is done by Harbor's per-task verifier against
+    container state — the adapter does not produce a scoreable
+    output file. The final answer is persisted to
+    `self.logs_dir/agent_output.txt` for post-hoc debugging only.
 
 Speaker is webui:bench-harness (owner-mapped), so the agent has its
 full normal tool surface — only terminal_exec is redirected. Other
@@ -168,6 +171,17 @@ class HrantAgent(BaseInstalledAgent):
                     )
             else:
                 answer = json.dumps(payload)
-            context.paths.output_file.write_text(answer or "(empty)", encoding="utf-8")
+            # Harbor scores the trial by running the task's verifier
+            # against container state; the adapter's job is to complete
+            # `run` without raising. We persist the final answer to
+            # `self.logs_dir/agent_output.txt` for post-hoc debugging
+            # only — Harbor never reads it.
+            try:
+                self.logs_dir.mkdir(parents=True, exist_ok=True)
+                (self.logs_dir / "agent_output.txt").write_text(
+                    answer or "(empty)", encoding="utf-8",
+                )
+            except Exception:
+                pass
         finally:
             await runner.cleanup()
