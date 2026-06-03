@@ -198,6 +198,24 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("background-jobs interrupted-sweep error: %s", e)
 
+    # Wire the autonomic supervisor turn to fire on every bg-job
+    # completion. Pre-fix the registration lived ONLY in the Telegram
+    # channel startup path (channels.py:_telegram_startup) — so on a
+    # WebUI-only / CLI-only / no-TELEGRAM_BOT_TOKEN deployment the
+    # supervisor turn NEVER ran, and real-bench completions died
+    # silently inside _fire_done with no follow-up DM and no
+    # conversation-log update. Registering here ensures the
+    # autonomic loop works on every deployment shape, regardless of
+    # which channels are active. Idempotent — register_on_done
+    # dedupes; the Telegram channel re-registration becomes a no-op.
+    try:
+        from .tools import background_jobs as _bg
+        from . import job_supervisor as _jsup
+        _bg.register_on_done(_jsup.on_job_completed)
+        log.info("background-jobs: subscribed supervisor turn to on_done")
+    except Exception as e:
+        log.warning("background-jobs supervisor subscribe failed: %s", e)
+
     # Audit T6 Phase 2: start the background-job watchdog. One
     # daemon thread that ticks every 60s and checks running jobs
     # for vanished PIDs, progress milestones, and stale
