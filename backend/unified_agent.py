@@ -737,6 +737,77 @@ def _count_distinct_tools_called(agent) -> tuple[int, set[str]]:
     return len(names), names
 
 
+_BG_TRAILING_AMP = re.compile(r"[^&]\s+&\s*$")
+_BG_NOHUP = re.compile(r"(^|;|\|\||&&|;)\s*nohup\s+")
+_BG_SETSID = re.compile(r"(^|;|\|\||&&|;)\s*setsid\s+")
+_BG_DISOWN = re.compile(r"(^|\s)disown(\b|$)")
+
+# Substrings that indicate a wait/poll for a backgrounded job.
+_WAIT_HINTS: tuple[str, ...] = (
+    "wait $",      # `wait $PID` or `wait $!`
+    "wait %",      # job-spec wait
+    "while ps",    # busy-wait pattern
+    "until [",     # busy-wait pattern
+    "tail -f",     # following the job's log to completion
+)
+
+
+def _command_looks_backgrounded(cmd: str) -> bool:
+    """Heuristic match for the four supported backgrounding shapes
+    (trailing `&`, `nohup`, `setsid`, `disown`). Conservative on
+    purpose — better miss a legitimate fire-and-forget than
+    false-positive on `make build && make test`."""
+    if not cmd:
+        return False
+    if _BG_TRAILING_AMP.search(cmd):
+        return True
+    if _BG_NOHUP.search(cmd):
+        return True
+    if _BG_SETSID.search(cmd):
+        return True
+    if _BG_DISOWN.search(cmd):
+        return True
+    return False
+
+
+def _command_looks_like_wait(cmd: str) -> bool:
+    """Did this command wait/poll for a background job to finish?"""
+    if not cmd:
+        return False
+    low = cmd.lower()
+    return any(hint in low for hint in _WAIT_HINTS)
+
+
+def _detect_background_not_awaited(trace) -> bool:
+    """True iff at least one terminal_exec command in `trace` was
+    backgrounded AND no LATER command in the same trace waited/polled.
+    Returns False on empty/None trace.
+
+    Deterministic — no LLM call."""
+    if not trace:
+        return False
+    bg_index = None
+    for i, step in enumerate(trace):
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None
+        )
+        if name != "terminal_exec":
+            continue
+        args = getattr(tc, "args", None) or (
+            tc.get("args") if isinstance(tc, dict) else {}
+        )
+        cmd = (args or {}).get("command") or ""
+        if bg_index is None and _command_looks_backgrounded(cmd):
+            bg_index = i
+            continue
+        if bg_index is not None and _command_looks_like_wait(cmd):
+            return False
+    return bg_index is not None
+
+
 # `REFUSAL_ATTEMPT_BAR` was used by the deleted refusal rewriter
 # (the keyword-based one). The "2 distinct tools before refusing"
 # rule still lives in the system prompt for the LLM to honour.
@@ -1262,6 +1333,8 @@ def _decide_self_correction(
     task: str,
     answer: str,
     turn_tools: list[str],
+    trace=None,
+    speaker_id: str = "",
 ) -> tuple[str, str]:
     """Decide whether the just-finished turn needs a corrective re-prompt.
 
@@ -1292,6 +1365,20 @@ def _decide_self_correction(
     """
     if not (answer or "").strip():
         return "", ""
+    # Block 3 — background-not-awaited. Fire FIRST because it's the
+    # most specific pattern (the agent literally spawned a process
+    # and walked away).
+    if _detect_background_not_awaited(trace):
+        corrective = (
+            "You spawned a background process (nohup/&/setsid/disown) "
+            "and never waited for it to finish. Wait for it now: use "
+            "`wait $!` (if you have the PID), or poll with `while ps -p "
+            "$PID >/dev/null 2>&1; do sleep 5; done`, or `tail -f` the "
+            "job's log until you see its completion marker. Then verify "
+            "the expected artifact actually exists on disk before "
+            "composing your final answer."
+        )
+        return "background-not-awaited", corrective
     from .endpoint_check import (
         _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
         endpoint_met,
@@ -2193,7 +2280,11 @@ def run_unified(
     if not supervisor_mode and (answer or "").strip():
         _turn_tools = _turn_tool_names(agent)
         _correction_tag, _corrective = _decide_self_correction(
-            task=task, answer=answer, turn_tools=_turn_tools,
+            task=task,
+            answer=answer,
+            turn_tools=_turn_tools,
+            trace=getattr(agent, "_trace", None),
+            speaker_id=speaker_id,
         )
         if _corrective:
             agent.progress("self_correct", f"{_correction_tag} — re-prompting")

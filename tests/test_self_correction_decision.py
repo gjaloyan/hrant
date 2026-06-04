@@ -184,3 +184,103 @@ def test_build_rules_for_turn_verify_tests_rule_present_with_attachments_too():
     )
     assert "Before declaring a task done" in out
     assert "/tests/" in out
+
+
+def _fake_trace(*tool_calls):
+    """Build a fake agent._trace from a list of (name, args_dict) tuples.
+    Matches the ThinkingStep+ToolCallDetail shape consumed by helpers."""
+    class _Step:
+        def __init__(self, name, args):
+            class _TC:
+                pass
+            tc = _TC()
+            tc.name = name
+            tc.args = args or {}
+            self.tool_call = tc
+            self.event = "tool"
+    return [_Step(n, a) for n, a in tool_calls]
+
+
+def test_detect_background_not_awaited_trailing_ampersand():
+    """`nohup ... &` shape without a later wait/poll fires the detector."""
+    from backend.unified_agent import _detect_background_not_awaited
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "nohup python /app/train.py > /tmp/t.log 2>&1 &"}),
+        ("terminal_exec", {"command": "echo started PID=5384"}),
+    )
+    assert _detect_background_not_awaited(trace) is True
+
+
+def test_detect_background_not_awaited_falsy_on_logical_and():
+    """`cmd1 && cmd2` is NOT backgrounding — `&&` must not trigger."""
+    from backend.unified_agent import _detect_background_not_awaited
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "make build && make test"}),
+    )
+    assert _detect_background_not_awaited(trace) is False
+
+
+def test_detect_background_not_awaited_false_when_wait_present():
+    """If the agent backgrounded AND then waited, the failure mode
+    doesn't apply — leave it alone."""
+    from backend.unified_agent import _detect_background_not_awaited
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "nohup python /app/train.py &"}),
+        ("terminal_exec", {"command": "wait $!"}),
+        ("terminal_exec", {"command": "ls /app/output/"}),
+    )
+    assert _detect_background_not_awaited(trace) is False
+
+
+def test_detect_background_not_awaited_nohup_in_middle_of_chain():
+    """`cd /x; nohup python y &` (no &&) still fires."""
+    from backend.unified_agent import _detect_background_not_awaited
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "cd /app; nohup python train.py &"}),
+    )
+    assert _detect_background_not_awaited(trace) is True
+
+
+def test_detect_background_not_awaited_disown_fires():
+    """`disown` is only used for backgrounding."""
+    from backend.unified_agent import _detect_background_not_awaited
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "python long.py & disown"}),
+    )
+    assert _detect_background_not_awaited(trace) is True
+
+
+def test_detect_background_not_awaited_setsid_fires():
+    """`setsid` is the same shape as `nohup`."""
+    from backend.unified_agent import _detect_background_not_awaited
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "setsid /app/run.sh &"}),
+    )
+    assert _detect_background_not_awaited(trace) is True
+
+
+def test_detect_background_not_awaited_empty_trace():
+    """No tools = no backgrounding signal."""
+    from backend.unified_agent import _detect_background_not_awaited
+    assert _detect_background_not_awaited([]) is False
+    assert _detect_background_not_awaited(None) is False
+
+
+def test_decide_self_correction_background_branch_fires(monkeypatch):
+    """When _detect_background_not_awaited returns True, the corrective
+    text must mention 'background' and the tag must label it."""
+    _patch_judges(monkeypatch, claim="", endpoint_met=True)
+    from backend.unified_agent import _decide_self_correction
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "nohup python train.py &"}),
+        ("terminal_exec", {"command": "echo started"}),
+    )
+    tag, corrective = _decide_self_correction(
+        task="Train the model and tell me final accuracy.",
+        answer="Started training in the background; will produce model.bin.",
+        turn_tools=["terminal_exec", "terminal_exec"],
+        trace=trace,
+        speaker_id="webui:default",
+    )
+    assert tag.startswith("background")
+    assert "wait" in corrective.lower() or "poll" in corrective.lower()
