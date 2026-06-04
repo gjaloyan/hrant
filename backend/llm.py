@@ -55,6 +55,34 @@ def _is_safety_refusal(err: "LLMError") -> bool:
     return any(marker in msg for marker in _SAFETY_REFUSAL_MARKERS)
 
 
+_QUOTA_EXHAUSTED_MARKERS: tuple[str, ...] = (
+    "usage_limit_reached",
+    "usage limit",
+    "quota exhausted",
+    "quota_exhausted",
+    "rate_limit_exceeded",
+    "rate limit exceeded",
+    "too many requests",
+    "429",
+)
+
+
+def _is_quota_exhausted(err: "LLMError") -> bool:
+    """True iff `err`'s message indicates provider-side usage/quota
+    exhaustion or rate limiting. Narrow substring match — we want
+    Codex 'usage_limit_reached', OpenAI/Anthropic '429 too many
+    requests', and similar, NOT generic 5xx / connection errors."""
+    msg = (str(err) or "").lower()
+    return any(marker in msg for marker in _QUOTA_EXHAUSTED_MARKERS)
+
+
+def _should_fallback(err: "LLMError") -> bool:
+    """The router fallback engages on EITHER a safety refusal OR a
+    quota/rate-limit failure. Both classes mean 'this provider can't
+    serve this call right now; try the next one.'"""
+    return _is_safety_refusal(err) or _is_quota_exhausted(err)
+
+
 def _active_provider_chain(task_type=None):
     """Return the ordered provider chain for the current router call.
 
@@ -84,9 +112,9 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
             method = getattr(prov, method_name)
             return method(task_type, system, user, *args, **kw)
         except LLMError as e:
-            if _is_safety_refusal(e):
+            if _should_fallback(e):
                 _log.warning(
-                    "router: provider %s returned safety refusal; "
+                    "router: provider %s returned safety/quota refusal; "
                     "falling back to next. detail=%s",
                     getattr(prov, "name", "?"), e,
                 )
