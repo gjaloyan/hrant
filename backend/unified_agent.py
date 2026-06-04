@@ -207,6 +207,30 @@ into code. The order matters: observable failure mode → journal →
 code, not the other way round."""
 
 
+# Always-on: the agent MUST run the real test suite before declaring
+# done. Closes the "I made it compile, looks good" failure mode that
+# accounts for 6 of the 11 terminal-bench failures on the 2026-06-04
+# baseline. Universal — many real-world tasks have test suites.
+_RULES_VERIFY_TESTS = """## Before declaring a task done — run the real tests
+
+If the workspace contains a test suite (any of: `/tests/` directory,
+`test_*.py` files at the project root, a `Makefile` `test` target,
+`pytest.ini`, or `pyproject.toml` with `[tool.pytest.ini_options]`),
+you MUST execute it and observe a passing run BEFORE composing your
+final answer.
+
+"It compiles", "my sample input works", or "I checked the obvious
+case" are NOT verification — only the real test suite's pass signal
+counts. If tests fail, fix the cause and re-run. Do not synthesize
+the final answer while any test is red.
+
+If you cannot find a test suite, look for verifier hints in the
+task instruction (paths under `/tests/`, "the verifier expects X",
+"run pytest /tests"). Run them. If you genuinely cannot find any
+verification mechanism, say so explicitly in your final answer —
+don't pretend a check happened."""
+
+
 # Loaded when an attachment is in play OR when this turn is likely
 # to produce a file the user should receive. Both signals point at
 # the MEDIA: convention being relevant.
@@ -562,7 +586,7 @@ def _build_rules_for_turn(
     triggers it. We trust the LLM more than a Russian-plus-English
     bug-keyword regex.
     """
-    parts = [_unified_rules_core(ctx), _RULES_JOURNAL_FIRST]
+    parts = [_unified_rules_core(ctx), _RULES_JOURNAL_FIRST, _RULES_VERIFY_TESTS]
     if has_attachments:
         parts.append(_RULES_FILE_TYPES)
         # MEDIA convention is most useful alongside an inbound

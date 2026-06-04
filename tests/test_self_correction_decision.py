@@ -152,3 +152,35 @@ def test_toolful_correction_lists_tool_names_capped(monkeypatch):
     assert "(+4 more)" in corrective
     # 10th tool name was beyond cap — should NOT appear verbatim.
     assert "tool_9" not in corrective
+
+
+def test_build_rules_for_turn_always_includes_verify_tests_rule():
+    """The 'verify with the real test suite before declaring done'
+    rule must appear in the per-turn system prompt regardless of
+    attachments / sticky / refusal context. Always-on by design —
+    universally useful, not bench-specific."""
+    from backend.unified_agent import _build_rules_for_turn
+    out = _build_rules_for_turn(
+        ctx=None,
+        has_attachments=False,
+        sticky_fired=False,
+        repeat_refusal=False,
+    )
+    assert "Before declaring a task done" in out
+    assert "/tests/" in out
+    assert "pytest" in out.lower() or "test suite" in out.lower()
+
+
+def test_build_rules_for_turn_verify_tests_rule_present_with_attachments_too():
+    """The verify-tests rule does NOT depend on structural signals
+    — it must still appear when has_attachments / sticky / refusal
+    add their own blocks."""
+    from backend.unified_agent import _build_rules_for_turn
+    out = _build_rules_for_turn(
+        ctx=None,
+        has_attachments=True,
+        sticky_fired=True,
+        repeat_refusal=True,
+    )
+    assert "Before declaring a task done" in out
+    assert "/tests/" in out
