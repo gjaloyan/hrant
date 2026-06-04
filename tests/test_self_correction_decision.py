@@ -284,3 +284,103 @@ def test_decide_self_correction_background_branch_fires(monkeypatch):
     )
     assert tag.startswith("background")
     assert "wait" in corrective.lower() or "poll" in corrective.lower()
+
+
+def _fake_trace_with_truncation(*tool_calls_with_trunc):
+    """Like _fake_trace but each entry is (name, args, result_truncated_bool)."""
+    class _Step:
+        def __init__(self, name, args, truncated):
+            class _TC:
+                pass
+            tc = _TC()
+            tc.name = name
+            tc.args = args or {}
+            tc.result_truncated = bool(truncated)
+            self.tool_call = tc
+            self.event = "tool"
+    return [_Step(n, a, t) for n, a, t in tool_calls_with_trunc]
+
+
+def test_detect_truncated_then_refusal_positive():
+    """Last terminal_exec was truncated AND answer matches a refusal
+    phrase -> True."""
+    from backend.unified_agent import _detect_truncated_then_refusal
+    trace = _fake_trace_with_truncation(
+        ("terminal_exec", {"command": "cat /app/big_log.txt"}, True),
+    )
+    assert _detect_truncated_then_refusal(
+        trace, "Honestly: I cannot confirm the file was modified."
+    ) is True
+
+
+def test_detect_truncated_then_refusal_no_truncation():
+    """Refusal phrase but no truncation -> False (other branches handle
+    plain refusals)."""
+    from backend.unified_agent import _detect_truncated_then_refusal
+    trace = _fake_trace_with_truncation(
+        ("terminal_exec", {"command": "echo hi"}, False),
+    )
+    assert _detect_truncated_then_refusal(
+        trace, "I cannot confirm anything happened."
+    ) is False
+
+
+def test_detect_truncated_then_refusal_truncation_but_no_refusal():
+    """Truncation happened but answer is fine -> False."""
+    from backend.unified_agent import _detect_truncated_then_refusal
+    trace = _fake_trace_with_truncation(
+        ("terminal_exec", {"command": "cat /app/big_log.txt"}, True),
+    )
+    assert _detect_truncated_then_refusal(
+        trace, "Done. The file has 1234 lines and ends with EOF marker."
+    ) is False
+
+
+def test_detect_truncated_then_refusal_russian_phrases():
+    """Russian refusal phrases also count."""
+    from backend.unified_agent import _detect_truncated_then_refusal
+    trace = _fake_trace_with_truncation(
+        ("terminal_exec", {"command": "ls -la /"}, True),
+    )
+    assert _detect_truncated_then_refusal(
+        trace, "Честно: я не могу подтвердить что файл был создан."
+    ) is True
+
+
+def test_detect_truncated_then_refusal_only_last_terminal_exec_counts():
+    """We look at the LAST terminal_exec's truncation flag, not earlier
+    ones."""
+    from backend.unified_agent import _detect_truncated_then_refusal
+    trace = _fake_trace_with_truncation(
+        ("terminal_exec", {"command": "cat huge"}, True),
+        ("terminal_exec", {"command": "echo small"}, False),
+    )
+    assert _detect_truncated_then_refusal(
+        trace, "I cannot confirm anything."
+    ) is False
+
+
+def test_detect_truncated_then_refusal_empty():
+    """No trace or no terminal_exec calls -> False."""
+    from backend.unified_agent import _detect_truncated_then_refusal
+    assert _detect_truncated_then_refusal([], "I cannot confirm.") is False
+    assert _detect_truncated_then_refusal(None, "I cannot confirm.") is False
+
+
+def test_decide_self_correction_truncated_then_refusal_branch_fires(monkeypatch):
+    """When truncated+refusal pattern matches, the corrective text
+    must instruct the agent to narrow output (head/tail/grep)."""
+    _patch_judges(monkeypatch, claim="", endpoint_met=True)
+    from backend.unified_agent import _decide_self_correction
+    trace = _fake_trace_with_truncation(
+        ("terminal_exec", {"command": "cat /app/log.txt"}, True),
+    )
+    tag, corrective = _decide_self_correction(
+        task="Check the log and tell me the final status.",
+        answer="I cannot confirm what the final status is.",
+        turn_tools=["terminal_exec"],
+        trace=trace,
+        speaker_id="webui:default",
+    )
+    assert tag.startswith("truncated")
+    assert any(s in corrective.lower() for s in ("tail", "head", "grep"))

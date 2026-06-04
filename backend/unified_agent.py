@@ -808,6 +808,38 @@ def _detect_background_not_awaited(trace) -> bool:
     return bg_index is not None
 
 
+def _detect_truncated_then_refusal(trace, answer: str) -> bool:
+    """True iff the LAST terminal_exec call in `trace` returned a
+    truncated result AND `answer` matches one of the existing
+    refusal phrases. This narrowly catches the failure mode where
+    Hrant's needed evidence was clipped past the 1500-char cap and
+    the agent then refused to commit.
+
+    Deterministic — no LLM call. Reuses _REFUSAL_PHRASES so future
+    additions to the refusal list are picked up automatically.
+    """
+    if not trace or not answer:
+        return False
+    head = answer[:300].lower()
+    if not any(phrase in head for phrase in _REFUSAL_PHRASES):
+        return False
+    # Walk trace backwards to find the last terminal_exec call.
+    for step in reversed(list(trace)):
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None
+        )
+        if name != "terminal_exec":
+            continue
+        was_truncated = getattr(tc, "result_truncated", False)
+        if was_truncated is None and isinstance(tc, dict):
+            was_truncated = tc.get("result_truncated", False)
+        return bool(was_truncated)
+    return False
+
+
 # `REFUSAL_ATTEMPT_BAR` was used by the deleted refusal rewriter
 # (the keyword-based one). The "2 distinct tools before refusing"
 # rule still lives in the system prompt for the LLM to honour.
@@ -1379,6 +1411,20 @@ def _decide_self_correction(
             "composing your final answer."
         )
         return "background-not-awaited", corrective
+    # Block 2 — truncated-then-refusal. Specific recovery path: tell
+    # the agent to narrow the output via tail/head/grep so the actual
+    # evidence fits the 1500-char tool-result cap.
+    if _detect_truncated_then_refusal(trace, answer):
+        corrective = (
+            "Your last terminal_exec output was truncated at the "
+            "1500-char cap and the part you needed to act on didn't "
+            "fit. Re-run the command with the output narrowed: pipe "
+            "through `tail -200`, `head -200`, or `grep -n PATTERN` so "
+            "only the relevant slice comes back. Read the actual "
+            "evidence before composing the final answer — do not "
+            "refuse based on truncated output."
+        )
+        return "truncated-then-refusal", corrective
     from .endpoint_check import (
         _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
         endpoint_met,
