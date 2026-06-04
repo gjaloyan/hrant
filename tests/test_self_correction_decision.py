@@ -384,3 +384,120 @@ def test_decide_self_correction_truncated_then_refusal_branch_fires(monkeypatch)
     )
     assert tag.startswith("truncated")
     assert any(s in corrective.lower() for s in ("tail", "head", "grep"))
+
+
+def test_detect_tests_exist_not_run_positive():
+    """Agent ran `ls /tests` (so tests exist) but never ran pytest etc."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "ls /tests"}),
+        ("terminal_exec", {"command": "cat /app/main.py"}),
+        ("terminal_exec", {"command": "make build"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is True
+
+
+def test_detect_tests_exist_not_run_negative_pytest_was_run():
+    """Discovery happened AND pytest was run -> False, all good."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "ls /tests"}),
+        ("terminal_exec", {"command": "pytest /tests/ -v"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is False
+
+
+def test_detect_tests_exist_not_run_negative_no_discovery():
+    """No discovery signal at all -> False (we don't assume tests exist)."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "ls /app"}),
+        ("terminal_exec", {"command": "echo done"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is False
+
+
+def test_detect_tests_exist_not_run_find_tests_discovery():
+    """`find /tests` also counts as discovery."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "find /tests -name '*.py'"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is True
+
+
+def test_detect_tests_exist_not_run_read_file_under_tests():
+    """A read_file call with path under /tests/ also counts as discovery."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("read_file", {"path": "/tests/test_outputs.py"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is True
+
+
+def test_detect_tests_exist_not_run_python_m_pytest_counts_as_run():
+    """`python -m pytest` is the same test-run signal."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("read_file", {"path": "/tests/test_outputs.py"}),
+        ("terminal_exec", {"command": "python -m pytest /tests/ -q"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is False
+
+
+def test_detect_tests_exist_not_run_make_test_counts_as_run():
+    """`make test` counts as a test run."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "ls /tests"}),
+        ("terminal_exec", {"command": "cd /app && make test"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is False
+
+
+def test_detect_tests_exist_not_run_unittest_counts_as_run():
+    """`python -m unittest` counts as a test run."""
+    from backend.unified_agent import _detect_tests_exist_not_run
+    trace = _fake_trace(
+        ("read_file", {"path": "/tests/test_x.py"}),
+        ("terminal_exec", {"command": "cd /app && python -m unittest discover"}),
+    )
+    assert _detect_tests_exist_not_run(trace) is False
+
+
+def test_decide_self_correction_tests_branch_fires_under_bench_speaker(monkeypatch):
+    """When tests-exist-not-run + speaker is bench-harness -> branch fires."""
+    _patch_judges(monkeypatch, claim="", endpoint_met=True)
+    from backend.unified_agent import _decide_self_correction
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "ls /tests"}),
+        ("terminal_exec", {"command": "cat /app/main.c"}),
+    )
+    tag, corrective = _decide_self_correction(
+        task="Implement /app/main.c per the spec.",
+        answer="Wrote /app/main.c and verified it compiles.",
+        turn_tools=["terminal_exec", "terminal_exec"],
+        trace=trace,
+        speaker_id="webui:bench-harness",
+    )
+    assert tag.startswith("tests-exist")
+    assert "test" in corrective.lower()
+
+
+def test_decide_self_correction_tests_branch_skipped_for_non_bench(monkeypatch):
+    """Same pattern but speaker is NOT bench-harness -> branch does NOT
+    fire (we don't want to force /tests checks on regular WebUI users)."""
+    _patch_judges(monkeypatch, claim="", endpoint_met=True)
+    from backend.unified_agent import _decide_self_correction
+    trace = _fake_trace(
+        ("terminal_exec", {"command": "ls /tests"}),
+        ("terminal_exec", {"command": "cat /app/main.c"}),
+    )
+    tag, corrective = _decide_self_correction(
+        task="Look at /tests and tell me what's there.",
+        answer="There are 3 files in /tests/.",
+        turn_tools=["terminal_exec", "terminal_exec"],
+        trace=trace,
+        speaker_id="webui:default",
+    )
+    assert not tag.startswith("tests-exist")

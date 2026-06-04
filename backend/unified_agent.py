@@ -840,6 +840,67 @@ def _detect_truncated_then_refusal(trace, answer: str) -> bool:
     return False
 
 
+# Tokens that mean "the agent learned a test suite exists":
+_TESTS_DISCOVERY_TERMINAL_PREFIXES: tuple[str, ...] = (
+    "ls /tests",
+    "find /tests",
+    "cat /tests/",
+    "head /tests/",
+    "tail /tests/",
+)
+
+# Tokens that mean "the agent ran the actual test suite":
+_TESTS_RUN_TOKENS: tuple[str, ...] = (
+    "pytest",         # also covers `python -m pytest`
+    "unittest",       # covers `python -m unittest`
+    "make test",
+)
+
+
+def _detect_tests_exist_not_run(trace) -> bool:
+    """True iff (a) at least one tool call in `trace` indicates the
+    agent discovered the existence of a test suite AND (b) no tool
+    call in the same trace actually executed it.
+
+    Deterministic — no LLM call."""
+    if not trace:
+        return False
+    discovered = False
+    ran = False
+    for step in trace:
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None
+        )
+        args = getattr(tc, "args", None) or (
+            tc.get("args") if isinstance(tc, dict) else {}
+        ) or {}
+        if name == "terminal_exec":
+            cmd = (args.get("command") or "").strip()
+            cmd_low = cmd.lower()
+            # Discovery: command starts with a discovery prefix, OR a
+            # discovery prefix appears after ; or && (chained commands).
+            if any(
+                cmd.startswith(p)
+                or ("; " + p) in cmd
+                or (";" + p) in cmd
+                or ("&& " + p) in cmd
+                or ("&&" + p) in cmd
+                for p in _TESTS_DISCOVERY_TERMINAL_PREFIXES
+            ):
+                discovered = True
+            # Run: any of the run-tokens substring-matches the command.
+            if any(token in cmd_low for token in _TESTS_RUN_TOKENS):
+                ran = True
+        elif name == "read_file":
+            path = (args.get("path") or "")
+            if path.startswith("/tests/") or path == "/tests":
+                discovered = True
+    return discovered and not ran
+
+
 # `REFUSAL_ATTEMPT_BAR` was used by the deleted refusal rewriter
 # (the keyword-based one). The "2 distinct tools before refusing"
 # rule still lives in the system prompt for the LLM to honour.
@@ -1425,6 +1486,22 @@ def _decide_self_correction(
             "refuse based on truncated output."
         )
         return "truncated-then-refusal", corrective
+    # Block 1b — tests-exist-not-run, bench-mode only. The universal
+    # prompt rule from Task 1 already told the agent to run tests;
+    # this branch is the structural backstop when the agent ignored
+    # it. Bench-harness only: we don't want to force /tests checks on
+    # the WebUI owner asking "what's in /tests/".
+    if speaker_id == "webui:bench-harness" and _detect_tests_exist_not_run(trace):
+        corrective = (
+            "You discovered a test suite under /tests/ but never ran "
+            "it. Run the actual tests NOW (`pytest /tests/ -v`, or "
+            "`python -m pytest /tests/`, or `make test`, whichever "
+            "matches the project setup) and observe a passing run "
+            "BEFORE composing your final answer. If the tests fail, "
+            "fix the cause and re-run — do not synthesize the final "
+            "answer while any test is red."
+        )
+        return "tests-exist-not-run", corrective
     from .endpoint_check import (
         _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
         endpoint_met,
