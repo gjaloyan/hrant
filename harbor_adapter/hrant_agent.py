@@ -113,23 +113,42 @@ class HrantAgent(BaseInstalledAgent):
 
     async def install(self, environment: BaseEnvironment) -> None:
         """Verify the host gateway is reachable; nothing to install
-        in the container."""
-        async with aiohttp.ClientSession() as s:
+        in the container.
+
+        Retries with exponential backoff. The gateway can be momentarily
+        unresponsive between trials while it finishes post-processing
+        the previous trial's turn (conversation log save, skill
+        reflection, supervisor handoff). A 10s timeout on the first
+        attempt + two 30s/60s retries gives a 100s total budget before
+        we give up — versus the prior single 10s attempt that
+        intermittently failed during the 20-task bench."""
+        import asyncio as _asyncio
+        last_err: Exception | None = None
+        for attempt_idx, timeout_s in enumerate((10, 30, 60), start=1):
             try:
-                async with s.get(
-                    f"{_HRANT_URL}/api/version",
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as r:
-                    if r.status != 200:
-                        raise RuntimeError(
-                            f"Hrant /api/version returned HTTP {r.status}; "
-                            f"ensure hrant.service is running on host."
-                        )
-            except aiohttp.ClientError as e:
-                raise RuntimeError(
-                    f"Cannot reach Hrant at {_HRANT_URL}: {e}. "
-                    f"Ensure hrant.service is up."
-                ) from e
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(
+                        f"{_HRANT_URL}/api/version",
+                        timeout=aiohttp.ClientTimeout(total=timeout_s),
+                    ) as r:
+                        if r.status != 200:
+                            raise RuntimeError(
+                                f"Hrant /api/version returned HTTP {r.status}; "
+                                f"ensure hrant.service is running on host."
+                            )
+                        return
+            except (aiohttp.ClientError, _asyncio.TimeoutError) as e:
+                last_err = e
+                if attempt_idx < 3:
+                    await _asyncio.sleep(2 * attempt_idx)
+                continue
+        raise RuntimeError(
+            f"Cannot reach Hrant at {_HRANT_URL} after 3 attempts "
+            f"(timeouts 10s/30s/60s). Last error: "
+            f"{type(last_err).__name__}: {last_err}. "
+            f"Ensure hrant.service is up and not blocked by a long "
+            f"post-turn cleanup."
+        ) from last_err
 
     @with_prompt_template
     async def run(
