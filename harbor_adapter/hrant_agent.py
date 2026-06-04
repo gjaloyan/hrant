@@ -44,7 +44,11 @@ from harbor.models.agent.context import AgentContext
 
 
 _HRANT_URL = "http://localhost:3333"
-_AGENT_TIMEOUT_S = 900  # 15 minutes — caller can lift via env if needed.
+_AGENT_TIMEOUT_S = 1800  # 30 minutes — caller can lift via env if needed.
+# Bumped from 900s after the 2026-06-04 hardened-bench run showed a
+# handful of trials legitimately exceeding 15 minutes once Hrant
+# started running the real /tests/ suite mid-turn (each pytest run
+# adds 30-90s).
 
 
 def _pick_ephemeral_port() -> int:
