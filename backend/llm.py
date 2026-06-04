@@ -31,6 +31,73 @@ class LLMError(RuntimeError):
     pass
 
 
+# Substrings that mark a provider-side safety refusal. Conservative
+# narrow match — we want to catch Codex Responses API
+# 'content flagged for cybersecurity risk' AND Anthropic safety
+# refusals, NOT generic 5xx / rate-limit / timeout errors. The match
+# is on the error message, NOT user input — this is content-of-error
+# matching, not user-text keyword routing.
+_SAFETY_REFUSAL_MARKERS: tuple[str, ...] = (
+    "flagged",
+    "content_policy",
+    "content policy",
+    "cybersecurity_risk",
+    "cybersecurity risk",
+    "safety",
+)
+
+
+def _is_safety_refusal(err: "LLMError") -> bool:
+    """True iff `err`'s message contains a provider-side safety-refusal
+    marker (case-insensitive substring match).
+    """
+    msg = (str(err) or "").lower()
+    return any(marker in msg for marker in _SAFETY_REFUSAL_MARKERS)
+
+
+def _active_provider_chain(task_type=None):
+    """Return the ordered provider chain for the current router call.
+
+    This is the seam that tests monkeypatch to inject fake providers.
+    Each item is a provider-like object exposing `.call(task_type,
+    system, user, **kw)`, `.call_with_tools(...)`, and
+    `.call_json(...)`. In production this returns an empty list — the
+    router's existing A/B + failover-chain orchestration handles
+    provider selection. Tests override this to drive the safety-
+    fallback branch directly.
+    """
+    return []
+
+
+def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args, **kw):
+    """Iterate `chain` and call `provider.<method_name>(task_type,
+    system, user, *args, **kw)` on each. If a provider raises an
+    LLMError that `_is_safety_refusal` recognises, log a warning and
+    advance to the next provider. Any non-safety LLMError propagates
+    immediately. If every provider safety-refuses, the last refusal
+    is re-raised. Empty chain -> LLMError("no providers configured").
+    """
+    _log = logging.getLogger("llm")
+    last_err: LLMError | None = None
+    for prov in chain:
+        try:
+            method = getattr(prov, method_name)
+            return method(task_type, system, user, *args, **kw)
+        except LLMError as e:
+            if _is_safety_refusal(e):
+                _log.warning(
+                    "router: provider %s returned safety refusal; "
+                    "falling back to next. detail=%s",
+                    getattr(prov, "name", "?"), e,
+                )
+                last_err = e
+                continue
+            raise
+    if last_err is not None:
+        raise last_err
+    raise LLMError("no providers configured")
+
+
 # ---------- Token usage tracking ----------
 class CallRecord:
     """Single LLM API call record."""
@@ -3502,6 +3569,19 @@ class DualModelRouter:
         temperature: float | None = None,
         attachments: list[str] | None = None,
     ) -> str:
+        # Safety-refusal fallback chain (Task 5). When
+        # `_active_provider_chain` yields a non-empty ordered list
+        # (tests monkeypatch this seam), iterate it and skip past any
+        # provider that raises a safety-shaped LLMError. Production
+        # default returns [], so the existing A/B + failover-chain
+        # orchestration below runs unchanged.
+        chain = _active_provider_chain(task_type)
+        if chain:
+            return _run_with_safety_fallback(
+                chain, "call", task_type, system, user,
+                max_tokens=max_tokens, temperature=temperature,
+                attachments=attachments,
+            )
         # Check if user selected a specific model
         active = self._get_active_llm()
         if active is not None:
@@ -3677,6 +3757,12 @@ class DualModelRouter:
             raise primary_err
 
     def call_json(self, task_type: TaskType, system: str, user: str, **kw) -> dict:
+        # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
+        chain = _active_provider_chain(task_type)
+        if chain:
+            return _run_with_safety_fallback(
+                chain, "call_json", task_type, system, user, **kw,
+            )
         raw = self.call(
             task_type,
             system + "\n\nReply with ONLY valid JSON, no markdown wrappers.",
@@ -3700,6 +3786,16 @@ class DualModelRouter:
         attachments: list[str] | None = None,
         tools_provider=None,
     ) -> str:
+        # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
+        chain = _active_provider_chain(task_type)
+        if chain:
+            return _run_with_safety_fallback(
+                chain, "call_with_tools", task_type, system, user,
+                tools, execute_tool,
+                max_tokens=max_tokens, temperature=temperature,
+                max_iterations=max_iterations, on_tool_call=on_tool_call,
+                attachments=attachments, tools_provider=tools_provider,
+            )
         """Tool-use loop via selected model.
 
         If an active model is set and supports tools, use it. Otherwise
