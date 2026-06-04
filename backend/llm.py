@@ -83,18 +83,125 @@ def _should_fallback(err: "LLMError") -> bool:
     return _is_safety_refusal(err) or _is_quota_exhausted(err)
 
 
-def _active_provider_chain(task_type=None):
-    """Return the ordered provider chain for the current router call.
+class _ProviderChainAdapter:
+    """Thin adapter wrapping a provider record from
+    `backend.providers.get_providers()` so it can be walked by
+    `_run_with_safety_fallback`.
 
-    This is the seam that tests monkeypatch to inject fake providers.
-    Each item is a provider-like object exposing `.call(task_type,
-    system, user, **kw)`, `.call_with_tools(...)`, and
-    `.call_json(...)`. In production this returns an empty list — the
-    router's existing A/B + failover-chain orchestration handles
-    provider selection. Tests override this to drive the safety-
-    fallback branch directly.
+    Built lazily — the underlying `BaseLLM` (via `create_llm`) is
+    not instantiated until the chain actually reaches this entry.
+    That keeps cold-path import-time cost zero AND avoids paying
+    for OAuth handshakes / API-key probes on entries that the
+    primary preempts.
     """
-    return []
+    __slots__ = ("_prov", "_task_type", "_llm", "id", "name")
+
+    def __init__(self, prov: dict, task_type=None):
+        self._prov = prov
+        self._task_type = task_type
+        self._llm: "BaseLLM | None" = None
+        self.id = prov.get("id", "")
+        self.name = prov.get("name") or prov.get("id") or "?"
+
+    @property
+    def model(self) -> str:
+        return self._prov.get("default_model", "") or (
+            (self._prov.get("models") or [""])[0]
+        )
+
+    def _build(self) -> "BaseLLM":
+        if self._llm is not None:
+            return self._llm
+        # Reuse failover.resolve_entry_cfg — same translation from a
+        # providers.json record to a create_llm-shaped cfg used by
+        # the existing per-provider failover chain. Single source of
+        # truth for that mapping.
+        from . import failover as _fo
+        pid = self._prov.get("id", "")
+        model = self.model
+        cfg = _fo.resolve_entry_cfg(pid, model)
+        if cfg is None:
+            raise LLMError(
+                f"provider {pid!r} is missing/disabled — cannot build LLM"
+            )
+        try:
+            self._llm = create_llm(cfg)
+        except LLMError:
+            raise
+        except Exception as e:
+            raise LLMError(
+                f"create_llm({cfg.get('provider')}/{cfg.get('model')}): {e}"
+            ) from e
+        return self._llm
+
+    def call(self, task_type, system, user, **kw):
+        llm = self._build()
+        tt = task_type.value if hasattr(task_type, "value") else (task_type or "")
+        return llm.complete(
+            system, user,
+            max_tokens=kw.get("max_tokens"),
+            temperature=kw.get("temperature"),
+            attachments=kw.get("attachments"),
+            _task_type=tt,
+        )
+
+    def call_with_tools(self, task_type, system, user, tools, execute_tool, **kw):
+        llm = self._build()
+        tt = task_type.value if hasattr(task_type, "value") else (task_type or "")
+        if not _supports_tools(
+            llm, tools, tools_provider=kw.get("tools_provider")
+        ):
+            raise LLMError(
+                f"chain entry {self.id} does not support tools"
+            )
+        return llm.complete_with_tools(
+            system, user, tools, execute_tool,
+            max_tokens=kw.get("max_tokens"),
+            temperature=kw.get("temperature"),
+            max_iterations=kw.get("max_iterations", 6),
+            on_tool_call=kw.get("on_tool_call"),
+            attachments=kw.get("attachments"),
+            tools_provider=kw.get("tools_provider"),
+            _task_type=tt,
+        )
+
+    def call_json(self, task_type, system, user, **kw):
+        raw = self.call(
+            task_type,
+            system + "\n\nReply with ONLY valid JSON, no markdown wrappers.",
+            user,
+            **kw,
+        )
+        return _parse_json_response(raw)
+
+
+def _active_provider_chain(task_type=None):
+    """Return the ordered list of enabled provider adapters the
+    router walks via `_run_with_safety_fallback`. Each entry exposes
+    `.call(task_type, system, user, **kw)`, `.call_with_tools(...)`,
+    and `.call_json(...)`.
+
+    In production this delegates to `backend.providers.get_providers()`
+    and filters by `enabled`. The first entry is the primary; the
+    rest are fallbacks tried in order when a provider raises a
+    safety- or quota-shaped LLMError.
+
+    Tests monkeypatch this function to inject pre-built fake providers
+    — the seam pattern lets them bypass the real provider registry.
+    """
+    try:
+        from . import providers as _p
+        records = _p.get_providers()
+    except Exception:
+        return []
+    out: list[_ProviderChainAdapter] = []
+    for prov in records:
+        if not isinstance(prov, dict):
+            continue
+        if not prov.get("enabled", True):
+            continue
+        out.append(_ProviderChainAdapter(prov, task_type=task_type))
+    return out
 
 
 def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args, **kw):

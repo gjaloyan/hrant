@@ -42,6 +42,39 @@ def _isolate_active_model(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_active_provider_chain(request, monkeypatch):
+    """Don't let production multi-provider fallback chain hijack tests
+    that mock model_a / model_b at the router level.
+
+    `_active_provider_chain()` returns a non-empty adapter list in
+    production when providers are configured (the 2026-06-05 fix that
+    made codex->anthropic fallback engage). In tests, ANTHROPIC_API_KEY
+    is set to 'test-key' to construct the router but the chain would
+    then try to call the real Anthropic API with that key. Existing
+    router/round* tests pre-date this seam and mock model_a/_b
+    directly — keep the chain empty so the legacy A/B path runs.
+
+    Tests that exercise the chain explicitly monkeypatch this seam
+    to inject fake providers (test_router_safety_fallback.py,
+    test_router_quota_fallback.py); those overrides win.
+
+    Tests that need the REAL `_active_provider_chain` (e.g. the
+    contract tests for the chain itself) mark themselves with
+    `@pytest.mark.uses_real_provider_chain` to opt out.
+    """
+    if request.node.get_closest_marker("uses_real_provider_chain"):
+        return
+    try:
+        from backend import llm as llm_mod
+    except ImportError:
+        return
+    monkeypatch.setattr(
+        llm_mod, "_active_provider_chain",
+        lambda *_a, **_kw: [], raising=True,
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_embedder(monkeypatch):
     """Don't let the user's runtime embedder config (knowledge/
     embedder_config.json, written by the Memory tab) bootstrap a real
