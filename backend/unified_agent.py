@@ -494,9 +494,26 @@ def _try_chat_path(
     if not answer or not isinstance(answer, str):
         return None
     head = answer.lstrip()
+    # ESCALATE marker can appear (a) at the very start of the answer
+    # (the disciplined shape the prompt asks for) OR (b) on any line
+    # AFTER preamble prose. The defensive scan was added 2026-06-09
+    # after Task 4 of the agent improvement loop caught a case where
+    # the LLM wrote "I need to delegate ... \n\nESCALATE: <reason>" —
+    # the prose-then-ESCALATE shape made the prior `startswith` check
+    # miss the marker, and the full preamble (including the literal
+    # ESCALATE line) leaked into the user-facing answer.
+    escalate_reason: str | None = None
     if head.upper().startswith("ESCALATE:"):
+        escalate_reason = head[9:120].strip()
+    else:
+        for line in answer.splitlines():
+            stripped = line.lstrip()
+            if stripped.upper().startswith("ESCALATE:"):
+                escalate_reason = stripped[9:120].strip()
+                break
+    if escalate_reason is not None:
         try:
-            agent.progress("chat_fast_path", f"escalating: {head[9:120].strip()}")
+            agent.progress("chat_fast_path", f"escalating: {escalate_reason}")
         except Exception:
             pass
         return None
