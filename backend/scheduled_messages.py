@@ -244,6 +244,48 @@ def deliver(row: dict) -> tuple[bool, str]:
         return False, "empty target or text"
 
     channel = target.split(":", 1)[0] if ":" in target else ""
+
+    if channel == "webui":
+        # WebUI doesn't have a push transport — we deliver by
+        # appending a synthetic assistant turn to the conversation
+        # log keyed by the target speaker. Next time that user opens
+        # the WebUI they'll see the scheduled message in their
+        # session history. Same pattern as `complete_supervisor`'s
+        # WebUI fallback.
+        try:
+            from .conversation import CONVERSATION
+            requester = row.get("requested_by") or "system:scheduler"
+            CONVERSATION.add_turn(
+                f"[scheduled message {row.get('id', '?')} — "
+                f"queued at {row.get('requested_at', '?')} "
+                f"by {requester}]",
+                text,
+                intent="scheduled",
+                is_chat=False,
+                confidence=70,
+                topics_used=[],
+                channel="scheduled",
+                speaker_id=target,
+                session_key=target,
+            )
+        except Exception as e:
+            mark_failed(row["id"], f"webui session-log append failed: {e}")
+            return False, f"webui session-log append failed: {e}"
+        # Best-effort: emit a LogBus event so any open SSE clients
+        # see the scheduled delivery in real time even if the user
+        # isn't on the chat session right now.
+        try:
+            from .log_bus import publish_supervisor_event as _pub
+            _pub(
+                job_id=row.get("id", ""),
+                decision="scheduled_delivered",
+                message=(text[:500] if text else ""),
+            )
+        except Exception:
+            pass
+        mark_sent(row["id"])
+        return True, ""
+
     if channel != "telegram":
         # Future channels plug in here.
         mark_failed(row["id"], f"unsupported channel: {channel}")
