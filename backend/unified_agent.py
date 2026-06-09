@@ -1830,6 +1830,27 @@ def run_unified(
             except Exception as e:
                 log.debug("unified fast-path: save_turn failed: %s", e)
 
+            # Persist the fast-path turn into CONVERSATION so the
+            # next turn's `context_block(n=6, session_key=skey)` can
+            # see it. Without this, fast-path turns are invisible to
+            # future-turn back-references — caught 2026-06-09 D4 of
+            # the deep agent-improvement loop, where the second turn
+            # of a same-session pair could not recall the first
+            # because turn 1 had landed on the fast path and was
+            # never written to history.
+            try:
+                CONVERSATION.add_turn(
+                    task, chat_answer,
+                    intent="chat", is_chat=True,
+                    confidence=85,
+                    topics_used=[],
+                    channel=channel,
+                    speaker_id=speaker_id,
+                    session_key=skey,
+                )
+            except Exception as e:
+                log.debug("unified fast-path: CONVERSATION.add_turn failed: %s", e)
+
             # The inner `call_with_tools` already pushed token usage
             # through TokenTracker.record so per-day counters and
             # request_usage() are up-to-date for the parent turn.
