@@ -52,7 +52,7 @@ Return strictly JSON:
       "impact": "performance" | "reliability" | "clarity" | "feature",
       "risk": "low" | "medium" | "high",
       "reasoning": "why this improves the code",
-      "test_commands": ["python -m pytest tests/test_X.py -q"],
+      "test_commands": ["python3 -m pytest tests/test_X.py -q"],
       "success_criteria": "all listed tests pass; no new failures elsewhere",
       "rollback_plan": "git checkout HEAD -- <file>"
     }
@@ -66,11 +66,15 @@ CLOSED-LOOP REQUIREMENTS:
 - Pick the narrowest test path that exercises the change. Prefer
   `tests/test_<module>.py` over running the whole suite.
 - For pure-clarity patches with no behavioural impact, you may pass
-  `["python -m py_compile <file>"]` — just enough to confirm the file
+  `["python3 -m py_compile <file>"]` — just enough to confirm the file
   still parses. The applier does py_compile anyway, so this is a no-op
   test, but specifying it keeps the contract uniform.
-- Allowed command prefixes: `python`, `pytest`, `python -m`. Anything else
-  is rejected by the applier and the patch is treated as untestable.
+- Allowed command prefixes: `python3`, `pytest`, `python3 -m`. ALWAYS use
+  `python3`, NEVER `python` — most servers (including this one) ship
+  only `python3`. Legacy `python ...` commands are auto-normalized to
+  `python3 ...` by the applier, but specifying `python3` from the start
+  avoids the round-trip. Anything else is rejected and the patch is
+  treated as untestable.
 - `success_criteria` is a one-line human-readable assertion of what
   "passing" looks like. Used in audit logs and review notes.
 - `rollback_plan` is a one-line shell snippet the user can run if the
@@ -87,10 +91,45 @@ Max 3 improvements per analysis. Only include changes you're confident about."""
 # whitespace tricks.
 _ALLOWED_TEST_PREFIXES = (
     ("pytest",),
+    ("python3", "-m"),
+    ("python3", "-c"),  # tiny smoke checks
+    ("python3",),       # `python3 script.py` for verification scripts
+    # Legacy `python` entries are kept for back-compat: the applier
+    # auto-normalizes them to `python3` (see `_normalize_test_command`),
+    # but the validator must still accept the un-normalized form because
+    # older proposals on disk may have been serialized with `python`.
     ("python", "-m"),
-    ("python", "-c"),  # tiny smoke checks
-    ("python",),       # `python script.py` for verification scripts
+    ("python", "-c"),
+    ("python",),
 )
+
+
+def _normalize_test_command(cmd: str) -> str:
+    """Auto-rewrite `python ...` -> `python3 ...` at first-token position.
+
+    Most modern Linux distros (including this Hrant host) ship only
+    `python3` and have no `python` symlink. An LLM-generated proposal
+    that specifies `python -m py_compile <file>` would fail at apply
+    time with `[Errno 2] No such file or directory: 'python'` — the
+    safety rollback then reverts the patch even though the change
+    itself was fine. Normalizing here makes the contract robust to
+    that environmental quirk.
+
+    Only the FIRST token is rewritten. `pytest some_module/python.py`
+    is left alone; `python` appearing later in the args (e.g. as a
+    test name) is not touched.
+    """
+    import shlex
+    if not cmd:
+        return cmd
+    try:
+        argv = shlex.split(cmd)
+    except ValueError:
+        return cmd  # malformed; let the validator reject it later
+    if not argv or argv[0] != "python":
+        return cmd
+    argv[0] = "python3"
+    return shlex.join(argv)
 # Per-test-command timeout. If a single test takes longer than this,
 # something is wrong (infinite loop, network call) and we'd rather
 # fail fast than block the apply for minutes.
@@ -135,7 +174,9 @@ class Proposal:
         self.created = created or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.reviewed = reviewed
         self.review_note = review_note
-        self.test_commands = list(test_commands or [])
+        self.test_commands = [
+            _normalize_test_command(t) for t in (test_commands or [])
+        ]
         self.success_criteria = success_criteria
         self.rollback_plan = rollback_plan
         self.test_output = test_output
@@ -632,7 +673,7 @@ Return strictly JSON:
   "impact": "performance" | "reliability" | "clarity" | "feature",
   "risk": "low" | "medium" | "high",
   "reasoning": "why this implements the owner's request",
-  "test_commands": ["python -m pytest tests/test_X.py -q"],
+  "test_commands": ["python3 -m pytest tests/test_X.py -q"],
   "success_criteria": "one-line assertion of what passing looks like",
   "rollback_plan": "one-line shell snippet to revert"
 }
