@@ -23,6 +23,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from .paths import write_atomic_json
+
 
 def cosine(a: list[float], b: list[float]) -> float:
     """Cosine similarity in pure Python. Returns 0 for empty/mismatched."""
@@ -80,18 +82,19 @@ class VectorStore:
             self._items = {}
 
     def _save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(
-            json.dumps(
-                {
-                    "dim": self._dim,
-                    "backend": self._backend,
-                    "model": self._model,
-                    "items": self._items,
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
+        # C3: atomic .tmp + rename so a crash mid-write doesn't truncate
+        # embeddings.json — losing the entire vector index would force a
+        # full re-embed of every note. `indent=None` preserves the
+        # compact single-line shape the pre-fix `json.dumps(...)` produced.
+        write_atomic_json(
+            self.path,
+            {
+                "dim": self._dim,
+                "backend": self._backend,
+                "model": self._model,
+                "items": self._items,
+            },
+            indent=None,
         )
 
     def stamp(self, dim: int, backend: str, model: str) -> None:

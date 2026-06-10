@@ -71,8 +71,12 @@ def load_config() -> dict:
 def save_config(cfg: dict) -> dict:
     """Persist embedder config and return the saved dict (no mutation)."""
     p = _config_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    # C3: atomic .tmp + rename so a crash mid-write doesn't truncate
+    # embedder_config.json — that file pins which backend (llama_cpp /
+    # ollama / openai / cohere) and model to use, and a torn write
+    # forces the next probe to re-pick from scratch.
+    from . import paths as _paths
+    _paths.write_atomic_json(p, cfg)
     return cfg
 
 

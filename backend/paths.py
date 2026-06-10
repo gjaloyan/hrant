@@ -32,6 +32,7 @@ engine/data split.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -223,6 +224,57 @@ def write_secret_json(
         _os.chmod(path, 0o600)
     except Exception:
         pass
+
+
+# ─── Public atomic-write helper for non-secret JSON stores ──────────
+#
+# Audit 2026-06-10 (Bundle B, fix C3): ~13 JSON stores across the
+# backend used `path.write_text(json.dumps(...))` directly. That's
+# a non-atomic write: a crash or kill mid-write leaves a torn file
+# (truncated JSON, zero bytes, or partial content) and the next
+# `_load` either raises and resets the store to empty (losing data)
+# or silently treats the partial as valid. `write_secret_json` above
+# already solves the same problem for secret configs; this helper
+# extracts the atomic-rename pattern for non-secret stores so every
+# JSON writer in the codebase converges on one battle-tested path.
+
+
+def write_atomic_json(
+    path: Path,
+    data,
+    *,
+    indent: int | None = 2,
+    ensure_ascii: bool = False,
+    mode: int | None = None,
+) -> None:
+    """Serialize `data` to JSON and write to `path` atomically.
+
+    Writes via `path.with_suffix(path.suffix + '.tmp')` then `replace`,
+    so a crash mid-write never leaves a torn or zero-byte file —
+    callers' `_load` either sees the prior version or the new one.
+
+    Creates parent directories if missing. If `mode` is given, chmods
+    after rename (useful for secrets — but secret-stores should prefer
+    `write_secret_json` which always chmods to 0o600). Pass `indent=None`
+    to get the most compact single-line encoding (matches the pre-fix
+    behaviour of stores that called `json.dumps(...)` without indent —
+    notably the vector store and the daily-eval aggregate). Best-effort:
+    writers that need to fail loudly should NOT catch here.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(data, ensure_ascii=ensure_ascii, indent=indent),
+        encoding="utf-8",
+    )
+    if mode is not None:
+        try:
+            os.chmod(tmp, mode)
+        except Exception:
+            # POSIX mode bits don't apply on Windows; best-effort.
+            pass
+    tmp.replace(path)
 
 
 def secure_existing_file(path: Path) -> None:

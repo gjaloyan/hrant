@@ -122,11 +122,11 @@ def _load_channels() -> list[dict]:
 
 def _save_channels(channels: list[dict]) -> None:
     p = _resolve_channels_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
-        json.dumps({"channels": channels}, indent=2, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    # C3: atomic .tmp + rename. channels.json carries the bot tokens
+    # + allowed-user lists; a torn write would either kill all channel
+    # config (next _load reads garbage, returns []) or land somewhere
+    # that no longer parses.
+    paths.write_atomic_json(p, {"channels": channels})
 
 
 def get_channels() -> list[dict]:

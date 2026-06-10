@@ -270,12 +270,15 @@ def load_history() -> list[HistoryEntry]:
 
 def save_history(entries: list[HistoryEntry]) -> None:
     p = paths.history_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
     # Cap to most-recent MAX_HISTORY_ENTRIES so the ledger doesn't
     # grow forever. Keep newest, drop oldest.
     capped = entries[-MAX_HISTORY_ENTRIES:]
     payload = {"entries": [asdict(e) for e in capped]}
-    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    # C3: atomic .tmp + rename. update_history.json is what
+    # `hrant rollback` reads to find a known-good prior SHA — a
+    # torn write at the wrong moment would force the user to dig
+    # the SHA out of git reflog manually.
+    paths.write_atomic_json(p, payload)
 
 
 def record(sha: str, branch: str, result: str, note: str = "") -> HistoryEntry:

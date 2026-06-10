@@ -198,6 +198,23 @@ async def lifespan(application: FastAPI):
     except Exception as e:
         log.warning("background-jobs interrupted-sweep error: %s", e)
 
+    # Bundle B (I9): same restart-resilience contract for scheduled
+    # messages. Any row stuck in `delivering` state survived a crash
+    # between `mark_delivering` and `mark_sent` — flip them to `failed`
+    # with a clear reason rather than risk a double-send. The next
+    # FIRE_SCHEDULED_MESSAGES tick only picks up `pending` rows, so
+    # this hook is what closes the gap.
+    try:
+        from . import scheduled_messages as _sched
+        n_stuck = _sched.recover_stuck_deliveries()
+        if n_stuck:
+            log.info(
+                "scheduled-messages: recovered %d row(s) stuck in "
+                "delivering state from previous run", n_stuck,
+            )
+    except Exception as e:
+        log.warning("scheduled-messages recovery error: %s", e)
+
     # Wire the autonomic supervisor turn to fire on every bg-job
     # completion. Pre-fix the registration lived ONLY in the Telegram
     # channel startup path (channels.py:_telegram_startup) — so on a

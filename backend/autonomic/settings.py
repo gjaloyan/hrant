@@ -54,8 +54,11 @@ def load_settings() -> dict:
 
 def save_settings(cfg: dict) -> dict:
     p = _path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    # C3: atomic .tmp + rename. autonomic_settings.json drives the
+    # scheduler tick interval — a torn write at boot reads as garbage
+    # and the autonomic loop falls back to the 30s default.
+    from .. import paths as _paths
+    _paths.write_atomic_json(p, cfg)
     return cfg
 
 

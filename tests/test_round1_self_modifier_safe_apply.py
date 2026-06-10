@@ -5,7 +5,23 @@
 """
 from __future__ import annotations
 
+import pytest
+
 from backend.self_modifier import SelfModifier, Proposal
+
+
+@pytest.fixture(autouse=True)
+def _owner_speaker():
+    """apply() now requires an owner speaker (audit 2026-06-10 C2).
+    These tests are about the apply mechanics (compile, rollback,
+    ambiguity), not the role gate — so stamp a default-owner speaker
+    so the gate doesn't fire."""
+    from backend import roles
+    token = roles.set_current_speaker("webui:default")
+    try:
+        yield
+    finally:
+        roles.reset_current_speaker(token)
 
 
 def _make_modifier_with_proposal(

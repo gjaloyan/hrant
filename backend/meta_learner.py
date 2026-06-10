@@ -19,6 +19,7 @@ from .config import CONFIG
 from .goals import GOALS
 from .llm import LLMError, TaskType, router
 from .models import VerificationResult
+from .paths import write_atomic_json
 
 META_ANALYSIS_SYSTEM = """You are a failure analyst for an AI agent.
 Given a question, the agent's wrong answer, and verification details,
@@ -84,11 +85,10 @@ class MetaLearner:
 
     def _save_patterns(self) -> None:
         try:
-            self.patterns_path.parent.mkdir(parents=True, exist_ok=True)
-            self.patterns_path.write_text(
-                json.dumps(self._patterns, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            # C3: atomic .tmp + rename so a crash mid-write doesn't
+            # truncate error_patterns.json — losing the patterns means
+            # losing the meta-learner's deduplicated failure history.
+            write_atomic_json(self.patterns_path, self._patterns)
         except Exception:
             pass
 

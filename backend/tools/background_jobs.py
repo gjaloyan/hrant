@@ -266,6 +266,42 @@ class BackgroundJobStore:
                 1 for r in self._load() if r.get("status") == "running"
             )
 
+    def prune(self, max_rows: int = 2000, keep_running: bool = True) -> int:
+        """I8: trim oldest non-running rows past `max_rows`.
+
+        Background: background.json was append-only with no GC. A box
+        running benchmarks plants a row per launch — over months the
+        registry grows to thousands of entries, each carrying a stdout
+        tail. Every `load` reads + parses the whole file.
+
+        `keep_running` (default True) protects in-flight jobs from
+        eviction regardless of the cap; closed jobs (done / error /
+        killed / interrupted) compete for the remaining slots,
+        oldest-first. Returns the number of rows dropped. Not auto-
+        fired from anywhere yet — exposed for a future autonomic
+        FIRE_STALE_PROPOSALS-style lever.
+        """
+        with _STORE_LOCK:
+            items = self._load()
+            if len(items) <= max_rows:
+                return 0
+            if keep_running:
+                running = [r for r in items if r.get("status") == "running"]
+                closed = [r for r in items if r.get("status") != "running"]
+            else:
+                running = []
+                closed = list(items)
+            closed.sort(key=lambda r: r.get("started_at") or 0)
+            keep_closed = max(0, max_rows - len(running))
+            if keep_closed >= len(closed):
+                return 0
+            kept_closed = closed[-keep_closed:] if keep_closed > 0 else []
+            new_items = running + kept_closed
+            new_items.sort(key=lambda r: r.get("started_at") or 0)
+            dropped = len(items) - len(new_items)
+            self._save(new_items)
+            return dropped
+
     def find_children(self, parent_job_id: str) -> list[BackgroundJob]:
         """Return ALL jobs whose `parent_job_id` matches. Walks the
         full registry (no `limit` cap) — the previous supervisor

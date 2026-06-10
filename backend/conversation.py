@@ -16,11 +16,13 @@ Design:
 """
 from __future__ import annotations
 import json
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .config import CONFIG
+from .paths import write_atomic_json
 
 
 class ConversationMemory:
@@ -37,25 +39,33 @@ class ConversationMemory:
         self.max_turns = max_turns
         self.max_answer_chars = max_answer_chars
         self._turns: list[dict] = []
+        # C4: RLock guards all read+write paths. add_turn fires from
+        # the agent thread, recent/context_block from the WebUI thread
+        # serving SSE; without serialization a save mid-read can yield
+        # a partial list. RLock so internal callers (add_turn -> _save)
+        # don't deadlock on the re-entry.
+        self._LOCK = threading.RLock()
         self._load()
 
     def _load(self) -> None:
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                self._turns = data if isinstance(data, list) else []
-            except Exception:
-                self._turns = []
+        with self._LOCK:
+            if self.path.exists():
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                    self._turns = data if isinstance(data, list) else []
+                except Exception:
+                    self._turns = []
 
     def _save(self) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps(self._turns, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass  # conversation memory is best-effort
+        with self._LOCK:
+            try:
+                # C3: atomic .tmp + rename so a crash mid-write doesn't
+                # truncate conversation.json — the next _load either
+                # sees the previous snapshot or the new one, never a
+                # half-written JSON array.
+                write_atomic_json(self.path, self._turns)
+            except Exception:
+                pass  # conversation memory is best-effort
 
     def add_turn(
         self,
@@ -132,11 +142,12 @@ class ConversationMemory:
         if n_llm_calls:
             turn["n_llm_calls"] = int(n_llm_calls)
 
-        self._turns.append(turn)
-        # Trim to max
-        if len(self._turns) > self.max_turns:
-            self._turns = self._turns[-self.max_turns :]
-        self._save()
+        with self._LOCK:
+            self._turns.append(turn)
+            # Trim to max
+            if len(self._turns) > self.max_turns:
+                self._turns = self._turns[-self.max_turns :]
+            self._save()
 
     def recent(
         self,
@@ -162,7 +173,11 @@ class ConversationMemory:
         out of the rolling window.
         """
         from .sessions import normalize_speaker
-        turns = self._turns
+        with self._LOCK:
+            # Snapshot under the lock so a concurrent add_turn can't
+            # mutate the list we're filtering. Cheap — turns is bounded
+            # by max_turns (typically 20).
+            turns = list(self._turns)
         if session_key is not None:
             wanted = (session_key or "").strip()
             turns = [
@@ -256,11 +271,13 @@ class ConversationMemory:
 
     def clear(self) -> None:
         """Clear all conversation history."""
-        self._turns = []
-        self._save()
+        with self._LOCK:
+            self._turns = []
+            self._save()
 
     def count(self) -> int:
-        return len(self._turns)
+        with self._LOCK:
+            return len(self._turns)
 
 
 CONVERSATION = ConversationMemory()

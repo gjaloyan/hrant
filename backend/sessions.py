@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from .config import CONFIG
+from .paths import write_atomic_json
 
 
 DEFAULT_SPEAKER = "webui:default"
@@ -244,7 +245,6 @@ class SessionManager:
 
     def _save(self) -> None:
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             data = {
                 "current_by_session_key": dict(self._current_by_session_key),
                 # Back-compat surface for old readers that look at the
@@ -259,10 +259,11 @@ class SessionManager:
                 "current_id": self._current_by_session_key.get(DEFAULT_SPEAKER),
                 "sessions": [s.to_dict() for s in self._sessions],
             }
-            self.path.write_text(
-                json.dumps(data, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            # C3: atomic .tmp + rename. sessions.json carries the
+            # entire conversation-thread ledger; a torn write makes
+            # _load reset to an empty list and the user's session
+            # history vanishes.
+            write_atomic_json(self.path, data)
         except Exception:
             pass
 

@@ -3381,11 +3381,12 @@ class DualModelRouter:
 
     def _save_state(self) -> None:
         try:
-            self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(
-                json.dumps(self.state, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            # C3: atomic .tmp + rename so a crash during the budget
+            # snapshot doesn't truncate failover.json — that file
+            # tracks today's api_calls/cost and the active_model
+            # selection; a torn write resets the budget mid-day.
+            from .paths import write_atomic_json
+            write_atomic_json(self.state_path, self.state)
         except Exception:
             pass
 

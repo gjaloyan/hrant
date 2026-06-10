@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ from typing import Optional
 
 from .config import CONFIG, ROOT
 from .llm import LLMError, TaskType, router
+from .paths import write_atomic_json
 
 log = logging.getLogger(__name__)
 
@@ -215,25 +217,36 @@ class SelfModifier:
         self.path = path or (kb_dir / "proposals.json")
         self._proposals: list[Proposal] = []
         self._backend_dir = ROOT / "backend"
+        # C4: RLock guards proposals list + disk persistence. The
+        # autonomic loop, the WebUI panel, the Telegram callback
+        # handler, and the apply() path can all hit this store from
+        # different threads. RLock so internal callers (approve ->
+        # _save) don't deadlock on re-entry.
+        self._LOCK = threading.RLock()
         self._load()
 
     def _load(self) -> None:
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                self._proposals = [Proposal.from_dict(p) for p in data]
-            except Exception:
-                self._proposals = []
+        with self._LOCK:
+            if self.path.exists():
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                    self._proposals = [Proposal.from_dict(p) for p in data]
+                except Exception:
+                    self._proposals = []
 
     def _save(self) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                json.dumps([p.to_dict() for p in self._proposals], ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass
+        with self._LOCK:
+            try:
+                # C3: atomic .tmp + rename. proposals.json carries the
+                # entire pending self-modification queue; a torn write
+                # forces _load to reset to [] and the user loses every
+                # outstanding proposal.
+                write_atomic_json(
+                    self.path,
+                    [p.to_dict() for p in self._proposals],
+                )
+            except Exception:
+                pass
 
     def analyze_module(self, module_name: str) -> list[Proposal]:
         """Read a backend module and propose improvements."""
@@ -297,7 +310,8 @@ class SelfModifier:
                     success_criteria=imp.get("success_criteria", ""),
                     rollback_plan=imp.get("rollback_plan", ""),
                 )
-                self._proposals.append(proposal)
+                with self._LOCK:
+                    self._proposals.append(proposal)
                 proposals.append(proposal)
 
             self._save()
@@ -308,24 +322,26 @@ class SelfModifier:
 
     def approve(self, proposal_id: str, note: str = "") -> bool:
         """Approve a proposal (does not apply it yet)."""
-        for p in self._proposals:
-            if p.id == proposal_id:
-                p.status = "approved"
-                p.reviewed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                p.review_note = note
-                self._save()
-                return True
+        with self._LOCK:
+            for p in self._proposals:
+                if p.id == proposal_id:
+                    p.status = "approved"
+                    p.reviewed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    p.review_note = note
+                    self._save()
+                    return True
         return False
 
     def reject(self, proposal_id: str, note: str = "") -> bool:
         """Reject a proposal."""
-        for p in self._proposals:
-            if p.id == proposal_id:
-                p.status = "rejected"
-                p.reviewed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                p.review_note = note
-                self._save()
-                return True
+        with self._LOCK:
+            for p in self._proposals:
+                if p.id == proposal_id:
+                    p.status = "rejected"
+                    p.reviewed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    p.review_note = note
+                    self._save()
+                    return True
         return False
 
     def apply(self, proposal_id: str) -> dict:
@@ -364,10 +380,11 @@ class SelfModifier:
         except Exception:
             pass
         proposal = None
-        for p in self._proposals:
-            if p.id == proposal_id:
-                proposal = p
-                break
+        with self._LOCK:
+            for p in self._proposals:
+                if p.id == proposal_id:
+                    proposal = p
+                    break
         if not proposal:
             return {"ok": False, "message": "Proposal not found"}
         if proposal.status != "approved":
@@ -494,33 +511,38 @@ class SelfModifier:
 
     def list_proposals(self, status: str | None = None) -> list[dict]:
         """List proposals, optionally filtered by status."""
-        proposals = self._proposals
+        with self._LOCK:
+            proposals = list(self._proposals)
         if status:
             proposals = [p for p in proposals if p.status == status]
         return [p.to_dict() for p in reversed(proposals)]
 
     def get_proposal(self, proposal_id: str) -> Proposal | None:
-        for p in self._proposals:
-            if p.id == proposal_id:
-                return p
+        with self._LOCK:
+            for p in self._proposals:
+                if p.id == proposal_id:
+                    return p
         return None
 
     def delete_proposal(self, proposal_id: str) -> bool:
-        for i, p in enumerate(self._proposals):
-            if p.id == proposal_id:
-                self._proposals.pop(i)
-                self._save()
-                return True
+        with self._LOCK:
+            for i, p in enumerate(self._proposals):
+                if p.id == proposal_id:
+                    self._proposals.pop(i)
+                    self._save()
+                    return True
         return False
 
     def stats(self) -> dict:
+        with self._LOCK:
+            proposals = list(self._proposals)
         by_status: dict[str, int] = {}
         by_impact: dict[str, int] = {}
-        for p in self._proposals:
+        for p in proposals:
             by_status[p.status] = by_status.get(p.status, 0) + 1
             by_impact[p.impact] = by_impact.get(p.impact, 0) + 1
         return {
-            "total": len(self._proposals),
+            "total": len(proposals),
             "by_status": by_status,
             "by_impact": by_impact,
         }
@@ -658,8 +680,9 @@ def propose(
             status="pending",
             review_note=f"requested by {requester}",
         )
-        SELF_MODIFIER._proposals.append(proposal)
-        SELF_MODIFIER._save()
+        with SELF_MODIFIER._LOCK:
+            SELF_MODIFIER._proposals.append(proposal)
+            SELF_MODIFIER._save()
         _fire_proposal_created(proposal)
         return proposal
     except Exception as e:
@@ -862,8 +885,9 @@ def propose_with_diff(
         success_criteria=imp.get("success_criteria", ""),
         rollback_plan=imp.get("rollback_plan", ""),
     )
-    SELF_MODIFIER._proposals.append(proposal)
-    SELF_MODIFIER._save()
+    with SELF_MODIFIER._LOCK:
+        SELF_MODIFIER._proposals.append(proposal)
+        SELF_MODIFIER._save()
     _fire_proposal_created(proposal)
     return proposal
 

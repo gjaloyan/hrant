@@ -112,8 +112,11 @@ def save_overrides(cfg: dict) -> dict:
     """Write the overrides file. Caller is expected to have validated
     via `validate_partial` already."""
     p = _overrides_path()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    # C3: atomic .tmp + rename. runtime_overrides.json is read at boot
+    # to patch CONFIG in place — a torn write here would zero-out the
+    # user's tuned router budget / verification knobs on next start.
+    from . import paths as _paths
+    _paths.write_atomic_json(p, cfg)
     return cfg
 
 

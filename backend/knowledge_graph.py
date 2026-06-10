@@ -20,12 +20,14 @@ Design:
 from __future__ import annotations
 import json
 import re
+import threading
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .config import CONFIG
+from .paths import write_atomic_json
 
 
 
@@ -62,18 +64,24 @@ class KnowledgeGraph:
         # query term — O(N×M). With it, "where is X mentioned as a
         # target?" is O(1).
         self._target_index: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+        # C4: RLock guards every read+write. Triples land from the
+        # agent's note-write path, the autonomic graph_rebuild lever,
+        # and KB import jobs in parallel. RLock so internal callers
+        # (add_relations -> _save) don't deadlock on re-entry.
+        self._LOCK = threading.RLock()
         self._load()
 
     def _load(self) -> None:
-        if self.path.exists():
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                self._edges = data.get("edges", {})
-                self._rebuild_indexes()
-            except Exception:
-                self._edges = {}
-                self._note_entities = defaultdict(set)
-                self._target_index = defaultdict(list)
+        with self._LOCK:
+            if self.path.exists():
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                    self._edges = data.get("edges", {})
+                    self._rebuild_indexes()
+                except Exception:
+                    self._edges = {}
+                    self._note_entities = defaultdict(set)
+                    self._target_index = defaultdict(list)
 
     def _rebuild_indexes(self) -> None:
         """Rebuild both reverse indexes from `self._edges`. Called on
@@ -95,34 +103,36 @@ class KnowledgeGraph:
         TARGET of some edge, return the (subject, edge) pairs that
         point to it. Used by memory_extractor.recall instead of the
         old full-graph scan."""
-        return list(self._target_index.get(self._normalize(target), []))
+        with self._LOCK:
+            return list(self._target_index.get(self._normalize(target), []))
 
     def _save(self) -> None:
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # Preserve any v2 schema fields (version / nodes / edges_v2)
-            # that a previous migration wrote. Without this, the next
-            # legacy save() strips them — undoing the migration and
-            # making graph_rebuild lever skip again. Round-trip is the
-            # cheapest reconciliation while the two writers coexist.
-            preserved: dict = {}
-            if self.path.exists():
-                try:
-                    existing = json.loads(self.path.read_text(encoding="utf-8"))
-                    if isinstance(existing, dict):
-                        for key in ("version", "nodes", "edges_v2"):
-                            if key in existing:
-                                preserved[key] = existing[key]
-                except (OSError, ValueError):
-                    pass
-            body: dict = {"edges": self._edges}
-            body.update(preserved)
-            self.path.write_text(
-                json.dumps(body, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception:
-            pass  # graph is best-effort
+        with self._LOCK:
+            try:
+                # Preserve any v2 schema fields (version / nodes / edges_v2)
+                # that a previous migration wrote. Without this, the next
+                # legacy save() strips them — undoing the migration and
+                # making graph_rebuild lever skip again. Round-trip is the
+                # cheapest reconciliation while the two writers coexist.
+                preserved: dict = {}
+                if self.path.exists():
+                    try:
+                        existing = json.loads(self.path.read_text(encoding="utf-8"))
+                        if isinstance(existing, dict):
+                            for key in ("version", "nodes", "edges_v2"):
+                                if key in existing:
+                                    preserved[key] = existing[key]
+                    except (OSError, ValueError):
+                        pass
+                body: dict = {"edges": self._edges}
+                body.update(preserved)
+                # C3: atomic .tmp + rename. graph.json holds the entire
+                # knowledge graph; a torn write here is catastrophic —
+                # _load resets the graph to empty and every entity link
+                # has to be re-extracted from notes.
+                write_atomic_json(self.path, body)
+            except Exception:
+                pass  # graph is best-effort
 
     def _normalize(self, entity: str) -> str:
         """Normalize entity name for consistent matching."""
@@ -168,6 +178,39 @@ class KnowledgeGraph:
         Returns:
             Number of edges added.
         """
+        # C4: hold the lock across the full triples loop so an
+        # in-progress add_relations isn't interleaved with another
+        # writer's auto-invalidation pass (which would otherwise see a
+        # half-written set of edges and double-close them). Delegate
+        # to `_add_relations_unlocked` so this method stays a clean
+        # single `with self._LOCK:` and the dense triple-processing
+        # block keeps its original indentation.
+        with self._LOCK:
+            return self._add_relations_unlocked(
+                triples,
+                source_note=source_note,
+                weight=weight,
+                valid_from=valid_from,
+                valid_to=valid_to,
+                confidence=confidence,
+                auto_invalidate=auto_invalidate,
+            )
+
+    def _add_relations_unlocked(
+        self,
+        triples: list[tuple[str, str, str]],
+        source_note: str,
+        weight: float = 1.0,
+        *,
+        valid_from: Optional[str] = None,
+        valid_to: Optional[str] = None,
+        confidence: float = 1.0,
+        auto_invalidate: bool = True,
+    ) -> int:
+        """Internal worker for add_relations. Caller MUST hold
+        `self._LOCK`. Split out so the public method can keep the
+        lock acquisition tidy without re-indenting the dense
+        triple-processing block."""
         added = 0
         for subj, rel, obj in triples:
             subj_n = self._normalize(subj)
@@ -310,19 +353,20 @@ class KnowledgeGraph:
 
     def remove_note(self, source_note: str) -> None:
         """Remove all edges from a specific note."""
-        for entity in list(self._edges.keys()):
-            self._edges[entity] = [
-                e for e in self._edges[entity]
-                if e.get("note") != source_note
-            ]
-            if not self._edges[entity]:
-                del self._edges[entity]
-        self._note_entities.pop(source_note, None)
-        # Bulk-rebuild target_index — selective removal would have to
-        # walk every list looking for tuples whose edge_dict's `note`
-        # matches; the rebuild scan is the same cost and simpler.
-        self._rebuild_indexes()
-        self._save()
+        with self._LOCK:
+            for entity in list(self._edges.keys()):
+                self._edges[entity] = [
+                    e for e in self._edges[entity]
+                    if e.get("note") != source_note
+                ]
+                if not self._edges[entity]:
+                    del self._edges[entity]
+            self._note_entities.pop(source_note, None)
+            # Bulk-rebuild target_index — selective removal would have to
+            # walk every list looking for tuples whose edge_dict's `note`
+            # matches; the rebuild scan is the same cost and simpler.
+            self._rebuild_indexes()
+            self._save()
 
     def find_related_notes(
         self,
@@ -348,14 +392,23 @@ class KnowledgeGraph:
         query_terms = self._extract_query_entities(query)
         if not query_terms:
             return []
-
+        # C4: read-side snapshot under the lock so a concurrent
+        # `add_relations` can't mutate `self._edges[entity]` mid-BFS
+        # — otherwise we'd hit `RuntimeError: dictionary changed size
+        # during iteration`. Snapshot once, then traverse without
+        # holding the lock so writers aren't blocked by long queries.
+        with self._LOCK:
+            edges_snap = {k: list(v) for k, v in self._edges.items()}
+            note_entities_snap = {
+                k: set(v) for k, v in self._note_entities.items()
+            }
         note_scores: dict[str, float] = defaultdict(float)
         normalized_terms = {self._normalize(t) for t in query_terms}
 
         # Topic-direct boost: query terms that exactly match a note slug
         # (case-insensitive, slug-style). Cheap and catches the "fuzzy and
         # graph see the same thing" case where the query is the topic.
-        for note_slug in self._note_entities:
+        for note_slug in note_entities_snap:
             slug_clean = note_slug.lower().replace("_", " ").replace("-", " ")
             if note_slug in normalized_terms or slug_clean in normalized_terms:
                 note_scores[note_slug] += 0.5
@@ -367,10 +420,10 @@ class KnowledgeGraph:
             visited: set[str] = set()
             frontier: list[tuple[str, int, float]] = []
 
-            if term_n in self._edges:
+            if term_n in edges_snap:
                 frontier.append((term_n, 0, 1.0))
 
-            for entity in self._edges:
+            for entity in edges_snap:
                 if entity == term_n:
                     continue
                 if term_n in entity or entity in term_n:
@@ -382,15 +435,15 @@ class KnowledgeGraph:
                 if entity in visited:
                     continue
                 visited.add(entity)
-                for note_slug, entities in self._note_entities.items():
+                for note_slug, entities in note_entities_snap.items():
                     if entity in entities:
                         # Cap the per-(term, note) contribution at the
                         # current hop's score — so revisits via different
                         # entity paths don't compound.
                         if score > term_scores[note_slug]:
                             term_scores[note_slug] = score
-                if hops < max_hops and entity in self._edges:
-                    for edge in self._edges[entity]:
+                if hops < max_hops and entity in edges_snap:
+                    for edge in edges_snap[entity]:
                         target = edge["target"]
                         if target in visited:
                             continue
@@ -453,10 +506,12 @@ class KnowledgeGraph:
     def get_neighbors(self, entity: str, max_depth: int = 1) -> list[dict]:
         """Get immediate neighbors of an entity (for UI visualization)."""
         entity_n = self._normalize(entity)
-        if entity_n not in self._edges:
-            return []
+        with self._LOCK:
+            if entity_n not in self._edges:
+                return []
+            edges = list(self._edges[entity_n][:20])  # cap at 20
         result = []
-        for edge in self._edges[entity_n][:20]:  # cap at 20
+        for edge in edges:
             result.append({
                 "source": entity_n,
                 "target": edge["target"],
@@ -468,22 +523,26 @@ class KnowledgeGraph:
 
     def stats(self) -> dict:
         """Graph statistics."""
-        all_entities = set(self._edges.keys())
-        for edges in self._edges.values():
-            for e in edges:
-                all_entities.add(e["target"])
-        total_edges = sum(len(edges) for edges in self._edges.values())
+        with self._LOCK:
+            all_entities = set(self._edges.keys())
+            for edges in self._edges.values():
+                for e in edges:
+                    all_entities.add(e["target"])
+            total_edges = sum(len(edges) for edges in self._edges.values())
+            notes_indexed = len(self._note_entities)
         return {
             "entities": len(all_entities),
             "edges": total_edges,
-            "notes_indexed": len(self._note_entities),
+            "notes_indexed": notes_indexed,
         }
 
     def entity_count(self) -> int:
-        return len(set(self._edges.keys()))
+        with self._LOCK:
+            return len(set(self._edges.keys()))
 
     def edge_count(self) -> int:
-        return sum(len(edges) for edges in self._edges.values())
+        with self._LOCK:
+            return sum(len(edges) for edges in self._edges.values())
 
     # ---- temporal queries ----
 
@@ -505,21 +564,22 @@ class KnowledgeGraph:
         """
         entity_n = self._normalize(entity)
         results: list[dict] = []
-        if direction in ("out", "both") and entity_n in self._edges:
-            for edge in self._edges[entity_n]:
-                if not _is_valid_at(edge, as_of):
-                    continue
-                results.append({"subject": entity_n, **edge})
-        if direction in ("in", "both"):
-            for subj, edges in self._edges.items():
-                if subj == entity_n:
-                    continue
-                for edge in edges:
-                    if edge.get("target") != entity_n:
-                        continue
+        with self._LOCK:
+            if direction in ("out", "both") and entity_n in self._edges:
+                for edge in self._edges[entity_n]:
                     if not _is_valid_at(edge, as_of):
                         continue
-                    results.append({"subject": subj, **edge})
+                    results.append({"subject": entity_n, **edge})
+            if direction in ("in", "both"):
+                for subj, edges in self._edges.items():
+                    if subj == entity_n:
+                        continue
+                    for edge in edges:
+                        if edge.get("target") != entity_n:
+                            continue
+                        if not _is_valid_at(edge, as_of):
+                            continue
+                        results.append({"subject": subj, **edge})
         return results
 
     def invalidate(
@@ -541,29 +601,30 @@ class KnowledgeGraph:
         ts = ended_at or datetime.utcnow().strftime("%Y-%m-%d")
 
         closed = 0
-        if subj_n in self._edges:
-            for edge in self._edges[subj_n]:
-                if (
-                    edge.get("target") == target_n
-                    and edge.get("relation") == rel
-                    and edge.get("valid_to") is None
-                ):
-                    edge["valid_to"] = ts
-                    closed += 1
+        with self._LOCK:
+            if subj_n in self._edges:
+                for edge in self._edges[subj_n]:
+                    if (
+                        edge.get("target") == target_n
+                        and edge.get("relation") == rel
+                        and edge.get("valid_to") is None
+                    ):
+                        edge["valid_to"] = ts
+                        closed += 1
 
-        # Close the inverse too so query_entity from the target side stays consistent.
-        inv_rel = f"inverse:{rel}"
-        if target_n in self._edges:
-            for edge in self._edges[target_n]:
-                if (
-                    edge.get("target") == subj_n
-                    and edge.get("relation") == inv_rel
-                    and edge.get("valid_to") is None
-                ):
-                    edge["valid_to"] = ts
+            # Close the inverse too so query_entity from the target side stays consistent.
+            inv_rel = f"inverse:{rel}"
+            if target_n in self._edges:
+                for edge in self._edges[target_n]:
+                    if (
+                        edge.get("target") == subj_n
+                        and edge.get("relation") == inv_rel
+                        and edge.get("valid_to") is None
+                    ):
+                        edge["valid_to"] = ts
 
-        if closed:
-            self._save()
+            if closed:
+                self._save()
         return closed
 
     def timeline(self, entity: str) -> list[dict]:
@@ -577,15 +638,16 @@ class KnowledgeGraph:
         # returns open ones; for timeline we want everything.
         entity_n = self._normalize(entity)
         all_edges: list[dict] = []
-        if entity_n in self._edges:
-            for edge in self._edges[entity_n]:
-                all_edges.append({"subject": entity_n, **edge})
-        for subj, edges in self._edges.items():
-            if subj == entity_n:
-                continue
-            for edge in edges:
-                if edge.get("target") == entity_n:
-                    all_edges.append({"subject": subj, **edge})
+        with self._LOCK:
+            if entity_n in self._edges:
+                for edge in self._edges[entity_n]:
+                    all_edges.append({"subject": entity_n, **edge})
+            for subj, edges in self._edges.items():
+                if subj == entity_n:
+                    continue
+                for edge in edges:
+                    if edge.get("target") == entity_n:
+                        all_edges.append({"subject": subj, **edge})
         all_edges.sort(key=lambda e: e.get("valid_from") or "0000-00-00")
         return all_edges
 

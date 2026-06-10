@@ -75,6 +75,39 @@ class SelfEvaluator:
         except Exception:
             pass
 
+    def prune(self, max_rows: int = 5000) -> int:
+        """I8: trim oldest rows past `max_rows`.
+
+        Background: eval_log.jsonl was append-only with no GC. The
+        evaluator writes a row per agent turn → a busy box piles up
+        tens of thousands of rows; every `daily_report` / `stats`
+        re-reads the entire file. Keeping the newest 5k rows preserves
+        the rolling window the report functions use (most read at most
+        500-1000 rows back) while bounding the on-disk size.
+
+        Returns the number of rows dropped. Atomic rewrite (.tmp +
+        rename) so a crash mid-prune can't truncate the log. Not
+        auto-fired from anywhere yet — exposed for a future autonomic
+        FIRE_STALE_PROPOSALS-style lever.
+        """
+        if not self.log_path.exists():
+            return 0
+        try:
+            text = self.log_path.read_text(encoding="utf-8")
+        except Exception:
+            return 0
+        lines = [ln for ln in text.split("\n") if ln.strip()]
+        if len(lines) <= max_rows:
+            return 0
+        kept = lines[-max_rows:]
+        tmp = self.log_path.with_suffix(self.log_path.suffix + ".tmp")
+        try:
+            tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            tmp.replace(self.log_path)
+        except Exception:
+            return 0
+        return len(lines) - len(kept)
+
     def _read_log(self, limit: int = 500) -> list[dict]:
         if not self.log_path.exists():
             return []
