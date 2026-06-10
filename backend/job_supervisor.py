@@ -303,6 +303,28 @@ def _run_supervisor_turn(job: BackgroundJob) -> None:
                 pass
 
 
+# Audit 2026-06-10 (C5): on_job_completed used to read `job.supervisor_terminal`
+# from the in-memory argument without re-fetching from STORE. Two near-
+# simultaneous _fire_done callbacks for the same job_id (one from the runner
+# thread's finally, one from a heartbeat watchdog) both saw False and both
+# spawned a supervisor daemon thread -> double DM, double retry chain, possibly
+# divergent decisions. We now claim ownership atomically under _STORE_LOCK
+# via this in-flight set; the wrapper releases the claim in `finally` once
+# the supervisor turn returns.
+_in_flight_supervisor: set[str] = set()
+
+
+def _run_supervisor_turn_wrapped(job: BackgroundJob) -> None:
+    """Wrapper that releases the in-flight claim when the supervisor
+    turn returns. Runs on a daemon thread."""
+    try:
+        _run_supervisor_turn(job)
+    finally:
+        from .tools.background_jobs import _STORE_LOCK
+        with _STORE_LOCK:
+            _in_flight_supervisor.discard(job.job_id)
+
+
 def on_job_completed(job: BackgroundJob) -> None:
     """Public entry — subscribe this in place of the old passive
     `_on_background_job_done` to get supervisor-driven follow-up.
@@ -312,31 +334,51 @@ def on_job_completed(job: BackgroundJob) -> None:
     we spawn a fresh daemon thread for the supervisor work and
     return immediately.
 
-    Idempotency: if a job is already marked `supervisor_terminal`,
-    re-entering the supervisor is a no-op. Prevents a late on_done
-    from a race re-opening the chain.
+    Idempotency: re-reads the job from STORE under _STORE_LOCK and
+    claims the supervisor slot via `_in_flight_supervisor` BEFORE
+    spawning the daemon thread. Two callbacks landing within the
+    same lock window see the second hit `if job_id in _in_flight`
+    and skip. Late callbacks for already-terminal jobs are also
+    rejected (the supervisor turn marked the chain complete).
     """
     if not isinstance(job, BackgroundJob):
         log.warning("on_job_completed: unexpected job type %r", type(job))
         return
-    if job.supervisor_terminal:
-        log.info(
-            "supervisor: %s already terminal, skipping re-entry",
-            job.job_id,
-        )
-        return
-    if job.retry_count >= _HARD_RETRY_CAP:
-        log.warning(
-            "supervisor: %s reached retry cap %d; escalating directly",
-            job.job_id, _HARD_RETRY_CAP,
-        )
-        # Mark terminal so future on_done callbacks don't re-open it,
-        # and let the supervisor compose the escalation DM in its
-        # last turn — the agent's prompt explicitly handles "you have
-        # exhausted retries" via the synthetic message.
+    from .tools.background_jobs import _STORE_LOCK
+    with _STORE_LOCK:
+        fresh = STORE.get(job.job_id)
+        if fresh is None:
+            log.warning(
+                "on_job_completed: job %s vanished from store", job.job_id,
+            )
+            return
+        if fresh.supervisor_terminal:
+            log.info(
+                "supervisor: %s already terminal, skipping re-entry",
+                job.job_id,
+            )
+            return
+        if job.job_id in _in_flight_supervisor:
+            log.info(
+                "supervisor: %s already in-flight, skipping double spawn",
+                job.job_id,
+            )
+            return
+        if fresh.retry_count >= _HARD_RETRY_CAP:
+            log.warning(
+                "supervisor: %s reached retry cap %d; escalating directly",
+                job.job_id, _HARD_RETRY_CAP,
+            )
+            # Mark terminal so future on_done callbacks don't re-open it,
+            # and let the supervisor compose the escalation DM in its
+            # last turn — the agent's prompt explicitly handles "you have
+            # exhausted retries" via the synthetic message.
+        _in_flight_supervisor.add(job.job_id)
+    # Spawn OUTSIDE the lock so the supervisor turn (minutes) doesn't
+    # block the store.
     threading.Thread(
-        target=_run_supervisor_turn,
-        args=(job,),
+        target=_run_supervisor_turn_wrapped,
+        args=(fresh,),
         daemon=True,
         name=f"job-supervisor-{job.job_id}",
     ).start()

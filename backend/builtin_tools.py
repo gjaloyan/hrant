@@ -233,9 +233,26 @@ def _save_user_fact_handler(category: str, fact: str) -> str:
     routing every user message into preference vs task.
 
     `category` ∈ {"language", "style", "about_user", "rule"}.
-    Dedup is automatic at IDENTITY.add_user_fact level."""
+    Dedup is automatic at IDENTITY.add_user_fact level.
+
+    Audit 2026-06-10 (I1): refused for guest speakers. An unknown
+    Telegram user could otherwise pollute their own per-speaker
+    profile.md with prompt-injection-style content the agent reads
+    back as identity context next turn. Trusted+ still allowed —
+    each speaker writes only their own file, which is the legitimate
+    use case."""
     from .identity import IDENTITY
-    from .roles import current_speaker
+    from .roles import current_speaker, role_of
+
+    sid = current_speaker()
+    if role_of(sid) == "guest":
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "permission denied — save_user_fact requires trusted "
+                "or owner role"
+            ),
+        }, ensure_ascii=False)
 
     cat = (category or "about_user").strip().lower()
     valid = ("language", "style", "about_user", "rule")
@@ -253,7 +270,7 @@ def _save_user_fact_handler(category: str, fact: str) -> str:
     try:
         IDENTITY.add_user_fact(
             fact_clean, category=cat,  # type: ignore[arg-type]
-            speaker_id=current_speaker(),
+            speaker_id=sid,
         )
     except Exception as e:
         return json.dumps({

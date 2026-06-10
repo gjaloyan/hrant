@@ -55,6 +55,7 @@ import os
 import re
 import shlex
 import subprocess
+import unicodedata
 from dataclasses import dataclass
 from typing import Optional
 
@@ -333,15 +334,30 @@ def _kill_init_or_all(argv: list[str]) -> str | None:
     return None
 
 
+def _normalize_whitespace(s: str) -> str:
+    """Replace Unicode-whitespace codepoints (NBSP, en-space, etc.) with
+    ASCII space so shlex.split treats them as token separators. Bash
+    itself tokenizes on Unicode-whitespace; if we don't, the denylist
+    sees a single fused argv token and misses the danger pattern."""
+    return "".join(" " if unicodedata.category(c) == "Zs" else c for c in s)
+
+
 def _command_segments(raw: str) -> list[list[str]]:
-    """Split `raw` by shell separators (; & | && ||), then shlex
-    each segment. Used for per-segment danger checks — `cmd1 ; rm -rf /`
-    would otherwise hide behind argv[0]=='cmd1'."""
+    """Split `raw` by shell separators (; & | && || newline carriage-return),
+    then shlex each segment. Used for per-segment danger checks —
+    `cmd1 ; rm -rf /` would otherwise hide behind argv[0]=='cmd1'.
+
+    Also splits on `\\n` / `\\r` because `/bin/bash -c` treats newlines
+    as command separators — `echo ok\\nrm -rf /` runs `rm -rf /` as a
+    separate command. Without the newline split the danger check would
+    see one fused segment and miss it.
+    """
     # Naive split — we're inspecting, not executing, so a quoted
     # `;` inside a string won't accidentally trigger a segment
     # (shlex below would re-tokenize and the quoted character lands
     # as part of one arg).
-    raw_segments = re.split(r"\|\||&&|[;|&]", raw)
+    raw = _normalize_whitespace(raw)
+    raw_segments = re.split(r"\|\||&&|[;|&\n\r]", raw)
     out: list[list[str]] = []
     for seg in raw_segments:
         seg = seg.strip()

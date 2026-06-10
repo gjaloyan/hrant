@@ -339,10 +339,21 @@ class SelfModifier:
         # Phase 11: hard role gate. The system prompt already tells
         # the LLM to refuse self-mod for non-owners; this is the
         # last line of defence if the model is talked into trying.
+        #
+        # Fail-closed audit 2026-06-10 (C2): when the speaker ContextVar
+        # is unset (autonomic loop, supervisor turn, scheduled task,
+        # bg-thread without a propagated context) we REFUSE rather than
+        # pass through. Subtle gotcha: `is_owner(None)` actually returns
+        # True because `normalize_speaker(None)` coerces to
+        # DEFAULT_SPEAKER ("webui:default") which IS in _IMPLICIT_OWNERS
+        # — fine for read-only endpoints that need a "current user"
+        # default, but a silent owner-equivalent for apply() would
+        # let bg-threads mutate source. So we explicitly refuse `sp is
+        # None` BEFORE the is_owner check.
         try:
             from .roles import current_speaker, is_owner
             sp = current_speaker()
-            if sp is not None and not is_owner(sp):
+            if sp is None or not is_owner(sp):
                 return {
                     "ok": False,
                     "message": (
