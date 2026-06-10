@@ -267,6 +267,73 @@ def record_attempt(
         log.warning("failover.record_attempt(%s) failed: %s", jid, e)
 
 
+# ─── Recently-failed cache (audit 2026-06-10 I7) ─────────────────────
+
+
+# When a (provider_id, model) attempt fails with a transient category,
+# remember that for a short TTL so the NEXT call doesn't pay the same
+# round-trip again. Without this, a 429-throttled primary is re-tried
+# every single LLM call — burns latency and may worsen the rate-limit
+# (some APIs count blocked requests against the quota too).
+#
+# Auth errors get a long TTL: a missing/expired key isn't going to
+# heal in 30 seconds, and the user needs to re-edit config anyway.
+# Unknown/non-retryable categories are NOT cached — those don't even
+# trigger failover so caching is irrelevant.
+_FAILED_TTL_BY_CATEGORY: dict[str, float] = {
+    "rate_limit": 60.0,
+    "server_error": 30.0,
+    "timeout": 30.0,
+    "connection": 30.0,
+    "auth_error": 600.0,
+}
+_DEFAULT_FAILED_TTL: float = 30.0
+
+import threading
+_failed_lock = threading.Lock()
+# key: (provider_id, model) -> epoch seconds when the failure expires.
+_failed_cache: dict[tuple[str, str], float] = {}
+
+
+def _mark_failed(provider_id: str, model: str, category: str) -> None:
+    """Record a recent failure so subsequent try_call walks skip this
+    (provider, model) until the TTL expires."""
+    ttl = _FAILED_TTL_BY_CATEGORY.get(category, _DEFAULT_FAILED_TTL)
+    if ttl <= 0:
+        return
+    with _failed_lock:
+        _failed_cache[(provider_id, model)] = time.time() + ttl
+
+
+def _is_recently_failed(provider_id: str, model: str) -> bool:
+    """True iff this (provider, model) had a transient failure within
+    its TTL window. Expired entries are cleaned up as a side effect."""
+    key = (provider_id, model)
+    now = time.time()
+    with _failed_lock:
+        expiry = _failed_cache.get(key)
+        if expiry is None:
+            return False
+        if expiry <= now:
+            del _failed_cache[key]
+            return False
+        return True
+
+
+def _clear_failed_cache() -> None:
+    """Test helper / admin tool — wipe the failure memory completely."""
+    with _failed_lock:
+        _failed_cache.clear()
+
+
+def _invalidate_failed(provider_id: str, model: str) -> None:
+    """Caller signals a known success on this (provider, model) — drop
+    the cached failure even if its TTL hasn't expired. Used so a
+    successful retry on the SAME provider clears the previous block."""
+    with _failed_lock:
+        _failed_cache.pop((provider_id, model), None)
+
+
 # ─── The retry loop ──────────────────────────────────────────────────
 
 
@@ -306,7 +373,24 @@ def try_call(
     cap = max(1, min(cap, len(attempts)))
 
     last_error: Optional[Exception] = None
+    skipped_all_recent_failures = True
     for i, (provider_id, model, fn) in enumerate(attempts[:cap]):
+        # Recent-failure short-circuit (audit 2026-06-10 I7). If THIS
+        # (provider, model) failed transiently within its TTL window
+        # we skip without spending a round-trip. The loop falls
+        # through to the next attempt unchanged. If every attempt is
+        # recently-failed (`skipped_all_recent_failures` still True
+        # at the end), we DROP the cache and re-try anyway — never
+        # leave the agent permanently wedged just because the cache
+        # outlived a brief outage.
+        if _is_recently_failed(provider_id, model):
+            log.info(
+                "failover: %s/%s skipped (recently-failed cache hit, "
+                "TTL not expired)",
+                provider_id, model,
+            )
+            continue
+        skipped_all_recent_failures = False
         t0 = time.monotonic()
         try:
             result = fn()
@@ -328,6 +412,9 @@ def try_call(
                     provider_id, model, category,
                 )
                 raise
+            # Mark this (provider, model) as transiently failed so
+            # the next try_call walks past it for the TTL window.
+            _mark_failed(provider_id, model, category)
             log.info(
                 "failover: %s/%s failed with %s; trying next entry "
                 "(%d of %d)",
@@ -340,6 +427,11 @@ def try_call(
             provider_id=provider_id, model=model, ok=True,
             elapsed_ms=elapsed_ms,
         )
+        # A success on this (provider, model) clears any stale failure
+        # mark — the previous transient is over and other callers
+        # should retry it on the next request rather than waiting out
+        # the full TTL.
+        _invalidate_failed(provider_id, model)
         if on_success is not None:
             try:
                 on_success(provider_id, model)
@@ -352,6 +444,20 @@ def try_call(
                 i + 1, provider_id, model, i,
             )
         return result
+
+    # All attempts skipped because of the recent-failure cache. Drop
+    # the cache and recurse once so we don't leave the agent wedged
+    # in case the cache outlived a real outage.
+    if skipped_all_recent_failures and not last_error:
+        log.warning(
+            "failover: every attempt was cache-skipped — clearing the "
+            "recent-failure cache and retrying once"
+        )
+        _clear_failed_cache()
+        return try_call(
+            attempts, retry_on=retry_on, max_attempts=max_attempts,
+            on_success=on_success,
+        )
 
     # All attempts exhausted — re-raise the last error so callers
     # see the most-recent failure rather than the first one (which

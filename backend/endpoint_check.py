@@ -19,6 +19,41 @@ confidence is capped at 30 and the turn is marked endpoint-missed.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
+
+
+# Per-turn cache for endpoint_met / unbacked_action_claim judgments.
+# Without this a single turn can trigger up to 3 calls on identical
+# (task, answer, tool_names) arguments — _decide_self_correction
+# evaluates endpoint_met, then the post-hoc cap_confidence_for_endpoint
+# evaluates it again, then internally cap_confidence_for_endpoint may
+# evaluate it a third time. Each call is a CLASSIFICATION LLM trip
+# (~$0.001-0.005, ~300-800 ms). Turn-scoped dict reset at run_unified
+# entry — see backend.unified_agent.run_unified.
+_endpoint_turn_cache: ContextVar["dict | None"] = ContextVar(
+    "_endpoint_turn_cache", default=None,
+)
+
+
+def begin_turn_cache():
+    """Open a fresh per-turn cache. Returns a token to pass to
+    reset_turn_cache. Audit 2026-06-10 (I3)."""
+    return _endpoint_turn_cache.set({})
+
+
+def reset_turn_cache(token) -> None:
+    """Tear down the per-turn cache."""
+    try:
+        _endpoint_turn_cache.reset(token)
+    except (LookupError, ValueError):
+        pass
+
+
+def _cache_key(prefix: str, task: str, answer: str,
+               tool_names: "list[str] | None") -> tuple:
+    return (prefix, task or "", answer or "",
+            tuple(sorted(tool_names or [])))
+
 
 # Tools whose presence in the trace UNAMBIGUOUSLY signals "the
 # agent took a state-changing action against the user's request".
@@ -83,13 +118,29 @@ def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:
     """Did the answer deliver against the request? Cheap deterministic
     checks first (an execute-class tool ran, or a file was delivered via
     MEDIA:), otherwise defer to an LLM judgment (language-agnostic,
-    no keyword lists)."""
+    no keyword lists).
+
+    Per-turn cached: same (task, answer, tool_names) within a turn
+    returns the same result without re-hitting the classifier LLM.
+    """
+    cache = _endpoint_turn_cache.get()
+    key = _cache_key("endpoint_met", task, answer, tool_names) \
+        if cache is not None else None
+    if cache is not None and key in cache:
+        return cache[key]
     for name in (tool_names or []):
         if name in _EXECUTE_TOOLS:
+            if cache is not None:
+                cache[key] = True
             return True
     if answer and "MEDIA:" in answer:
+        if cache is not None:
+            cache[key] = True
         return True
-    return _llm_endpoint_met(task, answer)
+    result = _llm_endpoint_met(task, answer)
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 _CLAIM_CHECK_SYSTEM = """You verify whether an assistant's answer claims an action it did NOT actually perform.
@@ -111,9 +162,18 @@ def unbacked_action_claim(task: str, answer: str, tool_names: list[str]) -> str:
     call this turn? Returns a short description of the unbacked claim, or
     "" when every claim is backed / no action claimed. Language-agnostic,
     no keyword matching. Fails OPEN ("") so a judge/infra failure never
-    fabricates a correction."""
+    fabricates a correction.
+
+    Per-turn cached: identical (task, answer, tool_names) within one
+    turn returns the prior result without re-hitting the classifier.
+    """
     if not (answer or "").strip():
         return ""
+    cache = _endpoint_turn_cache.get()
+    key = _cache_key("unbacked_claim", task, answer, tool_names) \
+        if cache is not None else None
+    if cache is not None and key in cache:
+        return cache[key]
     from .llm import router, TaskType
     tools_desc = ", ".join(t for t in (tool_names or []) if t) or "(none)"
     try:
@@ -124,9 +184,12 @@ def unbacked_action_claim(task: str, answer: str, tool_names: list[str]) -> str:
             f"TOOLS ACTUALLY CALLED THIS TURN: {tools_desc}",
             max_tokens=150, temperature=0.0,
         )
-        return str(data.get("unbacked_claim", "") or "").strip()
+        result = str(data.get("unbacked_claim", "") or "").strip()
     except Exception:
-        return ""
+        result = ""
+    if cache is not None:
+        cache[key] = result
+    return result
 
 
 # Cap applied when endpoint is missed. 30 is below the "low_confidence"

@@ -938,6 +938,14 @@ def _detect_tests_exist_not_run(trace) -> bool:
 # qualifying turn; latency hidden from user (runs after answer ships).
 
 SKILL_REFLECTION_TOOL_BAR = 3
+# Audit 2026-06-10 I4: don't run skill_reflection on low-confidence
+# turns — the verifier already flagged the answer as questionable
+# and we don't want to distill a flawed workflow into the catalog.
+# 50 lines up with the "low_confidence" threshold the daily report
+# uses (cap_confidence_for_endpoint clips to 30 on endpoint-miss,
+# so a missed endpoint AND a low base verifier score will both gate
+# correctly here).
+SKILL_REFLECTION_CONFIDENCE_FLOOR = 50
 SKILL_REFLECTION_MAX_ITERATIONS = 4
 _REFLECTION_TOOL_ALLOWLIST = frozenset({
     "list_skills", "load_skill", "propose_skill",
@@ -1189,7 +1197,11 @@ def _format_token_budget_marker(used: int) -> str:
 # ─── Post-turn skill_creator reflection (Option C from H3 audit) ───
 
 
-def _should_reflect_for_skill(agent, answer: str) -> tuple[bool, str]:
+def _should_reflect_for_skill(
+    agent, answer: str, *,
+    verifier_confidence: int | None = None,
+    endpoint_was_met: bool | None = None,
+) -> tuple[bool, str]:
     """Decide whether to run the post-turn skill-creator reflection.
 
     Returns (should_run, reason) — the reason string is for telemetry
@@ -1207,6 +1219,11 @@ def _should_reflect_for_skill(agent, answer: str) -> tuple[bool, str]:
          load_skill('skill_creator') — no double-firing.
       6. The skill_creator skill itself is loaded (couldn't run the
          reflection without its body anyway).
+      7. (audit 2026-06-10 I4) verifier confidence isn't below the
+         floor — low-confidence turns don't yield trustworthy skills.
+      8. (audit 2026-06-10 I4) endpoint_met != False — pure-research
+         turns (read-only inspects, no MEDIA: delivery) don't have a
+         reusable workflow shape, only a question-answering shape.
     """
     if not answer or not isinstance(answer, str):
         return False, "empty-or-nonstring-answer"
@@ -1225,6 +1242,23 @@ def _should_reflect_for_skill(agent, answer: str) -> tuple[bool, str]:
     n_distinct, names = _count_distinct_tools_called(agent)
     if n_distinct < SKILL_REFLECTION_TOOL_BAR:
         return False, f"only-{n_distinct}-distinct-tools"
+    # Gate 7: low-confidence answers don't yield reusable skills. If
+    # the verifier marked the turn as questionable (e.g. unbacked
+    # claim, contradictions, hallucinated source), spending another
+    # LLM trip to canonize the workflow is wasted — the skill would
+    # carry the same flaw forward.
+    if (
+        verifier_confidence is not None
+        and verifier_confidence < SKILL_REFLECTION_CONFIDENCE_FLOOR
+    ):
+        return False, f"low-confidence-{verifier_confidence}"
+    # Gate 8: pure-research turn (no state change, no delivery). The
+    # endpoint judge already concluded the answer didn't deliver an
+    # action shape — that's a Q-and-A turn, not a workflow. Skill
+    # reflection would just propose "search_knowledge then summarize"
+    # which is what the agent does by default.
+    if endpoint_was_met is False:
+        return False, "endpoint-not-met"
     for step in (getattr(agent, "_trace", None) or []):
         ev = getattr(step, "event", "") or ""
         if ev not in ("tool", "tool_error"):
@@ -1256,6 +1290,9 @@ def _post_turn_skill_reflection(
     task: str,
     answer: str,
     speaker_id: str,
+    *,
+    verifier_confidence: int | None = None,
+    endpoint_was_met: bool | None = None,
 ) -> None:
     """Out-of-band reflection: after a non-trivial turn finishes,
     spawn a small LLM call to decide whether to propose_skill.
@@ -1281,7 +1318,11 @@ def _post_turn_skill_reflection(
     by name, so propose_skill with an existing name replaces it
     (and the new version is still DISABLED until owner approves).
     """
-    should, reason = _should_reflect_for_skill(agent, answer)
+    should, reason = _should_reflect_for_skill(
+        agent, answer,
+        verifier_confidence=verifier_confidence,
+        endpoint_was_met=endpoint_was_met,
+    )
     if not should:
         try:
             agent.progress("skill_reflection", f"skipped: {reason}")
@@ -1629,6 +1670,17 @@ def run_unified(
     # CALL warning instead of re-running the handler).
     from .tool_registry import reset_per_turn_call_cache as _ptc_reset
     _ptc_reset()
+    # Open a per-turn endpoint-judgment cache. _decide_self_correction,
+    # the verifier-cap branch, and cap_confidence_for_endpoint all
+    # evaluate endpoint_met on identical (task, answer, tool_names) —
+    # ~3 LLM CLASSIFICATION trips for one turn without this. The
+    # cache makes the 2nd and 3rd calls instant. Audit 2026-06-10 (I3).
+    # We deliberately don't reset() at function exit: the next turn's
+    # begin_turn_cache() rebinds a fresh dict via ContextVar.set(), so
+    # the prior dict becomes garbage. Tracking the token through
+    # 1300+ lines of branches would just be footgun-bait.
+    from .endpoint_check import begin_turn_cache as _ec_begin
+    _ec_begin()
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles
@@ -2475,20 +2527,10 @@ def run_unified(
     # via the TSP rules + reasoning_routing, not a regex
     # post-processor.
 
-    # H3 enforcement: post-turn skill_creator reflection. Out-of-band
-    # LLM call that walks skill_creator's 3 gates against this turn's
-    # trace, then optionally fires propose_skill (with merge-existing
-    # support when a near-match is in the catalog). Gated tightly so
-    # most turns skip — only fires when ≥3 distinct tools ran AND
-    # the answer isn't a refusal/rewriter output AND no propose_skill
-    # was already called this turn. See `_should_reflect_for_skill`.
-    # Supervisor turns SKIP skill_reflection — they're internal
-    # plumbing, not workflows worth distilling into skills.
-    if not supervisor_mode:
-        try:
-            _post_turn_skill_reflection(agent, task, answer, speaker_id)
-        except Exception as _e:
-            log.warning("skill reflection top-level swallow: %s", _e)
+    # NOTE: skill_reflection is now fired AFTER verifier + endpoint cap
+    # so we can pass the confidence + endpoint-met flags into the gate
+    # (audit 2026-06-10 I4) — see the block below labeled "skill
+    # reflection (deferred)".
 
     # Per-iteration telemetry: walk the new CallRecord entries
     # produced inside the tool loop and emit a compact LLMCallDetail
@@ -2608,6 +2650,7 @@ def run_unified(
     # the answer delivers a file via MEDIA:. Otherwise clip the
     # confidence at 30 so the meta_learner sees the turn as a low-
     # confidence failure even when every claim was verifiable.
+    _was_met: bool | None = None  # consumed by skill_reflection gate below
     try:
         from .endpoint_check import (
             cap_confidence_for_endpoint, endpoint_met,
@@ -2649,6 +2692,26 @@ def run_unified(
                 vr.confidence = _capped
     except Exception as exc:
         log.debug("unified: endpoint check failed: %s", exc)
+
+    # H3 enforcement: post-turn skill_creator reflection (deferred from
+    # earlier in the function — audit 2026-06-10 I4). Out-of-band LLM
+    # call that walks skill_creator's 3 gates against this turn's
+    # trace, then optionally fires propose_skill (with merge-existing
+    # support when a near-match is in the catalog). Gated tightly so
+    # most turns skip — only fires when ≥3 distinct tools ran AND
+    # the answer isn't a refusal/rewriter output AND no propose_skill
+    # was already called this turn AND verifier confidence ≥ 50 AND
+    # endpoint was met. See `_should_reflect_for_skill`. Supervisor
+    # turns SKIP — internal plumbing, not workflows worth distilling.
+    if not supervisor_mode:
+        try:
+            _post_turn_skill_reflection(
+                agent, task, answer, speaker_id,
+                verifier_confidence=vr.confidence,
+                endpoint_was_met=_was_met,
+            )
+        except Exception as _e:
+            log.warning("skill reflection top-level swallow: %s", _e)
 
     # propose_self_modification empty-diff check (audit 2026-05-28).
     # When the agent claims to have submitted a proposal but the

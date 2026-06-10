@@ -28,6 +28,18 @@ from backend import failover as _fo
 from backend import jobs as _jobs
 
 
+@pytest.fixture(autouse=True)
+def _clear_failed_cache_between_tests():
+    """The recently-failed cache (audit 2026-06-10 I7) is module-level
+    state shared by every try_call invocation. Without resetting it,
+    a (provider, model) marked failed by one test gets silently
+    skipped in the next — flaky 'fallback not invoked' style failures.
+    """
+    _fo._clear_failed_cache()
+    yield
+    _fo._clear_failed_cache()
+
+
 # ─── Classifier ─────────────────────────────────────────────────────
 
 
