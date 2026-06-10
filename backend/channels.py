@@ -488,7 +488,17 @@ def _media_path_is_safe(p: Path) -> bool:
         data_root = paths.data_dir(require=False).resolve()
     except Exception:
         data_root = None
-    tmp_roots = [Path("/tmp"), Path("/var/tmp")]
+    # Cross-platform tempdir (audit 2026-06-10 N5): on Windows neither
+    # /tmp nor /var/tmp exist, so the safety check would silently
+    # refuse legitimate temp-file MEDIA: deliveries. tempfile.gettempdir()
+    # returns the OS-correct path; on Linux it's still /tmp so the
+    # production check behaviour is unchanged.
+    import tempfile
+    tmp_roots = [
+        Path(tempfile.gettempdir()).resolve(),
+        Path("/tmp"),
+        Path("/var/tmp"),
+    ]
     candidates = ([data_root] if data_root else []) + tmp_roots
     for root in candidates:
         try:

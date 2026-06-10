@@ -153,11 +153,24 @@ class Tool:
 @dataclass
 class ToolRegistry:
     tools: dict[str, Tool] = field(default_factory=dict)
+    # Audit 2026-06-10 (I2): cache rendered Anthropic-shape lists. The
+    # unified-loop calls to_anthropic_list once per LLM iteration with
+    # the same `filter_names` set; without cache that's N (=size of
+    # filter set) dict reads + dict builds per iteration × ~10
+    # iterations per turn. Invalidated on register / unregister.
+    _anthropic_cache: dict[Any, list[dict[str, Any]]] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
+
+    def _invalidate_cache(self) -> None:
+        if self._anthropic_cache:
+            self._anthropic_cache.clear()
 
     def register(self, tool: Tool) -> None:
         if tool.name in self.tools:
             raise ValueError(f"tool '{tool.name}' is already registered")
         self.tools[tool.name] = tool
+        self._invalidate_cache()
 
     def register_func(
         self,
@@ -178,7 +191,8 @@ class ToolRegistry:
         return tool
 
     def unregister(self, name: str) -> None:
-        self.tools.pop(name, None)
+        if self.tools.pop(name, None) is not None:
+            self._invalidate_cache()
 
     def names(self) -> list[str]:
         return sorted(self.tools.keys())
@@ -197,7 +211,21 @@ class ToolRegistry:
         ship only the base set + loaded bundles. `None` (default) keeps
         the legacy "return everything" behaviour for non-bundle callers
         (CLI, tests, the WebUI's tool catalog endpoint).
+
+        Audit 2026-06-10 (I2): result is cached by `filter_names`
+        identity. The cache is invalidated on register/unregister,
+        which are rare (startup + the very occasional skill upsert).
+        Per-turn lookups inside the LLM loop are now O(1).
         """
+        # Cache key: frozenset of filter or sentinel for "all". Same
+        # key under different orderings => same cached list.
+        cache_key = (
+            None if filter_names is None
+            else frozenset(filter_names)
+        )
+        cached = self._anthropic_cache.get(cache_key)
+        if cached is not None:
+            return cached
         out: list[dict[str, Any]] = []
         for name, tool in self.tools.items():
             if filter_names is not None and name not in filter_names:
@@ -207,6 +235,7 @@ class ToolRegistry:
                 "description": tool.description,
                 "input_schema": tool.input_schema,
             })
+        self._anthropic_cache[cache_key] = out
         return out
 
     def execute(self, name: str, arguments: dict[str, Any]) -> tuple[str, bool]:

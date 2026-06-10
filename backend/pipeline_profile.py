@@ -53,12 +53,15 @@ class PipelineProfile:
 
 
 def _profiles_root() -> Path:
-    """Lazy import of `paths` avoids a circular import on module load."""
+    """Lazy import of `paths` avoids a circular import on module load.
+    Cross-platform tempdir fallback (audit 2026-06-10 N5): "/tmp" did
+    not exist on Windows."""
     try:
         from . import paths
         return paths.data_dir(require=False) / "pipeline_profiles"
     except Exception:
-        return Path("/tmp/_hrant_pipeline_profiles_devstub")
+        import tempfile
+        return Path(tempfile.gettempdir()) / "_hrant_pipeline_profiles_devstub"
 
 
 def _history_root_for(pid: str) -> Path:

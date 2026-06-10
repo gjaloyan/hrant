@@ -124,8 +124,10 @@ def _config_path() -> Path:
         return paths.knowledge_dir() / "reasoning_routing.json"
     except Exception:
         # Pre-init fallback — tests that don't have data_dir wired
-        # use the default routing.
-        return Path("/tmp/_hrant_reasoning_routing_devstub.json")
+        # use the default routing. Cross-platform tempdir (audit
+        # 2026-06-10 N5): "/tmp" did not exist on Windows.
+        import tempfile
+        return Path(tempfile.gettempdir()) / "_hrant_reasoning_routing_devstub.json"
 
 
 def _load_from_disk() -> RoutingConfig:

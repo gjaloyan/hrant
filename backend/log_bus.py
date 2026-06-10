@@ -44,12 +44,15 @@ class LogEvent:
 
 def _logs_dir() -> Path:
     """Resolve the logs directory. Lazy import of `paths` avoids a
-    circular import on module load."""
+    circular import on module load. On Windows the previous "/tmp"
+    fallback did not exist — use `tempfile.gettempdir()` which is
+    cross-platform."""
     try:
         from . import paths
         return paths.data_dir(require=False) / "logs"
     except Exception:
-        return Path("/tmp/_hrant_logs_devstub")
+        import tempfile
+        return Path(tempfile.gettempdir()) / "_hrant_logs_devstub"
 
 
 def _current_log_file() -> Path:

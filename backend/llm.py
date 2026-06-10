@@ -27,6 +27,16 @@ import httpx
 from .config import CONFIG
 
 
+# Module-level logger. Audit 2026-06-10 (N1): the previous code only
+# defined `log` / `_log` inside individual functions, so call sites
+# like `Anthropic.call_with_tools`, `Router.call`, etc. that referenced
+# bare `log.warning(...)` would NameError at runtime. The function-scope
+# loggers in this file (post_with_retry, _call_with_safety_failover)
+# stay for their existing patterns, but new code should reach for this
+# module-level instance.
+log = logging.getLogger(__name__)
+
+
 class LLMError(RuntimeError):
     pass
 
@@ -591,8 +601,10 @@ class TokenTracker:
         except Exception:
             # Pre-init: return an in-memory-only sentinel so the load
             # is a no-op. Tests that don't have data_dir wired stay
-            # working.
-            return Path("/tmp/_hrant_tokens_today_devstub.json")
+            # working. tempfile.gettempdir() is cross-platform —
+            # the hardcoded "/tmp" predecessor didn't exist on Windows.
+            import tempfile
+            return Path(tempfile.gettempdir()) / "_hrant_tokens_today_devstub.json"
 
     def _load_today_from_disk(self) -> None:
         """Restore today's counters from disk on tracker init.

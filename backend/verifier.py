@@ -1,6 +1,5 @@
 """Self-verification of agent answers against loaded notes and tool outputs."""
 from __future__ import annotations
-import json
 import re
 
 from .llm import TaskType, router
@@ -184,14 +183,20 @@ def _extract_code_identifiers(tool_context: str, *, max_idents: int = 200) -> li
 
 _ANSWER_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b")
 _CONTEXT_LINES_AROUND = 5
-_FULL_KEEP_UNDER = 8000
+# Audit 2026-06-10 (I10): tightened caps. Was 8000 / 12000 — at those
+# values a fact-check on a heavy code-read turn could put 12 KB into the
+# verifier's classifier prompt, which is dominated by signal in the FIRST
+# 6 KB (the relevant snippets around mentioned identifiers). Lower
+# bounds: compress starting at 5 KB, cap output at 8 KB. Saves ~4 KB /
+# verifier call without measurably degrading claim-grounding.
+_FULL_KEEP_UNDER = 5000
 
 
 def _compress_tool_context(
     answer: str,
     tool_context: str,
     *,
-    max_chars: int = 12000,
+    max_chars: int = 8000,
 ) -> str:
     """Replace raw tool_context with snippets around identifiers the
     assistant's answer actually mentions. Falls back to the original

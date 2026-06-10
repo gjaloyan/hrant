@@ -78,8 +78,6 @@ from typing import Optional
 from .models import (
     AgentAnswer,
     LLMCallDetail,
-    ThinkingStep,
-    TokenUsage,
     ToolCallDetail,
     VerificationResult,
 )

@@ -15,6 +15,47 @@ from .tool_registry import get_registry
 
 
 log = logging.getLogger(__name__)
+
+
+def _check_owner(tool_name: str) -> tuple[str | None, str | None]:
+    """Centralized owner-role gate (audit 2026-06-10 N3).
+
+    Returns `(refusal_envelope, speaker_id)`:
+      - if the current speaker IS owner: `(None, "<speaker_id>")` and the
+        handler proceeds with `speaker_id` available for downstream use.
+      - otherwise: `("{json refusal envelope}", None)` and the handler
+        returns the envelope immediately.
+
+    Use the walrus form for the call site:
+
+        refuse, speaker_id = _check_owner("set_setting")
+        if refuse:
+            return refuse
+        # ... handler logic with `speaker_id` available
+
+    This collapses the previously-duplicated 14+ `if not is_owner(...)
+    return json.dumps(...)` blocks to two lines without losing access
+    to `speaker_id` (handlers like start_background_job need it for
+    `inherit_original_speaker` and similar).
+
+    Handlers with richer failure envelopes (e.g. agent_browser returns
+    exit_code/stdout/stderr fields, set_setting returns the key) keep
+    their inline check — this helper only abstracts the simple uniform
+    envelope.
+    """
+    from .roles import current_speaker, is_owner
+    sp = current_speaker()
+    if not is_owner(sp):
+        return (
+            json.dumps({
+                "ok": False,
+                "error": f"permission denied — {tool_name} is owner-only",
+            }, ensure_ascii=False),
+            None,
+        )
+    return (None, sp)
+
+
 from .tools.analyze_image import analyze_image as _analyze_image
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
@@ -556,15 +597,11 @@ def _start_background_job_handler(
     supervisor context with the literal user message that triggered
     the launch. `expected_outcome` describes what counts as done
     (e.g. 'report.json with ≥300 entries')."""
-    from .roles import current_speaker, is_owner
     from .tools import background_jobs as _bg
     from . import job_supervisor as _jsup
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — start_background_job is owner-only",
-        }, ensure_ascii=False)
+    refuse, speaker_id = _check_owner("start_background_job")
+    if refuse:
+        return refuse
     # Resolve retry-chain context. If we're inside a supervisor turn,
     # the active job is the parent unless the LLM explicitly passed
     # a different parent_job_id. Inherit `original_user_request`,
@@ -1217,15 +1254,11 @@ def _kick_supervisor_handler(job_id: str, reason: str = "") -> str:
 
     `reason` is a short note appended to the supervisor history so
     later audits know this was an LLM-driven manual trigger."""
-    from .roles import current_speaker, is_owner
     from .tools import background_jobs as _bg
     from . import job_supervisor as _jsup
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — kick_supervisor is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("kick_supervisor")
+    if refuse:
+        return refuse
     job = _bg.STORE.get(job_id)
     if job is None:
         return json.dumps({
@@ -1274,14 +1307,10 @@ def _list_background_jobs_handler(status: str = "", limit: int = 20) -> str:
     """List background jobs, optionally filtered by status
     ('running' / 'done' / 'error' / 'interrupted' / 'killed').
     OWNER-only."""
-    from .roles import current_speaker, is_owner
     from .tools import background_jobs as _bg
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — list_background_jobs is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("list_background_jobs")
+    if refuse:
+        return refuse
     try:
         items = _bg.list_jobs(
             status=(status or None),
@@ -1298,14 +1327,10 @@ def _list_background_jobs_handler(status: str = "", limit: int = 20) -> str:
 def _get_background_job_handler(job_id: str) -> str:
     """Fetch one job's full record (status, exit_code, stdout_tail,
     stderr_tail, etc.). OWNER-only."""
-    from .roles import current_speaker, is_owner
     from .tools import background_jobs as _bg
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — get_background_job is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("get_background_job")
+    if refuse:
+        return refuse
     try:
         j = _bg.get_job(job_id)
     except Exception as e:
@@ -1349,13 +1374,9 @@ def _sandbox_exec_handler(
     (bubblewrap > firejail > unshare > degraded). OWNER-only.
     `input_paths` is a comma-separated list of files to stage into
     the scratch dir before the command runs."""
-    from .roles import current_speaker, is_owner
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — sandbox_exec is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("sandbox_exec")
+    if refuse:
+        return refuse
     paths = [p.strip() for p in (input_paths or "").split(",") if p.strip()]
     try:
         result = _sandbox_exec(
@@ -1389,14 +1410,10 @@ def _propose_skill_handler(
     a future task contains any of them, the skill auto-injects its
     body into the system prompt for that turn.
     """
-    from .roles import current_speaker, is_owner
     from . import skills as _skills
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — propose_skill is owner-only",
-        }, ensure_ascii=False)
+    refuse, speaker_id = _check_owner("propose_skill")
+    if refuse:
+        return refuse
     if not (name or "").strip():
         return json.dumps({
             "ok": False, "error": "name is required",
@@ -1507,13 +1524,9 @@ def _propose_self_modification_handler(
     `description`: short summary of WHAT to change.
     `files`: comma-separated list of file paths to focus on (optional).
     `rationale`: WHY this change is being proposed."""
-    from .roles import current_speaker, is_owner
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — self-modification is owner-only",
-        }, ensure_ascii=False)
+    refuse, speaker_id = _check_owner("self-modification")
+    if refuse:
+        return refuse
     try:
         from . import self_modifier
         file_list = [f.strip() for f in (files or "").split(",") if f.strip()]
@@ -1790,14 +1803,10 @@ def _grant_telegram_access_handler(
     accepts them on the very next message. Replaces the old 4-step
     dance (read both files, decide, write, restart) with a single
     atomic action."""
-    from .roles import current_speaker, is_owner
     from . import access as _access
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — grant_telegram_access is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("grant_telegram_access")
+    if refuse:
+        return refuse
     uid = str(user_id or "").strip().lstrip("@")
     if not uid:
         return json.dumps({"ok": False, "error": "user_id is required"}, ensure_ascii=False)
@@ -1809,14 +1818,10 @@ def _revoke_telegram_access_handler(user_id: str) -> str:
     """Owner-only: symmetric counterpart of grant_telegram_access.
     Drops the user back to `guest` in roles.json and removes them
     from channels.json::allowed_users."""
-    from .roles import current_speaker, is_owner
     from . import access as _access
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — revoke_telegram_access is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("revoke_telegram_access")
+    if refuse:
+        return refuse
     uid = str(user_id or "").strip().lstrip("@")
     if not uid:
         return json.dumps({"ok": False, "error": "user_id is required"}, ensure_ascii=False)
@@ -1829,14 +1834,10 @@ def _approve_pairing_handler(code_or_user_id: str, label: str = "") -> str:
     unknown Telegram user wrote to the bot. Looks up the request by
     pairing code OR by user_id, grants `trusted` role atomically,
     clears the pending request."""
-    from .roles import current_speaker, is_owner
     from . import access as _access
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — approve_pairing is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("approve_pairing")
+    if refuse:
+        return refuse
     ident = str(code_or_user_id or "").strip()
     if not ident:
         return json.dumps({
@@ -1852,14 +1853,10 @@ def _list_pending_pairings_handler() -> str:
     """Owner-only: list every pending pairing request — code, user
     info, first-message snippet, age. Useful when the owner missed
     the original DM notification."""
-    from .roles import current_speaker, is_owner
     from . import access as _access
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — list_pending_pairings is owner-only",
-        }, ensure_ascii=False)
+    refuse, _ = _check_owner("list_pending_pairings")
+    if refuse:
+        return refuse
     return json.dumps(
         {"ok": True, "pending": _access.list_pending_pairings()},
         ensure_ascii=False,
@@ -1876,13 +1873,10 @@ def _list_telegram_access_handler(role: str = "") -> str:
     `role` filter is optional — pass 'owner' / 'trusted' / 'guest'
     to narrow the result, omit for everyone.
     """
-    from .roles import current_speaker, is_owner, list_roles
-    speaker_id = current_speaker()
-    if not is_owner(speaker_id):
-        return json.dumps({
-            "ok": False,
-            "error": "permission denied — list_telegram_access is owner-only",
-        }, ensure_ascii=False)
+    from .roles import list_roles
+    refuse, _ = _check_owner("list_telegram_access")
+    if refuse:
+        return refuse
     state = list_roles()
     owner_ids = set(state.get("owner_speaker_ids") or [])
     speakers = state.get("speakers") or {}
