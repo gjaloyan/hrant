@@ -115,6 +115,49 @@ def test_callback_for_already_terminal_job_does_not_spawn(
     assert spawn_count["n"] == 0
 
 
+def test_three_concurrent_callbacks_only_one_spawn(
+    isolated_jobs, monkeypatch,
+):
+    """Re-audit 2026-06-10 (IMPORTANT): the two-callback test proves
+    sequential same-job callbacks dedup, but the actual contention
+    pattern under load is N>=3 concurrent callbacks (runner finally +
+    heartbeat watchdog + on_done subscribers on the same channel).
+    The in-flight claim must cover the entire spawn window, not just
+    the lookup window."""
+    from backend import job_supervisor as _jsup
+
+    spawn_count = {"n": 0}
+    spawn_lock = threading.Lock()
+    barrier = threading.Event()
+
+    def _slow_run(job):
+        with spawn_lock:
+            spawn_count["n"] += 1
+        barrier.wait(timeout=2.0)
+
+    monkeypatch.setattr(_jsup, "_run_supervisor_turn", _slow_run)
+    _jsup._in_flight_supervisor.clear()
+
+    job = _make_running_job()
+
+    threads = [
+        threading.Thread(target=_jsup.on_job_completed, args=(job,))
+        for _ in range(3)
+    ]
+    for t in threads:
+        t.start()
+    # Let spawns enter _slow_run, then release the barrier so daemons
+    # can exit and the finally{} releases the claim.
+    time.sleep(0.1)
+    barrier.set()
+    for t in threads:
+        t.join(timeout=1.5)
+
+    assert spawn_count["n"] == 1, (
+        f"3-way contention must spawn EXACTLY once, got {spawn_count['n']}"
+    )
+
+
 def test_in_flight_set_cleared_after_run(isolated_jobs, monkeypatch):
     """After the supervisor turn returns the in-flight claim is
     released, so a LATER (legitimate) re-run for a different reason

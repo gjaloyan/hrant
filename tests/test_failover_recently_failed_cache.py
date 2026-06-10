@@ -177,6 +177,52 @@ def test_ttl_expiry_allows_retry(monkeypatch):
         assert ("p-a", "m-a") not in _fo._failed_cache
 
 
+def test_concurrent_try_call_cache_coherence():
+    """Re-audit 2026-06-10 (IMPORTANT): two threads invoking try_call
+    concurrently on overlapping (provider, model) pairs must produce a
+    coherent cache state without deadlocking. The RLock contention
+    path between _mark_failed / _is_recently_failed / _invalidate_failed
+    is untested in the single-threaded suite."""
+    import threading
+    from backend import failover as _fo
+    from backend.llm import LLMError
+
+    state = {"a_should_fail": True}
+    result: dict = {}
+
+    def _flaky_a():
+        if state["a_should_fail"]:
+            raise LLMError("429 rate limit")
+        return "ok-a"
+
+    def _ok_b():
+        return "ok-b"
+
+    def _run(tag):
+        try:
+            result[tag] = _fo.try_call([
+                ("p-a", "m-a", _flaky_a),
+                ("p-b", "m-b", _ok_b),
+            ])
+        except Exception as e:
+            result[tag] = e
+
+    t1 = threading.Thread(target=_run, args=("t1",))
+    t2 = threading.Thread(target=_run, args=("t2",))
+    t1.start()
+    t2.start()
+    t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
+
+    # Both threads completed (no deadlock).
+    assert not t1.is_alive() and not t2.is_alive(), "deadlock in failover"
+    # Both got a valid result (one of the two fallback values).
+    for tag in ("t1", "t2"):
+        assert result.get(tag) in ("ok-a", "ok-b"), (
+            f"thread {tag} returned unexpected value: {result.get(tag)}"
+        )
+
+
 def test_auth_error_gets_long_ttl(monkeypatch):
     """auth_error TTL is meaningfully longer than rate_limit — an
     expired key doesn't heal in 30 s and the user has to re-edit

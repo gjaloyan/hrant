@@ -11,6 +11,7 @@ False, so unset-context callers and unknown speakers both refuse.
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -119,3 +120,41 @@ def test_apply_proceeds_past_role_gate_for_owner(tmp_path, monkeypatch):
     msg = (out.get("message") or "").lower()
     assert "permission denied" not in msg
     assert "owner" not in msg or "applied" in msg or "ok" in msg or msg == ""
+
+
+def test_apply_in_bare_thread_refuses(tmp_path, monkeypatch):
+    """Re-audit 2026-06-10 (CRITICAL): the bug premise of C2 is that
+    a bare `threading.Thread` does NOT inherit the speaker ContextVar
+    from the main thread — autonomic loops, supervisor turns, scheduled
+    tasks all spawn via plain Thread without context propagation. Even
+    if main thread is the owner, the bg thread must see sp=None and
+    REFUSE. The earlier `test_apply_refuses_when_speaker_context_unset`
+    only proves the same-thread None case; this one proves the actual
+    threading model the fix targets."""
+    from backend import roles
+    sm, pid = _make_isolated_self_modifier(tmp_path, monkeypatch)
+
+    # Main thread = owner. The bg thread will fork off WITHOUT this
+    # context — proving the gate fires even when "the caller" upstream
+    # was legitimate.
+    roles.set_current_speaker("webui:default")
+
+    result: dict = {}
+
+    def _bg():
+        # No copy_context() / no ContextVar.set() — this is exactly the
+        # threading pattern in job_runner._fire_done, supervisor turn
+        # spawns, scheduled_messages.deliver(), etc.
+        result["out"] = sm.apply(pid)
+
+    t = threading.Thread(target=_bg)
+    t.start()
+    t.join(timeout=2.0)
+
+    assert "out" in result, "bg thread did not complete"
+    out = result["out"]
+    assert out.get("ok") is False
+    msg = (out.get("message") or "").lower()
+    assert "permission" in msg or "owner" in msg or "denied" in msg, (
+        f"bg-thread apply must refuse; got: {out}"
+    )

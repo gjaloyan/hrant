@@ -16,6 +16,8 @@ Pinned behaviour:
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 from unittest.mock import patch
 
@@ -155,3 +157,55 @@ def test_conversation_save_uses_atomic_write(tmp_path: Path, monkeypatch):
     assert isinstance(captured["data"], list)
     assert len(captured["data"]) == 1
     assert captured["data"][0]["user"] == "hi"
+
+
+def test_tmp_cleanup_after_replace_failure(tmp_path: Path):
+    """Re-audit 2026-06-10 (IMPORTANT): when Path.replace() raises
+    AFTER the tmp file is fully written, the tmp file is left dangling.
+    A subsequent SUCCESSFUL write must NOT trip over the residue —
+    it must complete cleanly and leave NO .tmp behind."""
+    from backend.paths import write_atomic_json
+
+    target = tmp_path / "store.json"
+    target.write_text('{"v": "old"}', encoding="utf-8")
+    tmp = target.with_suffix(target.suffix + ".tmp")
+
+    # First attempt: tmp gets written, replace() raises.
+    real_replace = Path.replace
+
+    def _boom(self, other):
+        raise OSError("simulated rename failure (e.g. shared lock)")
+
+    with patch.object(Path, "replace", _boom):
+        with pytest.raises(OSError):
+            write_atomic_json(target, {"v": "new"})
+
+    # Confirm the original file is intact.
+    assert json.loads(target.read_text(encoding="utf-8")) == {"v": "old"}
+
+    # Subsequent successful write completes and leaves no .tmp residue.
+    # (write_text on tmp overwrites the stale content; replace() lands
+    # the new payload; tmp must not survive.)
+    write_atomic_json(target, {"v": "after"})
+    assert json.loads(target.read_text(encoding="utf-8")) == {"v": "after"}
+    assert not tmp.exists(), (
+        f"stale .tmp lingered after recovery: {tmp}"
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX-only file mode bits")
+def test_chmod_actually_applied_posix(tmp_path: Path):
+    """Re-audit 2026-06-10 (IMPORTANT): when mode=0o600 is passed,
+    the FINAL file's mode is 0o600 (not just that the call didn't
+    raise — earlier `test_chmod_when_mode_given` only smoke-tested
+    that). 0o600 matters for secret stores: a world-readable
+    failover_config.json would leak API keys."""
+    from backend.paths import write_atomic_json
+
+    target = tmp_path / "secret.json"
+    write_atomic_json(target, {"k": "v"}, mode=0o600)
+
+    actual = stat.S_IMODE(target.stat().st_mode)
+    assert actual == 0o600, (
+        f"expected mode 0o600, got 0o{actual:o}"
+    )
