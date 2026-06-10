@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Literal
 
-from .knowledge_graph import GRAPH, extract_relations_from_note_body, parse_entity_relations
+from .knowledge_graph import GRAPH, extract_relations_from_note_body
 from .knowledge_manager import KM, _slug
 from .llm import TaskType, router
 from .models import Category, Note

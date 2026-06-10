@@ -39,7 +39,6 @@ from __future__ import annotations
 import json
 import logging
 import secrets
-import shlex
 import subprocess
 import threading
 import time

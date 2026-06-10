@@ -170,10 +170,6 @@ def _check_autonomic() -> dict:
         except OSError:
             pass
 
-        tick_log = _os.environ.get(
-            "AUTONOMIC_TICK_LOG_PATH",
-            "knowledge/autonomic/tick_log.jsonl",
-        )
         from .. import paths as _paths
         tl_path = _paths.data_dir(require=False) / "knowledge" / "autonomic" / "tick_log.jsonl"
         # Honour AUTONOMIC_TICK_LOG_PATH if it's an absolute override.

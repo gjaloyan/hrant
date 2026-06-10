@@ -25,7 +25,7 @@ import os
 import time
 from collections import deque
 from threading import Lock
-from typing import Deque, Optional
+from typing import Deque
 
 from fastapi import HTTPException, Request
 

@@ -22,7 +22,6 @@ backend/llm.py `_build_user_content` per class).
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 log = logging.getLogger(__name__)
 

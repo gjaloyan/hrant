@@ -27,7 +27,7 @@ from .embedder import EMBEDDER
 from .knowledge_graph import GRAPH, KnowledgeGraph
 from .knowledge_manager import KM, _slug
 from .models import IndexEntry
-from .searcher import SEARCHER, SearchHit, Searcher
+from .searcher import SEARCHER, Searcher
 from .vector_store import VECTOR_STORE, VectorStore
 
 

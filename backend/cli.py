@@ -28,7 +28,6 @@ Design notes:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 from pathlib import Path
@@ -489,7 +488,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 # --- service / gateway (Phase 14C) ---------------------------------------
 # Audit #21: handlers + platform helpers extracted to cli_gateway.py.
-from .cli_gateway import (  # noqa: E402
+# NOTE: the underscore helpers are re-exported on purpose —
+# tests/test_gateway_install.py exercises them via `cli_mod._render...`
+# attribute access, so they must stay importable from this module.
+from .cli_gateway import (  # noqa: E402,F401
     _detect_platform,
     _gateway_service_running,
     _render_service_template,

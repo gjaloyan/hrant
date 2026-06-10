@@ -10,9 +10,7 @@ opening the WebUI Providers tab after first run.
 """
 from __future__ import annotations
 
-import json
 import logging
-import os
 from datetime import datetime
 from typing import Optional
 
@@ -94,7 +92,7 @@ def auto_register_openai(api_key: str) -> Optional[dict]:
     if not api_key.strip():
         return None
     try:
-        from .providers import PROVIDERS_PATH, _load_providers, _save_providers
+        from .providers import _load_providers, _save_providers
     except Exception as e:
         log.warning("provider auto-register failed at import: %s", e)
         return None

@@ -20,7 +20,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import base64
 import hashlib
@@ -1608,7 +1608,6 @@ def test_provider(provider: dict) -> dict:
             return {"ok": False, "error": "Missing AWS access_key_id / secret_access_key"}
         region = aws.get("region") or "us-east-1"
         try:
-            import boto3
             cli = boto3.client(
                 "bedrock",
                 region_name=region,

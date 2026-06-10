@@ -49,7 +49,6 @@ import contextvars
 import logging
 import threading
 import time
-from typing import Optional
 
 from .tools.background_jobs import BackgroundJob, STORE
 

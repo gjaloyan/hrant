@@ -1762,7 +1762,6 @@ def run_unified(
     # installing things proactively that the skill might never
     # exercise during the turn.
     auto_proposed: list[dict] = []
-    auto_propose_deferred: int = 0
     if matched_skills:
         seen_pairs: set[tuple[str, str]] = set()
         for sk in matched_skills:
@@ -2466,7 +2465,7 @@ def run_unified(
             on_tool_call=_on_tool_call,
             attachments=attachments or None,
         )
-    except LLMError as e:
+    except LLMError:
         # Bubble up — outer run() / SSE handler classifies and
         # surfaces to the user.
         raise

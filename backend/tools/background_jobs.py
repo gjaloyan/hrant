@@ -27,7 +27,6 @@ import json
 import logging
 import os
 import secrets
-import shlex
 import subprocess
 import threading
 import time
@@ -518,7 +517,6 @@ def start_job(
         )
 
     def _runner() -> None:
-        nonlocal job
         proc: Optional[subprocess.Popen] = None
         stdout_buf = b""
         stderr_buf = b""

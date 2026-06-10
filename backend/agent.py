@@ -13,7 +13,7 @@ from .config import CONFIG
 from .conversation import CONVERSATION
 from .core_memory import CORE
 from .knowledge_manager import _slug
-from .llm import TOKENS
+from .llm import TaskType, TOKENS
 from .models import (
     AgentAnswer,
     Note,
@@ -29,7 +29,6 @@ from .project_mode import PROJECTS
 from .mcp_client import MCP, MCPServerConfig
 from .skills import SKILLS
 from .tool_registry import get_registry
-from .verifier import verify
 
 # Re-export SOLVER_SYSTEM_BASE so callers that do
 # `from backend.agent import SOLVER_SYSTEM_BASE` keep working.

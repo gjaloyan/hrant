@@ -36,7 +36,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Optional
 
 
 # Maximum bytes captured from stdout / stderr each. A runaway snippet

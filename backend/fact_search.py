@@ -24,10 +24,9 @@ import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Optional
 
 from .embedder import EMBEDDER
-from .vector_store import VectorStore, cosine
+from .vector_store import VectorStore
 
 log = logging.getLogger(__name__)
 

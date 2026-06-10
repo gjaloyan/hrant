@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import paths
-from .config import CONFIG
 
 log = logging.getLogger(__name__)
 
@@ -381,7 +380,6 @@ class _TgProgressStream:
         with self._lock:
             entries = list(self._entries)
             stage = self._stage_label
-            total_seen = self._total_seen
         if not entries:
             return stage
         from .tg_format import format_tool_entry_line as _line
@@ -1288,7 +1286,6 @@ class TelegramBot:
                         log.warning("Telegram photo download failed: %s", e)
 
                 # Voice → store + try to transcribe
-                user_sent_voice = bool(getattr(msg, "voice", None))
                 if getattr(msg, "voice", None):
                     try:
                         f = await msg.voice.get_file()
@@ -2150,7 +2147,7 @@ def _log_channel_message(
     Each Telegram user has their own session because each gets a
     distinct `speaker_id`."""
     try:
-        from .sessions import DEFAULT_SPEAKER, SESSIONS
+        from .sessions import SESSIONS
         sp = speaker_id or f"{channel_id}:{user}"
         turn = {
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),

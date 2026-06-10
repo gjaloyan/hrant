@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Callable
 
 from ..llm import LLMError, TaskType, router
 from ..roles import current_speaker, is_owner
-from .roles import RoleConfig, available_role_names, get_role
-from .store import SUBAGENT_STORE, SubagentSession
+from .roles import available_role_names, get_role
+from .store import SUBAGENT_STORE
 
 
 # Hard cap shared by the dispatcher + the recursive-delegation guard.

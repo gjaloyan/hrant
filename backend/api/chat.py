@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from pathlib import Path
 from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -29,7 +28,6 @@ from ..job_runner import run_tracked
 from ..llm import TOKENS
 from ..models import ChatRequest
 from ..project_mode import PROJECTS
-from ..sessions import SESSIONS  # noqa: F401 — re-exported by some legacy imports
 from ._auth import require_owner_for_writes
 from ._rate_limit import check_chat_rate
 

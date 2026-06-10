@@ -21,7 +21,6 @@ Edge kinds:
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any
 
 
 NODE_KINDS: tuple[str, ...] = ("fact", "topic", "skill", "project", "entity")

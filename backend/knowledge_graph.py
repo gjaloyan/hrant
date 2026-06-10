@@ -633,9 +633,8 @@ class KnowledgeGraph:
         Useful for "show me Max's history" — returns every fact ever
         recorded about an entity, ordered chronologically.
         """
-        entries = self.query_entity(entity, as_of=None, direction="both")
-        # Include closed edges too — query_entity with as_of=None only
-        # returns open ones; for timeline we want everything.
+        # Walk self._edges directly: query_entity(as_of=None) returns
+        # only OPEN edges, but a timeline wants closed ones too.
         entity_n = self._normalize(entity)
         all_edges: list[dict] = []
         with self._LOCK:

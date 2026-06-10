@@ -21,7 +21,7 @@ The set is intentionally small. New roles must justify themselves
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

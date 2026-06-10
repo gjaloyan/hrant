@@ -406,7 +406,6 @@ def grant_telegram_access(
     # find the Telegram channel(s) and append the user id.
     try:
         from . import channels as _channels
-        cfg_path = _channels._resolve_channels_path()
         chs = _channels._load_channels()
         changed = False
         for ch in chs:

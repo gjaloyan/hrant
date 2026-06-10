@@ -30,12 +30,10 @@ validator + a reset hook, not just a JSON write).
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 

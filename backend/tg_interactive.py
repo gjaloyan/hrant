@@ -31,7 +31,7 @@ import logging
 import secrets
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Sequence
+from typing import Any, Callable, Optional
 
 log = logging.getLogger(__name__)
 

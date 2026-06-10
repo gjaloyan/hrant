@@ -26,7 +26,6 @@ MCP may not be needed.
 """
 from __future__ import annotations
 import asyncio
-import json
 import threading
 from concurrent.futures import Future
 from dataclasses import dataclass, field
@@ -40,7 +39,7 @@ try:
 except Exception:  # pragma: no cover
     _MCP_AVAILABLE = False
 
-from .tool_registry import Tool, ToolRegistry, get_registry
+from .tool_registry import ToolRegistry, get_registry
 
 
 # ---------- single server config ----------

@@ -14,7 +14,6 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
-from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 from urllib.request import urlopen

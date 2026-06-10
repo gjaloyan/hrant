@@ -1156,7 +1156,6 @@ def _complete_supervisor_handler(
             from . import channels as _ch
             cm = getattr(_ch, "CHANNELS", None)
             if cm is not None:
-                tg = cm.get_channel("telegram") if hasattr(cm, "get_channel") else None
                 # The bot send path is internal — go directly through
                 # the existing _send_with_buttons helper on the
                 # Telegram channel instance.

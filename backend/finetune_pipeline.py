@@ -6,7 +6,6 @@ All imports are inside methods so the module is importable without these depende
 from __future__ import annotations
 import json
 import subprocess
-from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -326,9 +325,6 @@ This will register the model in Ollama as `{prefix}-{tag}`.
         src = Path(gguf_path)
         if not src.exists():
             raise FileNotFoundError(f"gguf not found: {gguf_path}")
-
-        # If a file was passed — use its directory; if a directory — look for gguf inside it
-        gguf_dir = src if src.is_dir() else src.parent
 
         if tag is None:
             tag = VERSIONS.next_tag()
