@@ -129,6 +129,13 @@ def qualifies(artifact: dict) -> tuple[bool, str]:
     task = str(artifact.get("user") or "").strip()
     if len(task) < _MIN_TASK_CHARS:
         return False, "task-too-short"
+    # Supervisor turns reach the backfill path with no explicit flag
+    # on the artifact — their synthetic prompt prefix is the only
+    # marker. They are internal plumbing, not reusable experience
+    # (caught on prod 2026-06-11: a BACKGROUND_JOB_COMPLETED turn
+    # leaked into the index).
+    if task.startswith("BACKGROUND_JOB_COMPLETED"):
+        return False, "supervisor-turn"
     if not str(artifact.get("answer") or "").strip():
         return False, "empty-answer"
     conf = int(artifact.get("confidence") or 0)
@@ -221,14 +228,33 @@ def recall_similar(task: str, limit: int = 2) -> list[dict]:
     status = EMBEDDER.status()
     if status.get("backend") in (None, "disabled"):
         return []
+    store = get_store()
+    if store.count() == 0:
+        return []
+    # Query-time compatibility check (prod bug 2026-06-11): when the
+    # embedder backend flips (auto-probe fell from ollama/bge-m3/1024
+    # to openai/1536 between processes), the query vector lives in a
+    # different space than the stored ones — cosine on mismatched
+    # dims returns 0.0 and recall silently degrades to "no results".
+    # Refuse loudly instead; the nightly backfill's wipe-and-restamp
+    # is the write-path that resolves the mismatch.
+    if not store.is_compatible(
+        status.get("dim") or 0,
+        status.get("backend") or "",
+        status.get("model") or "",
+    ):
+        log.warning(
+            "trajectory recall skipped: store stamped %s but embedder "
+            "is %s/%s/%s — backend flipped?",
+            store.stats(), status.get("backend"), status.get("model"),
+            status.get("dim"),
+        )
+        return []
     try:
         qvec = EMBEDDER.embed(task)
     except Exception:
         return []
     if not qvec:
-        return []
-    store = get_store()
-    if store.count() == 0:
         return []
     # Over-fetch: some hits fall below the floor or lost their
     # artifact to retention sweeps.

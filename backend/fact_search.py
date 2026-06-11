@@ -196,15 +196,35 @@ def search_facts(query: str, limit: int = 5) -> list[dict]:
     status = EMBEDDER.status()
     if status.get("backend") in (None, "disabled"):
         return []
+
+    store = get_store()
+    if store.count() == 0:
+        return []
+    # Query-time compatibility check (prod bug 2026-06-11, found via
+    # trajectory_memory which copied this module's pattern): when the
+    # auto-probe embedder flips backends between processes (ollama/
+    # bge-m3/1024 -> openai/1536), the query vector lands in a
+    # different space and every cosine comes back 0.0 — fact recall
+    # silently returns nothing while looking healthy. Refuse loudly;
+    # FIRE_FACT_EMBEDDING_BACKFILL's wipe-and-restamp is the write
+    # path that resolves a genuine backend migration.
+    if not store.is_compatible(
+        status.get("dim") or 0,
+        status.get("backend") or "",
+        status.get("model") or "",
+    ):
+        log.warning(
+            "fact search skipped: store stamped %s but embedder is "
+            "%s/%s/%s — backend flipped?",
+            store.stats(), status.get("backend"), status.get("model"),
+            status.get("dim"),
+        )
+        return []
     try:
         qvec = EMBEDDER.embed(query)
     except Exception:
         return []
     if not qvec:
-        return []
-
-    store = get_store()
-    if store.count() == 0:
         return []
     scored = store.search(qvec, k=max(1, min(int(limit) or 5, 50)))
     if not scored:

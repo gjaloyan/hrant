@@ -219,6 +219,46 @@ def test_disabled_embedder_degrades_everywhere(traj, monkeypatch):
     assert stats["ok"] is False
 
 
+def test_supervisor_synthetic_prompt_does_not_qualify(traj):
+    """BACKGROUND_JOB_COMPLETED turns are supervisor plumbing, not
+    reusable experience (leaked into the prod index 2026-06-11)."""
+    tm, _ = traj
+    art = _artifact(
+        "BACKGROUND_JOB_COMPLETED: bg-9f3b46294076 label: Portfolio "
+        "benchmark suite finished",
+    )
+    ok, reason = tm.qualifies(art)
+    assert ok is False and reason == "supervisor-turn"
+
+
+def test_recall_refuses_on_backend_flip(traj, monkeypatch):
+    """Prod bug 2026-06-11: store stamped ollama/1024, query embedded
+    by openai/1536 — every cosine = 0.0, recall silently empty. The
+    fix refuses the incompatible query instead of zero-matching."""
+    tm, turns = traj
+    task_a = "run the terminal benchmark suite on two tasks"
+    art = _artifact(task_a)
+    (turns / "t1.json").write_text(json.dumps(art), encoding="utf-8")
+    tm.index_turn("t1", art)  # stamped fake-3d / dim 3
+
+    class _FlippedEmbedder:
+        def status(self):
+            return {"backend": "openai", "dim": 1536,
+                    "model": "text-embedding-3-small"}
+
+        def embed(self, text):  # pragma: no cover — must not be reached
+            raise AssertionError(
+                "query must be refused BEFORE embedding on a flip",
+            )
+
+    monkeypatch.setattr(tm, "EMBEDDER", _FlippedEmbedder())
+    assert tm.recall_similar(
+        "please run terminal-bench smoke with 2 tasks",
+    ) == []
+    # Store untouched — refusal is read-only.
+    assert tm.get_store().has("t1")
+
+
 def test_embedder_model_change_wipes_incompatible_store(traj, monkeypatch):
     """Vectors from different embedder models don't share a space —
     a model change must wipe and restamp, not mix."""
