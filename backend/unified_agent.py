@@ -2779,6 +2779,42 @@ def run_unified(
     except Exception as exc:
         log.debug("unified: endpoint check failed: %s", exc)
 
+    # Critic-revise pass (AGI roadmap, 2026-06-11). When the verifier
+    # found CONTENT problems (real contradictions / unsupported claims
+    # — delivery markers excluded), one bounded revision call with a
+    # read-only tool subset tries to fix the claims, the revision is
+    # re-verified, and the better of {original, revised} ships. Placed
+    # BEFORE skill_reflection so the reflection gates on the improved
+    # confidence. ask_user turns skip — the answer is about to be
+    # replaced by the question payload anyway.
+    if not supervisor_mode and not _pending_question_id["v"]:
+        try:
+            from .answer_critic import revise_and_pick, should_critique
+            _crit_fire, _crit_why = should_critique(vr, answer=answer or "")
+            if _crit_fire:
+                agent.progress("self_critic", f"revising: {_crit_why}")
+                _revised, _new_vr = revise_and_pick(
+                    task=task,
+                    answer=answer or "",
+                    vr=vr,
+                    system_prompt=system_prompt,
+                    tool_context="\n\n".join(tool_outputs),
+                    on_tool_call=_on_tool_call,
+                )
+                if _revised is not None:
+                    answer = _revised
+                    vr = _new_vr
+                    agent.progress(
+                        "self_critic",
+                        f"revision kept (confidence {vr.confidence})",
+                    )
+                else:
+                    agent.progress(
+                        "self_critic", "revision rejected — original kept",
+                    )
+        except Exception as _e:
+            log.warning("self-critic pass failed (non-fatal): %s", _e)
+
     # H3 enforcement: post-turn skill_creator reflection (deferred from
     # earlier in the function — audit 2026-06-10 I4). Out-of-band LLM
     # call that walks skill_creator's 3 gates against this turn's

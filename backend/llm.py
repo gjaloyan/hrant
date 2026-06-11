@@ -777,6 +777,12 @@ class TaskType(Enum):
     # complex_solving, which is overkill for reflection). Audit
     # follow-up 2026-05-21 — previously masqueraded as complex_solving.
     SKILL_REFLECTION = "skill_reflection"
+    # Post-verifier critic-revise pass (AGI roadmap 2026-06-11): the
+    # answer gets one evidence-grounded revision when the verifier
+    # found contradictions / unsupported claims. Separate member so
+    # telemetry attributes the cost and the reasoning router's
+    # existing "self_critic": "high" entry finally has a consumer.
+    SELF_CRITIC = "self_critic"
 
 
 MODEL_A_TASKS = {
