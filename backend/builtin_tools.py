@@ -2193,6 +2193,69 @@ def register_builtin_tools() -> None:
         handler=_save_user_fact_handler,
     )
 
+    from .tools.plan_scratchpad import set_plan_handler, update_plan_handler
+
+    reg.register_func(
+        name="set_plan",
+        description=(
+            "Declare a checklist for a MULTI-STEP task (3+ distinct "
+            "steps) BEFORE starting work. The result echoes the full "
+            "checklist; it stays visible in your context for the rest "
+            "of the turn. The turn will NOT be accepted as finished "
+            "while steps are still pending — mark each one via "
+            "`update_plan` as you complete it. Don't use for single-"
+            "action tasks; the ceremony costs more than it saves."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Short imperative step descriptions, in "
+                        "execution order. Max 12."
+                    ),
+                },
+            },
+            "required": ["steps"],
+        },
+        handler=set_plan_handler,
+    )
+
+    reg.register_func(
+        name="update_plan",
+        description=(
+            "Mark one step of this turn's plan as done or skipped "
+            "(skipping requires a `note` explaining why). Call it "
+            "right after finishing each step — the result echoes the "
+            "updated checklist so you always see what remains."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "integer",
+                    "description": "1-based index from the checklist.",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["done", "skipped", "pending"],
+                    "description": "New status for the step.",
+                },
+                "note": {
+                    "type": "string",
+                    "description": (
+                        "Why (required for skipped; optional "
+                        "evidence note for done)."
+                    ),
+                },
+            },
+            "required": ["step", "status"],
+        },
+        handler=update_plan_handler,
+    )
+
     reg.register_func(
         name="search_knowledge",
         description=(

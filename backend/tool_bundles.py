@@ -76,6 +76,10 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "analyze_image",
     # Interaction
     "ask_user", "save_user_fact",
+    # Plan scratchpad (2026-06-11) — multi-step checklist the model
+    # declares up front and ticks off; self-correction refuses a
+    # final answer while steps are still pending.
+    "set_plan", "update_plan",
     # Jobs — full read+write so supervisor turns + any long-running
     # launch work without a `load_tool_bundle("bench")` dance.
     # Moved here 2026-05-27 (the former `bench` bundle is gone).

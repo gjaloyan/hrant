@@ -1579,6 +1579,32 @@ def _decide_self_correction(
             "answer while any test is red."
         )
         return "tests-exist-not-run", corrective
+    # Plan-incomplete backstop (2026-06-11). Deterministic and free —
+    # checked BEFORE the LLM-judge branches. When the agent declared
+    # a checklist via set_plan this turn and is now synthesizing with
+    # steps still pending, the work is structurally unfinished no
+    # matter how confident the prose sounds. One corrective re-prompt
+    # listing exactly what remains; the agent finishes the steps,
+    # marks them skipped with a reason, or honestly escalates.
+    try:
+        from .tools.plan_scratchpad import unfinished_steps
+        _pending = unfinished_steps()
+    except Exception:
+        _pending = []
+    if _pending:
+        listed = "\n".join(f"  {i}. {text}" for i, text in _pending[:8])
+        corrective = (
+            f"Your plan for this turn still has {len(_pending)} "
+            f"unfinished step(s):\n{listed}\n\n"
+            f"Do NOT finalize yet. For each remaining step, either "
+            f"(a) execute it now and mark it via "
+            f"`update_plan(step, 'done')`, or (b) mark it "
+            f"`update_plan(step, 'skipped', note='why')` if it is "
+            f"genuinely not needed, or (c) if you are blocked, say so "
+            f"explicitly and offer options via `ask_user`. Then write "
+            f"the final answer reflecting the TRUE completion state."
+        )
+        return f"plan-incomplete — {len(_pending)} pending", corrective
     from .endpoint_check import (
         _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
         endpoint_met,
@@ -1700,6 +1726,11 @@ def run_unified(
     # 1300+ lines of branches would just be footgun-bait.
     from .endpoint_check import begin_turn_cache as _ec_begin
     _ec_begin()
+    # Reset the per-turn plan scratchpad (2026-06-11) — each turn
+    # starts plan-less; set_plan/update_plan mutate it mid-turn and
+    # _decide_self_correction refuses synthesis with pending steps.
+    from .tools.plan_scratchpad import reset_plan as _plan_reset
+    _plan_reset()
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles

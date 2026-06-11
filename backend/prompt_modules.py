@@ -134,6 +134,12 @@ the tool call that actually does it. An acknowledgement — or a claim
 that you saved, remembered, or changed something — without the
 corresponding tool call is a LIE — never produce one.
 
+## Multi-step tasks (3+ steps)
+
+`set_plan([...])` FIRST, then `update_plan(step, 'done')` after
+each step ('skipped' needs a note). A final answer with pending
+steps is REJECTED and re-prompted. Single-action tasks: skip it.
+
 ## Loop discipline
 
 After every tool result, ask: "did this advance the endpoint?"
