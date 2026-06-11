@@ -213,6 +213,17 @@ def _format_completion_message(job: BackgroundJob) -> str:
         "intermediate status unless you have a heartbeat-worthy "
         "milestone. The user has already accepted up to "
         f"{_HARD_RETRY_CAP} silent retry attempts.",
+        "",
+        "INTERPRET failures, don't just count them (behavioral audit "
+        "2026-06-11). For test/build runs, distinguish REAL failures "
+        "(assertions, wrong behaviour) from ENVIRONMENT failures "
+        "(collection/import errors, missing dev dependencies, wrong "
+        "interpreter, permission denied) — and NAME the cause in your "
+        "DM. 'passed 0, errors 93' without the diagnosis 'all 93 are "
+        "collection errors — this box lacks the dev test deps' is a "
+        "useless report. When the cause is environmental and fixable "
+        "(pip install missing deps), prefer RETRY with the fix over "
+        "reporting raw numbers as DONE.",
     ]
     return "\n".join(p for p in parts if p is not None)
 
