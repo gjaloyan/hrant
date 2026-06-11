@@ -1649,7 +1649,7 @@ export type ScheduledMessage = {
   due_at: string;
   requested_by: string;
   requested_at: string;
-  status: "pending" | "sent" | "failed" | "cancelled";
+  status: "pending" | "delivering" | "sent" | "failed" | "cancelled";
   delivered_at: string | null;
   last_error: string;
 };
@@ -1665,6 +1665,17 @@ export const cancelScheduledMessage = (id: string) =>
   json_delete<{ ok: boolean }>(
     `/api/scheduled-messages/${encodeURIComponent(id)}`,
   );
+
+// Reminders tab (2026-06-12): explicit-time creation from Settings.
+// Exactly one of due_at (ISO 8601 UTC Z) / delay_minutes.
+export const createScheduledMessage = (p: {
+  text: string;
+  due_at?: string;
+  delay_minutes?: number;
+  target_speaker?: string;
+}) => json_post<{ ok: boolean; message: ScheduledMessage }>(
+  "/api/scheduled-messages", p,
+);
 
 
 // ---------- Skills (Phase 12B/C) ----------

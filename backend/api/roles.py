@@ -131,3 +131,54 @@ def scheduled_cancel(message_id: str):
     if not _sched.cancel(message_id):
         raise HTTPException(404, "no pending message with that id")
     return {"ok": True}
+
+
+class ScheduledCreate(BaseModel):
+    """Reminders menu (2026-06-12). Either `due_at` (ISO 8601 UTC,
+    'YYYY-MM-DDTHH:MM:SSZ') or `delay_minutes` — exactly one."""
+    text: str
+    due_at: Optional[str] = None
+    delay_minutes: Optional[int] = None
+    target_speaker: Optional[str] = None
+
+
+@router.post("/api/scheduled-messages")
+def scheduled_create(body: ScheduledCreate):
+    """Create a reminder from the Settings UI. The chat path (the
+    `schedule_message` tool) parses natural-language times; this
+    endpoint takes explicit ones — the UI owns the picker."""
+    require_owner_for_writes(action="creating a scheduled message")
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    if bool(body.due_at) == bool(body.delay_minutes is not None):
+        raise HTTPException(
+            400, "provide exactly one of due_at / delay_minutes",
+        )
+    from datetime import datetime, timedelta, timezone
+    if body.delay_minutes is not None:
+        if body.delay_minutes < 1:
+            raise HTTPException(400, "delay_minutes must be >= 1")
+        due_dt = datetime.now(timezone.utc) + timedelta(
+            minutes=int(body.delay_minutes),
+        )
+        due_at = due_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    else:
+        due_at = (body.due_at or "").strip()
+        try:
+            due_dt = datetime.strptime(due_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            raise HTTPException(
+                400, "due_at must be ISO 8601 UTC: YYYY-MM-DDTHH:MM:SSZ",
+            )
+        if due_dt <= datetime.now(timezone.utc):
+            raise HTTPException(400, "due_at must be in the future")
+    row = _sched.schedule(
+        target_speaker=body.target_speaker or DEFAULT_SPEAKER,
+        text=text,
+        due_at=due_at,
+        requested_by=DEFAULT_SPEAKER,
+    )
+    return {"ok": True, "message": row}
