@@ -1208,6 +1208,14 @@ export const testProvider = (providerId: string) =>
     `/api/providers/${encodeURIComponent(providerId)}/test`,
   );
 
+// Live catalog from an OpenAI-compatible gateway (OpenRouter etc.) —
+// lets the Settings UI change a provider's model without hand-editing
+// the providers.json models list.
+export const fetchProviderRemoteModels = (providerId: string) =>
+  json_get<{ ok: boolean; models: string[]; count?: number; error?: string }>(
+    `/api/providers/${encodeURIComponent(providerId)}/models/remote`,
+  );
+
 export type OllamaModel = {
   name: string;
   size: number;

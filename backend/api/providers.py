@@ -304,6 +304,52 @@ async def test_provider(provider_id: str):
     return run_provider_test(p)
 
 
+@router.get("/api/providers/{provider_id}/models/remote")
+def provider_remote_models(provider_id: str):
+    """Live model catalog from an OpenAI-compatible gateway.
+
+    2026-06-11: the Settings UI had no way to CHANGE the model on an
+    OpenRouter provider — the only listing endpoints were codex
+    (subscription cache) and ollama (local daemon), so the UI showed
+    whatever was hand-typed into `models` at creation time and
+    nothing else. OpenRouter / any base_url provider exposes the
+    standard `GET {base_url}/models`; this endpoint proxies it with
+    the provider's credentials so the UI can offer the full catalog.
+
+    Owner-only: the response reveals what the stored key unlocks.
+    """
+    require_owner_for_writes(action="listing remote models")
+    p = get_provider(provider_id)
+    if not p:
+        raise HTTPException(404, "provider not found")
+    base = (p.get("base_url") or "").rstrip("/")
+    if not base:
+        return {
+            "ok": False, "models": [],
+            "error": (
+                "provider has no base_url — remote model listing is "
+                "only supported for OpenAI-compatible gateways"
+            ),
+        }
+    key = get_api_key(p)
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        r = httpx.get(f"{base}/models", headers=headers, timeout=20.0)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        return {
+            "ok": False, "models": [],
+            "error": f"{type(e).__name__}: {str(e)[:300]}",
+        }
+    rows = data.get("data") or []
+    ids = sorted({
+        str(m.get("id")) for m in rows
+        if isinstance(m, dict) and m.get("id")
+    })
+    return {"ok": True, "models": ids, "count": len(ids)}
+
+
 # ---- OAuth: auth-config update + status + authorize-url + flow helpers ----
 class OAuthConfigUpdate(BaseModel):
     auth_type: str

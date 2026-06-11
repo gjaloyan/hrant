@@ -50,6 +50,7 @@ import {
   updateProvider,
   deleteProvider,
   testProvider,
+  fetchProviderRemoteModels,
   fetchOllamaModels,
   pullOllamaModel,
   deleteOllamaModel,
@@ -115,6 +116,33 @@ export default function SettingsPanel() {
   const [wizardStep, setWizardStep] = useState(0);
   const [connectWizard, setConnectWizard] = useState<string | null>(null);
   const [editingAuth, setEditingAuth] = useState<string | null>(null);
+  // Model management panel for OpenAI-compatible gateways (OpenRouter
+  // etc.) — fetches the live catalog and lets the owner change the
+  // provider's default model / curate the models list.
+  const [editingModels, setEditingModels] = useState<string | null>(null);
+  const [remoteModels, setRemoteModels] = useState<string[]>([]);
+  const [remoteModelsErr, setRemoteModelsErr] = useState("");
+  const [remoteModelsLoading, setRemoteModelsLoading] = useState(false);
+  const [modelFilter, setModelFilter] = useState("");
+
+  const loadRemoteModels = async (providerId: string) => {
+    setRemoteModelsLoading(true);
+    setRemoteModelsErr("");
+    try {
+      const r = await fetchProviderRemoteModels(providerId);
+      if (r.ok) {
+        setRemoteModels(r.models || []);
+      } else {
+        setRemoteModels([]);
+        setRemoteModelsErr(r.error || "catalog fetch failed");
+      }
+    } catch (e: any) {
+      setRemoteModels([]);
+      setRemoteModelsErr(e.message);
+    } finally {
+      setRemoteModelsLoading(false);
+    }
+  };
   const [authForm, setAuthForm] = useState({
     authType: "api_key",
     clientId: "",
@@ -1353,6 +1381,77 @@ export default function SettingsPanel() {
                     );
                   })()}
 
+                  {/* Model management panel (OpenAI-compatible gateways) */}
+                  {editingModels === p.id && (() => {
+                    const filtered = remoteModels.filter(
+                      (m) => !modelFilter || m.toLowerCase().includes(modelFilter.toLowerCase()),
+                    );
+                    const setDefaultModel = async (m: string) => {
+                      try {
+                        const models = Array.from(new Set([...(p.models || []), m]));
+                        await updateProvider(p.id, { default_model: m, models });
+                        loadProviders();
+                        flash(`Default model → ${m}`);
+                      } catch (e: any) { flash("Error: " + e.message); }
+                    };
+                    const removeFromList = async (m: string) => {
+                      try {
+                        const models = (p.models || []).filter((x: string) => x !== m);
+                        const upd: Record<string, any> = { models };
+                        if (p.default_model === m) upd.default_model = models[0] || "";
+                        await updateProvider(p.id, upd);
+                        loadProviders();
+                      } catch (e: any) { flash("Error: " + e.message); }
+                    };
+                    return (
+                      <div className="bg-slate-900 rounded p-3 mb-2 space-y-2 text-xs">
+                        <div className="text-slate-300 font-medium">
+                          Current default: <span className="font-mono text-emerald-400">{p.default_model || "(none)"}</span>
+                        </div>
+                        {p.models?.length > 0 && (
+                          <div className="space-y-1">
+                            <div className="text-slate-400">In provider list:</div>
+                            {p.models.map((m: string) => (
+                              <div key={m} className="flex items-center justify-between gap-2 px-1">
+                                <span className="font-mono truncate">{m}</span>
+                                <div className="flex gap-1 shrink-0">
+                                  {p.default_model !== m && (
+                                    <button onClick={() => setDefaultModel(m)} className="bg-emerald-800 hover:bg-emerald-700 rounded px-1.5 py-0.5">set default</button>
+                                  )}
+                                  <button onClick={() => removeFromList(m)} className="bg-rose-900 hover:bg-rose-800 rounded px-1.5 py-0.5">remove</button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <input
+                            value={modelFilter}
+                            onChange={(e) => setModelFilter(e.target.value)}
+                            placeholder="filter catalog… (e.g. qwen)"
+                            className="bg-slate-800 rounded px-2 py-1 flex-1"
+                          />
+                          <button onClick={() => loadRemoteModels(p.id)} className="bg-slate-700 hover:bg-slate-600 rounded px-2 py-1">↻</button>
+                          <span className="text-slate-500">
+                            {remoteModelsLoading ? "loading…" : `${filtered.length}/${remoteModels.length}`}
+                          </span>
+                        </div>
+                        {remoteModelsErr && <div className="text-rose-400">{remoteModelsErr}</div>}
+                        <div className="max-h-48 overflow-y-auto space-y-0.5">
+                          {filtered.slice(0, 200).map((m) => (
+                            <div key={m} className="flex items-center justify-between gap-2 hover:bg-slate-800 rounded px-1">
+                              <span className="font-mono truncate">{m}</span>
+                              <button onClick={() => setDefaultModel(m)} className="bg-emerald-800 hover:bg-emerald-700 rounded px-1.5 py-0.5 shrink-0">set default</button>
+                            </div>
+                          ))}
+                          {!remoteModelsLoading && filtered.length === 0 && !remoteModelsErr && (
+                            <div className="text-slate-500">No models match the filter.</div>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
+
                   {provTestResult[p.id] && (
                     <div className="text-xs mb-2 bg-slate-900 rounded px-2 py-1">{provTestResult[p.id]}</div>
                   )}
@@ -1395,6 +1494,19 @@ export default function SettingsPanel() {
                     >
                       {editingAuth === p.id ? "Close Auth" : "Auth Config"}
                     </button>
+                    {p.base_url && (
+                      <button
+                        onClick={() => {
+                          if (editingModels === p.id) { setEditingModels(null); return; }
+                          setModelFilter("");
+                          setEditingModels(p.id);
+                          loadRemoteModels(p.id);
+                        }}
+                        className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs"
+                      >
+                        {editingModels === p.id ? "Close Models" : "Models"}
+                      </button>
+                    )}
                     {/* OAuth flow panel */}
                     {p.auth_type === "oauth" && (
                       <>
