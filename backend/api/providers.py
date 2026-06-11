@@ -190,6 +190,26 @@ def ollama_delete_model(model_name: str):
 
 
 # ---- active model selection ----
+@router.get("/api/model-routing")
+def get_model_routing():
+    """Per-task model routing table (2026-06-11) — which task types
+    run on which (provider, model) instead of the active pin."""
+    from ..model_routing import load_config
+    return load_config(force=True)
+
+
+class ModelRoutingUpdate(BaseModel):
+    enabled: bool = False
+    routing: dict = {}
+
+
+@router.put("/api/model-routing")
+def put_model_routing(body: ModelRoutingUpdate):
+    require_owner_for_writes(action="changing model routing")
+    from ..model_routing import save_config
+    return {"ok": True, "config": save_config(body.model_dump())}
+
+
 @router.get("/api/active-model")
 def get_active_model():
     return {"active": ACTIVE_MODEL.get(), "models": get_available_models()}

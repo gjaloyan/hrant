@@ -3316,6 +3316,11 @@ class DualModelRouter:
         self._model_b: OllamaLLM | None = None
         self._active_llm: BaseLLM | None = None
         self._active_cfg_hash: str = ""  # to detect changes
+        # Per-task model routing (2026-06-11): "provider_id:model" →
+        # constructed LLM, so a routed classifier call doesn't pay
+        # client setup every time. Bounded by the routing table size
+        # (a handful of entries).
+        self._routed_llms: dict[str, BaseLLM] = {}
         self._api_cache: tuple[float, bool] = (0.0, True)
         # If model_b is disabled (cloud_only) — mark it unavailable right away
         self._ollama_cache: tuple[float, bool] = (9e18, self.cfg_b is not None)
@@ -3325,6 +3330,48 @@ class DualModelRouter:
             state_path = KM.base / "router_state.json"
         self.state_path = state_path
         self.state = self._load_state()
+
+    # ---- per-task model routing (2026-06-11) ----
+    def _get_routed_llm(self, task_type) -> "tuple[BaseLLM, str, str] | None":
+        """Resolve a per-task model override from model_routing.json.
+
+        Returns (llm, provider_id, model) when this task type is
+        routed to a specific model, None otherwise. Never raises —
+        an unresolvable route logs and falls back to the active pin.
+        """
+        try:
+            from .model_routing import route_for
+            tt = task_type.value if hasattr(task_type, "value") else str(task_type)
+            route = route_for(tt)
+        except Exception:
+            return None
+        if not route:
+            return None
+        provider_id, model = route
+        key = f"{provider_id}:{model}"
+        llm = self._routed_llms.get(key)
+        if llm is None:
+            try:
+                from .failover import resolve_entry_cfg
+                cfg = resolve_entry_cfg(provider_id, model)
+                if cfg is None:
+                    log.warning(
+                        "model routing: %s -> %s/%s not resolvable "
+                        "(provider missing/disabled); using active model",
+                        task_type, provider_id, model,
+                    )
+                    return None
+                llm = create_llm(cfg)
+            except Exception as e:
+                log.warning(
+                    "model routing: create_llm(%s/%s) failed (%s); "
+                    "using active model", provider_id, model, e,
+                )
+                return None
+            if len(self._routed_llms) > 8:
+                self._routed_llms.clear()
+            self._routed_llms[key] = llm
+        return llm, provider_id, model
 
     # ---- active model (runtime switchable) ----
     def _get_active_llm(self) -> BaseLLM | None:
@@ -3736,6 +3783,35 @@ class DualModelRouter:
                 max_tokens=max_tokens, temperature=temperature,
                 attachments=attachments,
             )
+        # Per-task model routing (2026-06-11): cheap task types
+        # (classification judges, keyword extraction, quick answers)
+        # can run on a cheap model while the pinned active model keeps
+        # the heavy turns. Direct call, no failover-chain ceremony —
+        # on ANY failure we fall through to the normal active path so
+        # a routed-model outage can never break a turn.
+        _routed = self._get_routed_llm(task_type)
+        if _routed is not None:
+            _r_llm, _r_pid, _r_model = _routed
+            self.state["last_reason"] = f"task-routed: {_r_pid}/{_r_model}"
+            try:
+                out = _r_llm.complete(
+                    system, user, max_tokens=max_tokens,
+                    temperature=temperature, attachments=attachments,
+                    _task_type=task_type.value,
+                )
+                self._track_active_model_call(
+                    provider_id=_r_pid, model=_r_model,
+                )
+                self._save_state()
+                return out
+            except LLMError as e:
+                log.warning(
+                    "task-routed %s -> %s/%s failed (%s); falling back "
+                    "to active model",
+                    task_type.value, _r_pid, _r_model,
+                    str(e)[:200],
+                )
+
         # Check if user selected a specific model
         active = self._get_active_llm()
         if active is not None:
