@@ -171,3 +171,37 @@ def test_unresolvable_route_falls_back(router_with_route, monkeypatch):
     out = r.call(TaskType.CLASSIFICATION, "sys", "user")
     assert out == "active-reply"
     assert routed_llm.calls == 0
+
+
+def test_route_wins_over_provider_chain(router_with_route, monkeypatch):
+    """Live-verify bug 2026-06-11: on prod `_active_provider_chain`
+    is non-empty, and the first hook placement sat BELOW the chain
+    dispatch — the routing table never applied. Routing is an
+    explicit per-task owner choice and must win over generic chain
+    dispatch, in both call() and call_json()."""
+    import backend.llm as llm_mod
+    from backend.llm import TaskType
+    r, routed_llm, active_llm = router_with_route
+
+    chain_calls = {"n": 0}
+
+    def _chain(tt):
+        chain_calls["n"] += 1
+        return [object()]  # non-empty, like production
+
+    monkeypatch.setattr(llm_mod, "_active_provider_chain", _chain)
+    # If the chain path were taken, _run_with_safety_fallback would
+    # blow up on our fake adapter — that's the trap.
+    monkeypatch.setattr(
+        llm_mod, "_run_with_safety_fallback",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("chain dispatch must not run for a routed task"),
+        ),
+    )
+
+    out = r.call(TaskType.CLASSIFICATION, "sys", "user")
+    assert out == "routed-reply"
+
+    routed_llm.reply = '{"ok": true}'
+    data = r.call_json(TaskType.CLASSIFICATION, "sys", "user")
+    assert data == {"ok": True}

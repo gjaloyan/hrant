@@ -3770,25 +3770,16 @@ class DualModelRouter:
         temperature: float | None = None,
         attachments: list[str] | None = None,
     ) -> str:
-        # Safety-refusal fallback chain (Task 5). When
-        # `_active_provider_chain` yields a non-empty ordered list
-        # (tests monkeypatch this seam), iterate it and skip past any
-        # provider that raises a safety-shaped LLMError. Production
-        # default returns [], so the existing A/B + failover-chain
-        # orchestration below runs unchanged.
-        chain = _active_provider_chain(task_type)
-        if chain:
-            return _run_with_safety_fallback(
-                chain, "call", task_type, system, user,
-                max_tokens=max_tokens, temperature=temperature,
-                attachments=attachments,
-            )
         # Per-task model routing (2026-06-11): cheap task types
         # (classification judges, keyword extraction, quick answers)
         # can run on a cheap model while the pinned active model keeps
-        # the heavy turns. Direct call, no failover-chain ceremony —
-        # on ANY failure we fall through to the normal active path so
-        # a routed-model outage can never break a turn.
+        # the heavy turns. Checked BEFORE the safety-fallback chain —
+        # routing is an explicit per-task owner choice and must win
+        # over generic chain dispatch (on prod the chain is non-empty,
+        # so a post-chain hook would never fire — caught in the
+        # 2026-06-11 live verify). Direct call, no failover ceremony;
+        # on ANY failure we fall through to the normal chain/active
+        # path so a routed-model outage can never break a turn.
         _routed = self._get_routed_llm(task_type)
         if _routed is not None:
             _r_llm, _r_pid, _r_model = _routed
@@ -3811,6 +3802,20 @@ class DualModelRouter:
                     task_type.value, _r_pid, _r_model,
                     str(e)[:200],
                 )
+
+        # Safety-refusal fallback chain (Task 5). When
+        # `_active_provider_chain` yields a non-empty ordered list
+        # (tests monkeypatch this seam), iterate it and skip past any
+        # provider that raises a safety-shaped LLMError. Production
+        # default returns [], so the existing A/B + failover-chain
+        # orchestration below runs unchanged.
+        chain = _active_provider_chain(task_type)
+        if chain:
+            return _run_with_safety_fallback(
+                chain, "call", task_type, system, user,
+                max_tokens=max_tokens, temperature=temperature,
+                attachments=attachments,
+            )
 
         # Check if user selected a specific model
         active = self._get_active_llm()
@@ -3987,6 +3992,20 @@ class DualModelRouter:
             raise primary_err
 
     def call_json(self, task_type: TaskType, system: str, user: str, **kw) -> dict:
+        # Per-task model routing (2026-06-11): when this task type is
+        # routed, delegate straight to call() whose routed-first
+        # branch handles it (and falls back to chain/active on
+        # failure). Without this short-circuit, a non-empty
+        # production chain would dispatch call_json to the chain
+        # adapters and the routing table would never apply.
+        if self._get_routed_llm(task_type) is not None:
+            raw = self.call(
+                task_type,
+                system + "\n\nReply with ONLY valid JSON, no markdown wrappers.",
+                user,
+                **kw,
+            )
+            return _parse_json_response(raw)
         # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
         chain = _active_provider_chain(task_type)
         if chain:
