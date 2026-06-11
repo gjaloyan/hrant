@@ -91,6 +91,11 @@ class Embedder:
         self._last_error: Optional[str] = None
         self._provider: Optional[dict] = None  # cached provider config when applicable
         self._llama_cpp_base: Optional[str] = None  # cached base URL for llama.cpp server
+        # Cached ollama base resolved at probe time. Pre-fix,
+        # _embed_ollama re-read OLLAMA_BASE_URL/env and IGNORED the
+        # config's ollama.url — probe and embed could hit different
+        # servers (audit 2026-06-11).
+        self._ollama_base: Optional[str] = None
 
     def reset(self) -> None:
         """Drop cached backend so the next embed() call re-probes.
@@ -105,6 +110,7 @@ class Embedder:
             self._model = None
             self._dim = None
             self._provider = None
+            self._ollama_base = None
             self._llama_cpp_base = None
             self._last_error = None
 
@@ -241,10 +247,20 @@ class Embedder:
             return False
         model = forced_model or cfg_ollama.get("model") or DEFAULT_OLLAMA_MODEL
         try:
+            # timeout 60s, not 10s (audit 2026-06-11): ollama unloads
+            # idle models; this probe IS the cold-load trigger for a
+            # ~1.1 GB bge-m3 on a CPU box, which takes longer than 10s.
+            # The 10s timeout made the probe fail exactly when the
+            # model was cold — auto-mode then silently fell through to
+            # the PAID OpenAI backend with a different vector dim,
+            # poisoning recall against ollama-stamped stores. The
+            # probe runs once per process, so the one-time wait is
+            # acceptable. keep_alive holds the model resident so
+            # subsequent processes probe warm.
             r = httpx.post(
                 f"{base}/api/embeddings",
-                json={"model": model, "prompt": "ok"},
-                timeout=10.0,
+                json={"model": model, "prompt": "ok", "keep_alive": "24h"},
+                timeout=60.0,
             )
             r.raise_for_status()
             data = r.json()
@@ -254,6 +270,7 @@ class Embedder:
             self._backend = "ollama"
             self._model = model
             self._dim = len(vec)
+            self._ollama_base = base
             self._last_error = None
             return True
         except Exception as e:
@@ -359,10 +376,15 @@ class Embedder:
         return r.json()["data"][0]["embedding"]
 
     def _embed_ollama(self, text: str) -> Optional[list[float]]:
-        base = os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE).rstrip("/")
+        # Use the base resolved at probe time (honours config's
+        # ollama.url); env/default is only the pre-probe fallback.
+        base = (
+            self._ollama_base
+            or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE)
+        ).rstrip("/")
         r = httpx.post(
             f"{base}/api/embeddings",
-            json={"model": self._model, "prompt": text},
+            json={"model": self._model, "prompt": text, "keep_alive": "24h"},
             timeout=60.0,
         )
         r.raise_for_status()
