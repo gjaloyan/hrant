@@ -37,6 +37,33 @@ log = logging.getLogger(__name__)
 _running = asyncio.Lock()
 
 
+def _prune_stores() -> None:
+    """Sleep-phase store pruning (audit 2026-06-11). Trims the three
+    append-only stores to their caps using the Bundle B helpers.
+    Best-effort per store: one failing prune logs and moves on."""
+    try:
+        from ..tools.background_jobs import STORE as _bg_store
+        dropped = _bg_store.prune()
+        if dropped:
+            log.info("consolidation: pruned %d background-job rows", dropped)
+    except Exception as e:
+        log.warning("consolidation: background_jobs prune failed: %s", e)
+    try:
+        from .. import scheduled_messages as _sched
+        dropped = _sched.prune()
+        if dropped:
+            log.info("consolidation: pruned %d scheduled-message rows", dropped)
+    except Exception as e:
+        log.warning("consolidation: scheduled_messages prune failed: %s", e)
+    try:
+        from ..evaluator import EVALUATOR as _ev
+        dropped = _ev.prune()
+        if dropped:
+            log.info("consolidation: pruned %d evaluator rows", dropped)
+    except Exception as e:
+        log.warning("consolidation: evaluator prune failed: %s", e)
+
+
 async def _fire_one(*, force: bool = False, dry_run: bool = False):
     """Run the pipeline once. Updates persisted state at the end.
     Honours the lock so two concurrent fire requests serialise
@@ -95,6 +122,22 @@ async def _fire_one(*, force: bool = False, dry_run: bool = False):
                     )
             except Exception as e:
                 log.warning("consolidation: jobs cleanup failed: %s", e)
+            # Synaptic-pruning phase (audit 2026-06-11). The Bundle B
+            # prune() helpers shipped 2026-06-10 deliberately without
+            # an auto-fire site; the nightly consolidation is the
+            # natural one — same "sleep" window, same best-effort
+            # semantics. Each store keeps its most recent rows;
+            # background_jobs additionally never drops running rows.
+            _prune_stores()
+            # The day's digest changed — drop the cached wake-up
+            # block so the NEXT turn re-renders with fresh narrative
+            # / threads / lessons instead of serving yesterday's
+            # cache until midnight.
+            try:
+                from . import recall as _recall
+                _recall.clear_cache()
+            except Exception:
+                pass
             return d
         except Exception as e:
             log.exception("consolidation: _fire_one outer failure: %s", e)

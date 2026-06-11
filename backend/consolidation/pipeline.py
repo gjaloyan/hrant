@@ -85,6 +85,29 @@ Rules:
 - Each fact must be a single declarative sentence."""
 
 
+LESSONS_SYSTEM = """You distill ACTIONABLE LESSONS from an AI agent's failed turns.
+
+You receive the day's failed/interrupted turns (user request, agent
+response, error). Extract up to 5 lessons the agent should apply
+TOMORROW to avoid repeating the same mistakes.
+
+Return strictly JSON:
+{ "lessons": ["one imperative sentence per lesson", ...] }
+
+Examples of GOOD lessons:
+  "Run benchmarks via start_background_job — interactive runs time out."
+  "Verify a file exists with read_file before claiming it was created."
+  "harbor CLI uses --agent, not --model; check --help before retrying."
+
+Rules:
+- Max 5 lessons, each ONE imperative sentence, concrete and reusable.
+- Skip one-off infrastructure blips (provider 500s, transient network).
+- Skip lessons about specific user content; focus on the agent's
+  PROCESS errors (wrong tool, wrong flag, unverified claim, gave up
+  too early).
+- Empty list if every failure was transient/external."""
+
+
 OPEN_THREADS_SYSTEM = """You identify UNRESOLVED conversational threads from a day's transcript.
 
 Return strictly JSON:
@@ -568,6 +591,39 @@ def run(
         ][:5]
     except Exception as e:
         log.warning("consolidation.threads failed: %s", e)
+
+    # Step 6.5: lessons from failures (REM-phase analogue, 2026-06-11).
+    # Only fires when the window actually contains failed/interrupted
+    # turns — clean days don't pay the extra LLM call. The lessons are
+    # surfaced to the agent next morning via recall.yesterday_block()
+    # so process mistakes (wrong tool, wrong flag, unbacked claim)
+    # don't repeat day after day.
+    failed_jobs = [
+        j for j in bundle.jobs if j.status in ("failed", "interrupted")
+    ]
+    if failed_jobs:
+        try:
+            fail_lines: list[str] = []
+            for j in sorted(failed_jobs, key=lambda j: j.created_at)[-15:]:
+                prompt = (j.prompt or "").replace("\n", " ").strip()
+                answer = (j.response or "").replace("\n", " ").strip()
+                err = (j.error or "").replace("\n", " ").strip()
+                fail_lines.append(
+                    f"REQUEST: {prompt[:300]}\n"
+                    f"AGENT: {answer[:300]}\n"
+                    f"ERROR: {err[:200]}\n"
+                )
+            lessons_resp = _call_router_json(
+                LESSONS_SYSTEM,
+                "FAILED TURNS TODAY:\n\n" + "\n---\n".join(fail_lines),
+                max_tokens=600,
+            )
+            d.lessons = [
+                str(l).strip() for l in (lessons_resp.get("lessons") or [])
+                if str(l).strip()
+            ][:5]
+        except Exception as e:
+            log.warning("consolidation.lessons failed: %s", e)
 
     # Token / cost delta — see snapshot taken at the top of run().
     _tokens_after = _TOKENS.request_usage()

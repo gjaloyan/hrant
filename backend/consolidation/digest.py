@@ -74,6 +74,12 @@ class Digest:
     profile_updates: list[ProfileUpdate] = field(default_factory=list)
     open_threads: list[str] = field(default_factory=list)
     links_added: list[dict] = field(default_factory=list)
+    # Sleep-phase REM analogue (2026-06-11): actionable lessons distilled
+    # from the day's FAILED turns ("don't pass --agent X to harbor",
+    # "always background-job benchmarks"). Surfaced to the agent next
+    # morning via consolidation.recall.yesterday_block(). Old digests
+    # without this field decode to [] via the tolerant from_dict.
+    lessons: list[str] = field(default_factory=list)
 
     # Budget / status
     tokens_used: int = 0

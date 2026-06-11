@@ -1451,26 +1451,47 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
     a `search_knowledge` tool call when the relevant notes are
     obvious from the message text.
 
+    Audit 2026-06-11: also surfaces top consolidated long-term FACTS
+    (memory_facts.jsonl via the fact vector store). Pre-fix, the
+    1400+ facts the nightly consolidation distilled were reachable
+    ONLY through an explicit `search_facts` tool call the LLM rarely
+    thought to make — write-side worked, read-side didn't.
+
     Skipped on very short messages (< 20 chars) — short messages
     usually don't have enough signal for useful retrieval."""
     if not task or len(task.strip()) < 20:
         return ""
+    note_hits = []
     try:
         from .hybrid_searcher import HYBRID
         # Re-use the post-Phase-2-audit min_raw_score of 0.55 so
         # we don't pull noise (Mercury → Scary Movie).
-        hits = HYBRID.search(task, limit=limit)
+        note_hits = HYBRID.search(task, limit=limit)
     except Exception:
-        return ""
-    if not hits:
+        note_hits = []
+    fact_hits: list[dict] = []
+    try:
+        from .fact_search import search_facts
+        # search_facts returns [] when the embedder is disabled —
+        # never raises, but belt-and-suspenders anyway.
+        fact_hits = search_facts(task, limit=2)
+    except Exception:
+        fact_hits = []
+    if not note_hits and not fact_hits:
         return ""
     lines = ["# AUTO-RECALL (related notes — read via read_file if relevant)"]
-    for h in hits:
+    for h in note_hits:
         e = h.entry
         lines.append(
             f"- {e.topic} (cat: {e.category}, score: {h.score:.2f}, "
             f"source: {h.source}) → {e.path}"
         )
+    if fact_hits:
+        lines.append("Long-term facts (consolidated memory):")
+        for f in fact_hits:
+            summary = str(f.get("summary") or "").strip()
+            if summary:
+                lines.append(f"- {summary}")
     return "\n".join(lines)
 
 
@@ -1800,6 +1821,17 @@ def run_unified(
         snapshot = ""
 
     recall = _auto_recall_block(task)
+    # Wake-up context (audit 2026-06-11): yesterday's consolidated
+    # narrative + open threads + failure lessons. Cached per calendar
+    # day inside the consolidation module, so this is a dict lookup
+    # on all but the first turn of the day. Closes the read-side gap
+    # where digests were written nightly but never re-entered
+    # cognition — the agent woke up amnesiac.
+    try:
+        from .consolidation.recall import yesterday_block as _yb
+        yesterday = _yb()
+    except Exception:
+        yesterday = ""
     # Per-thread conversation context — Wife's DM thread and Wife's
     # group-chat thread don't leak into each other's prompts even
     # though both have the same speaker_id.
@@ -1824,7 +1856,12 @@ def run_unified(
             task=task,
             agent=agent,
             speaker_id=speaker_id,
-            snapshot=snapshot,
+            # Fast path gets the wake-up block folded into the snapshot —
+            # "what did you do yesterday?" is a chat-shaped question and
+            # must not require the full tool loop to answer.
+            snapshot=(
+                f"{snapshot}\n\n{yesterday}" if yesterday else snapshot
+            ),
             convo=convo,
         )
         if chat_answer is not None:
@@ -1926,6 +1963,8 @@ def run_unified(
     ]
     if snapshot:
         system_parts.append(f"---\n\n{snapshot}")
+    if yesterday:
+        system_parts.append(f"---\n\n{yesterday}")
     if recall:
         system_parts.append(f"---\n\n{recall}")
     if convo:
