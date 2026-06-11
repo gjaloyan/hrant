@@ -425,3 +425,16 @@ def test_chat_prompt_is_smaller_than_task_prompt():
         f"chat ({len(chat)}) should be smaller than task "
         f"({len(task)}); M2 isn't being skipped"
     )
+
+
+def test_m3_negative_existence_rule():
+    """Head-to-head audit 2026-06-11: Hermes found postgres running in
+    a Docker container after Hrant concluded 'not installed' from a
+    PATH/packages/systemd sweep. The M3 rule pins the wider surface —
+    a negative existence answer must check containers too."""
+    from backend.prompt_modules import MODULES
+    body = MODULES["m3_tool_use"].body
+    assert "Negative existence answers" in body
+    assert "docker ps" in body
+    assert "podman ps" in body
+    assert "EXHAUST" in body
