@@ -96,6 +96,24 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=120.0,
         ),
         LayerZeroRule(
+            # Starvation fix (2026-06-12): this rule lived LAST in
+            # the list, and the engine is first-match-wins. After a
+            # service restart every periodic rule's cooldown is
+            # clear, so they all queue ahead by list order and a DUE
+            # REMINDER waited 5+ minutes for a tick slot (caught
+            # live: integrity + goal_propose + capability_scan each
+            # took a tick while a due message sat pending). Now the
+            # FIRST of the always-true periodic rules: reactive rules
+            # (disk/memory/cpu/errors — the four above) still preempt
+            # genuinely urgent conditions, but among housekeeping,
+            # user-facing delivery wins every time.
+            name="scheduled_messages_tick",
+            predicate=lambda s: True,
+            lever="FIRE_SCHEDULED_MESSAGES",
+            params={},
+            cooldown_seconds=60.0,
+        ),
+        LayerZeroRule(
             name="integrity_tick",
             predicate=lambda s: True,
             lever="FIRE_INTEGRITY_HEARTBEAT",
@@ -215,17 +233,7 @@ def default_rules() -> list[LayerZeroRule]:
             params={},
             cooldown_seconds=86400.0,  # daily
         ),
-        LayerZeroRule(
-            # Phase 11D: deliver any due cross-speaker scheduled
-            # messages. Placed LAST in the rule list so fall-through
-            # ordering tests (test_d03_integration) keep their
-            # deterministic sequence — this rule fires on its own
-            # 60s schedule once the heavier earlier rules are all
-            # on cooldown.
-            name="scheduled_messages_tick",
-            predicate=lambda s: True,
-            lever="FIRE_SCHEDULED_MESSAGES",
-            params={},
-            cooldown_seconds=60.0,
-        ),
+        # scheduled_messages_tick moved to the head of the list
+        # (right after the safety triad) 2026-06-12 — see the
+        # starvation-fix comment there.
     ]

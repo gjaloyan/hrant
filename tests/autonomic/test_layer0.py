@@ -197,16 +197,24 @@ def test_default_rules_count_after_phase11():
 
 def test_default_rules_d07_scheduled_rules_present():
     """D-07 added self_reflection / finetune_qc / gap_detection.
-    Audit T3.3 final tail: self_reflection / finetune_qc /
-    gap_detection / log_rotation / goal_executor /
-    fact_embedding_backfill / scheduled_messages — D-07 triplet
-    at -7..-4."""
+    Since 2026-06-12 scheduled_messages_tick sits at position 3
+    (right after the safety triad), not LAST: the first-match
+    engine starved due reminders behind housekeeping rules after a
+    restart (caught live — a due message waited 5+ minutes).
+    User-facing delivery preempts housekeeping; safety preempts
+    all. The D-07 triplet therefore moved from -7..-4 to -6..-3."""
     from backend.autonomic.layer0 import default_rules
     names = [r.name for r in default_rules()]
-    assert names[-7:-4] == [
+    # Reactive quartet first (unchanged), then reminders lead the
+    # always-true periodic block.
+    assert names[:4] == [
+        "disk_low", "memory_low", "cpu_high", "errors_present",
+    ]
+    assert names[4] == "scheduled_messages_tick"
+    assert names[-6:-3] == [
         "self_reflection_tick", "finetune_qc_tick", "gap_detection_tick",
     ]
-    assert names[-1] == "scheduled_messages_tick"
+    assert names[-1] == "fact_embedding_backfill_tick"
 
 
 def test_default_rules_d07_cooldowns():

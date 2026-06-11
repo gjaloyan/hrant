@@ -139,7 +139,11 @@ def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
          patch("backend.autonomic.levers.goal_propose.GOALS") as mock_goals:
         mock_goals.suggest_from_gaps.side_effect = lambda gaps, max_goals=3: [_FakeGoal(f"Learn about: {g['topic']}") for g in gaps[:max_goals]]
 
-        # Three consecutive ticks
+        # Four consecutive ticks. Since 2026-06-12,
+        # scheduled_messages_tick LEADS the periodic block (reminder
+        # starvation fix) — it takes the first tick, then the
+        # housekeeping fall-through proceeds in list order.
+        tick()
         tick()
         tick()
         tick()
@@ -148,6 +152,7 @@ def test_three_scheduled_levers_fire_in_sequence(tmp_path: Path):
     fired_levers = [LeverReport.from_jsonl(line).lever for line in lever_lines]
 
     assert fired_levers == [
+        "FIRE_SCHEDULED_MESSAGES",
         "FIRE_INTEGRITY_HEARTBEAT",
         "FIRE_GOAL_PROPOSE",
         "FIRE_CAPABILITY_SCAN",
@@ -212,9 +217,14 @@ def test_cooldown_fall_through_allows_other_scheduled_rules(tmp_path: Path):
          patch("backend.autonomic.levers.goal_propose.GOALS") as mock_goals:
         mock_goals.suggest_from_gaps.side_effect = lambda gaps, max_goals=3: [_FakeGoal(f"Learn about: {g['topic']}") for g in gaps[:max_goals]]
 
-        tick()  # integrity fires
-        tick()  # integrity in cooldown; goal_propose fires
+        tick()  # scheduled_messages leads the periodic block (2026-06-12)
+        tick()  # scheduled in cooldown; integrity fires
+        tick()  # both in cooldown; goal_propose fires via fall-through
 
     lever_lines = lever_log.read_text(encoding="utf-8").splitlines()
     fired = [LeverReport.from_jsonl(line).lever for line in lever_lines]
-    assert fired == ["FIRE_INTEGRITY_HEARTBEAT", "FIRE_GOAL_PROPOSE"]
+    assert fired == [
+        "FIRE_SCHEDULED_MESSAGES",
+        "FIRE_INTEGRITY_HEARTBEAT",
+        "FIRE_GOAL_PROPOSE",
+    ]
