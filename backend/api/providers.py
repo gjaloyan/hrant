@@ -210,6 +210,28 @@ def put_model_routing(body: ModelRoutingUpdate):
     return {"ok": True, "config": save_config(body.model_dump())}
 
 
+@router.get("/api/cascade")
+def get_cascade():
+    """Model-cascade test mode: small tier first, strong-verifier
+    gate, escalate on failure."""
+    from ..cascade import load_config
+    return load_config(force=True)
+
+
+class CascadeUpdate(BaseModel):
+    enabled: bool = False
+    provider_id: str = ""
+    model: str = ""
+    confidence_gate: int = 70
+
+
+@router.put("/api/cascade")
+def put_cascade(body: CascadeUpdate):
+    require_owner_for_writes(action="changing cascade config")
+    from ..cascade import save_config
+    return {"ok": True, "config": save_config(body.model_dump())}
+
+
 @router.get("/api/active-model")
 def get_active_model():
     return {"active": ACTIVE_MODEL.get(), "models": get_available_models()}

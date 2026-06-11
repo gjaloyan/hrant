@@ -4034,7 +4034,50 @@ class DualModelRouter:
         on_tool_call: ToolCallCB | None = None,
         attachments: list[str] | None = None,
         tools_provider=None,
+        model_override: "tuple[str, str] | None" = None,
     ) -> str:
+        # Cascade test-mode (2026-06-12): `model_override` runs THIS
+        # tool loop on an explicit (provider_id, model) instead of the
+        # active pin — the cascade's small-tier attempt. Explicit by
+        # contract: unresolvable override raises LLMError rather than
+        # silently substituting the active model (the caller owns the
+        # escalation decision). Bypasses the safety chain — the caller
+        # IS the fallback orchestrator here.
+        if model_override is not None:
+            ov_pid, ov_model = model_override
+            key = f"{ov_pid}:{ov_model}"
+            ov_llm = self._routed_llms.get(key)
+            if ov_llm is None:
+                from .failover import resolve_entry_cfg
+                cfg = resolve_entry_cfg(ov_pid, ov_model)
+                if cfg is None:
+                    raise LLMError(
+                        f"model_override {ov_pid}/{ov_model} not "
+                        f"resolvable (provider missing/disabled)"
+                    )
+                ov_llm = create_llm(cfg)
+                if len(self._routed_llms) > 8:
+                    self._routed_llms.clear()
+                self._routed_llms[key] = ov_llm
+            if not _supports_tools(ov_llm, tools, tools_provider=tools_provider):
+                raise LLMError(
+                    f"model_override {ov_pid}/{ov_model} does not "
+                    f"support tool use"
+                )
+            self.state["last_reason"] = f"override: {key}"
+            out = ov_llm.complete_with_tools(
+                system, user, tools, execute_tool,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                max_iterations=max_iterations,
+                on_tool_call=on_tool_call,
+                attachments=attachments,
+                _task_type=task_type.value,
+                tools_provider=tools_provider,
+            )
+            self._track_active_model_call(provider_id=ov_pid, model=ov_model)
+            self._save_state()
+            return out
         # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
         chain = _active_provider_chain(task_type)
         if chain:

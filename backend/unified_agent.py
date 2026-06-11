@@ -2525,8 +2525,9 @@ def run_unified(
     # the cumulative cost number but useless for "which iteration
     # burned the tokens". Audit follow-up 2026-05-21.
     _calls_before_loop = TOKENS.request_calls_count()
-    try:
-        answer = router().call_with_tools(
+
+    def _run_main_loop(model_override=None) -> str:
+        return router().call_with_tools(
             TaskType.COMPLEX_SOLVING,
             system_prompt,
             task,
@@ -2546,7 +2547,75 @@ def run_unified(
             max_iterations=20,
             on_tool_call=_on_tool_call,
             attachments=attachments or None,
+            model_override=model_override,
         )
+
+    # Model cascade (AGI roadmap #1, 2026-06-12). When enabled, the
+    # turn first runs the FULL tool loop on the configured small tier;
+    # the answer is judged by the verifier on the STRONG model (small
+    # judges produce false negatives — 2026-06-11 battery); on gate
+    # failure the loop re-runs on the active model. The per-turn
+    # duplicate-call cache turns the small attempt's tool results
+    # into a warm cache for the escalation re-run. Supervisor turns
+    # skip the cascade — their decisions seal retry chains and must
+    # stay on the strong model.
+    _cascade_prevr = None  # strong-verifier result reused post-hoc
+    _cascade_cfg = None
+    if not supervisor_mode:
+        try:
+            from .cascade import gate_passes as _c_gate, route as _c_route
+            _cascade_cfg = _c_route()
+        except Exception:
+            _cascade_cfg = None
+    try:
+        _small_ok = False
+        if _cascade_cfg is not None:
+            _c_pid, _c_model, _c_threshold = _cascade_cfg
+            agent.progress(
+                "cascade", f"small-tier attempt: {_c_pid}/{_c_model}",
+            )
+            try:
+                answer = _run_main_loop(model_override=(_c_pid, _c_model))
+                _small_ok = True
+            except LLMError as _ce:
+                agent.progress(
+                    "cascade",
+                    f"small tier failed ({str(_ce)[:80]}) — escalating",
+                )
+        if _small_ok:
+            try:
+                from .verifier import verify as _gate_verify
+                _g_vr = _gate_verify(
+                    question=task,
+                    answer=answer or "",
+                    notes_text="",
+                    used_topics=[],
+                    tool_context="\n\n".join(tool_outputs),
+                )
+            except Exception as _ge:
+                log.warning("cascade gate verify failed: %s", _ge)
+                _g_vr = None
+            _ok, _why = _c_gate(_g_vr, confidence_gate=_c_threshold)
+            if _ok:
+                _cascade_prevr = _g_vr
+                agent.progress("cascade", f"small tier accepted ({_why})")
+            else:
+                agent.progress(
+                    "cascade", f"escalating to active model ({_why})",
+                )
+                # The small attempt's plan checklist would trip the
+                # plan-incomplete corrective against the strong
+                # re-run; each attempt declares its own plan.
+                try:
+                    from .tools.plan_scratchpad import reset_plan as _c_pr
+                    _c_pr()
+                except Exception:
+                    pass
+                answer = _run_main_loop()
+        if not _small_ok:
+            # No cascade configured, or the small tier raised —
+            # either way the active model runs the loop.
+            answer = _run_main_loop()
     except LLMError:
         # Bubble up — outer run() / SSE handler classifies and
         # surfaces to the user.
@@ -2709,7 +2778,12 @@ def run_unified(
     # task_mode — only fires when there's grounding material to
     # verify against (notes + tool outputs).
     vr = VerificationResult(confidence=85)
-    if tool_outputs:
+    if _cascade_prevr is not None:
+        # The cascade gate already verified THIS answer on the strong
+        # model moments ago — reuse it instead of paying a second
+        # verifier call on an accepted small-tier turn.
+        vr = _cascade_prevr
+    elif tool_outputs:
         try:
             from .verifier import verify
             vr = verify(
