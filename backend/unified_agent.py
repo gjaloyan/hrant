@@ -3021,6 +3021,28 @@ def run_unified(
     except Exception:
         pass
 
+    # Fine-tune auto-collection (AGI roadmap, 2026-06-12). High-trust
+    # delivered turns become distillation data for the small local
+    # model. The collector applies its own gates (confidence >= 85,
+    # endpoint met, no contradictions, grounded in notes or tool
+    # evidence) — most turns skip. Mirror image of the meta-learner
+    # wire below: that one learns from failures, this one harvests
+    # successes. Best-effort; never blocks the reply.
+    if not supervisor_mode:
+        try:
+            from .finetune import collect_from_turn
+            collect_from_turn(
+                task=task,
+                answer=answer or "",
+                vr=vr,
+                tool_names=_turn_tool_names(agent),
+                is_chat=False,
+                supervisor_mode=supervisor_mode,
+                project=project,
+            )
+        except Exception as e:
+            log.debug("finetune collection failed (non-fatal): %s", e)
+
     # Audit T3 follow-up (2026-05-27). The MetaLearner.analyze_failure
     # path was DEFINED but NEVER CALLED from anywhere — leaving the
     # whole learning loop dead since the unified-loop cutover. Wire

@@ -276,3 +276,65 @@ def store() -> FinetuneStore:
     if _store is None:
         _store = FinetuneStore()
     return _store
+
+
+def collect_from_turn(
+    *,
+    task: str,
+    answer: str,
+    vr,
+    tool_names: "list[str] | None" = None,
+    is_chat: bool = False,
+    supervisor_mode: bool = False,
+    project: "str | None" = None,
+) -> "FinetunePair | None":
+    """Unified-loop auto-collection (AGI roadmap, 2026-06-12).
+
+    The legacy `maybe_add_from_agent` was written for the notes-based
+    pipeline and was never wired into the unified loop — the queue
+    sat at 0 rows since the cutover. This is its unified-era
+    replacement: the gates run off the turn's VerificationResult
+    (including the 2026-06-11 grader-calibration split fields) and
+    grounding comes from tool evidence, not just KB notes.
+
+    Collected turns become distillation data for the small local
+    model (finetune_pipeline: Unsloth LoRA on a 7B → Ollama). Only
+    turns the verifier scored as trustworthy AND delivered make the
+    queue — we distill the strong model's SUCCESSES, not its noise.
+
+    Returns the stored pair or None (gate name is intentionally not
+    surfaced — callers treat collection as fire-and-forget).
+    """
+    if supervisor_mode or is_chat:
+        return None
+    task = (task or "").strip()
+    answer = (answer or "").strip()
+    if len(task) < 10:
+        return None
+    if not (50 <= len(answer) <= 4000):
+        return None
+    st = store()
+    confidence = int(getattr(vr, "confidence", 0) or 0)
+    if confidence < st.confidence_threshold:
+        return None
+    if getattr(vr, "endpoint_met", None) is False:
+        return None
+    if getattr(vr, "contradictions", None):
+        return None
+    # Grounding: prefer the verifier's notes; fall back to the tool
+    # evidence that produced the answer. A turn with neither is
+    # ungrounded chat-shaped output — skip (curator would score it
+    # down anyway).
+    sources = list(getattr(vr, "notes_used", None) or [])
+    if not sources:
+        sources = [f"tool:{n}" for n in dict.fromkeys(tool_names or [])][:8]
+    if not sources:
+        return None
+    return st.add(
+        question=task,
+        answer=answer,
+        source_notes=sources,
+        confidence=confidence,
+        project=project,
+        verified=True,
+    )
