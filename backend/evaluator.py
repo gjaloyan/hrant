@@ -31,6 +31,14 @@ class EvalEntry:
         is_chat: bool = False,
         response_time_ms: int = 0,
         ts: str | None = None,
+        # Grader calibration (2026-06-11): the split signal.
+        # `confidence` stays the conservative (possibly endpoint-
+        # clipped) scalar; `content_confidence` is the pre-clip
+        # claim score; `endpoint_met` is the delivery judgment.
+        # None on old rows / turns where the verifier didn't run —
+        # readers must .get() with a default.
+        content_confidence: int | None = None,
+        endpoint_met: bool | None = None,
     ):
         self.ts = ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.question = question[:200]
@@ -42,6 +50,8 @@ class EvalEntry:
         self.verified = verified
         self.is_chat = is_chat
         self.response_time_ms = response_time_ms
+        self.content_confidence = content_confidence
+        self.endpoint_met = endpoint_met
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +65,8 @@ class EvalEntry:
             "verified": self.verified,
             "is_chat": self.is_chat,
             "response_time_ms": self.response_time_ms,
+            "content_confidence": self.content_confidence,
+            "endpoint_met": self.endpoint_met,
         }
 
 

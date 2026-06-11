@@ -112,6 +112,18 @@ class VerificationResult(BaseModel):
     unverified_claims: list[str] = []
     contradictions: list[str] = []
     notes_used: list[str] = []
+    # Grader calibration (audit 2026-06-11). `confidence` stays the
+    # conservative display scalar — clipped to 30 on an endpoint miss
+    # so UI badges and gates remain strict. These two fields preserve
+    # the SPLIT signal so the learning loop doesn't conflate "didn't
+    # deliver the action" (process failure, root cause already known)
+    # with "bad/hallucinated content" (needs LLM failure analysis):
+    #   content_confidence — claim-verifiability score BEFORE any
+    #     endpoint/psm clipping. None = no clip happened (confidence
+    #     already IS the content score).
+    #   endpoint_met — the delivery judgment. None = not evaluated.
+    content_confidence: Optional[int] = None
+    endpoint_met: Optional[bool] = None
 
 
 class EvidenceItem(BaseModel):

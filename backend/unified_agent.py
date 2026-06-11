@@ -2722,12 +2722,19 @@ def run_unified(
         _was_met = endpoint_met(
             task=task, answer=answer or "", tool_names=_trace_tool_names,
         )
+        # Grader calibration (2026-06-11): record the delivery
+        # judgment separately so the learning loop can distinguish
+        # "didn't deliver the action" from "bad content".
+        vr.endpoint_met = _was_met
         if not _was_met:
             _capped = cap_confidence_for_endpoint(
                 task=task, answer=answer or "",
                 tool_names=_trace_tool_names, confidence=vr.confidence,
             )
             if _capped != vr.confidence:
+                # Preserve the pre-clip content score for the
+                # meta-learner / daily report before clipping.
+                vr.content_confidence = vr.confidence
                 # Surface the reason so the WebUI / daily report
                 # explains the dip.
                 try:
@@ -2801,6 +2808,12 @@ def run_unified(
                     )
                 except Exception:
                     pass
+                # An empty-shell proposal is a DELIVERY failure (the
+                # claimed action has no substance) — classify it with
+                # the endpoint misses, preserve the content score.
+                if vr.content_confidence is None:
+                    vr.content_confidence = vr.confidence
+                vr.endpoint_met = False
                 vr.confidence = min(vr.confidence, 30)
     except Exception as exc:
         log.debug("unified: psm empty-diff check failed: %s", exc)
@@ -2935,6 +2948,8 @@ def run_unified(
             contradictions=len(vr.contradictions),
             unverified=len(vr.unverified_claims),
             verified=len(vr.verified_claims),
+            content_confidence=vr.content_confidence,
+            endpoint_met=vr.endpoint_met,
         ))
     except Exception:
         pass

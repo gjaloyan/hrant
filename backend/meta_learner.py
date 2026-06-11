@@ -124,6 +124,56 @@ class MetaLearner:
         if verification.confidence >= 60:
             return None
 
+        # Grader calibration (2026-06-11). The endpoint cap clips
+        # `confidence` to 30 on a delivery miss, which used to route
+        # every such turn through the LLM failure analyst — and the
+        # analyst, seeing a fine answer with a low score, guessed
+        # "hallucination" (35 of 96 in the 2026-06-10 reflection
+        # were this mislabel). When the CONTENT was actually fine
+        # (pre-clip score >= 60) and the only failure is delivery,
+        # we already KNOW the root cause — record it directly, skip
+        # the LLM, and let self_reflection aggregate `endpoint_miss`
+        # as its own category.
+        content_conf = (
+            verification.content_confidence
+            if verification.content_confidence is not None
+            else verification.confidence
+        )
+        if content_conf >= 60 and verification.endpoint_met is False:
+            entry = {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "question": question[:200],
+                "answer_preview": answer[:300],
+                "confidence": verification.confidence,
+                "content_confidence": content_conf,
+                "contradictions": verification.contradictions[:5],
+                "unverified": verification.unverified_claims[:5],
+                "intent": intent,
+                "analysis": {
+                    "root_cause": "endpoint_miss",
+                    "missing_topic": None,
+                    "error_pattern": (
+                        "action-shaped request answered without an "
+                        "execute-class tool call or delivery"
+                    ),
+                    "domain": "task_execution_and_validation",
+                    "fix_action": "none",
+                    "fix_detail": (
+                        "process failure — handled by self-correction "
+                        "and nightly lessons, not knowledge fixes"
+                    ),
+                    "severity": 4,
+                },
+            }
+            self._append_log(entry)
+            self._failure_count += 1
+            if self._failure_count % self.AUTO_EXTRACT_EVERY_N_FAILURES == 0:
+                try:
+                    self.extract_patterns()
+                except Exception:
+                    pass
+            return entry["analysis"]
+
         # Log the failure first
         entry = {
             "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
