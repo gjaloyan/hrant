@@ -1958,6 +1958,16 @@ def run_unified(
     except Exception:
         catalog = ""
 
+    # Trajectory memory (AGI roadmap #2, 2026-06-11): retrieve up to
+    # two similar PAST SOLVED turns and show their tool chains +
+    # outcomes. Computed here — after the fast-path gate — so chat
+    # turns never pay the embed. Best-effort: embedder down = "".
+    try:
+        from .trajectory_memory import past_experience_block
+        experience = past_experience_block(task)
+    except Exception:
+        experience = ""
+
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
     ]
@@ -1967,6 +1977,8 @@ def run_unified(
         system_parts.append(f"---\n\n{yesterday}")
     if recall:
         system_parts.append(f"---\n\n{recall}")
+    if experience:
+        system_parts.append(f"---\n\n{experience}")
     if convo:
         system_parts.append(f"---\n\n{convo}")
     if catalog:
@@ -2893,6 +2905,16 @@ def run_unified(
                 setattr(agent, "_last_turn_id", turn_id)
             except Exception:
                 pass
+            # Trajectory memory: index this turn so future similar
+            # tasks can retrieve the trajectory. Supervisor turns are
+            # synthetic plumbing, not reusable experience. The module
+            # applies its own quality gates (confidence, tool count).
+            if not supervisor_mode:
+                try:
+                    from .trajectory_memory import index_turn
+                    index_turn(turn_id, artifact)
+                except Exception as e:
+                    log.debug("trajectory index failed (non-fatal): %s", e)
         except Exception as e:
             log.debug("unified: save_turn failed (non-fatal): %s", e)
 

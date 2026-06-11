@@ -129,6 +129,21 @@ async def _fire_one(*, force: bool = False, dry_run: bool = False):
             # semantics. Each store keeps its most recent rows;
             # background_jobs additionally never drops running rows.
             _prune_stores()
+            # Memory-replay phase (AGI roadmap #2): index any turn
+            # trajectories the post-turn hook missed (crash, embedder
+            # down at turn time) so tomorrow's recalls cover today's
+            # experience. Best-effort, embeds run on the local
+            # embedding server.
+            try:
+                from ..trajectory_memory import backfill as _traj_backfill
+                stats = _traj_backfill()
+                if stats.get("indexed"):
+                    log.info(
+                        "consolidation: trajectory backfill indexed %d turn(s)",
+                        stats["indexed"],
+                    )
+            except Exception as e:
+                log.warning("consolidation: trajectory backfill failed: %s", e)
             # The day's digest changed — drop the cached wake-up
             # block so the NEXT turn re-renders with fresh narrative
             # / threads / lessons instead of serving yesterday's
