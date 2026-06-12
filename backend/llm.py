@@ -3068,6 +3068,19 @@ def _consume_responses_sse(line_iter) -> tuple[str, list[dict], dict]:
             d = evt.get("delta")
             if isinstance(d, str):
                 text_chunks.append(d)
+        elif kind == "response.refusal.delta":
+            # Refusal bug fix (2026-06-12, found via conversational
+            # audit): when the model declines (e.g. "write a script to
+            # dump browser passwords"), the Responses API streams the
+            # decline as `response.refusal.delta` — NOT output_text —
+            # and the final content part has type "refusal" with the
+            # text under a "refusal" key. The old parser read only
+            # output_text, so EVERY refusal came back as an empty
+            # answer: the agent correctly declined but said nothing,
+            # violating the soul's "refuse AND explain". Capture it.
+            d = evt.get("delta")
+            if isinstance(d, str):
+                text_chunks.append(d)
         elif kind == "response.output_item.done":
             item = evt.get("item")
             if isinstance(item, dict):
@@ -3080,8 +3093,13 @@ def _consume_responses_sse(line_iter) -> tuple[str, list[dict], dict]:
                 for it in resp.get("output") or []:
                     if it.get("type") == "message":
                         for c in it.get("content") or []:
-                            if c.get("type") == "output_text" and c.get("text"):
+                            if not isinstance(c, dict):
+                                continue
+                            ctype = c.get("type")
+                            if ctype == "output_text" and c.get("text"):
                                 text_chunks.append(c["text"])
+                            elif ctype == "refusal" and c.get("refusal"):
+                                text_chunks.append(c["refusal"])
         elif kind in ("response.failed", "response.incomplete"):
             err = evt.get("response") or {}
             err_obj = err.get("error") if isinstance(err, dict) else None
