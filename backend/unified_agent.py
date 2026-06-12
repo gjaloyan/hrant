@@ -2526,11 +2526,11 @@ def run_unified(
     # burned the tokens". Audit follow-up 2026-05-21.
     _calls_before_loop = TOKENS.request_calls_count()
 
-    def _run_main_loop(model_override=None) -> str:
+    def _run_main_loop(model_override=None, iterations=None, user_task=None) -> str:
         return router().call_with_tools(
             TaskType.COMPLEX_SOLVING,
             system_prompt,
-            task,
+            user_task if user_task is not None else task,
             tools=tools_schema,
             tools_provider=_current_tool_schema_for_turn,
             execute_tool=_execute_with_progress,
@@ -2544,7 +2544,7 @@ def run_unified(
             # natural shape of complex workflows (load skill → find
             # file → probe → sample frames → analyze_image x N →
             # render → verify → deliver).
-            max_iterations=20,
+            max_iterations=iterations if iterations is not None else 20,
             on_tool_call=_on_tool_call,
             attachments=attachments or None,
             model_override=model_override,
@@ -2570,12 +2570,17 @@ def run_unified(
     try:
         _small_ok = False
         if _cascade_cfg is not None:
-            _c_pid, _c_model, _c_threshold = _cascade_cfg
+            _c_pid, _c_model, _c_threshold, _c_small_iters = _cascade_cfg
             agent.progress(
-                "cascade", f"small-tier attempt: {_c_pid}/{_c_model}",
+                "cascade",
+                f"small-tier attempt: {_c_pid}/{_c_model} "
+                f"(max {_c_small_iters} iterations)",
             )
             try:
-                answer = _run_main_loop(model_override=(_c_pid, _c_model))
+                answer = _run_main_loop(
+                    model_override=(_c_pid, _c_model),
+                    iterations=_c_small_iters,
+                )
                 _small_ok = True
             except LLMError as _ce:
                 agent.progress(
@@ -2611,7 +2616,36 @@ def run_unified(
                     _c_pr()
                 except Exception:
                     pass
-                answer = _run_main_loop()
+                # Double-execution guard (2026-06-12 incident): tell
+                # the strong rerun which EXECUTE-class actions the
+                # small attempt already performed, so it verifies
+                # their effects instead of repeating them. Identical
+                # re-calls are deduped by the per-turn cache anyway;
+                # this note covers same-action-different-args.
+                _esc_task = task
+                try:
+                    from .endpoint_check import (
+                        _EXECUTE_TOOLS as _C_EXEC,
+                    )
+                    _done = [
+                        n for n in _turn_tool_names(agent) if n in _C_EXEC
+                    ]
+                    if _done:
+                        seen: list[str] = []
+                        for n in _done:
+                            if n not in seen:
+                                seen.append(n)
+                        _esc_task = (
+                            f"{task}\n\n[CASCADE HANDOFF] A previous "
+                            f"attempt this turn already executed: "
+                            f"{', '.join(seen)}. Check their results "
+                            f"in the duplicate-call cache before "
+                            f"acting — do NOT repeat completed "
+                            f"actions; verify and build on them."
+                        )
+                except Exception:
+                    pass
+                answer = _run_main_loop(user_task=_esc_task)
         if not _small_ok:
             # No cascade configured, or the small tier raised —
             # either way the active model runs the loop.

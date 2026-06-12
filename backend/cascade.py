@@ -43,6 +43,13 @@ _CACHE_LOADED_AT: float = 0.0
 _CACHE_TTL_SEC = 5.0
 
 _DEFAULT_GATE = 70
+# Iteration cap for the small-tier attempt. The 2026-06-12 incident:
+# qwen burned 13 of the main loop's 20 iterations flailing on a
+# trivial scheduling task (3x schedule_message + 7x terminal_exec
+# probes) before the gate caught it — then the strong rerun paid
+# full price on top. A small model that hasn't delivered in 8
+# iterations won't deliver in 20; escalate sooner and cheaper.
+_DEFAULT_SMALL_MAX_ITERATIONS = 8
 
 
 def _config_path():
@@ -60,6 +67,7 @@ def default_config() -> dict:
         "provider_id": "",
         "model": "",
         "confidence_gate": _DEFAULT_GATE,
+        "small_max_iterations": _DEFAULT_SMALL_MAX_ITERATIONS,
     }
 
 
@@ -83,6 +91,11 @@ def load_config(*, force: bool = False) -> dict:
                 cfg["model"] = str(raw.get("model") or "").strip()
                 gate = int(raw.get("confidence_gate") or _DEFAULT_GATE)
                 cfg["confidence_gate"] = max(0, min(100, gate))
+                smi = int(
+                    raw.get("small_max_iterations")
+                    or _DEFAULT_SMALL_MAX_ITERATIONS
+                )
+                cfg["small_max_iterations"] = max(1, min(20, smi))
             except Exception as e:
                 log.warning("cascade.json unreadable (%s); disabled", e)
         _CACHE = cfg
@@ -100,6 +113,13 @@ def save_config(cfg: dict) -> dict:
     except (TypeError, ValueError):
         gate = _DEFAULT_GATE
     out["confidence_gate"] = max(0, min(100, gate))
+    try:
+        smi = int(
+            cfg.get("small_max_iterations") or _DEFAULT_SMALL_MAX_ITERATIONS
+        )
+    except (TypeError, ValueError):
+        smi = _DEFAULT_SMALL_MAX_ITERATIONS
+    out["small_max_iterations"] = max(1, min(20, smi))
     from .paths import write_atomic_json
     write_atomic_json(_config_path(), out)
     global _CACHE, _CACHE_LOADED_AT
@@ -109,9 +129,10 @@ def save_config(cfg: dict) -> dict:
     return out
 
 
-def route() -> "Optional[tuple[str, str, int]]":
-    """(provider_id, model, confidence_gate) when the cascade is on
-    and fully configured; None otherwise. Never raises."""
+def route() -> "Optional[tuple[str, str, int, int]]":
+    """(provider_id, model, confidence_gate, small_max_iterations)
+    when the cascade is on and fully configured; None otherwise.
+    Never raises."""
     try:
         cfg = load_config()
         if not cfg.get("enabled"):
@@ -120,7 +141,15 @@ def route() -> "Optional[tuple[str, str, int]]":
         model = cfg.get("model") or ""
         if not pid or not model:
             return None
-        return pid, model, int(cfg.get("confidence_gate") or _DEFAULT_GATE)
+        return (
+            pid,
+            model,
+            int(cfg.get("confidence_gate") or _DEFAULT_GATE),
+            int(
+                cfg.get("small_max_iterations")
+                or _DEFAULT_SMALL_MAX_ITERATIONS
+            ),
+        )
     except Exception as e:
         log.debug("cascade.route failed: %s", e)
         return None

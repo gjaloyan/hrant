@@ -35,7 +35,7 @@ def test_route_when_configured(cas):
         "model": "qwen/qwen3.6-35b-a3b",
         "confidence_gate": 75,
     })
-    assert cas.route() == ("openrouter-x", "qwen/qwen3.6-35b-a3b", 75)
+    assert cas.route() == ("openrouter-x", "qwen/qwen3.6-35b-a3b", 75, 8)
 
 
 def test_enabled_but_unconfigured_routes_none(cas):
@@ -49,6 +49,24 @@ def test_gate_clamped(cas):
         "confidence_gate": 250,
     })
     assert cas.route()[2] == 100
+
+
+def test_small_max_iterations_clamped_and_routed(cas):
+    """2026-06-12 incident: qwen burned 13 of 20 iterations flailing
+    on a scheduling task before the gate caught it. The small-tier
+    attempt now has its own (lower) iteration budget."""
+    cas.save_config({
+        "enabled": True, "provider_id": "p", "model": "m",
+        "small_max_iterations": 99,
+    })
+    assert cas.route()[3] == 20  # clamped to the main loop's cap
+    cas.save_config({
+        "enabled": True, "provider_id": "p", "model": "m",
+        "small_max_iterations": 5,
+    })
+    assert cas.route()[3] == 5
+    cas.save_config({"enabled": True, "provider_id": "p", "model": "m"})
+    assert cas.route()[3] == 8  # default
 
 
 # ─── Gate ─────────────────────────────────────────────────────────

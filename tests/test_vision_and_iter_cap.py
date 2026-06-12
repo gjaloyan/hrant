@@ -191,7 +191,10 @@ def test_run_unified_max_iterations_is_20(monkeypatch):
     import inspect
     from backend import unified_agent
     src = inspect.getsource(unified_agent)
-    assert "max_iterations=20" in src
+    # 2026-06-12: the literal became a parameter default - the cascade
+    # small-tier attempt runs with its own (lower) budget while the
+    # strong/main path keeps the full 20.
+    assert "iterations if iterations is not None else 20" in src
     assert "max_iterations=10" not in src
 
 
