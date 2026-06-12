@@ -2102,10 +2102,10 @@ class OpenAICompatibleLLM(BaseLLM):
                     task_type=f"{_task_type}:tool_synth",
                     model=self.model,
                     provider=self.provider_name,
-                    usage={
-                        "input_tokens": usage.get("prompt_tokens", 0),
-                        "output_tokens": usage.get("completion_tokens", 0),
-                    },
+                    # Same cache-aware split the other OpenAI-compat
+                    # call sites use (2026-06-12) — raw prompt_tokens
+                    # include the cached portion.
+                    usage=_openai_usage_to_record(usage),
                     duration_ms=duration_ms,
                     prompt_preview="(forced final synthesis)",
                 )
@@ -2215,13 +2215,23 @@ class CodexLLM(BaseLLM):
     def _record_usage(self, usage: dict, _task_type: str, prompt_preview: str, duration_ms: int) -> None:
         if not usage:
             return
+        # Responses API reports `input_tokens` INCLUSIVE of cached
+        # tokens, with the cached subset under
+        # `input_tokens_details.cached_tokens`. Pre-fix (2026-06-12)
+        # we recorded the raw number as fresh input — the 208k-token
+        # reminder turn showed in=202k when 193k of it was cache reads
+        # billed at ~10%. Split so display and cost are honest.
+        raw_in = usage.get("input_tokens", 0) or 0
+        details = usage.get("input_tokens_details") or {}
+        cached = details.get("cached_tokens", 0) or 0
         TOKENS.record(
             task_type=_task_type,
             model=self.model,
             provider=self.provider_name,
             usage={
-                "input_tokens": usage.get("input_tokens", 0),
+                "input_tokens": max(0, raw_in - cached),
                 "output_tokens": usage.get("output_tokens", 0),
+                "cache_read_input_tokens": cached,
             },
             duration_ms=duration_ms,
             prompt_preview=prompt_preview,

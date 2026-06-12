@@ -298,6 +298,46 @@ def _tts_set_rate(value: Optional[str]) -> None:
 # --- Response language ------------------------------------------------
 
 
+def _tz_path():
+    from . import paths
+    return paths.knowledge_dir() / "user_timezone.json"
+
+
+def _user_timezone_get() -> str:
+    """IANA timezone name; 'UTC' when unset."""
+    try:
+        import json as _json
+        p = _tz_path()
+        if p.exists():
+            tz = (_json.loads(p.read_text(encoding="utf-8")) or {}).get("tz")
+            if tz:
+                return str(tz)
+    except Exception:
+        pass
+    return "UTC"
+
+
+def _user_timezone_set(value: Optional[str]) -> None:
+    """Validate against the IANA database before persisting — a typo
+    here would silently shift every reminder the user sets."""
+    tz = (value or "").strip() or "UTC"
+    from zoneinfo import ZoneInfo
+    try:
+        ZoneInfo(tz)
+    except Exception:
+        raise ValueError(
+            f"unknown timezone {tz!r} — use an IANA name like "
+            f"'Asia/Yerevan' or 'Europe/Berlin'"
+        )
+    from .paths import write_atomic_json
+    write_atomic_json(_tz_path(), {"tz": tz})
+
+
+def user_timezone() -> str:
+    """Public accessor for prompt assembly and tools."""
+    return _user_timezone_get()
+
+
 def _response_language_get() -> Optional[str]:
     """Pinned response language from the WebUI default user_profile.
     Returns the raw section body (one line typically) or None."""
@@ -416,6 +456,17 @@ def _build_registry() -> dict[str, SettingSpec]:
             ),
             get_fn=_response_language_get,
             set_fn=_response_language_set,
+        ),
+        "user.timezone": SettingSpec(
+            key="user.timezone",
+            description=(
+                "IANA timezone the user lives in (e.g. 'Asia/Yerevan'). "
+                "The agent shows times and parses 'tomorrow' / 'on "
+                "Monday' / reminder times in THIS zone, converting to "
+                "UTC only where tool arguments require it. Default UTC."
+            ),
+            get_fn=_user_timezone_get,
+            set_fn=_user_timezone_set,
         ),
     }
 

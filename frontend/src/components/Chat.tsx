@@ -1488,9 +1488,12 @@ const Chat = forwardRef<ChatHandle, {
                   longer-term analytics. */}
               {m.role === "agent" && m.meta?.token_usage && m.meta.token_usage.total_tokens > 0 && (
                 <div className="mt-1 text-[10px] opacity-50 flex gap-3 flex-wrap">
-                  <span>tokens: {m.meta.token_usage.input_tokens.toLocaleString()} in / {m.meta.token_usage.output_tokens.toLocaleString()} out</span>
+                  {/* `in` is FRESH (billed-at-full-price) input only;
+                      cached reads bill ~10% and are shown separately
+                      so the real spend is readable at a glance. */}
+                  <span>tokens: {m.meta.token_usage.input_tokens.toLocaleString()} in (fresh) / {m.meta.token_usage.output_tokens.toLocaleString()} out</span>
                   {m.meta.token_usage.cache_read_tokens > 0 && (
-                    <span>cache: {m.meta.token_usage.cache_read_tokens.toLocaleString()} read</span>
+                    <span>+ {m.meta.token_usage.cache_read_tokens.toLocaleString()} cached (~10% price)</span>
                   )}
                   <span>{m.meta.token_usage.total_tokens.toLocaleString()} total</span>
                   <span>{m.meta.token_usage.llm_calls} calls</span>

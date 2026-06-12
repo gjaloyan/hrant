@@ -1999,9 +1999,38 @@ def run_unified(
     except Exception:
         experience = ""
 
+    # NOW block (2026-06-12): the agent defaulted to UTC for every
+    # user-facing time ("напомни в понедельник" became Monday 10:00
+    # UTC = 14:00 for the user). Inject the user's local time + zone
+    # so 'tomorrow' / 'on Monday' / reminder times resolve in THEIR
+    # zone; UTC stays available for tool args that require it.
+    now_block = ""
+    try:
+        from datetime import datetime as _now_dt, timezone as _now_tz
+        from zoneinfo import ZoneInfo as _ZI
+        from .settings import user_timezone as _user_tz
+        _tzname = _user_tz()
+        _utc_now = _now_dt.now(_now_tz.utc)
+        _local_now = _utc_now.astimezone(_ZI(_tzname))
+        _off = _local_now.strftime("%z")
+        now_block = (
+            "# NOW\n"
+            f"User local time: {_local_now:%A %Y-%m-%d %H:%M} "
+            f"({_tzname}, UTC{_off[:3]}:{_off[3:]})\n"
+            f"UTC time: {_utc_now:%Y-%m-%d %H:%M}\n"
+            "All user-facing times (reminders, 'tomorrow', 'on "
+            "Monday', schedules you report back) are in the USER'S "
+            "LOCAL timezone. Convert to UTC only for tool arguments "
+            "that require UTC (e.g. schedule_message due_at)."
+        )
+    except Exception as e:
+        log.debug("now-block assembly failed: %s", e)
+
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
     ]
+    if now_block:
+        system_parts.append(f"---\n\n{now_block}")
     if snapshot:
         system_parts.append(f"---\n\n{snapshot}")
     if yesterday:

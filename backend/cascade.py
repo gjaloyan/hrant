@@ -43,13 +43,16 @@ _CACHE_LOADED_AT: float = 0.0
 _CACHE_TTL_SEC = 5.0
 
 _DEFAULT_GATE = 70
-# Iteration cap for the small-tier attempt. The 2026-06-12 incident:
-# qwen burned 13 of the main loop's 20 iterations flailing on a
-# trivial scheduling task (3x schedule_message + 7x terminal_exec
-# probes) before the gate caught it — then the strong rerun paid
-# full price on top. A small model that hasn't delivered in 8
-# iterations won't deliver in 20; escalate sooner and cheaper.
-_DEFAULT_SMALL_MAX_ITERATIONS = 8
+# Iteration budget for the small-tier attempt. Default = the main
+# loop's full 20 — owner decision 2026-06-12: "we need a powerful
+# agent, not a cut and limited one". The small tier gets the same
+# room to work as the strong one; the strong-verifier gate (not an
+# iteration guillotine) decides whether its work ships. The knob
+# stays for owners who prefer cheaper early escalation (the
+# 2026-06-12 incident: 13 flail iterations on a scheduling task
+# before the gate caught it — a cap of 8 would have saved ~40% of
+# that turn).
+_DEFAULT_SMALL_MAX_ITERATIONS = 20
 
 
 def _config_path():

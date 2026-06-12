@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import {
+  CascadeConfig,
+  fetchCascade,
+  saveCascade,
   boostFinetuneExample,
   deleteFinetuneExample,
   editFinetuneExample,
@@ -45,6 +48,26 @@ export default function FinetunePanel() {
   const [editText, setEditText] = useState("");
   const [ggufPath, setGgufPath] = useState("");
   const [ggufTag, setGgufTag] = useState("");
+  // Model cascade (small tier first, strong-verifier gate). Lives in
+  // the fine-tune panel because the cascade's small tier is the model
+  // this panel's training loop is meant to improve.
+  const [cascade, setCascade] = useState<CascadeConfig | null>(null);
+  const [cascadeSaving, setCascadeSaving] = useState(false);
+
+  const saveCascadeCfg = async (patch: Partial<CascadeConfig>) => {
+    if (!cascade) return;
+    const next = { ...cascade, ...patch };
+    setCascade(next);
+    setCascadeSaving(true);
+    try {
+      const r = await saveCascade(next);
+      setCascade(r.config);
+    } catch {
+      try { setCascade(await fetchCascade()); } catch { /* ignore */ }
+    } finally {
+      setCascadeSaving(false);
+    }
+  };
 
   const refresh = async () => {
     const [s, e, v, a] = await Promise.all([
@@ -57,6 +80,7 @@ export default function FinetunePanel() {
     setItems(e.items || []);
     setVersions(v);
     setAppStatus(a);
+    try { setCascade(await fetchCascade()); } catch { /* ignore */ }
   };
 
   useEffect(() => {
@@ -171,6 +195,74 @@ export default function FinetunePanel() {
             mode: <b>{appStatus.mode}</b> · training:{" "}
             <b>{appStatus.training_location}</b> · finetune:{" "}
             {appStatus.finetune_enabled ? "yes" : "no"}
+          </div>
+        )}
+
+        {/* Model cascade — small tier first, strong-verifier gate */}
+        {cascade && (
+          <div className="mt-3 bg-slate-800/60 rounded p-3 text-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="font-semibold text-sm">
+                Model Cascade{" "}
+                <span className="font-normal text-slate-400">
+                  (small model answers first; a strong-model verifier
+                  gate escalates weak turns)
+                </span>
+              </div>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={cascade.enabled}
+                  disabled={cascadeSaving}
+                  onChange={() => saveCascadeCfg({ enabled: !cascade.enabled })}
+                  className="rounded"
+                />
+                <span className={cascade.enabled ? "text-emerald-400" : "text-slate-400"}>
+                  {cascade.enabled ? "ON" : "OFF"}
+                </span>
+              </label>
+            </div>
+            <div className="flex gap-3 flex-wrap items-center">
+              <label className="flex items-center gap-1">
+                provider
+                <input
+                  value={cascade.provider_id}
+                  onChange={(e) => setCascade({ ...cascade, provider_id: e.target.value })}
+                  onBlur={() => saveCascadeCfg({})}
+                  className="bg-slate-900 rounded px-2 py-0.5 w-56 font-mono"
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                model
+                <input
+                  value={cascade.model}
+                  onChange={(e) => setCascade({ ...cascade, model: e.target.value })}
+                  onBlur={() => saveCascadeCfg({})}
+                  className="bg-slate-900 rounded px-2 py-0.5 w-56 font-mono"
+                />
+              </label>
+              <label className="flex items-center gap-1" title="Small-tier answers below this strong-verifier confidence escalate to the active model">
+                gate
+                <input
+                  type="number" min={0} max={100}
+                  value={cascade.confidence_gate}
+                  onChange={(e) => setCascade({ ...cascade, confidence_gate: parseInt(e.target.value || "70", 10) })}
+                  onBlur={() => saveCascadeCfg({})}
+                  className="bg-slate-900 rounded px-2 py-0.5 w-16"
+                />
+              </label>
+              <label className="flex items-center gap-1" title="Iteration budget for the small-tier attempt (20 = same as the main loop, no cut)">
+                max iters
+                <input
+                  type="number" min={1} max={20}
+                  value={cascade.small_max_iterations}
+                  onChange={(e) => setCascade({ ...cascade, small_max_iterations: parseInt(e.target.value || "20", 10) })}
+                  onBlur={() => saveCascadeCfg({})}
+                  className="bg-slate-900 rounded px-2 py-0.5 w-16"
+                />
+              </label>
+              {cascadeSaving && <span className="text-slate-500">saving…</span>}
+            </div>
           </div>
         )}
 

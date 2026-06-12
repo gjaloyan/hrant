@@ -1666,6 +1666,20 @@ export const cancelScheduledMessage = (id: string) =>
     `/api/scheduled-messages/${encodeURIComponent(id)}`,
   );
 
+// ---- Model cascade (small tier first, strong-verifier gate) ----
+export type CascadeConfig = {
+  enabled: boolean;
+  provider_id: string;
+  model: string;
+  confidence_gate: number;
+  small_max_iterations: number;
+};
+
+export const fetchCascade = () => json_get<CascadeConfig>("/api/cascade");
+
+export const saveCascade = (c: CascadeConfig) =>
+  json_put<{ ok: boolean; config: CascadeConfig }>("/api/cascade", c);
+
 // Reminders tab (2026-06-12): explicit-time creation from Settings.
 // Exactly one of due_at (ISO 8601 UTC Z) / delay_minutes.
 export const createScheduledMessage = (p: {

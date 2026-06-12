@@ -223,7 +223,7 @@ class CascadeUpdate(BaseModel):
     provider_id: str = ""
     model: str = ""
     confidence_gate: int = 70
-    small_max_iterations: int = 8
+    small_max_iterations: int = 20
 
 
 @router.put("/api/cascade")
