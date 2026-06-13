@@ -8,12 +8,14 @@ ID — stable 12-character sha1 of user+assistant+timestamp, assigned on add().
 from __future__ import annotations
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
 
 from .config import CONFIG
+log = logging.getLogger(__name__)
 from .models import (
     ChatMessage,
     FinetuneCategory,
@@ -338,3 +340,92 @@ def collect_from_turn(
         project=project,
         verified=True,
     )
+
+
+_CORRECTION_JUDGE_SYSTEM = (
+    "You label CORRECTION pairs for an agent's training data.\n"
+    "You are given the PREVIOUS exchange (the user's question and the "
+    "assistant's answer) and the CURRENT exchange (the user's reply and "
+    "the assistant's new answer).\n\n"
+    "A CORRECTION happened when ALL hold:\n"
+    "  - the user's CURRENT reply points out that the assistant's "
+    "PREVIOUS answer was wrong, incomplete, or off, AND\n"
+    "  - the assistant's CURRENT answer genuinely fixes it with real, "
+    "specific content (not merely 'sorry, you are right' with nothing "
+    "added).\n\n"
+    "It is NOT a correction when: the user simply asks a follow-up; the "
+    "user adds a new unrelated request; the assistant only apologizes "
+    "without delivering a better answer; the topic changed.\n\n"
+    "Judge in the user's own language. Return strictly JSON: "
+    '{"is_correction": true|false, "reason": "short"}'
+)
+
+
+def maybe_capture_correction(
+    *,
+    is_chat: bool = False,
+    supervisor_mode: bool = False,
+    speaker_id: "str | None" = None,
+    session_key: "str | None" = None,
+    project: "str | None" = None,
+) -> "FinetunePair | None":
+    """Detect a user-driven correction of the agent's PREVIOUS turn and
+    store it as a high-value 'correction' training pair (AGI roadmap C,
+    2026-06-13).
+
+    Reading the real conversation history showed the richest learning
+    signal — turns where the human caught the agent being wrong and the
+    agent then fixed it — was being thrown away: corrections score low
+    confidence, so `collect_from_turn`'s >=85 gate rejected them, and
+    `add_correction` was only ever called manually from the WebUI.
+
+    Must run AFTER the current turn is persisted to CONVERSATION (so
+    `recent(2)` yields [prior, current]). An LLM CLASSIFICATION judge
+    (routable to the small model) confirms the correction so we never
+    keyword-match. Fail-closed: any error / non-correction → no row.
+
+    The stored pair is (original question -> corrected answer) with the
+    wrong answer kept as `original_wrong_answer`, so a future model
+    learns to answer the ORIGINAL question correctly the first time.
+    Curation gives 'correction' a quality bonus + 2-3x boosting, and the
+    pair is human-reviewable in the Fine-Tune panel before training.
+    """
+    if is_chat or supervisor_mode:
+        return None
+    try:
+        from .conversation import CONVERSATION
+        turns = CONVERSATION.recent(2, session_key=session_key)
+        if len(turns) < 2:
+            return None
+        prior, current = turns[-2], turns[-1]
+        prior_q = (prior.get("user") or "").strip()
+        prior_a = (prior.get("answer") or "").strip()
+        corr_msg = (current.get("user") or "").strip()
+        corrected_a = (current.get("answer") or "").strip()
+        # Need real content on both sides to be worth a training pair.
+        if len(prior_q) < 10 or len(prior_a) < 30 or len(corrected_a) < 30:
+            return None
+
+        from .llm import router, TaskType
+        data = router().call_json(
+            TaskType.CLASSIFICATION,
+            _CORRECTION_JUDGE_SYSTEM,
+            (
+                f"=== PREVIOUS ===\nUSER: {prior_q[:1500]}\n"
+                f"ASSISTANT: {prior_a[:1500]}\n\n"
+                f"=== CURRENT ===\nUSER: {corr_msg[:1500]}\n"
+                f"ASSISTANT: {corrected_a[:1500]}"
+            ),
+            max_tokens=120, temperature=0.0,
+        )
+        if not bool(data.get("is_correction", False)):
+            return None
+        return store().add_correction(
+            question=prior_q,
+            wrong_answer=prior_a,
+            corrected_answer=corrected_a,
+            project=project,
+        )
+    except Exception as e:
+        log.debug("maybe_capture_correction failed (non-fatal): %s", e)
+        return None

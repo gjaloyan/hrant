@@ -3180,6 +3180,25 @@ def run_unified(
         except Exception as e:
             log.debug("finetune collection failed (non-fatal): %s", e)
 
+        # Correction capture (AGI roadmap C, 2026-06-13). Reading the
+        # real conversation history showed the gold signal — turns
+        # where the human caught the agent wrong and it then fixed
+        # itself — was lost: corrections score low confidence so the
+        # collector above rejects them. This runs AFTER CONVERSATION.
+        # add_turn (above) so recent(2) yields [prior, current]; an
+        # LLM judge confirms the correction (no keyword matching).
+        try:
+            from .finetune import maybe_capture_correction
+            maybe_capture_correction(
+                is_chat=False,
+                supervisor_mode=supervisor_mode,
+                speaker_id=speaker_id,
+                session_key=skey,
+                project=project,
+            )
+        except Exception as e:
+            log.debug("correction capture failed (non-fatal): %s", e)
+
     # Audit T3 follow-up (2026-05-27). The MetaLearner.analyze_failure
     # path was DEFINED but NEVER CALLED from anywhere — leaving the
     # whole learning loop dead since the unified-loop cutover. Wire
