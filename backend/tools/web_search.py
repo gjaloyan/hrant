@@ -200,6 +200,45 @@ def _ssrf_check(url: str) -> str:
     return ""
 
 
+def _regex_strip_html(html: str) -> str:
+    """Crude fallback: drop scripts/styles, strip tags, collapse
+    whitespace. Keeps boilerplate (nav/footer/ads) — used only when
+    main-content extraction is unavailable or fails."""
+    text = re.sub(r"<script.*?</script>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
+    text = re.sub(r"<.*?>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_main_content(html: str, url: str) -> "str | None":
+    """Pull the readable article body out of a page with trafilatura,
+    dropping nav / ads / cookie banners / footers. Returns None when
+    trafilatura isn't installed or finds no main content, so the
+    caller can fall back to the regex strip.
+
+    2026-06-13: the old fetch_url returned the whole page through a
+    crude regex strip — menus, banners and ads diluted the signal and
+    burned the LLM's token budget. trafilatura is pure-Python, local
+    (the URL never leaves the box, unlike a hosted reader), and a big
+    signal/noise win for the common case (read an article / docs)."""
+    try:
+        import trafilatura
+    except Exception:
+        return None
+    try:
+        text = trafilatura.extract(
+            html,
+            url=url,
+            include_comments=False,
+            include_tables=True,
+            favor_precision=True,
+        )
+    except Exception:
+        return None
+    text = (text or "").strip()
+    return text or None
+
+
 def fetch_url(url: str, max_chars: int = 8000) -> str:
     blocked = _ssrf_check(url)
     if blocked:
@@ -210,8 +249,9 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
         r.raise_for_status()
     except Exception as e:
         return f"[fetch error: {e}]"
-    text = re.sub(r"<script.*?</script>", " ", r.text, flags=re.S | re.I)
-    text = re.sub(r"<style.*?</style>", " ", text, flags=re.S | re.I)
-    text = re.sub(r"<.*?>", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
+    # Prefer clean main-content extraction; fall back to the regex
+    # strip when trafilatura is absent or the page has no article body
+    # (search-result pages, JSON endpoints, tiny pages).
+    main = _extract_main_content(r.text, url)
+    text = main if main is not None else _regex_strip_html(r.text)
     return text[:max_chars]

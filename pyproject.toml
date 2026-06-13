@@ -42,6 +42,11 @@ dependencies = [
     # backend. ~400 multilingual neural voices, no API key, no local
     # model files. Falls through to Piper / OpenAI when unreachable.
     "edge-tts>=6.1.0",
+    # Main-content extraction for fetch_url — strips nav/ads/boilerplate
+    # so the LLM sees the readable article body, not the whole page.
+    # Local (URL never leaves the box); fetch_url degrades to a regex
+    # strip if it's ever missing.
+    "trafilatura>=1.8.0",
 ]
 
 [project.optional-dependencies]
