@@ -68,8 +68,9 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "read_file", "save_to_workspace",
     # Execution
     "terminal_exec", "run_python",
-    # Search / navigation
-    "locate_symbol", "search_knowledge", "list_skills", "load_skill",
+    # Search / navigation + knowledge education (read + deliberate write)
+    "locate_symbol", "search_knowledge", "save_knowledge",
+    "list_skills", "load_skill",
     # Web (basic — agent_browser is in `media` bundle)
     "fetch_url", "web_search",
     # Multimodal

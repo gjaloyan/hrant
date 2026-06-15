@@ -325,6 +325,54 @@ def _save_user_fact_handler(category: str, fact: str) -> str:
     }, ensure_ascii=False)
 
 
+def _save_knowledge_handler(
+    topic: str,
+    body: str,
+    category: str = "profession",
+    keywords: str = "",
+    source: str = "",
+) -> str:
+    """Persist DELIBERATELY-studied domain knowledge into the
+    searchable knowledge base (2026-06-15). This is the write side of
+    the agent's "education": when it researches how a kind of task is
+    properly done — trading TA theory, a library's API model, a
+    domain's best practices — it saves the distilled theory/method
+    here so the NEXT task in that domain recalls it via
+    search_knowledge instead of re-studying from scratch (expensive
+    once, cheap forever). Distinct from save_user_fact (facts about
+    the user) and save_to_workspace (scratch files)."""
+    from .knowledge_manager import KM
+    topic = (topic or "").strip()
+    body = (body or "").strip()
+    if len(topic) < 3 or len(body) < 30:
+        return json.dumps({
+            "ok": False,
+            "error": "topic (>=3 chars) and a substantive body (>=30 chars) required",
+        }, ensure_ascii=False)
+    cat = (category or "profession").strip().lower()
+    valid_cats = ("fundamentals", "profession", "projects", "personal")
+    if cat not in valid_cats:
+        cat = "profession"
+    kw = [k.strip() for k in (keywords or "").split(",") if k.strip()]
+    try:
+        note = KM.save_note(
+            topic=topic,
+            body=body,
+            category=cat,  # type: ignore[arg-type]
+            keywords=kw,
+            source=(source or "studied").strip(),
+            confidence="partial",
+        )
+    except Exception as e:
+        return json.dumps({
+            "ok": False, "error": f"{type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True, "topic": note.frontmatter.topic,
+        "category": cat, "path": note.path,
+    }, ensure_ascii=False)
+
+
 def _search_knowledge_handler(query: str, limit: int = 5) -> str:
     """Hybrid-search across notes + knowledge graph + vector store
     AND the per-fact vector store (audit T3.3, 2026-05-27). Returns
@@ -2284,6 +2332,60 @@ def register_builtin_tools() -> None:
             "required": ["query"],
         },
         handler=_search_knowledge_handler,
+    )
+
+    reg.register_func(
+        name="save_knowledge",
+        description=(
+            "Save DELIBERATELY-STUDIED domain knowledge to your "
+            "searchable knowledge base — the theory, methods, "
+            "principles, and best practices of a field (like what a "
+            "human studies in college). Use it after researching HOW "
+            "a kind of task is properly done, so the next task in that "
+            "domain recalls it via `search_knowledge` instead of "
+            "re-studying (expensive once, cheap forever). This is your "
+            "EDUCATION; skills are how you APPLY it. NOT for facts "
+            "about the user (`save_user_fact`) or scratch files "
+            "(`save_to_workspace`)."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "topic": {
+                    "type": "string",
+                    "description": (
+                        "Short canonical title, e.g. 'Crypto technical "
+                        "analysis — core methodology'."
+                    ),
+                },
+                "body": {
+                    "type": "string",
+                    "description": (
+                        "The distilled knowledge in Markdown: theory, "
+                        "method steps, what a complete approach covers, "
+                        "key formulas/heuristics, pitfalls, sources."
+                    ),
+                },
+                "category": {
+                    "type": "string",
+                    "enum": ["fundamentals", "profession", "projects", "personal"],
+                    "description": (
+                        "'profession' for domain expertise (default), "
+                        "'fundamentals' for foundational/general theory."
+                    ),
+                },
+                "keywords": {
+                    "type": "string",
+                    "description": "Comma-separated keywords for recall.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Where it came from (URL / 'studied').",
+                },
+            },
+            "required": ["topic", "body"],
+        },
+        handler=_save_knowledge_handler,
     )
 
     reg.register_func(
