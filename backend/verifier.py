@@ -256,7 +256,7 @@ You are given: (1) a user question, (2) an assistant's answer, (3) source
 notes, and optionally (4) tool outputs (file contents the assistant read,
 web search results, etc.).
 
-Classify EVERY substantive claim in the answer into one of three buckets:
+Classify EVERY substantive claim in the answer into one of FOUR buckets:
 
   verified       — claim is directly supported by a note OR a tool output.
                    For positive claims, the supporting text must actually
@@ -268,6 +268,20 @@ Classify EVERY substantive claim in the answer into one of three buckets:
                    "absent", "not handled", or "needs to be added" is a
                    CONTRADICTION whenever the tool output shows that
                    thing IS already there.
+  projection     — an EXPLICITLY-HEDGED forecast or conditional outcome:
+                   a statement about the FUTURE or a scenario, marked as
+                   uncertain ("may", "likely", "could", "~30% chance",
+                   "if X then Y", "bullish/base/bearish scenario"). These
+                   are legitimate analysis, NOT hallucinations — an analyst
+                   SHOULD make hedged projections. Put a claim here ONLY
+                   when it is (a) about the future/a conditional, AND
+                   (b) clearly hedged, AND (c) NOT presented as certain.
+                   A future claim stated as a CERTAINTY ("PEPE WILL hit
+                   $1") is NOT a projection — it is unverified or a
+                   contradiction. A wrong PRESENT fact is never a
+                   projection. Do not let projections excuse fabricated
+                   present-tense facts (prices, levels, filings) — those
+                   still go to verified / unverified / contradiction.
 
 IMPORTANT — negative existence claims ("X is missing", "code doesn't
 handle Y", "no validation for Z", or proposed "fixes" that add what the
@@ -305,22 +319,43 @@ from verified / unverified / contradiction counts.
   "verified_claims":   ["..."],
   "unverified_claims": ["..."],
   "contradictions":    ["..."],
+  "projections":       ["..."],
   "notes_used":        ["topic1", "topic2"]
 }"""
 
 
-def _compute_confidence(verified: int, unverified: int, contradictions: int) -> int:
+def _compute_confidence(
+    verified: int,
+    unverified: int,
+    contradictions: int,
+    projections: int = 0,
+) -> int:
     """Deterministic confidence from claim counts.
 
     Pulled out of the LLM prompt (where it lived as a formula the model
     was supposed to evaluate but routinely got wrong) into Python so the
-    same claim split always yields the same score. Formula matches what
-    used to be in the prompt: contradictions are weighted 2× because
-    they're worse than no evidence — they're evidence against.
+    same claim split always yields the same score. Contradictions are
+    weighted 2× because they're worse than no evidence.
 
         confidence = 100 * verified / (verified + unverified + 2*contradictions)
 
-    Edge: zero claims of any kind → 0 (the verifier saw nothing).
+    Forecast calibration (Q2 level 2, 2026-06-15): `projections` —
+    explicitly-hedged, premise-grounded forecasts — are EXCLUDED from
+    the math. They're legitimate analysis, not hallucinations, so they
+    must not drag confidence the way unverified FACTUAL claims do. The
+    data that forced this: a detailed PEPE year-analysis scored 75 with
+    95 'unverified' claims that were almost all hedged scenarios — and
+    a RICHER analysis (after the catalyst-weighting fix) pushed that to
+    95 unverified, i.e. better work looked worse. Confidence here now
+    measures factual grounding + hallucination-freedom; the forecast's
+    inherent uncertainty is communicated by the answer's own hedging
+    and the projection cap the caller applies, not by tanking the
+    score. A confident fabrication about the future still lands in
+    unverified/contradiction (full weight), so this can't be gamed.
+
+    Edge: zero verified/unverified/contradiction → 0 (nothing to grade),
+    even if there are projections (a pure-guess answer with no grounded
+    facts shouldn't ride high on hedged speculation alone).
     """
     denom = verified + unverified + 2 * contradictions
     if denom <= 0:
@@ -336,6 +371,11 @@ def _compute_confidence(verified: int, unverified: int, contradictions: int) -> 
 # critic_threshold so the agent triggers a retry / surfaces a
 # low-confidence banner instead of presenting the answer as solid.
 UNGROUNDED_CONFIDENCE_CAP = 50
+
+# Forecast cap (Q2 level 2, 2026-06-15): ceiling for projection-
+# dominated answers (a year-ahead forecast is never near-certain),
+# set above the critic-retry threshold so good analysis still ships.
+_PROJECTION_CONFIDENCE_CAP = 85
 
 # Floor applied when the agent read substantial source material AND
 # the LLM verifier produced verified_claims with zero contradictions.
@@ -538,14 +578,24 @@ Available topics: {', '.join(used_topics)}"""
     verified = list(data.get("verified_claims", []))
     unverified = list(data.get("unverified_claims", []))
     contradictions = list(data.get("contradictions", []))
+    projections = list(data.get("projections", []))
 
     # False-absence detection ("agent proposes adding X that already
     # exists") is handled by the VERIFIER_SYSTEM prompt itself (the
     # negative-existence rule, Steps 1-5) given the EXTRACTED
     # IDENTIFIERS list in the prompt — no deterministic keyword backup.
     confidence = _compute_confidence(
-        len(verified), len(unverified), len(contradictions)
+        len(verified), len(unverified), len(contradictions),
+        len(projections),
     )
+    # Forecast cap (Q2 level 2): when an answer is projection-DOMINATED
+    # (more hedged forecasts than verified facts), it is an inherently-
+    # uncertain analysis no matter how clean its facts. Cap at 85 so a
+    # year-ahead forecast never reads as near-certain, while still
+    # scoring well above the critic-retry threshold. A fact-dominated
+    # answer with a few projections is unaffected.
+    if projections and len(projections) > len(verified) and confidence > _PROJECTION_CONFIDENCE_CAP:
+        confidence = _PROJECTION_CONFIDENCE_CAP
     # Grounding guard: cap confidence when the answer's named entities
     # don't trace back to ANY source. Production audit caught the
     # verifier-LLM reporting 95% confidence on a fully fabricated
@@ -600,5 +650,6 @@ Available topics: {', '.join(used_topics)}"""
         verified_claims=verified,
         unverified_claims=unverified,
         contradictions=contradictions,
+        projections=projections,
         notes_used=list(data.get("notes_used", used_topics)),
     )

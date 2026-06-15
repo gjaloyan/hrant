@@ -124,6 +124,13 @@ class VerificationResult(BaseModel):
     #   endpoint_met — the delivery judgment. None = not evaluated.
     content_confidence: Optional[int] = None
     endpoint_met: Optional[bool] = None
+    # Forecast calibration (Q2 level 2, 2026-06-15). Explicitly-hedged,
+    # premise-grounded projections ("X is filed → ~P% likely → effect
+    # Z", "scenario: if Y then Z") — legitimately-uncertain analysis,
+    # NOT hallucinations. Kept separate so they don't drag confidence
+    # the way unverified FACTUAL claims do; a confident fabrication
+    # about the future still lands in unverified/contradictions.
+    projections: list[str] = []
 
 
 class EvidenceItem(BaseModel):
