@@ -438,3 +438,18 @@ def test_m3_negative_existence_rule():
     assert "docker ps" in body
     assert "podman ps" in body
     assert "EXHAUST" in body
+
+
+def test_m2_method_before_execution_principle():
+    """2026-06-15 (Gor's task-doing principle): for substantive tasks
+    the agent must establish the proper methodology BEFORE executing —
+    recall/learn how experts do this kind of task, cover every
+    essential dimension. The asset-analysis example pins the concrete
+    lesson (price technicals alone are incomplete; weigh news/
+    catalysts)."""
+    from backend.prompt_modules import MODULES
+    body = MODULES["m2_task_solver"].body
+    assert "Method before execution" in body
+    assert "RECALL" in body and "LEARN" in body
+    assert "expert" in body
+    assert "catalyst" in body  # the news/catalyst completeness lesson

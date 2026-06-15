@@ -123,7 +123,17 @@ with these constraints:
   domains. Where the skill needs binaries, also list them as
   tags so a future user typing "ffmpeg ..." pulls this skill.
 - `when_to_use`: short paragraph; emphasis on when NOT to use.
+  - CAUTION (2026-06-15): do NOT scope a skill so narrowly that it
+    excludes dimensions a domain expert would call essential. A
+    self-learned `crypto-technical-analysis` skill once said "do not
+    use for news sentiment" and so produced price-only analyses that
+    ignored a pending ETF — a wrong-feeling-right answer. Capture the
+    COMPLETE professional method, not the one mechanical slice you
+    happened to run this turn.
 - `body`: the step-by-step. Be explicit:
+  - the FULL methodology a professional would use, covering every
+    essential dimension of the task (e.g. an asset-analysis skill
+    must include a news/catalyst/regulatory step, not price alone),
   - exact tool names (`run_python`, not "Python"),
   - exact commands with concrete arguments (not "run ffmpeg
     with appropriate flags"),
