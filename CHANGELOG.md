@@ -10,6 +10,71 @@ For the full commit history, see `git log`. This file focuses on
 
 ---
 
+## AGI initiative — smart with small models (2026-06-10 → 2026-06-15)
+
+A two-week push to make Hrant genuinely intelligent on cheap/small
+models by moving wisdom, method and identity into the agent's "body"
+(files that survive any model swap). Full conceptual map + the agent's
+work philosophy: [docs/cognition.md](docs/cognition.md).
+
+**Cognitive systems**
+
+- **Model cascade** (`backend/cascade.py`) — small model answers
+  first, a strong-model verifier gates it, escalate only on failure.
+  Test-mode, owner opt-in via Fine-Tune panel / `GET/PUT /api/cascade`
+  (gate + small-tier iteration budget configurable).
+- **Per-task model routing** (`backend/model_routing.py`) — cheap
+  task types (classification / quick-answer / keyword) run on a cheap
+  model; judges + heavy turns stay strong. `GET/PUT /api/model-routing`.
+- **Method before execution** (M2 prompt) — for a substantive task the
+  agent establishes the proper methodology first (recall → research how
+  experts do it → cover every dimension), then executes. Financial
+  analysis now weighs news/catalysts/regulation, not price alone.
+- **Knowledge vs skills vs trajectories** — three memories, used
+  differently. New `save_knowledge` tool persists studied domain
+  theory (study-once, recall-forever); skills are applied procedures;
+  trajectories are past cases.
+- **Trajectory memory** (`backend/trajectory_memory.py`) — case-based
+  reasoning: similar past solved turns injected as PAST EXPERIENCE.
+- **Plan scratchpad** — `set_plan` / `update_plan` checklist;
+  self-correction rejects a final answer with pending steps.
+- **Answer critic** (`backend/answer_critic.py`) — best-of-2 read-only
+  revision when the verifier finds content problems.
+
+**Calibration**
+
+- **Grader calibration** — `VerificationResult` gains
+  `content_confidence` + `endpoint_met`; the learning loop separates
+  "didn't deliver the action" from "bad content".
+- **Projection bucket** — verifier 4th claim type for explicitly-
+  hedged, premise-grounded forecasts; excluded from the confidence
+  penalty (a year-ahead forecast is no longer scored like a
+  hallucination) with a projection cap of 85. Paired agent rule:
+  weigh material-but-uncertain info, don't binary-filter it.
+
+**Sleep cycle & learning loops** — nightly consolidation (digest →
+lessons → pruning → trajectory replay); finetune auto-collection of
+high-trust turns; correction auto-capture (user fixes the agent →
+stored as a high-value `correction` pair); methodology-complete skill
+creation.
+
+**The body (soul / identity)** — rewrote `soul.md` + `identity.md`:
+relationship to truth, judgment layer, ambitions and honest inner
+life, **family-unit framing** (a member of the family, not property).
+Verified on a 3B model — identity and morality hold across a model
+swap. Work philosophy documented in [docs/cognition.md §0](docs/cognition.md).
+
+**Reliability & UX fixes** — atomic writes + RLocks + pruning on all
+JSON stores; failover recently-failed cache; `fetch_url` main-content
+extraction via trafilatura; user timezone (local times, not UTC);
+Reminders settings tab + reminder-delivery priority; honest token
+display (fresh vs cached split); Codex refusal capture (refusals were
+silently empty); three tool-call-dump leak formats in the chat
+fast-path; owner-only helper refactor; per-task routing wins over the
+provider chain.
+
+---
+
 ## QA-audit-fix6 — closes the last 3 deferred refactors (2026-05-15)
 
 Audit findings #21, #22, #25 were marked as "deferred (refactor,

@@ -115,6 +115,7 @@ hrant gateway uninstall            # удалить unit, оставить venv
 
 ## Documentation
 
+- [docs/cognition.md](docs/cognition.md) — **когнитивная архитектура + философия работы агента**: память (knowledge/skills/trajectories), каскад, калибровка, sleep-цикл, тело (soul/identity)
 - [docs/architecture.md](docs/architecture.md) — модули, пайплайны, как агент думает
 - [docs/modes.md](docs/modes.md) — 4 deployment modes (`claude_only` / `local_full` / `cloud_finetune` / `local_cpu`) + dual-model router
 - [docs/cli.md](docs/cli.md) — полная справка по командам `hrant`
