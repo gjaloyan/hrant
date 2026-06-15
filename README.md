@@ -1,15 +1,50 @@
-# Hrant — Self-Learning Agent
+<div align="center">
 
-***English** · [Русский](README.ru.md)*
+# 🧠 Hrant
 
-A local AI agent that **does not keep knowledge in the model's weights**.
-Instead it reads sources, keeps structured notes (markdown) on disk, and
-loads them into context only when needed. It grows competence for the
-tasks you actually give it while keeping a small, efficient core.
+### A self-learning AI agent that keeps its knowledge in *notes*, not in the model's weights
 
-> a junior engineer with perfect notes who never forgets anything.
+*[English](README.md) · [Русский](README.ru.md)*
 
-## Install (fresh machine)
+![Python](https://img.shields.io/badge/python-3.12+-3776AB?logo=python&logoColor=white)
+![Backend](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
+![Frontend](https://img.shields.io/badge/React-20232A?logo=react&logoColor=61DAFB)
+![Local-first](https://img.shields.io/badge/local--first-no%20cloud%20required-success)
+![Tests](https://img.shields.io/badge/tests-2.8k-brightgreen)
+![Model-agnostic](https://img.shields.io/badge/models-Claude%20%C2%B7%20GPT%20%C2%B7%20Qwen%20%C2%B7%20local-blueviolet)
+
+> *A junior engineer with perfect notes who never forgets anything — and gets smarter every night while you sleep.*
+
+</div>
+
+---
+
+Hrant **doesn't store knowledge in the model's weights.** It reads sources,
+keeps structured markdown notes on disk, and loads them into context only
+when needed. It grows competence for the tasks you actually give it while
+keeping a small, efficient core — which is what lets it stay smart even on
+cheap or local models.
+
+```
+   the model is the muscle.   the body — files on disk — is who it is.
+   swap the model, the agent remains.
+```
+
+## ✨ What makes it different
+
+|   | |
+|---|---|
+| 🧩 **Knowledge ≠ weights** | Studies a domain once (expensive), recalls it cheaply forever. Notes + knowledge graph + vector search. |
+| 🪜 **Model cascade** | A cheap small model answers first; a strong-model verifier gates it; escalate only on failure. |
+| 🔎 **Anti-hallucination by design** | Every answer is verified against sources; hedged forecasts are scored separately from facts. |
+| 🌙 **Learns while idle** | Nightly consolidation digests the day, extracts lessons, prunes, and replays past solutions. |
+| 🧭 **Method before execution** | For a real task it first researches *how experts do it*, then executes — not price-only analysis. |
+| 🫀 **A body, not just a prompt** | Character, morality and judgment live in `soul.md` / `identity.md` — and hold even on a 3B model. |
+| 🛠 **Owns the machine** | Full shell, background jobs, Telegram, self-modification, reminders — with hard safety rails. |
+
+→ Full design + the agent's work philosophy: **[docs/cognition.md](docs/cognition.md)**
+
+## 🚀 Install (fresh machine)
 
 ```bash
 # 1. Get the engine
@@ -26,29 +61,25 @@ hrant init
 
 # 4. Start the agent
 hrant run
-# Open http://127.0.0.1:3333
+#    → open http://127.0.0.1:3333
 ```
 
-**What happens:**
-- `hrant init` creates `~/.hrant/data/` (or wherever `HRANT_DATA_DIR`
-  points), copies starter templates from `backend/knowledge_templates/`,
-  makes `config.yaml` from `config.example.yaml`, and asks about API keys
-  (Anthropic, OpenAI) + optional service URLs.
-- `hrant run` brings up FastAPI on `127.0.0.1:3333` (WebUI lives there
-  too) and auto-starts the configured channels.
+`hrant init` creates `~/.hrant/data/` (or wherever `HRANT_DATA_DIR` points),
+copies starter templates, makes `config.yaml`, and asks about API keys
+(Anthropic, OpenAI) + optional service URLs. `hrant run` brings up FastAPI on
+`127.0.0.1:3333` (WebUI included) and auto-starts the configured channels.
 
-Any important setting can be changed later via `hrant config`:
+Change anything later through `hrant config`:
 
 ```bash
-hrant config                              # interactive menu — the main entry point for newcomers
+hrant config                              # interactive menu — the main entry point
 hrant config list                         # see all settings (secrets masked)
-hrant config set tts.backend edge_tts     # example: switch voice to free Edge TTS
-hrant config set whisper.url http://...   # example: point to an STT server
+hrant config set tts.backend edge_tts     # switch voice to free Edge TTS
 ```
 
 Details — [docs/cli.md](docs/cli.md#hrant-config).
 
-## Engine vs Data
+## 📦 Engine vs Data
 
 ```
 <repo>/                  ← engine: backend/ (incl. knowledge_templates/) frontend/ deploy/
@@ -56,14 +87,12 @@ Details — [docs/cli.md](docs/cli.md#hrant-config).
 ~/.hrant/data/update_history.json   ← ledger for `hrant rollback`
 ```
 
-`hrant update` updates only the engine; user data is left untouched. You
-can move the location with `HRANT_DATA_DIR=/some/path hrant init`.
+`hrant update` updates only the engine; user data is untouched. Move it with
+`HRANT_DATA_DIR=/some/path hrant init`. **Dev mode:** run from the repo without
+`HRANT_DATA_DIR` and the agent uses `<repo>/knowledge/` + `<repo>/workspace/`
+(both gitignored).
 
-**Dev mode (single-tree):** if you run from the repo without
-`HRANT_DATA_DIR`, the agent uses `<repo>/knowledge/` and
-`<repo>/workspace/` (both gitignored). Handy for development.
-
-## Update / Rollback
+## 🔄 Update / Rollback
 
 ```bash
 hrant update --check               # what's new on origin/master, no actions
@@ -72,150 +101,104 @@ hrant update --skip-frontend       # backend-only (faster)
 hrant rollback                     # one step back
 hrant rollback --list              # history of all updates
 hrant rollback --to <sha>          # to a specific commit
-hrant rebuild                      # rebuild the frontend only, no pull
 ```
 
-`hrant update` refuses to run on a dirty working tree (uncommitted
-changes); untracked files in `knowledge/`/`workspace/` (gitignored) don't
-count. The history is written to `~/.hrant/data/update_history.json`
-**before** `git pull`, so rollback works even if an update fails halfway.
+`hrant update` refuses a dirty working tree (gitignored `knowledge/` /
+`workspace/` don't count). History is written **before** `git pull`, so
+rollback works even if an update fails halfway.
 
-## Run as a background service
+## 🖥 Run as a background service
 
-All commands for running the agent as a service are grouped under
-`hrant gateway` (by analogy with `openclaw gateway`). The shortest path:
+All service commands are grouped under `hrant gateway`:
 
 ```bash
-hrant gateway start                # install the unit + start (idempotent)
-hrant gateway start --gateway      # bind 0.0.0.0 — other devices on LAN/Tailscale can reach it
-hrant gateway start --port 4444    # non-default port
-
-hrant gateway logs -f              # stream logs (journalctl --user -u hrant -f)
+hrant gateway start                # install unit + start (idempotent)
+hrant gateway start --gateway      # bind 0.0.0.0 — reachable on LAN/Tailscale
+hrant gateway logs -f              # stream logs
 hrant gateway restart              # after `hrant update`
-hrant gateway stop                 # stop (the unit stays; restart via `gateway start`)
-```
-
-Under the hood `gateway start` is `gateway install` + activation. If you
-want to inspect the unit file first, use `gateway install` and activate
-manually.
-
-```bash
-hrant gateway install              # write the unit, do NOT start
-hrant gateway status               # what the OS service manager shows
-hrant gateway uninstall            # remove the unit, keep the venv
 ```
 
 More per-platform detail — [deploy/README.md](deploy/README.md).
 
-## Configure via WebUI
+## ⚙️ Configure via WebUI
 
-After `hrant run` → `http://127.0.0.1:3333` → Settings. Tabs:
+After `hrant run` → `http://127.0.0.1:3333` → **Settings**:
 
-- **Identity / Soul / User Profile** — who the agent is, who the user is
-- **Providers** — add/switch LLM providers (Anthropic, OpenAI, Ollama,
-  OpenRouter, …) + change a provider's model from the live catalog
-- **Channels** — Telegram bots, etc.
-- **Memory** — embeddings backend (llama.cpp / ollama / OpenAI / Cohere)
-- **Voice** — Whisper / Piper + Tailscale discover for service auto-detection
-- **Engine** — router budget, verification strictness, workspace
-  retention, knowledge caps (all applied live, no restart)
-- **Reminders** — create / list / cancel scheduled messages
-- **Fine-Tune** — distillation queue + the **model cascade** controls
-  (small-model tier, gate, on/off)
-- **Self-Modifications** — list of the agent's local patches, revert buttons
-- **Status** — diagnostics of every subsystem
+| Tab | What it does |
+|---|---|
+| **Identity / Soul / User Profile** | who the agent is, who you are |
+| **Providers** | add/switch LLM providers (Anthropic, OpenAI, Ollama, OpenRouter…) + pick a model from the live catalog |
+| **Channels** | Telegram bots, etc. |
+| **Memory / Voice** | embeddings backend · Whisper / Piper + Tailscale auto-discovery |
+| **Engine** | router budget, verification strictness, retention, caps — all live, no restart |
+| **Reminders** | create / list / cancel scheduled messages |
+| **Fine-Tune** | distillation queue + **model cascade** controls (small-tier, gate, on/off) |
+| **Self-Modifications** | the agent's local patches, revert buttons |
+| **Status** | diagnostics of every subsystem |
 
-## How the agent thinks
+## 🤔 How the agent thinks
 
-Hrant keeps wisdom, method and identity in its **body** (files that
-survive a model swap) rather than the model's weights — which is what
-lets a cheap/small model stay smart. The full conceptual map and the
-agent's work philosophy: **[docs/cognition.md](docs/cognition.md)**. In
-short:
+Wisdom, method and identity live in the agent's **body** (files that survive a
+model swap) rather than the weights — which is what lets a small model stay
+smart. Full map + work philosophy: **[docs/cognition.md](docs/cognition.md)**.
+In short:
 
-- **Method before execution** — for a substantive task it establishes the
-  proper methodology first (recall → research how experts do it → cover
-  every dimension), then executes.
-- **Three memories** — knowledge (studied theory, declarative), skills
-  (applied procedures), trajectories (past cases).
-- **Model cascade** — a small model answers first, a strong-model verifier
-  gates it, escalate only on failure.
-- **Calibration** — the verifier separates verified facts from hedged
-  forecasts (a year-ahead projection isn't scored like a hallucination).
-- **Sleep cycle** — nightly consolidation digests the day, extracts
-  lessons, prunes, and replays trajectories.
+- **Method before execution** — research *how the job is properly done*, then do it.
+- **Three memories** — knowledge (studied theory), skills (procedures), trajectories (past cases).
+- **Model cascade** — small answers first, strong-model verifier gates, escalate on failure.
+- **Calibration** — verified facts vs hedged forecasts scored separately (a year-ahead projection isn't a hallucination).
+- **Sleep cycle** — nightly: digest → lessons → prune → replay.
 
-## Self-Modifications
+## 🔧 Self-Modifications
 
-The agent can change its own code on the user's request (e.g. "store
-memory in SQLite instead of RAG"). These changes are **local** and don't
-go into official git:
-
-- A self-modification → a unified diff saved in `~/.hrant/data/self_mods/`.
-- `hrant update` applies engine updates, then best-effort re-applies your
-  patches.
-- If a patch conflicts with the updated engine it's flagged "needs review"
-  and not applied (the engine stays stable).
-- Settings → Self-Modifications: list of patches, revert one or all.
+The agent can change its own code on request (e.g. "store memory in SQLite
+instead of RAG"). Changes are **local** and never enter official git: a
+unified diff is saved in `~/.hrant/data/self_mods/`, re-applied best-effort
+after `hrant update`, and flagged "needs review" if it conflicts with the
+updated engine. Revert one or all in Settings.
 
 Details and risks — [docs/self-modification.md](docs/self-modification.md).
 
-## Documentation
+## 📚 Documentation
 
-- [docs/cognition.md](docs/cognition.md) — **cognitive architecture +
-  the agent's work philosophy**: memory (knowledge/skills/trajectories),
-  the cascade, calibration, the sleep cycle, the body (soul/identity)
-- [docs/architecture.md](docs/architecture.md) — modules, pipelines, how
-  the agent thinks *(Russian)*
-- [docs/modes.md](docs/modes.md) — 4 deployment modes (`claude_only` /
-  `local_full` / `cloud_finetune` / `local_cpu`) + dual-model router
-- [docs/cli.md](docs/cli.md) — full `hrant` command reference
-- [docs/autonomic.md](docs/autonomic.md) — Model X: 26 levers + immune
-  system + safety gates
-- [docs/finetune.md](docs/finetune.md) — fine-tune pipeline (autocollect
-  → curate → train)
-- [docs/sessions.md](docs/sessions.md) — sessions, conversations, and
-  per-speaker user profiles (Telegram users vs WebUI)
-- [docs/roles-and-scheduling.md](docs/roles-and-scheduling.md) —
-  owner/trusted/guest roles + cross-speaker scheduled messages
-- [docs/skills.md](docs/skills.md) — agent skills (markdown plugins) +
-  autonomic heartbeat
-- [docs/self-modification.md](docs/self-modification.md) — how local
-  self-modification works
-- [deploy/README.md](deploy/README.md) — install as a background service
-- [docs/superpowers/specs/](docs/superpowers/specs/) — design docs
-  (autonomic Model X, etc.)
+| Doc | What's inside |
+|---|---|
+| **[cognition.md](docs/cognition.md)** | **cognitive architecture + the agent's work philosophy** |
+| [architecture.md](docs/architecture.md) | modules, pipelines, how the agent thinks *(Russian)* |
+| [modes.md](docs/modes.md) | 4 deployment modes + dual-model router |
+| [cli.md](docs/cli.md) | full `hrant` command reference |
+| [autonomic.md](docs/autonomic.md) | Model X: 26 levers + immune system + safety gates |
+| [finetune.md](docs/finetune.md) | fine-tune pipeline (autocollect → curate → train) |
+| [sessions.md](docs/sessions.md) | sessions, conversations, per-speaker profiles |
+| [roles-and-scheduling.md](docs/roles-and-scheduling.md) | owner/trusted/guest roles + scheduled messages |
+| [skills.md](docs/skills.md) | agent skills (markdown plugins) + autonomic heartbeat |
+| [self-modification.md](docs/self-modification.md) | how local self-modification works |
+| [deploy/README.md](deploy/README.md) | install as a background service |
 
-## API surface
+## 🌐 API surface
 
-FastAPI generates interactive docs at runtime:
-- `http://127.0.0.1:3333/docs`  — Swagger UI
-- `http://127.0.0.1:3333/redoc` — ReDoc
+FastAPI generates interactive docs at runtime — Swagger at
+`http://127.0.0.1:3333/docs`, ReDoc at `/redoc`. Frequently used:
+`/api/chat` (SSE stream), `/api/knowledge`, `/api/health`, `/api/cascade`,
+`/api/model-routing`, `/api/autonomic/*`.
 
-Frequently used endpoints: `/api/chat` (SSE stream), `/api/knowledge`,
-`/api/health`, `/api/discover`, `/api/engine/config`, `/api/cascade`,
-`/api/model-routing`, `/api/autonomic/*`. Full list in Swagger UI.
+## 🛡 Anti-hallucination — hard rules
 
-## Anti-hallucination — hard rules
+1. No answering "from memory" on topics where notes exist.
+2. Solver prompt: answer **only** from the notes.
+3. Each solver step → verifier (can be disabled via Settings → Engine).
+4. `confidence < min_confidence` → a ⚠️ prefix on the answer.
+5. Contradictions with notes are flagged in `verification.contradictions`.
 
-1. The agent doesn't answer "from memory" on topics where it has notes.
-2. The solver system prompt: "answer ONLY from the notes".
-3. Each solver step → verifier — not optional (can be disabled via
-   Settings → Engine).
-4. `confidence < min_confidence` → a ⚠️ prefix in the answer.
-5. Contradictions with notes are explicitly flagged in
-   `verification.contradictions`.
-
-## Tests
+## 🧪 Tests
 
 ```bash
-pytest -q
+pytest -q     # ~2800 tests / ~3min on a dev machine
 ```
 
 Coverage: knowledge manager, core memory, parsers, verifier, cascade,
 cognition pipeline, full agent cycle (mocked LLM), updater, paths layer.
-~2800 tests / ~3min on a dev machine.
 
-## License
+## 📄 License
 
 TBD.
