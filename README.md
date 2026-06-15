@@ -1,8 +1,13 @@
-﻿# Hrant — Self-Learning Agent
+# Hrant — Self-Learning Agent
 
-Локальный AI-агент, который **не хранит знания в весах модели**. Вместо этого он читает источники, ведёт структурированные заметки (markdown) на диске и подгружает их в контекст только когда нужно. Растёт в компетенции под конкретные задачи, сохраняя маленькое эффективное ядро.
+***English** · [Русский](README.ru.md)*
 
-> junior engineer с идеальными конспектами, который никогда ничего не забывает.
+A local AI agent that **does not keep knowledge in the model's weights**.
+Instead it reads sources, keeps structured notes (markdown) on disk, and
+loads them into context only when needed. It grows competence for the
+tasks you actually give it while keeping a small, efficient core.
+
+> a junior engineer with perfect notes who never forgets anything.
 
 ## Install (fresh machine)
 
@@ -24,20 +29,24 @@ hrant run
 # Open http://127.0.0.1:3333
 ```
 
-**Что произойдёт:**
-- `hrant init` создаст `~/.hrant/data/` (или туда, куда указывает `HRANT_DATA_DIR`), скопирует стартовые шаблоны из `backend/knowledge_templates/`, сделает `config.yaml` из `config.example.yaml`, и спросит про API-ключи (Anthropic, OpenAI) + опциональные URL сервисов.
-- `hrant run` поднимет FastAPI на `127.0.0.1:3333` (WebUI там же) и автоматически запустит сконфигурированные channels.
+**What happens:**
+- `hrant init` creates `~/.hrant/data/` (or wherever `HRANT_DATA_DIR`
+  points), copies starter templates from `backend/knowledge_templates/`,
+  makes `config.yaml` from `config.example.yaml`, and asks about API keys
+  (Anthropic, OpenAI) + optional service URLs.
+- `hrant run` brings up FastAPI on `127.0.0.1:3333` (WebUI lives there
+  too) and auto-starts the configured channels.
 
-Любую важную настройку потом можно поменять через `hrant config`:
+Any important setting can be changed later via `hrant config`:
 
 ```bash
-hrant config                              # интерактивное меню — главный вход для новичков
-hrant config list                         # увидеть все настройки (секреты замаскированы)
-hrant config set tts.backend edge_tts     # пример: переключить голос на бесплатный Edge TTS
-hrant config set whisper.url http://...   # пример: указать STT-сервер
+hrant config                              # interactive menu — the main entry point for newcomers
+hrant config list                         # see all settings (secrets masked)
+hrant config set tts.backend edge_tts     # example: switch voice to free Edge TTS
+hrant config set whisper.url http://...   # example: point to an STT server
 ```
 
-Подробности — [docs/cli.md](docs/cli.md#hrant-config).
+Details — [docs/cli.md](docs/cli.md#hrant-config).
 
 ## Engine vs Data
 
@@ -47,102 +56,155 @@ hrant config set whisper.url http://...   # пример: указать STT-с�
 ~/.hrant/data/update_history.json   ← ledger for `hrant rollback`
 ```
 
-`hrant update` обновляет только engine; пользовательские данные не трогаются. Можно сменить расположение через `HRANT_DATA_DIR=/some/path hrant init`.
+`hrant update` updates only the engine; user data is left untouched. You
+can move the location with `HRANT_DATA_DIR=/some/path hrant init`.
 
-**Dev mode (single-tree):** если запускаешь из репо без `HRANT_DATA_DIR`, агент использует `<repo>/knowledge/` и `<repo>/workspace/` (всё в .gitignore). Удобно для разработки.
+**Dev mode (single-tree):** if you run from the repo without
+`HRANT_DATA_DIR`, the agent uses `<repo>/knowledge/` and
+`<repo>/workspace/` (both gitignored). Handy for development.
 
 ## Update / Rollback
 
 ```bash
-hrant update --check               # что нового на origin/master, без действий
+hrant update --check               # what's new on origin/master, no actions
 hrant update                       # pull → pip install -e . → npm build
-hrant update --skip-frontend       # backend-only (быстрее)
-hrant rollback                     # шаг назад
-hrant rollback --list              # история всех обновлений
-hrant rollback --to <sha>          # к конкретному коммиту
-hrant rebuild                      # только пересборка фронта без pull
+hrant update --skip-frontend       # backend-only (faster)
+hrant rollback                     # one step back
+hrant rollback --list              # history of all updates
+hrant rollback --to <sha>          # to a specific commit
+hrant rebuild                      # rebuild the frontend only, no pull
 ```
 
-`hrant update` отказывается работать при dirty working tree (есть незакоммиченные изменения); untracked файлы в `knowledge/`/`workspace/` (.gitignore'd) не считаются. История пишется в `~/.hrant/data/update_history.json` **до** `git pull`, так что rollback доступен даже если update упал на половине.
+`hrant update` refuses to run on a dirty working tree (uncommitted
+changes); untracked files in `knowledge/`/`workspace/` (gitignored) don't
+count. The history is written to `~/.hrant/data/update_history.json`
+**before** `git pull`, so rollback works even if an update fails halfway.
 
 ## Run as a background service
 
-Все команды для запуска агента как сервиса собраны в группе `hrant gateway` (по аналогии с `openclaw gateway`). Самый короткий путь:
+All commands for running the agent as a service are grouped under
+`hrant gateway` (by analogy with `openclaw gateway`). The shortest path:
 
 ```bash
-hrant gateway start                # установить unit + стартовать (idempotent)
-hrant gateway start --gateway      # bind 0.0.0.0 — другие устройства в LAN/Tailscale достанут
-hrant gateway start --port 4444    # нестандартный порт
+hrant gateway start                # install the unit + start (idempotent)
+hrant gateway start --gateway      # bind 0.0.0.0 — other devices on LAN/Tailscale can reach it
+hrant gateway start --port 4444    # non-default port
 
-hrant gateway logs -f              # стрим логов (journalctl --user -u hrant -f)
-hrant gateway restart              # после `hrant update`
-hrant gateway stop                 # остановить (unit остаётся, перезапуск через `gateway start`)
+hrant gateway logs -f              # stream logs (journalctl --user -u hrant -f)
+hrant gateway restart              # after `hrant update`
+hrant gateway stop                 # stop (the unit stays; restart via `gateway start`)
 ```
 
-Под капотом `gateway start` это `gateway install` + activation. Если хочется сначала посмотреть unit-файл — используй `gateway install` и активируй вручную.
+Under the hood `gateway start` is `gateway install` + activation. If you
+want to inspect the unit file first, use `gateway install` and activate
+manually.
 
 ```bash
-hrant gateway install              # положить unit, НЕ стартовать
-hrant gateway status               # что показывает OS service manager
-hrant gateway uninstall            # удалить unit, оставить venv
+hrant gateway install              # write the unit, do NOT start
+hrant gateway status               # what the OS service manager shows
+hrant gateway uninstall            # remove the unit, keep the venv
 ```
 
-Подробнее по платформам — [deploy/README.md](deploy/README.md).
+More per-platform detail — [deploy/README.md](deploy/README.md).
 
 ## Configure via WebUI
 
-После `hrant run` → `http://127.0.0.1:3333` → Settings. Вкладки:
+After `hrant run` → `http://127.0.0.1:3333` → Settings. Tabs:
 
-- **Identity / Soul / User Profile** — кто такой агент, кто такой пользователь
-- **Providers** — добавлять/переключать LLM-провайдеры (Anthropic, OpenAI, Ollama, …)
-- **Channels** — Telegram-боты и др.
+- **Identity / Soul / User Profile** — who the agent is, who the user is
+- **Providers** — add/switch LLM providers (Anthropic, OpenAI, Ollama,
+  OpenRouter, …) + change a provider's model from the live catalog
+- **Channels** — Telegram bots, etc.
 - **Memory** — embeddings backend (llama.cpp / ollama / OpenAI / Cohere)
-- **Voice** — Whisper / Piper + Tailscale discover для авто-обнаружения сервисов
-- **Engine** — router budget, verification strictness, workspace retention, knowledge caps (всё применяется live, без рестарта)
-- **Self-Modifications** — список локальных патчей агента, кнопки revert (см. ниже)
-- **Status** — диагностика всех подсистем
+- **Voice** — Whisper / Piper + Tailscale discover for service auto-detection
+- **Engine** — router budget, verification strictness, workspace
+  retention, knowledge caps (all applied live, no restart)
+- **Reminders** — create / list / cancel scheduled messages
+- **Fine-Tune** — distillation queue + the **model cascade** controls
+  (small-model tier, gate, on/off)
+- **Self-Modifications** — list of the agent's local patches, revert buttons
+- **Status** — diagnostics of every subsystem
+
+## How the agent thinks
+
+Hrant keeps wisdom, method and identity in its **body** (files that
+survive a model swap) rather than the model's weights — which is what
+lets a cheap/small model stay smart. The full conceptual map and the
+agent's work philosophy: **[docs/cognition.md](docs/cognition.md)**. In
+short:
+
+- **Method before execution** — for a substantive task it establishes the
+  proper methodology first (recall → research how experts do it → cover
+  every dimension), then executes.
+- **Three memories** — knowledge (studied theory, declarative), skills
+  (applied procedures), trajectories (past cases).
+- **Model cascade** — a small model answers first, a strong-model verifier
+  gates it, escalate only on failure.
+- **Calibration** — the verifier separates verified facts from hedged
+  forecasts (a year-ahead projection isn't scored like a hallucination).
+- **Sleep cycle** — nightly consolidation digests the day, extracts
+  lessons, prunes, and replays trajectories.
 
 ## Self-Modifications
 
-Агент умеет менять собственный код по запросу пользователя (например, «сохраняй память в SQLite вместо RAG»). Эти изменения **локальны** и не уходят в official git:
+The agent can change its own code on the user's request (e.g. "store
+memory in SQLite instead of RAG"). These changes are **local** and don't
+go into official git:
 
-- Самомодификация → unified diff сохраняется в `~/.hrant/data/self_mods/`.
-- `hrant update` применяет апдейты engine, потом best-effort переприменяет твои патчи.
-- Если патч конфликтует с обновлённым engine, он помечается «needs review» и не применяется (engine остаётся стабильным).
-- Settings → Self-Modifications: список патчей, revert по одному или всех.
+- A self-modification → a unified diff saved in `~/.hrant/data/self_mods/`.
+- `hrant update` applies engine updates, then best-effort re-applies your
+  patches.
+- If a patch conflicts with the updated engine it's flagged "needs review"
+  and not applied (the engine stays stable).
+- Settings → Self-Modifications: list of patches, revert one or all.
 
-Детали и риски — [docs/self-modification.md](docs/self-modification.md).
+Details and risks — [docs/self-modification.md](docs/self-modification.md).
 
 ## Documentation
 
-- [docs/cognition.md](docs/cognition.md) — **когнитивная архитектура + философия работы агента**: память (knowledge/skills/trajectories), каскад, калибровка, sleep-цикл, тело (soul/identity)
-- [docs/architecture.md](docs/architecture.md) — модули, пайплайны, как агент думает
-- [docs/modes.md](docs/modes.md) — 4 deployment modes (`claude_only` / `local_full` / `cloud_finetune` / `local_cpu`) + dual-model router
-- [docs/cli.md](docs/cli.md) — полная справка по командам `hrant`
-- [docs/autonomic.md](docs/autonomic.md) — Model X: 19 levers + immune system + safety gates
-- [docs/finetune.md](docs/finetune.md) — fine-tune pipeline (autocollect → curate → train)
-- [docs/sessions.md](docs/sessions.md) — sessions, conversations, и per-speaker user profiles (Telegram users vs WebUI)
-- [docs/roles-and-scheduling.md](docs/roles-and-scheduling.md) — owner/trusted/guest roles + cross-speaker scheduled messages (Phase 11)
-- [docs/skills.md](docs/skills.md) — agent skills (markdown plugins) + autonomic heartbeat (Phase 12)
-- [docs/self-modification.md](docs/self-modification.md) — как работает локальная самомодификация (Phase 7+)
-- [deploy/README.md](deploy/README.md) — установка как фоновый сервис
-- [docs/superpowers/specs/](docs/superpowers/specs/) — design docs (autonomic Model X и др.)
+- [docs/cognition.md](docs/cognition.md) — **cognitive architecture +
+  the agent's work philosophy**: memory (knowledge/skills/trajectories),
+  the cascade, calibration, the sleep cycle, the body (soul/identity)
+- [docs/architecture.md](docs/architecture.md) — modules, pipelines, how
+  the agent thinks *(Russian)*
+- [docs/modes.md](docs/modes.md) — 4 deployment modes (`claude_only` /
+  `local_full` / `cloud_finetune` / `local_cpu`) + dual-model router
+- [docs/cli.md](docs/cli.md) — full `hrant` command reference
+- [docs/autonomic.md](docs/autonomic.md) — Model X: 26 levers + immune
+  system + safety gates
+- [docs/finetune.md](docs/finetune.md) — fine-tune pipeline (autocollect
+  → curate → train)
+- [docs/sessions.md](docs/sessions.md) — sessions, conversations, and
+  per-speaker user profiles (Telegram users vs WebUI)
+- [docs/roles-and-scheduling.md](docs/roles-and-scheduling.md) —
+  owner/trusted/guest roles + cross-speaker scheduled messages
+- [docs/skills.md](docs/skills.md) — agent skills (markdown plugins) +
+  autonomic heartbeat
+- [docs/self-modification.md](docs/self-modification.md) — how local
+  self-modification works
+- [deploy/README.md](deploy/README.md) — install as a background service
+- [docs/superpowers/specs/](docs/superpowers/specs/) — design docs
+  (autonomic Model X, etc.)
 
 ## API surface
 
-FastAPI генерирует интерактивную доку при запуске:
+FastAPI generates interactive docs at runtime:
 - `http://127.0.0.1:3333/docs`  — Swagger UI
 - `http://127.0.0.1:3333/redoc` — ReDoc
 
-Часто используемые endpoints: `/api/chat` (SSE-стрим), `/api/knowledge`, `/api/health`, `/api/discover`, `/api/engine/config`, `/api/autonomic/*`. Полный список — в Swagger UI.
+Frequently used endpoints: `/api/chat` (SSE stream), `/api/knowledge`,
+`/api/health`, `/api/discover`, `/api/engine/config`, `/api/cascade`,
+`/api/model-routing`, `/api/autonomic/*`. Full list in Swagger UI.
 
 ## Anti-hallucination — hard rules
 
-1. Агент не отвечает «из головы» по темам, где есть заметки.
-2. Системный промпт solver'а: «отвечай ТОЛЬКО по заметкам».
-3. Каждый шаг solver → verifier — не опционален (можно отключить через Settings → Engine).
-4. `confidence < min_confidence` → в ответе ⚠️ префикс.
-5. Противоречия заметкам явно помечаются в `verification.contradictions`.
+1. The agent doesn't answer "from memory" on topics where it has notes.
+2. The solver system prompt: "answer ONLY from the notes".
+3. Each solver step → verifier — not optional (can be disabled via
+   Settings → Engine).
+4. `confidence < min_confidence` → a ⚠️ prefix in the answer.
+5. Contradictions with notes are explicitly flagged in
+   `verification.contradictions`.
 
 ## Tests
 
@@ -150,7 +212,9 @@ FastAPI генерирует интерактивную доку при запу
 pytest -q
 ```
 
-Coverage: knowledge manager, core memory, parsers, verifier, full agent cycle (mocked LLM), updater, paths layer. ~1130 tests / <2min on dev machine.
+Coverage: knowledge manager, core memory, parsers, verifier, cascade,
+cognition pipeline, full agent cycle (mocked LLM), updater, paths layer.
+~2800 tests / ~3min on a dev machine.
 
 ## License
 
