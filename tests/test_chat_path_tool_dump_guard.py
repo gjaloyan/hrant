@@ -38,3 +38,22 @@ def test_guard_only_matches_at_head():
     assert _looks_like_tool_call_dump(
         "I would run web_search(...) but I already know the answer."
     ) is False
+
+
+def test_tool_code_block_dump_detected():
+    """Gemini/code-style: <tool_code>print(web_search(...))</tool_code>
+    leaked as a chat answer (found gathering Q2 data 2026-06-15)."""
+    assert _looks_like_tool_call_dump(
+        '<tool_code>\nprint(web_search(query="SSD price 2026"))\n</tool_code>'
+    ) is True
+    assert _looks_like_tool_call_dump(
+        'print(read_file(path="/etc/hosts"))'
+    ) is True
+    assert _looks_like_tool_call_dump(
+        '```tool_code\nweb_search(query="x")\n```'
+    ) is True
+
+
+def test_print_of_nontool_not_misread():
+    assert _looks_like_tool_call_dump("print(x + 1)  # debug") is False
+    assert _looks_like_tool_call_dump("print('hello world')") is False

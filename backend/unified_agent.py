@@ -440,16 +440,32 @@ import re as _re_tcd
 # is a REAL registered tool before escalating, so legit prose that
 # happens to contain `print(x)` or `f(a, b)` is never misread.
 _BARE_CALL_RE = _re_tcd.compile(r"^\s*([a-z_][a-z0-9_]{2,})\s*\(")
+# Wrappers some models put around a tool call that we must peel off
+# before the bare-call check: a ```tool_code```/<tool_code> block and
+# a `print(...)` / `tool.run(...)`-style code shell.
+_TOOL_CODE_WRAPPER_RE = _re_tcd.compile(
+    r"^\s*(?:```+\s*(?:tool_code|python|py)?\s*|<tool_code>\s*|print\s*\()",
+    _re_tcd.IGNORECASE,
+)
 
 
 def _looks_like_tool_call_dump(head: str) -> bool:
-    """True when the answer head IS a bare function-call to a known
-    tool, e.g. `web_search(query="...")` — the parenthesised form the
-    `<tool_call` XML guard misses. Conservative: only fires on a real
-    registered tool name to avoid false positives on ordinary text."""
+    """True when the answer head IS a tool call dumped as text — the
+    bare `web_search(query=...)` form OR a `<tool_code>`/```tool_code```
+    code block OR a `print(web_search(...))` shell (Gemini/code-style).
+    Conservative: only fires when, after peeling wrappers, the head
+    starts with a REAL registered tool name, so ordinary prose with
+    `print(x)` or `f(a, b)` is never misread."""
     if not head:
         return False
-    m = _BARE_CALL_RE.match(head)
+    s = head.lstrip()
+    # Peel up to two layers of wrapper (e.g. ```tool_code\nprint( ).
+    for _ in range(2):
+        m = _TOOL_CODE_WRAPPER_RE.match(s)
+        if not m:
+            break
+        s = s[m.end():].lstrip()
+    m = _BARE_CALL_RE.match(s)
     if not m:
         return False
     name = m.group(1)
@@ -541,10 +557,10 @@ def _try_chat_path(
         except Exception:
             pass
         return None
-    if "<tool_call" in head[:300]:
-        # LLM emitted a tool-call XML dump — definitely wanted tools.
+    if "<tool_call" in head[:300] or "<tool_code" in head[:300]:
+        # LLM emitted a tool-call XML / code-block dump — wanted tools.
         try:
-            agent.progress("chat_fast_path", "escalating: tool-call XML in output")
+            agent.progress("chat_fast_path", "escalating: tool-call block in output")
         except Exception:
             pass
         return None
