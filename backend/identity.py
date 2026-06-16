@@ -566,6 +566,12 @@ class IdentityManager:
                     f"NEVER address the user by YOUR own name. The user "
                     f"is NOT named the same as you.\n\n"
                 )
+            if speaker_id:
+                out += (
+                    f"USER'S addressable id — when a tool needs to REACH "
+                    f"this user (e.g. `schedule_message` to remind THEM), "
+                    f"pass this as the target:\n**{speaker_id}**\n\n"
+                )
             out += (
                 "Rule: if the user says 'I am X' or 'my name is X' or "
                 "'you are Y, I am X', then X is the USER'S name (update "

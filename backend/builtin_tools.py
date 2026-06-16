@@ -2161,20 +2161,27 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="schedule_message",
         description=(
-            "Deliver a message to another speaker at a future time "
-            "('remind wife at 10am', 'tell Mom in an hour'). Target = "
-            "alias from relationships.json OR full `telegram:<id>`. "
-            "Convert natural time to UTC ISO 8601 yourself. "
-            "Owner/trusted only. Returns `{ok, id, target_speaker, "
-            "due_at}`."
+            "Schedule a message to be delivered at a future time. The "
+            "recipient can be ANYONE — including the user you are talking "
+            "to. To remind the user THEMSELVES (the most common case: "
+            "'remind me at 10am', 'напомни мне завтра'), pass their own "
+            "speaker_id (shown in the NAMES block) as `target`. To reach "
+            "someone else: 'remind wife at 10am', 'tell Mom in an hour'. "
+            "Target = a speaker_id like `telegram:<id>` OR an alias from "
+            "relationships.json (e.g. 'wife'). Convert natural time to "
+            "UTC ISO 8601 yourself. Owner/trusted only. Returns `{ok, id, "
+            "target_speaker, due_at}`."
         ),
         input_schema={
             "type": "object",
             "properties": {
                 "target": {
                     "type": "string",
-                    "description": "Alias from relationships.json (e.g. 'wife') "
-                                   "OR fully-qualified speaker_id (e.g. "
+                    "description": "Who receives it. The user's OWN speaker_id "
+                                   "(from the NAMES block) to remind themselves "
+                                   "— the common case; an alias from "
+                                   "relationships.json (e.g. 'wife'); or a "
+                                   "fully-qualified speaker_id (e.g. "
                                    "'telegram:123456789').",
                 },
                 "text": {
