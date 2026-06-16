@@ -70,6 +70,56 @@ def _pick_voice(text: str, *, default: str, ru: Optional[str] = None) -> str:
     return default
 
 
+# --- Speech text cleaner (markdown/emphasis -> spoken prose) --------------
+#
+# The answer text is written for the eye (Telegram markdown: `*_..._*`
+# emphasis, `### headers`, `` `code` ``, bullet lists, links). Fed raw to
+# a synthesizer it vocalizes the MARKERS ("asterisk underscore ..."). This
+# strips the formatting marks while keeping the words and ordinary
+# sentence punctuation (the periods/commas that shape prosody).
+
+_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]+\)")
+_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_ITALIC_STAR_RE = re.compile(r"\*([^*\n]+)\*")
+# `_italic_` only when the underscores hug a whole word group — never
+# inside identifiers like file_name or backend/builtin_tools.py.
+_ITALIC_US_RE = re.compile(r"(?<![\w/])_([^_\n]+)_(?![\w/])")
+_INLINE_CODE_RE = re.compile(r"`([^`]*)`")
+_STRIKE_RE = re.compile(r"~~([^~]+)~~")
+_HEADING_RE = re.compile(r"(?m)^\s{0,3}#{1,6}\s*")
+_QUOTE_RE = re.compile(r"(?m)^\s{0,3}>\s?")
+_BULLET_RE = re.compile(r"(?m)^\s*[-*•]\s+")
+_ORDERED_RE = re.compile(r"(?m)^\s*\d+\.\s+")
+_SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([.,!?;:])")
+
+
+def strip_markdown_for_speech(text: Optional[str]) -> str:
+    """Render markdown / Telegram-emphasis answer text as plain spoken
+    prose for TTS: drop the formatting markers, keep the words and
+    sentence punctuation. Deterministic — runs regardless of model."""
+    if not text:
+        return ""
+    s = _FENCE_RE.sub(" ", text)        # code blocks: not speakable
+    s = s.replace("*_", "").replace("_*", "")   # Telegram bold-italic combo
+    s = _LINK_RE.sub(r"\1", s)          # [text](url) -> text
+    s = _BOLD_RE.sub(r"\1", s)          # **bold** -> bold
+    s = _STRIKE_RE.sub(r"\1", s)        # ~~strike~~ -> strike
+    s = _ITALIC_STAR_RE.sub(r"\1", s)   # *italic* -> italic
+    s = _ITALIC_US_RE.sub(r"\1", s)     # _italic_ -> italic (word-bounded)
+    s = _INLINE_CODE_RE.sub(r"\1", s)   # `code` -> code
+    s = _HEADING_RE.sub("", s)          # ### Heading -> Heading
+    s = _QUOTE_RE.sub("", s)            # > quote -> quote
+    s = _BULLET_RE.sub("", s)           # - item -> item
+    s = _ORDERED_RE.sub("", s)          # 1. item -> item
+    s = s.replace("*", "").replace("`", "")     # stray leftover marks
+    s = re.sub(r"\n{2,}", ". ", s)      # paragraph break -> sentence pause
+    s = s.replace("\n", " ")
+    s = _SPACE_BEFORE_PUNCT_RE.sub(r"\1", s)
+    s = re.sub(r"\s{2,}", " ", s)
+    return s.strip()
+
+
 # --- Telegram voice format conversion (WAV -> OGG/Opus) -------------------
 #
 # Telegram's "voice message" bubble (reply_voice) renders correctly only

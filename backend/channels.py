@@ -1870,7 +1870,10 @@ class TelegramBot:
                     # reply_audio on PTB versions that are stricter.
                     try:
                         from .config import CONFIG as _C
-                        from .tts import SYNTHESIZER as _TTS
+                        from .tts import (
+                            SYNTHESIZER as _TTS,
+                            strip_markdown_for_speech,
+                        )
                         tts_cfg = _C.tts
                         speak = (
                             tts_cfg.get("enabled_always", False)
@@ -1881,7 +1884,10 @@ class TelegramBot:
                         )
                         if speak and answer.strip():
                             cap = int(tts_cfg.get("max_chars", 1000) or 1000)
-                            spoken = (answer or "").strip()
+                            # Speak plain prose, not markdown: strip the
+                            # emphasis/heading/code markers so the voice
+                            # doesn't vocalize "asterisk underscore ...".
+                            spoken = strip_markdown_for_speech(answer)
                             if len(spoken) > cap:
                                 spoken = spoken[:cap]
                             audio_wav = await running_loop.run_in_executor(
