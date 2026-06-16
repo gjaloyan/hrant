@@ -321,6 +321,48 @@ def test_schedule_message_owner_can_schedule_anywhere(isolated_kb):
     assert body["target_speaker"] == "telegram:222"
 
 
+def test_schedule_message_accepts_message_alias(isolated_kb):
+    """Models frequently call `schedule_message` with a `message`
+    argument instead of the schema's `text` (the tool is literally
+    named schedule_*message*). The handler must accept `message` as an
+    alias for `text` so a reminder request does not dead-end on a
+    `unexpected keyword argument 'message'` TypeError."""
+    from backend import roles as _roles
+    from backend.builtin_tools import _schedule_message_handler
+
+    token = _roles.set_current_speaker("webui:default")
+    try:
+        out = _schedule_message_handler(
+            target="webui:default",
+            message="send the lab report",  # alias for `text`
+            due_at="2999-01-01T00:00:00Z",
+        )
+    finally:
+        _roles.reset_current_speaker(token)
+    body = json.loads(out)
+    assert body["ok"] is True
+    assert body["target_speaker"] == "webui:default"
+
+
+def test_schedule_message_requires_text_or_message(isolated_kb):
+    """Neither `text` nor `message` → a clean refusal, never a crash
+    and never a silently-empty reminder."""
+    from backend import roles as _roles
+    from backend.builtin_tools import _schedule_message_handler
+
+    token = _roles.set_current_speaker("webui:default")
+    try:
+        out = _schedule_message_handler(
+            target="webui:default",
+            due_at="2999-01-01T00:00:00Z",
+        )
+    finally:
+        _roles.reset_current_speaker(token)
+    body = json.loads(out)
+    assert body["ok"] is False
+    assert "text" in body["error"] or "message" in body["error"]
+
+
 def test_bench_harness_speaker_is_implicit_owner():
     """The Harbor terminal-bench endpoint always runs as
     `webui:bench-harness`. That speaker MUST resolve to owner so the

@@ -1715,8 +1715,9 @@ def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
 
 def _schedule_message_handler(
     target: str,
-    text: str,
-    due_at: str,
+    text: str = "",
+    due_at: str = "",
+    message: str = "",
 ) -> str:
     """Owner + trusted gate. Trusted can only schedule TO the owner;
     owner can schedule to anyone.
@@ -1725,6 +1726,9 @@ def _schedule_message_handler(
     "mom") or a fully-qualified speaker_id ("telegram:222").
     `due_at` must be ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ') —
     the caller (the LLM) parses natural-language times first.
+    `message` is accepted as an alias for `text`: models routinely
+    pass `message` to a tool named schedule_*message*, and rejecting
+    it dead-ends a plain reminder request.
     """
     from .contacts import resolve
     from .roles import current_role, current_speaker, is_owner
@@ -1736,6 +1740,15 @@ def _schedule_message_handler(
         return json.dumps({
             "ok": False,
             "error": "refused: scheduled messages require trusted or owner role.",
+        }, ensure_ascii=False)
+
+    if not text and message:
+        # Backward-compatible alias for older tool schemas / model calls.
+        text = message
+    if not text:
+        return json.dumps({
+            "ok": False,
+            "error": "missing required message text (pass `text` or `message`).",
         }, ensure_ascii=False)
 
     resolved = resolve(target)
