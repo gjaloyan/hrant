@@ -121,19 +121,39 @@ class TrackerStore:
         self._save(t)
         return t
 
+    def _schedule_check_in(self, tracker: dict, step: dict, requested_by: str) -> None:
+        """Create/refresh the check_in row for a step with a due_at. Cancels
+        any prior pending check-in for this step first (idempotent reschedule)."""
+        from .scheduled_messages import schedule, _read_all, cancel
+        for r in _read_all():
+            if (r.get("kind") == "check_in" and r["status"] == "pending"
+                    and (r.get("meta") or {}).get("step_id") == step["id"]):
+                cancel(r["id"])
+        if step.get("due_at") and step.get("check_in_kind") != "none" \
+                and step.get("status") not in ("done", "blocked"):
+            schedule(
+                target_speaker=requested_by, text="", due_at=step["due_at"],
+                requested_by=requested_by, kind="check_in",
+                meta={"tracker_id": tracker["id"], "step_id": step["id"],
+                      "check_in_kind": step.get("check_in_kind", "ask_status")},
+            )
+
     def add_step(self, tracker_id: str, title: str, *, due_at: str = "",
-                 check_in_kind: str = "ask_status") -> dict | None:
+                 check_in_kind: str = "ask_status",
+                 requested_by: str = "webui:default") -> dict | None:
         t = self.get(tracker_id)
         if not t:
             return None
         step = _new_step(title, due_at=due_at, check_in_kind=check_in_kind)
         t["steps"].append(step)
         self._save(t)
+        self._schedule_check_in(t, step, requested_by)
         return step
 
     def update_step(self, tracker_id: str, step_id: str, *, status: str | None = None,
                     note: str | None = None, due_at: str | None = None,
-                    title: str | None = None) -> dict | None:
+                    title: str | None = None,
+                    requested_by: str = "webui:default") -> dict | None:
         t = self.get(tracker_id)
         if not t:
             return None
@@ -148,6 +168,7 @@ class TrackerStore:
                 if title is not None:
                     step["title"] = title.strip()
                 self._save(t)
+                self._schedule_check_in(t, step, requested_by)
                 return step
         return None
 
