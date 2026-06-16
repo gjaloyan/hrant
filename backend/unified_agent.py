@@ -419,16 +419,20 @@ recall like "what voice / model / settings am I on", brief
 opinion), do so. Use the STATE SNAPSHOT above for any recall —
 don't guess settings.
 
-If you actually NEED tools (file operations, settings changes,
-external lookups, running code, multi-step problems, file
-delivery) — do NOT try to answer. Respond with EXACTLY one line:
+If you actually NEED tools (saving or remembering a fact/preference
+— `запомни` / `сохрани` / remember / save persist to memory and
+REQUIRE a tool, file operations, settings changes, external lookups,
+running code, multi-step problems, file delivery) — do NOT try to
+answer. Respond with EXACTLY one line:
 
   ESCALATE: <one-sentence reason>
 
 The system will then route the same message through the full
 agent with all tools available. Don't apologise, don't explain
-how the routing works, don't promise "I'll do it next turn" —
-just `ESCALATE: ...` and stop.
+how the routing works, don't promise "I'll do it next turn", and
+NEVER claim you saved or remembered something here — you have no
+tools to do it, so a "Запомнил/Saved" reply would be a lie. Just
+`ESCALATE: ...` and stop.
 
 Match the user's language. Be brief.
 """
@@ -474,6 +478,40 @@ def _looks_like_tool_call_dump(head: str) -> bool:
         return name in get_registry().tools
     except Exception:
         return False
+
+
+# A no-tool chat-lane answer that ASSERTS it saved/remembered something
+# is a fabricated action — the lane has no tools to persist anything.
+# Anchored at the answer head so a mid-sentence "I could save that" or
+# "если хочешь, я могу сохранить" never trips it. Boolean only: on a
+# match the caller escalates to the full path where save_user_fact runs.
+_SAVE_CLAIM_RE = _re_tcd.compile(
+    r"^\s*(?:"
+    r"запомнил|запомнила|запомню|запомним|"
+    r"сохранил|сохранила|сохраню|"
+    r"записал|записала|запишу|"
+    r"занёс|занес|"
+    r"буду помнить|"
+    r"saved|noted|remembered|"
+    r"i['’`]?ve saved|i saved|"
+    r"i['’`]?ve noted|i noted|"
+    r"i['’`]?ve remembered|i remembered|"
+    r"i['’`]?ll remember|i will remember|"
+    r"added to memory"
+    r")\b",
+    _re_tcd.IGNORECASE,
+)
+
+
+def _claims_save_without_tool(head: str | None) -> bool:
+    """True when a no-tool chat-lane answer asserts it saved/remembered
+    something (e.g. "Запомнил: ...", "Saved your preference."). The lane
+    has zero tools, so the claim is an apply-don't-acknowledge lie —
+    escalate so the full path actually persists it. Caught 2026-06-16:
+    "запомни ... 10-19" got a "Запомнил: ..." reply with nothing saved."""
+    if not head:
+        return False
+    return _SAVE_CLAIM_RE.match(head) is not None
 
 
 def _try_chat_path(
@@ -574,6 +612,17 @@ def _try_chat_path(
         try:
             agent.progress(
                 "chat_fast_path", "escalating: bare tool-call in output",
+            )
+        except Exception:
+            pass
+        return None
+    if _claims_save_without_tool(head):
+        # The lane has no tools, so an answer asserting it saved /
+        # remembered something is fabricated. Escalate so the full path
+        # actually calls save_user_fact instead of lying "Запомнил".
+        try:
+            agent.progress(
+                "chat_fast_path", "escalating: claimed save with no tool",
             )
         except Exception:
             pass
