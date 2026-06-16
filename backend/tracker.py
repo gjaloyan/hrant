@@ -7,12 +7,16 @@ a standalone reminder is a one-step project with domain="inbox".
 """
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .knowledge_manager import _slug
 from .paths import data_dir, write_atomic_json
+
+log = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -46,10 +50,10 @@ class TrackerStore:
                 p = d / "tracker.json"
                 if p.exists():
                     try:
-                        import json
                         if json.loads(p.read_text(encoding="utf-8")).get("id") == tracker_id:
                             return p
-                    except Exception:
+                    except Exception as e:
+                        log.warning("tracker: unreadable %s (%s); skipping", p, e)
                         continue
         return None
 
@@ -84,30 +88,30 @@ class TrackerStore:
         )
 
     def get(self, tracker_id: str) -> dict | None:
-        import json
         p = self._path(tracker_id)
         if not p:
             return None
         return json.loads(p.read_text(encoding="utf-8"))
 
     def list(self, status: str = "active") -> list[dict]:
-        import json
         out = []
         for d in self._base.iterdir():
             p = d / "tracker.json" if d.is_dir() else None
             if p and p.exists():
                 try:
                     t = json.loads(p.read_text(encoding="utf-8"))
-                except Exception:
+                except Exception as e:
+                    log.warning("tracker: unreadable %s (%s); skipping", p, e)
                     continue
                 if status in ("", "all") or t.get("status") == status:
                     out.append(t)
         return sorted(out, key=lambda t: t.get("created_at", ""), reverse=True)
 
     def _save(self, tracker: dict) -> None:
-        p = self._path(tracker["id"])
-        if p:
-            write_atomic_json(p, tracker)
+        # Path is deterministic from the title (mirrors create()), so we don't
+        # re-scan the projects dir on every mutation.
+        d = self._base / _slug(tracker["title"] or tracker["id"])
+        write_atomic_json(d / "tracker.json", tracker)
 
     def set_status(self, tracker_id: str, status: str) -> dict | None:
         t = self.get(tracker_id)
