@@ -1338,7 +1338,29 @@ def post_with_retry(
         try:
             r = httpx.post(url, json=payload, headers=headers, timeout=timeout)
             r.raise_for_status()
-            return r.json()
+            data = r.json()
+            # OpenRouter (and some OpenAI-compat gateways) can return HTTP
+            # 200 with an {"error": {...}} body and NO choices when the
+            # upstream model rate-limits / errors under burst. Treat that
+            # like a transient failure: retry with backoff, then raise
+            # cleanly. Never hand a choices-less body back to the caller —
+            # it would KeyError deep in the tool loop and crash the turn.
+            if isinstance(data, dict) and data.get("error") and not data.get("choices"):
+                _err = data.get("error")
+                _msg = _err.get("message") if isinstance(_err, dict) else str(_err)
+                if attempt < max_retries:
+                    wait = min(2 ** attempt * 2, 60.0)
+                    log.warning(
+                        "%s returned a 200 error-body (%s), retry %d/%d in %.1fs...",
+                        provider_name, _msg, attempt + 1, max_retries, wait,
+                    )
+                    time.sleep(wait)
+                    continue
+                _tag = f"(model={model!r})" if model else ""
+                raise LLMError(
+                    f"{provider_name} API 200-error {_tag}: {_msg}".strip()
+                )
+            return data
         except httpx.HTTPStatusError as e:
             last_error = e
             status = e.response.status_code
@@ -2040,7 +2062,15 @@ class OpenAICompatibleLLM(BaseLLM):
                     prompt_preview=user[:300] if _iter == 0 else f"(tool iteration {_iter})",
                 )
 
-            choice = data["choices"][0]
+            try:
+                choice = data["choices"][0]
+            except (KeyError, IndexError) as e:
+                # Defense-in-depth: post_with_retry already turns a 200
+                # error-body into an LLMError, but never crash the tool
+                # loop on an unexpected shape — raise cleanly instead.
+                raise LLMError(
+                    f"Unexpected response from {self.provider_name}: {data}"
+                ) from e
             msg = choice["message"]
             finish_reason = choice.get("finish_reason", "stop")
 
