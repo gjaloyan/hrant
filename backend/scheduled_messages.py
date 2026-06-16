@@ -435,6 +435,16 @@ def deliver_due() -> dict:
     `recover_stuck_deliveries` at the next service startup."""
     summary: dict = {"sent": [], "failed": []}
     for row in due_now():
+        if row.get("kind") == "check_in":
+            try:
+                from .tracker_checkin import run_check_in
+                run_check_in(row)
+                mark_sent(row["id"])
+                summary["sent"].append(row["id"])
+            except Exception as e:
+                mark_failed(row["id"], str(e)[:200])
+                summary["failed"].append({"id": row["id"], "error": str(e)[:200]})
+            continue
         ok, err = deliver(row)
         if ok:
             summary["sent"].append(row["id"])
