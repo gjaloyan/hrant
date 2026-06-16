@@ -2181,13 +2181,20 @@ def register_builtin_tools() -> None:
                     "type": "string",
                     "description": "The message body the recipient will see.",
                 },
+                "message": {
+                    "type": "string",
+                    "description": "Backward-compatible alias for `text`.",
+                },
                 "due_at": {
                     "type": "string",
                     "description": "UTC ISO 8601 timestamp 'YYYY-MM-DDTHH:MM:SSZ'. "
                                    "Convert the user's natural-language time first.",
                 },
             },
-            "required": ["target", "text", "due_at"],
+            # `text` used to be the only accepted body field; some tool
+            # schemas / model calls name it `message`. The handler accepts
+            # both, so only the destination and time are schema-required.
+            "required": ["target", "due_at"],
         },
         handler=_schedule_message_handler,
     )
