@@ -73,3 +73,39 @@ def add_project_issue(name: str, body: ProjectIssueRequest):
     if PROJECTS.current != name:
         raise HTTPException(400, f"project '{name}' is not active")
     return {"message": PROJECTS.add_issue(body.problem, body.fix)}
+
+
+@router.get("/api/trackers")
+def list_trackers_api(status: str = "active"):
+    from ..tracker import TRACKERS
+    return {"trackers": TRACKERS.list(status=status)}
+
+
+@router.get("/api/trackers/{tracker_id}")
+def get_tracker_api(tracker_id: str):
+    from ..tracker import TRACKERS
+    t = TRACKERS.get(tracker_id)
+    if not t:
+        raise HTTPException(404, "tracker not found")
+    return t
+
+
+@router.put("/api/trackers/{tracker_id}/steps/{step_id}")
+def update_step_api(tracker_id: str, step_id: str, body: dict):
+    from ..tracker import TRACKERS
+    s = TRACKERS.update_step(
+        tracker_id, step_id,
+        status=body.get("status"), note=body.get("note"),
+        due_at=body.get("due_at"), title=body.get("title"))
+    if s is None:
+        raise HTTPException(404, "tracker/step not found")
+    return {"ok": True, "step": s}
+
+
+@router.post("/api/trackers/{tracker_id}/complete")
+def complete_tracker_api(tracker_id: str):
+    from ..tracker import TRACKERS
+    t = TRACKERS.set_status(tracker_id, "archived")
+    if t is None:
+        raise HTTPException(404, "tracker not found")
+    return {"ok": True, "tracker": t}
