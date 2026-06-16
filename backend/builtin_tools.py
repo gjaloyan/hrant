@@ -1983,6 +1983,79 @@ def _list_telegram_access_handler(role: str = "") -> str:
     )
 
 
+# ---------- tracker tools ----------
+
+def _propose_steps_from_experience(title: str) -> list[dict]:
+    """Recall a similar past project's step template; [] if none."""
+    try:
+        from .trajectory_memory import recall_similar
+        for hit in (recall_similar(title, limit=2) or []):
+            steps = hit.get("steps") or []
+            if steps:
+                return [{"title": s} for s in steps if isinstance(s, str)]
+    except Exception:
+        pass
+    return []
+
+
+def _create_tracker_handler(title: str, domain: str = "work",
+                            steps: list | None = None) -> str:
+    refuse, _sp = _check_owner("create_tracker")
+    if refuse:
+        return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
+    from .tracker import TRACKERS
+    use_steps = steps if steps else _propose_steps_from_experience(title)
+    recalled = bool(not steps and use_steps)
+    t = TRACKERS.create(title=title, domain=domain, steps=use_steps or [])
+    return json.dumps({"ok": True, "tracker": t, "steps_recalled": recalled,
+                       "note": ("proposed steps from past experience — confirm "
+                                "or edit them" if recalled else "")},
+                      ensure_ascii=False)
+
+
+def _list_trackers_handler(status: str = "active") -> str:
+    from .tracker import TRACKERS
+    items = TRACKERS.list(status=status)
+    return json.dumps({"ok": True, "count": len(items), "trackers": items},
+                      ensure_ascii=False)
+
+
+def _get_tracker_handler(tracker_id: str) -> str:
+    from .tracker import TRACKERS
+    t = TRACKERS.get(tracker_id)
+    if not t:
+        return json.dumps({"ok": False, "error": "tracker not found"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "tracker": t}, ensure_ascii=False)
+
+
+def _add_step_handler(tracker_id: str, title: str, due_at: str = "",
+                      check_in_kind: str = "ask_status") -> str:
+    refuse, speaker = _check_owner("add_step")
+    if refuse:
+        return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
+    from .tracker import TRACKERS
+    s = TRACKERS.add_step(tracker_id, title, due_at=due_at,
+                          check_in_kind=check_in_kind, requested_by=speaker)
+    if s is None:
+        return json.dumps({"ok": False, "error": "tracker not found"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "step": s}, ensure_ascii=False)
+
+
+def _update_step_handler(tracker_id: str, step_id: str, status: str = "",
+                         note: str = "", due_at: str = "", title: str = "") -> str:
+    refuse, speaker = _check_owner("update_step")
+    if refuse:
+        return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
+    from .tracker import TRACKERS
+    s = TRACKERS.update_step(
+        tracker_id, step_id,
+        status=status or None, note=note or None,
+        due_at=due_at or None, title=title or None, requested_by=speaker)
+    if s is None:
+        return json.dumps({"ok": False, "error": "tracker/step not found"}, ensure_ascii=False)
+    return json.dumps({"ok": True, "step": s}, ensure_ascii=False)
+
+
 # ---------- registration ----------
 def register_builtin_tools() -> None:
     reg = get_registry()
@@ -2204,6 +2277,72 @@ def register_builtin_tools() -> None:
             "required": ["target", "due_at"],
         },
         handler=_schedule_message_handler,
+    )
+    reg.register_func(
+        name="create_tracker",
+        description=(
+            "Start a living project/tracker for systematic, multi-step work "
+            "(an order, a trip, a research effort). Omit `steps` to have the "
+            "agent propose them from past experience (it recalls similar "
+            "projects); pass `steps` to set an explicit plan. Steps with a "
+            "due_at are checked on automatically. Owner/trusted only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Project title."},
+                "domain": {"type": "string",
+                           "description": "work | personal | research | travel."},
+                "steps": {"type": "array", "items": {"type": "object"},
+                          "description": "Optional [{title, due_at?}]. Omit to "
+                                         "propose from experience."},
+            },
+            "required": ["title"],
+        },
+        handler=_create_tracker_handler,
+    )
+    reg.register_func(
+        name="list_trackers",
+        description="List the agent's active projects/trackers with their steps "
+                    "and check-ins — the unified view of all ongoing work.",
+        input_schema={"type": "object", "properties": {
+            "status": {"type": "string", "description": "active | archived | all."}}},
+        handler=_list_trackers_handler,
+    )
+    reg.register_func(
+        name="get_tracker",
+        description="Read one tracker by id (full steps/status).",
+        input_schema={"type": "object", "properties": {
+            "tracker_id": {"type": "string"}}, "required": ["tracker_id"]},
+        handler=_get_tracker_handler,
+    )
+    reg.register_func(
+        name="add_step",
+        description="Add a step to a tracker. A due_at schedules a check-in.",
+        input_schema={"type": "object", "properties": {
+            "tracker_id": {"type": "string"},
+            "title": {"type": "string"},
+            "due_at": {"type": "string",
+                       "description": "UTC ISO 8601; schedules a check-in."},
+            "check_in_kind": {"type": "string",
+                              "description": "ask_status | remind | none."}},
+            "required": ["tracker_id", "title"]},
+        handler=_add_step_handler,
+    )
+    reg.register_func(
+        name="update_step",
+        description="Update a step's status/note/due_at/title. Changing due_at "
+                    "reschedules its check-in; marking done cancels it.",
+        input_schema={"type": "object", "properties": {
+            "tracker_id": {"type": "string"},
+            "step_id": {"type": "string"},
+            "status": {"type": "string",
+                       "description": "pending | active | done | blocked."},
+            "note": {"type": "string"},
+            "due_at": {"type": "string"},
+            "title": {"type": "string"}},
+            "required": ["tracker_id", "step_id"]},
+        handler=_update_step_handler,
     )
 
     reg.register_func(
