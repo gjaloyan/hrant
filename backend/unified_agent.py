@@ -2029,6 +2029,7 @@ def run_unified(
                     "speaker_id": speaker_id,
                     "session_key": skey,
                     "mode": "fast_chat",
+                    "level": "L0_CHAT",
                     "token_usage": tu_now,
                     "n_tool_calls": 0,
                     "n_llm_calls": tu_now.get("llm_calls", 1) if isinstance(tu_now, dict) else 1,
@@ -2945,13 +2946,22 @@ def run_unified(
     # Post-hoc: optional verifier. Same threshold as legacy
     # task_mode — only fires when there's grounding material to
     # verify against (notes + tool outputs).
+    # Escalation level (L0/L1/L2). Pure-action turns (only state-mutation
+    # tools) are L1 and skip the claim verifier — endpoint_met already
+    # confirmed delivery deterministically and there are no claims to ground.
+    # `_level` is also stamped on the artifact below. See backend/escalation.py.
+    from .escalation import decide_level, should_verify, tool_names_from_trace
+    _level = decide_level(
+        was_fast_chat=False,
+        tool_names=tool_names_from_trace(agent._trace or []),
+    )
     vr = VerificationResult(confidence=85)
     if _cascade_prevr is not None:
         # The cascade gate already verified THIS answer on the strong
         # model moments ago — reuse it instead of paying a second
         # verifier call on an accepted small-tier turn.
         vr = _cascade_prevr
-    elif tool_outputs:
+    elif should_verify(tool_outputs, agent._trace or []):
         try:
             from .verifier import verify
             vr = verify(
@@ -3188,6 +3198,7 @@ def run_unified(
                 (tu.llm_calls if tu and getattr(tu, "llm_calls", 0) else None)
                 or len(agent._llm_calls or [])
             ),
+            "level": _level.name,
         }
         if job_id:
             turn_record["job_id"] = job_id
