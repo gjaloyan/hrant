@@ -97,6 +97,8 @@ def schedule(
     text: str,
     due_at: str,
     requested_by: str,
+    kind: str = "message",
+    meta: dict | None = None,
 ) -> dict:
     """Create a new scheduled message. Returns the persisted row.
 
@@ -119,6 +121,8 @@ def schedule(
         # `failed` instead of re-sending (the user might've
         # received the message before the crash).
         "status": "pending",
+        "kind": kind,            # message | check_in
+        "meta": meta or {},      # check_in carries {tracker_id, step_id, check_in_kind}
         "delivered_at": None,
         "last_error": "",
     }
