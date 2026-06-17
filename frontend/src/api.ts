@@ -2416,3 +2416,44 @@ export async function restorePipelineProfile(
 export async function fetchSystemPromptSections(): Promise<SystemPromptSectionsPayload> {
   return json_get("/api/pipeline-profiles/system-prompt-sections");
 }
+
+// ---- Project trackers (living projects) ----
+export interface TrackerStep {
+  id: string;
+  title: string;
+  status: string; // pending | active | done | blocked
+  due_at: string;
+  check_in_kind: string; // ask_status | remind | none
+  note: string;
+  last_checked_at: string | null;
+}
+
+export interface Tracker {
+  id: string;
+  title: string;
+  domain: string;
+  status: string; // active | archived | done | cancelled
+  created_at: string;
+  steps: TrackerStep[];
+  notes: string;
+}
+
+export const fetchTrackers = (status = "active") =>
+  json_get<{ trackers: Tracker[] }>(
+    `/api/trackers?status=${encodeURIComponent(status)}`,
+  );
+
+export const updateTrackerStep = (
+  trackerId: string,
+  stepId: string,
+  patch: Partial<Pick<TrackerStep, "status" | "note" | "due_at" | "title">>,
+) =>
+  json_put<{ ok: boolean; step: TrackerStep }>(
+    `/api/trackers/${encodeURIComponent(trackerId)}/steps/${encodeURIComponent(stepId)}`,
+    patch,
+  );
+
+export const completeTracker = (trackerId: string) =>
+  json_post<{ ok: boolean; tracker: Tracker }>(
+    `/api/trackers/${encodeURIComponent(trackerId)}/complete`,
+  );
