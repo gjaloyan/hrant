@@ -1831,6 +1831,13 @@ def run_unified(
     # 1300+ lines of branches would just be footgun-bait.
     from .endpoint_check import begin_turn_cache as _ec_begin
     _ec_begin()
+    # Reset the per-turn router fallback reason so the honest model notice
+    # only reflects THIS turn's fallback (if any).
+    try:
+        from .llm import reset_turn_fallback_reason as _rfr
+        _rfr()
+    except Exception:
+        pass
     # Reset the per-turn plan scratchpad (2026-06-11) — each turn
     # starts plan-less; set_plan/update_plan mutate it mid-turn and
     # _decide_self_correction refuses synthesis with pending steps.
@@ -3341,6 +3348,17 @@ def run_unified(
     # conversation history + saved turn artifact + session row —
     # not just the in-memory AgentAnswer returned below.
 
+    # Honest model reporting: the model that ACTUALLY served this turn, and a
+    # notice when the router silently fell back off the selected one.
+    from .model_report import primary_model_used, fallback_note
+    from .llm import turn_fallback_reason
+    _model_used = primary_model_used(agent._llm_calls)
+    try:
+        from .providers import ACTIVE_MODEL as _AM
+        _intended = (_AM.get() or {}).get("model", "")
+    except Exception:
+        _intended = ""
+    _model_note = fallback_note(_intended, _model_used, turn_fallback_reason())
     return AgentAnswer(
         answer=answer or "",
         verification=vr,
@@ -3354,4 +3372,6 @@ def run_unified(
         llm_calls=agent._llm_calls,
         turn_id=getattr(agent, "_last_turn_id", "") or "",
         question=question_payload,
+        model_used=_model_used,
+        model_note=_model_note,
     )

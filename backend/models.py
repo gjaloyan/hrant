@@ -283,6 +283,14 @@ class AgentAnswer(BaseModel):
     # and retry loop; deep_agent is the full cycle. Empty string
     # on legacy paths that don't yet stamp it.
     mode: str = ""
+    # Honest model reporting. `model_used` is the model that ACTUALLY served
+    # this turn (derived from llm_calls), which can differ from the selected
+    # one when the router silently fell back (e.g. Codex quota exhausted ->
+    # OpenRouter). `model_note` is a user-facing notice, non-empty ONLY when a
+    # fallback happened ("Selected X unavailable — answered with Y (reason)").
+    # The agent must never show a model it did not use.
+    model_used: str = ""
+    model_note: str = ""
     # AskUserQuestion follow-up. When the agent called the `ask_user`
     # tool, the turn ends with this field populated and `answer`
     # carries a short placeholder. The frontend renders a structured

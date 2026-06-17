@@ -11,6 +11,7 @@ Provider-selection logic on each call:
 State (per-day counters and total calls) is persisted in knowledge/router_state.json.
 """
 from __future__ import annotations
+import contextvars
 import json
 import logging
 import os
@@ -214,6 +215,32 @@ def _active_provider_chain(task_type=None):
     return out
 
 
+# Per-turn capture of WHY the router fell back off the selected provider, so
+# the turn can honestly tell the user "selected X unavailable (reason)". Reset
+# at turn start by run_unified; read at turn finalization.
+_TURN_FALLBACK_REASON: "contextvars.ContextVar[str]" = contextvars.ContextVar(
+    "turn_fallback_reason", default="",
+)
+
+
+def reset_turn_fallback_reason() -> None:
+    _TURN_FALLBACK_REASON.set("")
+
+
+def turn_fallback_reason() -> str:
+    return _TURN_FALLBACK_REASON.get()
+
+
+def _short_fallback_reason(err: "LLMError") -> str:
+    s = str(err)
+    low = s.lower()
+    if "usage_limit_reached" in low or "quota" in low:
+        return "quota exhausted"
+    if "429" in low or "rate" in low:
+        return "rate limited"
+    return s[:80].strip()
+
+
 def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args, **kw):
     """Iterate `chain` and call `provider.<method_name>(task_type,
     system, user, *args, **kw)` on each. If a provider raises an
@@ -236,6 +263,10 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
                     getattr(prov, "name", "?"), e,
                 )
                 last_err = e
+                try:
+                    _TURN_FALLBACK_REASON.set(_short_fallback_reason(e))
+                except Exception:
+                    pass
                 continue
             raise
     if last_err is not None:

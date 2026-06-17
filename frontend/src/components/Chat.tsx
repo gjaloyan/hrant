@@ -1435,8 +1435,21 @@ const Chat = forwardRef<ChatHandle, {
               {m.role === "user" && (
                 <span className="whitespace-pre-wrap">{m.text}</span>
               )}
+              {/* Honest model notice: shown ONLY when the turn silently fell
+                  back off the selected model (e.g. Codex quota -> OpenRouter).
+                  The agent must never claim a model it did not use. */}
+              {m.role === "agent" && m.meta?.model_note && (
+                <div className="mb-1 text-[11px] rounded bg-amber-900/50 border border-amber-700/50 px-2 py-1 text-amber-200">
+                  ⚠️ {m.meta.model_note}
+                </div>
+              )}
               {m.role === "agent" && !m.meta?.question && m.text && (
                 <AnswerCard text={m.text} is_chat={Boolean(m.meta?.is_chat)} />
+              )}
+              {m.role === "agent" && m.meta?.model_used && (
+                <div className="mt-0.5 text-[10px] opacity-50 font-mono">
+                  model: {m.meta.model_used}
+                </div>
               )}
               {m.role === "agent" && m.error && (
                 <ErrorCard message={m.error} />

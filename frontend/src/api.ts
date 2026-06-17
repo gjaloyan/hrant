@@ -77,6 +77,11 @@ export type AgentAnswer = {
   claims?: Claim[];
   evidence?: EvidenceItem[];
   turn_id?: string;
+  // Honest model reporting: the model that ACTUALLY served the turn, and a
+  // user-facing notice (non-empty only on a silent fallback off the selected
+  // model). The UI must show what was used, never just what was selected.
+  model_used?: string;
+  model_note?: string;
   // Phase 15A: durable job record id. Set by the /api/chat handler
   // so the WebUI can deep-link a streamed answer to its Jobs-tab
   // entry without cross-referencing by timestamp.
