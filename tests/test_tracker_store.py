@@ -60,3 +60,15 @@ def test_inbox_reminder_is_a_one_step_project(store):
 
 def test_unknown_tracker_returns_none(store):
     assert store.get("trk_does_not_exist") is None
+
+
+def test_same_title_trackers_do_not_collide(store):
+    # Two projects with the same title must NOT overwrite each other on disk.
+    a = store.create(title="Order parts", domain="work", steps=[{"title": "x"}])
+    b = store.create(title="Order parts", domain="work", steps=[{"title": "y"}])
+    assert a["id"] != b["id"]
+    ga, gb = store.get(a["id"]), store.get(b["id"])
+    assert ga is not None and gb is not None  # first not lost
+    assert ga["steps"][0]["title"] == "x"
+    assert gb["steps"][0]["title"] == "y"
+    assert len([t for t in store.list() if t["title"] == "Order parts"]) == 2

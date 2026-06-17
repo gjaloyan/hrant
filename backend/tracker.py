@@ -60,7 +60,14 @@ class TrackerStore:
     def create(self, *, title: str, domain: str = "work",
                steps: list[dict] | None = None) -> dict:
         tid = "trk_" + uuid.uuid4().hex[:10]
-        d = self._base / _slug(title or tid)
+        # Dir = slug (readable, coexists with the markdown journal). On a slug
+        # COLLISION with an existing tracker, suffix the id so two same-titled
+        # projects never overwrite each other. The chosen dir is stored as
+        # `slug` for O(1) saves.
+        dirname = _slug(title or tid)
+        if (self._base / dirname / "tracker.json").exists():
+            dirname = f"{dirname}-{tid[-8:]}"
+        d = self._base / dirname
         d.mkdir(parents=True, exist_ok=True)
         tracker = {
             "id": tid,
@@ -68,6 +75,7 @@ class TrackerStore:
             "domain": domain,
             "status": "active",
             "created_at": _now(),
+            "slug": dirname,
             "steps": [
                 _new_step(
                     s["title"],
@@ -108,10 +116,11 @@ class TrackerStore:
         return sorted(out, key=lambda t: t.get("created_at", ""), reverse=True)
 
     def _save(self, tracker: dict) -> None:
-        # Path is deterministic from the title (mirrors create()), so we don't
-        # re-scan the projects dir on every mutation.
-        d = self._base / _slug(tracker["title"] or tracker["id"])
-        write_atomic_json(d / "tracker.json", tracker)
+        # Use the dir chosen at create time (`slug`); fall back to the
+        # title-derived slug for pre-existing trackers without the field.
+        # No re-scan of the projects dir on every mutation.
+        dirname = tracker.get("slug") or _slug(tracker["title"] or tracker["id"])
+        write_atomic_json(self._base / dirname / "tracker.json", tracker)
 
     def set_status(self, tracker_id: str, status: str) -> dict | None:
         t = self.get(tracker_id)
