@@ -8,6 +8,8 @@ import {
   fetchProjectDetail,
   fetchProjects,
 } from "../api";
+import TrackerBoard from "./TrackerBoard";
+import TrackerCalendar from "./TrackerCalendar";
 
 export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) {
   const [current, setCurrent] = useState<string | null>(null);
@@ -21,6 +23,9 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
   const [issueFix, setIssueFix] = useState("");
   const [msg, setMsg] = useState("");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  const [view, setView] = useState<"journal" | "trackers" | "calendar">(
+    "trackers",
+  );
 
   const refresh = async () => {
     try {
@@ -258,23 +263,48 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
         {msg && <div className="bg-sky-900/50 text-xs rounded p-2">{msg}</div>}
       </aside>
 
-      {/* Right: project overview */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {selectedProject ? (
-          <>
-            <h2 className="text-lg font-bold mb-4">
-              Project: {selectedProject}
-              {selectedProject === current && (
-                <span className="ml-2 text-sm text-emerald-400">(active)</span>
-              )}
-            </h2>
-            <pre className="whitespace-pre-wrap text-sm bg-slate-900 rounded p-4 max-w-3xl">
-              {overview}
-            </pre>
-          </>
-        ) : (
-          <div className="opacity-50 text-sm text-center mt-8">
-            Select a project or create a new one.
+      {/* Right: view switch (Trackers board / Calendar / Journal) */}
+      <div className="flex flex-1 min-w-0 flex-col">
+        <div className="flex gap-1 border-b border-slate-800 px-3 py-2 text-xs">
+          {(["trackers", "calendar", "journal"] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              className={`rounded px-3 py-1 ${
+                view === v ? "bg-sky-700 text-white" : "bg-slate-800"
+              }`}
+            >
+              {v === "trackers"
+                ? "Trackers"
+                : v === "calendar"
+                ? "Calendar"
+                : "Journal"}
+            </button>
+          ))}
+        </div>
+        {view === "trackers" && <TrackerBoard />}
+        {view === "calendar" && <TrackerCalendar />}
+        {view === "journal" && (
+          <div className="flex-1 overflow-y-auto p-4">
+            {selectedProject ? (
+              <>
+                <h2 className="text-lg font-bold mb-4">
+                  Project: {selectedProject}
+                  {selectedProject === current && (
+                    <span className="ml-2 text-sm text-emerald-400">
+                      (active)
+                    </span>
+                  )}
+                </h2>
+                <pre className="whitespace-pre-wrap text-sm bg-slate-900 rounded p-4 max-w-3xl">
+                  {overview}
+                </pre>
+              </>
+            ) : (
+              <div className="opacity-50 text-sm text-center mt-8">
+                Select a project or create a new one.
+              </div>
+            )}
           </div>
         )}
       </div>
