@@ -105,18 +105,21 @@ class _ProviderChainAdapter:
     for OAuth handshakes / API-key probes on entries that the
     primary preempts.
     """
-    __slots__ = ("_prov", "_task_type", "_llm", "id", "name")
+    __slots__ = ("_prov", "_task_type", "_llm", "id", "name", "_model_override")
 
-    def __init__(self, prov: dict, task_type=None):
+    def __init__(self, prov: dict, task_type=None, model_override: str = ""):
         self._prov = prov
         self._task_type = task_type
         self._llm: "BaseLLM | None" = None
         self.id = prov.get("id", "")
         self.name = prov.get("name") or prov.get("id") or "?"
+        # When the user pinned a specific model on THIS provider, the chain
+        # forces it here instead of falling back to the provider's default.
+        self._model_override = model_override or ""
 
     @property
     def model(self) -> str:
-        return self._prov.get("default_model", "") or (
+        return self._model_override or self._prov.get("default_model", "") or (
             (self._prov.get("models") or [""])[0]
         )
 
@@ -205,12 +208,29 @@ def _active_provider_chain(task_type=None):
         records = _p.get_providers()
     except Exception:
         return []
+    enabled = [p for p in records
+               if isinstance(p, dict) and p.get("enabled", True)]
+    # The active-model selection (the UI selector / ACTIVE_MODEL) is the chain
+    # PRIMARY: its provider, forced to the SELECTED model. The remaining enabled
+    # providers follow as fallbacks. Without this the selector was silently
+    # overridden by each provider's `default_model` (the chain ignored it),
+    # so picking a model in the UI never changed which model actually ran.
+    pinned_id = pinned_model = ""
+    try:
+        from .providers import ACTIVE_MODEL
+        _pin = ACTIVE_MODEL.get() or {}
+        pinned_id = _pin.get("provider_id") or ""
+        pinned_model = _pin.get("model") or ""
+    except Exception:
+        pass
     out: list[_ProviderChainAdapter] = []
-    for prov in records:
-        if not isinstance(prov, dict):
-            continue
-        if not prov.get("enabled", True):
-            continue
+    if pinned_id and pinned_model:
+        head = next((p for p in enabled if p.get("id") == pinned_id), None)
+        if head is not None:
+            out.append(_ProviderChainAdapter(
+                head, task_type=task_type, model_override=pinned_model))
+            enabled = [p for p in enabled if p.get("id") != pinned_id]
+    for prov in enabled:
         out.append(_ProviderChainAdapter(prov, task_type=task_type))
     return out
 
