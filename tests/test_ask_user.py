@@ -351,11 +351,16 @@ def test_question_overwrite_happens_before_conversation_persist():
         if "CONVERSATION.add_turn(" in ln
     ]
     assert convo_lines, "expected `CONVERSATION.add_turn(` call"
-    first_convo = convo_lines[0]
-    assert first_resolution < first_convo, (
+    # The FULL-PATH persist (the one that records a turn which may carry a
+    # pending question) must come AFTER the resolution so the question text is
+    # included. The fast-path persist comes earlier but is for chat turns with
+    # no question, so compare against the LAST add_turn (the full path), not
+    # the first.
+    full_path_convo = convo_lines[-1]
+    assert first_resolution < full_path_convo, (
         f"question_payload resolution at line {first_resolution+1} "
-        f"must come BEFORE CONVERSATION.add_turn at line "
-        f"{first_convo+1} — otherwise the conversation log loses "
+        f"must come BEFORE the full-path CONVERSATION.add_turn at line "
+        f"{full_path_convo+1} — otherwise the conversation log loses "
         f"the question text and resume turns see an empty assistant "
         f"message (bug fixed 2026-05-21)."
     )

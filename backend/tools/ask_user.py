@@ -198,15 +198,17 @@ class QuestionStore:
             return q
 
     def gc_old(self, *, older_than_days: int = 7) -> int:
-        """Delete answered questions older than N days. Called from
-        the bg-job watchdog's daily sweep so the store doesn't grow
-        unboundedly. Returns the number of files removed.
+        """Delete questions older than N days — answered (by answer time) AND
+        abandoned/never-answered (by ask time). Called from the bg-job
+        watchdog's daily sweep so the store doesn't grow unboundedly. Returns
+        the number of files removed.
 
-        Audit follow-up: every `ask_user` call writes a JSON blob;
-        without cleanup the store accumulates one stale file per
-        question forever. 7-day default gives the user plenty of
-        time to scroll back through old conversations + revisit a
-        question, but caps long-term disk usage.
+        Audit follow-up: every `ask_user` call writes a JSON blob; without
+        cleanup the store accumulates one stale file per question forever.
+        Pre-fix only ANSWERED questions were collected, so abandoned ones lived
+        forever (15-day-old open questions seen on prod, polluting the
+        open-list and leaving stale keyboards). 7-day default gives plenty of
+        time to revisit a question but caps long-term cruft.
         """
         cutoff = time.time() - max(1, int(older_than_days)) * 86400
         removed = 0
@@ -224,9 +226,12 @@ class QuestionStore:
                         continue
                     if not isinstance(raw, dict):
                         continue
-                    if not raw.get("answered"):
-                        continue
-                    if (raw.get("answer_at") or 0) >= cutoff:
+                    # Answered -> expire by answer time; abandoned -> by ask
+                    # time. Both past the cutoff are dead weight.
+                    answered = bool(raw.get("answered"))
+                    ts = (raw.get("answer_at") if answered
+                          else raw.get("asked_at")) or 0
+                    if ts >= cutoff:
                         continue
                     try:
                         path.unlink()
@@ -238,6 +243,31 @@ class QuestionStore:
         except Exception as e:
             log.warning("question gc sweep failed: %s", e)
         return removed
+
+    def supersede_open(self, speaker_id: str, keep_qid: str) -> int:
+        """Mark a speaker's OTHER open questions answered (superseded) so only
+        the latest is live. A cascade of questions otherwise leaves a pile of
+        live keyboards that cross-wire resume turns (tapping a stale one fires
+        the wrong resume — the "My choice id: N doesn't match" failures). This
+        does NOT trigger a resume; it just flips the flag, so taps on a
+        superseded keyboard get an 'already answered' toast. Returns the count.
+        """
+        if not speaker_id:
+            return 0
+        n = 0
+        with _STORE_LOCK:
+            for q in self.list_open(limit=100):
+                if q.question_id == keep_qid:
+                    continue
+                if (q.asker_speaker_id or "") != speaker_id:
+                    continue
+                q.answered = True
+                q.answer_at = time.time()
+                q.answer_choice = ""
+                q.answer_text = "(superseded by a newer question)"
+                self.put(q)
+                n += 1
+        return n
 
     def list_open(self, *, limit: int = 50) -> list[PendingQuestion]:
         """All un-answered questions, newest first. Used by the
@@ -467,4 +497,11 @@ def create_question(
         channel=(channel or "").strip(),
     )
     STORE.put(q)
+    # One live question per speaker: a new question supersedes the speaker's
+    # prior open ones so a cascade can't leave stale keyboards that cross-wire
+    # resume turns.
+    try:
+        STORE.supersede_open(q.asker_speaker_id, q.question_id)
+    except Exception as e:
+        log.debug("supersede_open failed: %s", e)
     return q
