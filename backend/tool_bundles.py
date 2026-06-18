@@ -27,7 +27,6 @@ TOOL_BUNDLES: Final[dict[str, list[str]]] = {
         "approve_pairing",
         "list_telegram_access",
         "list_pending_pairings",
-        "schedule_message",
     ],
     "self": [
         "propose_skill",
@@ -45,8 +44,7 @@ BUNDLE_DESCRIPTIONS: Final[dict[str, str]] = {
     "admin": (
         "Mutate agent configuration (set_setting), manage Telegram "
         "user access (grant / revoke / list / approve_pairing / "
-        "list_pending_pairings), schedule outbound messages "
-        "(schedule_message)."
+        "list_pending_pairings)."
     ),
     "self": (
         "Write a new reusable skill (propose_skill), propose "
@@ -75,8 +73,12 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "fetch_url", "web_search",
     # Multimodal
     "analyze_image",
-    # Interaction
-    "ask_user", "save_user_fact",
+    # Interaction + reminders. schedule_message moved to BASE 2026-06-18:
+    # it was gated behind the `admin` bundle, so reminder turns couldn't reach
+    # it and the model hand-rolled scheduling via raw python/terminal (slow,
+    # fragile, sometimes a useless outbox file). A self-reminder is a core,
+    # common, owner-gated action — it belongs always-on.
+    "ask_user", "save_user_fact", "schedule_message",
     # Plan scratchpad (2026-06-11) — multi-step checklist the model
     # declares up front and ticks off; self-correction refuses a
     # final answer while steps are still pending.
