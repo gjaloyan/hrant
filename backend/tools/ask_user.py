@@ -305,6 +305,25 @@ STORE = QuestionStore()
 # ─── Telegram callback dispatcher (q: prefix) ─────────────────────
 
 
+def _deliver_resume_dm(chat_id, text: str) -> bool:
+    """Send a button-tap resume-turn answer back to the asker's chat.
+
+    Thin seam over `ChannelManager.deliver_dm` — the canonical one-off
+    DM path. An earlier version of this code hand-rolled a loop over a
+    `CHANNELS.channels` attribute that never existed (bots live in
+    `_bots`), so it dropped every resume reply silently. Delegating
+    keeps the fix in one place.
+    """
+    if chat_id is None:
+        return False
+    from .. import channels as _ch
+    cm = getattr(_ch, "CHANNELS", None)
+    if cm is None:
+        log.warning("ask_user resume DM not delivered: no channel manager")
+        return False
+    return cm.deliver_dm(chat_id, text)
+
+
 def _register_telegram_callback() -> None:
     """Wire `q:<question_id>:<option_id>` inline-keyboard clicks
     into the tg_interactive dispatcher. Hits on every bot startup —
@@ -380,30 +399,10 @@ def _register_telegram_callback() -> None:
                     channel="telegram",
                     speaker_id=speaker,
                 )
-                # Send the reply via the channel layer. Reuse the
-                # `_send_with_buttons` helper on the live Telegram
-                # channel — same path the supervisor uses for its
-                # final DM, so formatting + chunking + HTML-fallback
-                # behaviour all match.
-                from .. import channels as _ch
-                cm = getattr(_ch, "CHANNELS", None)
-                if cm is None or marked.asker_chat_id is None:
-                    return
-                for _ch_obj in (getattr(cm, "channels", {}) or {}).values():
-                    if not hasattr(_ch_obj, "_send_with_buttons"):
-                        continue
-                    try:
-                        _ch_obj._send_with_buttons(
-                            marked.asker_chat_id,
-                            (res.answer or "").strip()[:4000] or "(empty)",
-                            None,
-                        )
-                        break
-                    except Exception as e:
-                        log.warning(
-                            "ask_user resume DM via %r failed: %s",
-                            type(_ch_obj).__name__, e,
-                        )
+                # Deliver the answer back to the asker's chat. Reuses the
+                # bot's `_send_with_buttons` (same path the supervisor's
+                # final DM takes, so formatting + HTML-fallback match).
+                _deliver_resume_dm(marked.asker_chat_id, res.answer or "")
             except Exception as e:
                 log.warning("ask_user resume turn crashed: %s", e)
 

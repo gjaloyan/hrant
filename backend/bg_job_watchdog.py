@@ -223,19 +223,9 @@ def _send_heartbeat_dm(job: BackgroundJob, text: str) -> bool:
         cm = getattr(_ch, "CHANNELS", None)
         if cm is None:
             return False
-        for _ch_obj in (getattr(cm, "channels", {}) or {}).values():
-            if hasattr(_ch_obj, "_send_with_buttons") and job.original_chat_id:
-                try:
-                    _ch_obj._send_with_buttons(
-                        job.original_chat_id, text, None,
-                    )
-                    return True
-                except Exception as e:
-                    log.warning(
-                        "heartbeat DM via channel %r failed: %s",
-                        type(_ch_obj).__name__, e,
-                    )
-        return False
+        # Canonical DM path. (Previously iterated `cm.channels` — a
+        # nonexistent attribute — so heartbeats never reached Telegram.)
+        return cm.deliver_dm(job.original_chat_id, text)
     except Exception as e:
         log.warning("heartbeat DM dispatch failed: %s", e)
         return False

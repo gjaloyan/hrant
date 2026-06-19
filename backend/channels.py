@@ -2258,6 +2258,34 @@ class ChannelManager:
                 return bot.send_text(text, chat_id=chat_id)
         return False
 
+    def deliver_dm(self, chat_id, text: str) -> bool:
+        """Canonical one-off DM to a specific chat via a running bot.
+
+        The single delivery path for internal senders that need to push
+        an out-of-band message to a known chat: ask_user button-tap
+        resume replies, the supervisor's final answer, and background-job
+        heartbeats. Each of those used to hand-roll a loop over a
+        `CHANNELS.channels` attribute that never existed — `ChannelManager`
+        keeps its bots in `_bots` — so the loop ran over an empty dict and
+        dropped every message silently. Routing them through one method
+        kills that whole class of bug.
+
+        Returns True once a running bot accepts the send. Logs a warning
+        and returns False when nothing was delivered, so a silent drop is
+        visible in the journal instead of vanishing. Uses `send_text`
+        (plain, chunked at Telegram's length limit) — reliable for
+        notification copy and immune to HTML-entity parse failures.
+        """
+        if chat_id is None:
+            return False
+        for bot in self._bots.values():
+            if bot.is_running:
+                if bot.send_text(text, chat_id=chat_id):
+                    return True
+        log.warning("deliver_dm: no running bot delivered to chat_id=%s",
+                    chat_id)
+        return False
+
     def send_to_first_telegram(self, text: str) -> bool:
         """Round E: forward arbitrary text to the first running
         Telegram bot's most-recent chat. Used by the WebUI's

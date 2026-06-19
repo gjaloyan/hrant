@@ -1204,25 +1204,12 @@ def _complete_supervisor_handler(
             from . import channels as _ch
             cm = getattr(_ch, "CHANNELS", None)
             if cm is not None:
-                # The bot send path is internal — go directly through
-                # the existing _send_with_buttons helper on the
-                # Telegram channel instance.
-                sent = False
-                for _ch_id, _ch_obj in (
-                    (getattr(cm, "channels", {}) or {}).items()
-                ):
-                    if hasattr(_ch_obj, "_send_with_buttons"):
-                        try:
-                            _ch_obj._send_with_buttons(
-                                job.original_chat_id, final_message, None,
-                            )
-                            sent = True
-                            break
-                        except Exception as e:
-                            log.warning(
-                                "complete_supervisor DM via %s failed: %s",
-                                _ch_id, e,
-                            )
+                # Canonical one-off DM path. (Previously hand-rolled a
+                # loop over `cm.channels` — an attribute that never
+                # existed — so the supervisor's final answer never
+                # reached Telegram. Bots live in `_bots`; deliver_dm
+                # owns that lookup now.)
+                sent = cm.deliver_dm(job.original_chat_id, final_message)
                 dm_status = "sent" if sent else "no_channel"
         except Exception as e:
             log.warning("complete_supervisor DM dispatch failed: %s", e)
