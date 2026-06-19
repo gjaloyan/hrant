@@ -46,6 +46,20 @@ DEFAULT_OPENAI_MODEL = "text-embedding-3-small"  # 1536 dim
 DEFAULT_COHERE_MODEL = "embed-english-v3.0"  # 1024 dim
 DEFAULT_LLAMA_CPP_MODEL = "bge-m3"  # what we echo back; server runs whatever GGUF is loaded
 
+# Transformer embedders cost ~quadratically in input length, and on a CPU-only
+# host a full multi-KB document does not embed within any reasonable timeout: a
+# 12 KB knowledge note exceeded 120 s and failed, while a short string took
+# 0.44 s. That silently left VECTOR_STORE empty (every note errored), so
+# semantic search fell back to a mis-ranking fuzzy match. For note-level recall
+# a bounded, representative excerpt is enough — and keeps the index actually
+# buildable on CPU. Callers prepend the note's topic, so it survives the cap.
+_MAX_EMBED_CHARS = 2000
+
+
+def _cap_embed_text(text: str) -> str:
+    """Bound embed input so a long document can't stall the CPU embedder."""
+    return text[:_MAX_EMBED_CHARS]
+
 
 def _config_path() -> Path:
     # Audit cleanup: route through paths.knowledge_dir() so test
@@ -120,6 +134,7 @@ class Embedder:
         """Return an embedding or None if no backend is available."""
         if not text:
             return None
+        text = _cap_embed_text(text)
         if self._backend is None:
             self._pick_backend()
         if self._backend == "disabled":
