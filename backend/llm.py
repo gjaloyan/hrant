@@ -87,11 +87,41 @@ def _is_quota_exhausted(err: "LLMError") -> bool:
     return any(marker in msg for marker in _QUOTA_EXHAUSTED_MARKERS)
 
 
+_PROVIDER_MALFORMED_MARKERS: tuple[str, ...] = (
+    "provider returned error",   # OpenRouter's wrapper when an upstream faults
+    "unexpected end of data",    # truncated provider response
+    "unexpected end of json",    # variant of the above
+)
+
+
+def _is_provider_malformed(err: "LLMError") -> bool:
+    """True iff the provider returned a MALFORMED/TRUNCATED response rather than
+    a valid completion or a legitimate client error.
+
+    This is a provider-side fault — the model didn't finish streaming, or the
+    upstream gateway wrapped an internal failure — so the router should retry on
+    the next provider, exactly like a safety/quota refusal. Surfaced 2026-06-19:
+    `nex-n2-pro:free` truncated a large generation at ~12 KB, OpenRouter wrapped
+    it as a 400 'Provider returned error / unexpected end of data', and the turn
+    hard-crashed instead of degrading to a working provider.
+
+    Deliberately narrow: it does NOT match a bare 5xx or timeout (post_with_retry
+    already HTTP-retries those; a persistent 5xx is surfaced, not masked across
+    providers), nor a legitimate client-side bad request (falling back would just
+    fail again and hide the real payload bug)."""
+    msg = (str(err) or "").lower()
+    return any(marker in msg for marker in _PROVIDER_MALFORMED_MARKERS)
+
+
 def _should_fallback(err: "LLMError") -> bool:
-    """The router fallback engages on EITHER a safety refusal OR a
-    quota/rate-limit failure. Both classes mean 'this provider can't
-    serve this call right now; try the next one.'"""
-    return _is_safety_refusal(err) or _is_quota_exhausted(err)
+    """The router fallback engages on a safety refusal, a quota/rate-limit
+    failure, OR a malformed/truncated provider response. All three mean 'this
+    provider can't serve this call right now; try the next one.'"""
+    return (
+        _is_safety_refusal(err)
+        or _is_quota_exhausted(err)
+        or _is_provider_malformed(err)
+    )
 
 
 class _ProviderChainAdapter:
@@ -258,6 +288,8 @@ def _short_fallback_reason(err: "LLMError") -> str:
         return "quota exhausted"
     if "429" in low or "rate" in low:
         return "rate limited"
+    if _is_provider_malformed(err):
+        return "provider error (malformed/truncated response)"
     return s[:80].strip()
 
 
