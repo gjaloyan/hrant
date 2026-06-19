@@ -1991,6 +1991,20 @@ def _create_tracker_handler(title: str, domain: str = "work",
     if refuse:
         return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
     from .tracker import TRACKERS
+    # Idempotency guard: if an active tracker with the same title already
+    # exists, return it instead of minting a duplicate. The model sometimes
+    # re-issues create_tracker within a single turn (2026-06-19 audit: 2 calls
+    # produced 2 same-title trackers); returning the existing one keeps the
+    # conversation moving without polluting the store with clones.
+    norm = " ".join((title or "").split()).lower()
+    if norm:
+        for t in TRACKERS.list(status="active"):
+            if " ".join((t.get("title") or "").split()).lower() == norm:
+                return json.dumps(
+                    {"ok": True, "tracker": t, "steps_recalled": False,
+                     "note": "a tracker with this title already exists — "
+                             "returning it (call add_step/update_step to change it)"},
+                    ensure_ascii=False)
     use_steps = steps if steps else _propose_steps_from_experience(title)
     recalled = bool(not steps and use_steps)
     t = TRACKERS.create(title=title, domain=domain, steps=use_steps or [])

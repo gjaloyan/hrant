@@ -29,6 +29,21 @@ def test_create_tracker_explicit_steps(tools):
     assert len(out["tracker"]["steps"]) == 2
 
 
+def test_create_tracker_idempotent_on_active_title(tools):
+    """A second create_tracker with the same active title returns the existing
+    tracker instead of a duplicate. The model sometimes re-issues the call in
+    one turn (2026-06-19 audit: 2 calls -> 2 same-title trackers)."""
+    from backend.tracker import TRACKERS
+    a = json.loads(tools._create_tracker_handler(
+        title="Launch landing", steps=[{"title": "draft"}]))
+    b = json.loads(tools._create_tracker_handler(
+        title="  launch  LANDING ", steps=[{"title": "draft"}]))  # same modulo case/space
+    assert a["ok"] is True and b["ok"] is True
+    assert a["tracker"]["id"] == b["tracker"]["id"]      # returned the existing one
+    assert "already exists" in (b.get("note") or "")
+    assert len(TRACKERS.list(status="active")) == 1       # no duplicate created
+
+
 def test_create_tracker_recalls_steps_when_omitted(tools, monkeypatch):
     monkeypatch.setattr(
         "backend.trajectory_memory.recall_similar",
