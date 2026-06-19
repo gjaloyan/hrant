@@ -79,6 +79,17 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # fragile, sometimes a useless outbox file). A self-reminder is a core,
     # common, owner-gated action — it belongs always-on.
     "ask_user", "save_user_fact", "schedule_message",
+    # Project tracker (the living-projects feature). Added to BASE 2026-06-19:
+    # these were registered as builtins but never placed in BASE or any
+    # bundle, so the per-turn schema filter (BASE | loaded-bundles) dropped
+    # them — the model never saw them. Asked to "заведи трекер" it spent
+    # ~120s exploring the codebase and hand-rolled a dead markdown note in
+    # workspace/notes/ instead of using the real store (tracker.json +
+    # check-ins + due-date scheduling + WebUI board). Same gating-induced
+    # hand-roll class as schedule_message. Managing a project is a core,
+    # conversational, owner-gated action — it belongs always-on.
+    "create_tracker", "list_trackers", "get_tracker",
+    "add_step", "update_step",
     # Plan scratchpad (2026-06-11) — multi-step checklist the model
     # declares up front and ticks off; self-correction refuses a
     # final answer while steps are still pending.

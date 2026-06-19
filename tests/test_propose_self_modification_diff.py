@@ -56,7 +56,9 @@ def test_propose_with_diff_creates_proposal_with_old_and_new_code(
         assert p.old_code == "def f():\n    return 1"
         assert p.new_code == "def f():\n    return 2"
         assert p.status == "pending"
-        assert p.test_commands == ["python -m py_compile backend/_psm_target.py"]
+        # The applier auto-normalizes `python ...` -> `python3 ...` (Linux hosts
+        # ship only python3); the LLM here returned the legacy `python` form.
+        assert p.test_commands == ["python3 -m py_compile backend/_psm_target.py"]
     finally:
         target.unlink(missing_ok=True)
         sm.SELF_MODIFIER._proposals = []
