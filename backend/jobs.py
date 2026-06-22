@@ -267,6 +267,11 @@ class JobStore:
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
                     continue
+                # The background-jobs store (background.json) is a top-level
+                # list sharing this dir — skip non-job-dict files silently
+                # rather than logging "malformed; skipping" on every scan.
+                if not isinstance(data, dict):
+                    continue
                 try:
                     job = Job.from_dict(data)
                 except (ValueError, TypeError) as e:
@@ -473,6 +478,12 @@ class JobStore:
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
                 except Exception:
+                    continue
+                # The background-jobs store (background.json) is a top-level
+                # list sharing this dir; skip any non-job-dict file instead of
+                # blowing up on `data.get` (was: "consolidation: jobs cleanup
+                # failed: 'list' object has no attribute 'get'").
+                if not isinstance(data, dict):
                     continue
                 if data.get("status") in keep:
                     continue

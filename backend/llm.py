@@ -310,9 +310,9 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
         except LLMError as e:
             if _should_fallback(e):
                 _log.warning(
-                    "router: provider %s returned safety/quota refusal; "
+                    "router: provider %s returned a retryable failure (%s); "
                     "falling back to next. detail=%s",
-                    getattr(prov, "name", "?"), e,
+                    getattr(prov, "name", "?"), _short_fallback_reason(e), e,
                 )
                 last_err = e
                 try:
@@ -887,6 +887,13 @@ MODEL_B_TASKS = {
 
 # ---------- base JSON parser ----------
 def _parse_json_response(raw: str) -> dict:
+    # A provider can hand back None / "" (empty completion, blanked by a
+    # safety filter, or a failed call that returned nothing). Guard before
+    # .strip() so JSON callers (call_json) get a clean LLMError instead of a
+    # cryptic "'NoneType' object has no attribute 'strip'" — which surfaced as
+    # repeated self_study / self_reflection lever failures (2026-06-20 logs).
+    if not raw or not raw.strip():
+        raise LLMError("LLM returned an empty response")
     raw = raw.strip()
     if raw.startswith("```"):
         raw = raw.strip("`")

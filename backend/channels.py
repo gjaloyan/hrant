@@ -61,24 +61,47 @@ class _ConflictNoiseFilter(logging.Filter):
     level on every retry until the situation resolves (usually
     seconds). The trace is alarming but harmless.
 
+    It also collapses transient NETWORK blips during long-poll (httpx
+    ConnectError / ReadTimeout / RemoteProtocolError while calling
+    `getUpdates`): those throw a full ERROR traceback every time the
+    connection to api.telegram.org hiccups, yet the lib retries and recovers
+    on its own. We keep one throttled line so a genuine, sustained outage is
+    still visible without burying the log in stack traces (2026-06-20 logs).
+
     This filter:
       - Drops the stack trace (sets `exc_info` and `exc_text` to None).
       - Throttles repeats: emits one short WARNING per minute even
         if the lib retries every few seconds.
-      - Lets all non-Conflict records through unchanged.
+      - Lets all other records through unchanged.
     """
 
     THROTTLE_SECONDS = 60.0
+    # Transient network exception type names (matched by name to avoid an
+    # httpx/httpcore import here). The lib retries all of these.
+    _TRANSIENT_NET = (
+        "ConnectError", "ConnectTimeout", "ReadTimeout", "ReadError",
+        "WriteError", "PoolTimeout", "RemoteProtocolError", "NetworkError",
+        "ConnectionError", "TimeoutException",
+    )
 
     def __init__(self) -> None:
         super().__init__()
         self._last_log_at: float = 0.0
 
+    def _exc_name(self, record: logging.LogRecord) -> str:
+        if record.exc_info and record.exc_info[1] is not None:
+            return type(record.exc_info[1]).__name__
+        return ""
+
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage() if record.args else (record.msg or "")
-        if "Conflict" not in msg and (
-            not record.exc_info or "Conflict" not in str(record.exc_info[1])
-        ):
+        exc_str = str(record.exc_info[1]) if record.exc_info else ""
+        is_conflict = "Conflict" in msg or "Conflict" in exc_str
+        is_transient_net = (
+            "polling for updates" in msg
+            and self._exc_name(record) in self._TRANSIENT_NET
+        )
+        if not is_conflict and not is_transient_net:
             return True
         now = time.time()
         if now - self._last_log_at < self.THROTTLE_SECONDS:
@@ -86,12 +109,19 @@ class _ConflictNoiseFilter(logging.Filter):
         self._last_log_at = now
         record.levelno = logging.WARNING
         record.levelname = "WARNING"
-        record.msg = (
-            "Telegram poll preempted by another getUpdates consumer "
-            "(Conflict). Usually a dev-reload race; the lib retries. "
-            "If it persists, check for a duplicate backend with the "
-            "same TELEGRAM token."
-        )
+        if is_conflict:
+            record.msg = (
+                "Telegram poll preempted by another getUpdates consumer "
+                "(Conflict). Usually a dev-reload race; the lib retries. "
+                "If it persists, check for a duplicate backend with the "
+                "same TELEGRAM token."
+            )
+        else:
+            record.msg = (
+                "Telegram polling hit a transient network error (%s); the "
+                "lib retries automatically. Only a concern if sustained."
+                % (self._exc_name(record) or "network")
+            )
         record.args = ()
         record.exc_info = None
         record.exc_text = None
