@@ -99,6 +99,18 @@ def backfill_embeddings(*, force: bool = False, limit: Optional[int] = None) -> 
         topics = topics[:limit]
     stats["total"] = len(topics)
 
+    # Warm the model before the batch. On the CPU host the FIRST embed after
+    # idle can be slow enough to hit the timeout (cold load / weight page-in),
+    # which left the first note erroring on every backfill while the rest
+    # succeeded — so the store stuck at N-1/N and the FIRE_EMBEDDING_BACKFILL
+    # lever retried (and re-logged a timeout) every tick. A tiny throwaway
+    # embed pays the warm-up cost up front.
+    if topics:
+        try:
+            EMBEDDER.embed("warmup")
+        except Exception:
+            pass
+
     for entry in topics:
         slug = _slug(entry.topic)
         if VECTOR_STORE.has(slug) and not force:
@@ -110,7 +122,9 @@ def backfill_embeddings(*, force: bool = False, limit: Optional[int] = None) -> 
                 stats["errors"] += 1
                 continue
             text = f"{note.frontmatter.topic}\n\n{note.body}".strip()
-            vec = EMBEDDER.embed(text)
+            # One retry: a single transient timeout (CPU contention) should not
+            # permanently leave a note unembedded and re-trigger the lever.
+            vec = EMBEDDER.embed(text) or EMBEDDER.embed(text)
             if not vec:
                 stats["errors"] += 1
                 continue
