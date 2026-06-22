@@ -138,8 +138,7 @@ def backfill_fact_embeddings(*, force: bool = False) -> dict:
 
     store = get_store()
     if force or not store.is_compatible(dim, backend, model):
-        for slug in list(store._items.keys()):  # type: ignore[attr-defined]
-            store.remove(slug)
+        store.clear()  # one write, not a per-slug remove() loop (O(n^2))
         store.stamp(dim, backend, model)
     else:
         # Stamp on cold start.
@@ -169,8 +168,9 @@ def backfill_fact_embeddings(*, force: bool = False) -> dict:
         if not vec:
             errors += 1
             continue
-        store.add(fid, vec)
+        store.add(fid, vec, save=False)
         embedded += 1
+    store.flush()  # single write for the whole batch (was O(n^2) per-add)
     return {
         "ok": True,
         "backend": backend,

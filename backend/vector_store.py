@@ -110,9 +110,25 @@ class VectorStore:
             return True  # empty store accepts anything
         return self._dim == dim and self._backend == backend and self._model == model
 
-    def add(self, slug: str, vector: list[float]) -> None:
+    def add(self, slug: str, vector: list[float], *, save: bool = True) -> None:
         with self._lock:
             self._items[slug] = list(vector)
+            if save:
+                self._save()
+
+    def clear(self) -> None:
+        """Drop all vectors in a SINGLE write. Use this instead of remove()
+        per-slug in a backfill's wipe step — remove() re-serializes the whole
+        file on every call, which is O(n^2) and stalled a 2368-fact re-embed
+        for 30+ minutes (2026-06-22)."""
+        with self._lock:
+            self._items.clear()
+            self._save()
+
+    def flush(self) -> None:
+        """Persist the current in-memory items in one write. Pair with
+        add(..., save=False) to batch a large backfill into a single save."""
+        with self._lock:
             self._save()
 
     def remove(self, slug: str) -> None:

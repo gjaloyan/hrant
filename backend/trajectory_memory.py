@@ -92,8 +92,7 @@ def _ensure_stamp(store: VectorStore, status: dict) -> bool:
         store.stamp(dim, backend, model)
         return True
     if not store.is_compatible(dim, backend, model):
-        for slug in list(store._items.keys()):  # type: ignore[attr-defined]
-            store.remove(slug)
+        store.clear()  # one write, not a per-slug remove() loop (O(n^2))
         store.stamp(dim, backend, model)
     return True
 
@@ -152,9 +151,12 @@ def qualifies(artifact: dict) -> tuple[bool, str]:
 # ─── Indexing ─────────────────────────────────────────────────────
 
 
-def index_turn(turn_id: str, artifact: dict) -> bool:
+def index_turn(turn_id: str, artifact: dict, *, save: bool = True) -> bool:
     """Embed the turn's task text and add to the store. Returns True
-    when indexed. Never raises — indexing is post-turn best-effort."""
+    when indexed. Never raises — indexing is post-turn best-effort.
+
+    `save=False` defers the disk write so a backfill can batch a large run
+    into one flush() (per-add saves are O(n^2) on a big store)."""
     try:
         ok, _reason = qualifies(artifact)
         if not ok:
@@ -169,7 +171,7 @@ def index_turn(turn_id: str, artifact: dict) -> bool:
         vec = EMBEDDER.embed(task)
         if not vec:
             return False
-        store.add(turn_id, vec)
+        store.add(turn_id, vec, save=save)
         return True
     except Exception as e:
         log.debug("trajectory index_turn(%s) failed: %s", turn_id, e)
@@ -200,10 +202,11 @@ def backfill(limit: int = 500) -> dict:
             artifact = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if index_turn(tid, artifact):
+        if index_turn(tid, artifact, save=False):
             indexed += 1
         else:
             skipped += 1
+    store.flush()  # single write for the whole batch (was O(n^2) per-add)
     return {"ok": True, "indexed": indexed, "skipped": skipped}
 
 

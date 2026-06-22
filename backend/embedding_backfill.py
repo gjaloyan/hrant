@@ -78,9 +78,8 @@ def backfill_embeddings(*, force: bool = False, limit: Optional[int] = None) -> 
     model = status["model"] or ""
 
     if force or not VECTOR_STORE.is_compatible(dim, backend, model):
-        # Stale or forced: clear and re-stamp.
-        for slug in list(VECTOR_STORE._items.keys()):  # type: ignore[attr-defined]
-            VECTOR_STORE.remove(slug)
+        # Stale or forced: clear and re-stamp (one write, not per-slug).
+        VECTOR_STORE.clear()
         VECTOR_STORE.stamp(dim, backend, model)
 
     stats = {
@@ -128,10 +127,11 @@ def backfill_embeddings(*, force: bool = False, limit: Optional[int] = None) -> 
             if not vec:
                 stats["errors"] += 1
                 continue
-            VECTOR_STORE.add(slug, vec)
+            VECTOR_STORE.add(slug, vec, save=False)
             stats["embedded"] += 1
         except Exception as e:
             log.warning("backfill embed failed for %s: %s", entry.topic, e)
             stats["errors"] += 1
 
+    VECTOR_STORE.flush()  # single write for the whole batch (was O(n^2))
     return stats

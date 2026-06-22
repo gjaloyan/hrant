@@ -48,7 +48,8 @@ def test_backfill_retries_a_transient_embed_failure(monkeypatch):
     monkeypatch.setattr(bf.VECTOR_STORE, "is_compatible", lambda *a: True)
     monkeypatch.setattr(bf.VECTOR_STORE, "has", lambda slug: False)
     monkeypatch.setattr(bf.VECTOR_STORE, "add",
-                        lambda slug, vec: added.__setitem__(slug, vec))
+                        lambda slug, vec, save=True: added.__setitem__(slug, vec))
+    monkeypatch.setattr(bf.VECTOR_STORE, "flush", lambda: None)
 
     stats = bf.backfill_embeddings()
 
