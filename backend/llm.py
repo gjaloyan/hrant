@@ -1074,7 +1074,8 @@ def _build_synth_user_text(
         if len(digest_text) > digest_cap:
             digest_text = digest_text[:digest_cap] + "\n… (digest truncated)"
         parts.append(
-            "\n\n## Investigation already done (do NOT repeat these calls)\n"
+            "\n\n## Work you already did this turn — tool calls + actions "
+            "(do NOT repeat these calls)\n"
             + digest_text
         )
     if narration_chunks:
@@ -1083,9 +1084,14 @@ def _build_synth_user_text(
             narration = narration[:narration_cap] + "\n… (narration truncated)"
         parts.append("\n\n## My running analysis from prior turns\n" + narration)
     parts.append(
-        "\n\nProvide the FINAL answer now based on the investigation above. "
-        "Tools are disabled for this turn. If you don't have enough evidence, "
-        "say so honestly rather than guessing."
+        "\n\nWrite the FINAL answer now from the work above. Tools are disabled "
+        "for this turn. The summary above is what YOU already did this turn — if "
+        "it shows you completed actions (wrote a file, started a server, set a "
+        "reminder, created a tracker, applied a patch), report plainly what you "
+        "accomplished and where. Do NOT disclaim or cast doubt on actions the "
+        "summary shows you took — recognize your own success and close the loop. "
+        "Only flag as unfinished what genuinely was not done; don't guess about "
+        "facts you never gathered."
     )
     return "".join(parts)
 
