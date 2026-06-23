@@ -1985,6 +1985,75 @@ def _propose_steps_from_experience(title: str) -> list[dict]:
     return []
 
 
+def _frame_problem_handler(
+    title: str,
+    components: list | None = None,
+    proposed_scope: str = "",
+    open_questions: list | None = None,
+    domain: str = "general",
+) -> str:
+    """Critical-thinking structure for a non-trivial task: record the component
+    map of what a REAL (functional, not demo) version needs — each component
+    with its source and confidence — plus a proposed scope and open questions.
+    Persists a durable frame and returns scope options to confirm via ask_user."""
+    import uuid
+    from datetime import datetime, timezone
+    from .paths import workspace_dir, write_atomic_json
+    from .knowledge_manager import _slug
+
+    refuse, _sp = _check_owner("frame_problem")
+    if refuse:
+        return json.dumps({"ok": False, "error": "owner/trusted only"},
+                          ensure_ascii=False)
+
+    comps = []
+    for c in (components or []):
+        if not isinstance(c, dict) or not str(c.get("name", "")).strip():
+            continue
+        comps.append({
+            "name": str(c.get("name")).strip(),
+            "role": str(c.get("role", "")).strip(),
+            "mvp": bool(c.get("mvp", False)),
+            "source": str(c.get("source", "")).strip(),
+            "confidence": str(c.get("confidence", "med")).strip().lower(),
+        })
+
+    fid = "frame_" + uuid.uuid4().hex[:10]
+    slug = _slug(title or fid)
+    frame = {
+        "id": fid,
+        "title": str(title or "").strip(),
+        "domain": str(domain or "general").strip(),
+        "components": comps,
+        "proposed_scope": str(proposed_scope or "").strip(),
+        "open_questions": [str(q).strip() for q in (open_questions or [])
+                           if str(q).strip()],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    d = workspace_dir() / "frames"
+    d.mkdir(parents=True, exist_ok=True)
+    write_atomic_json(d / f"{slug}.json", frame)
+
+    mvp = [c["name"] for c in comps if c["mvp"]]
+    later = [c["name"] for c in comps if not c["mvp"]]
+    scope_options = []
+    if mvp:
+        scope_options.append({"label": "Build the MVP now",
+                              "description": "Now: " + ", ".join(mvp)})
+    if later:
+        scope_options.append({"label": "MVP + more",
+                              "description": "Also add: " + ", ".join(later)})
+    return json.dumps({
+        "ok": True,
+        "frame_id": fid,
+        "frame": frame,
+        "scope_options": scope_options,
+        "note": ("Frame saved. Confirm scope with the owner via ask_user using "
+                 "scope_options, then build only the confirmed scope. For work "
+                 "too big for one session, seed a create_tracker project."),
+    }, ensure_ascii=False)
+
+
 def _create_tracker_handler(title: str, domain: str = "work",
                             steps: list | None = None) -> str:
     refuse, _sp = _check_owner("create_tracker")
@@ -2301,6 +2370,53 @@ def register_builtin_tools() -> None:
             "required": ["title"],
         },
         handler=_create_tracker_handler,
+    )
+    reg.register_func(
+        name="frame_problem",
+        description=(
+            "Critical-thinking structure for a non-trivial task: record the "
+            "component map of what a REAL (functional, not demo) version needs "
+            "— each component with its source and your confidence — plus a "
+            "proposed scope and open questions. Persists a durable frame and "
+            "returns scope_options to confirm with the owner via ask_user "
+            "BEFORE building. Use on big / open-ended builds (see the "
+            "solving-by-questions skill). Owner/trusted only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string",
+                          "description": "The task/problem being framed."},
+                "components": {
+                    "type": "array",
+                    "description": ("What a real version is made of. Each: name, "
+                                    "role, mvp (bool — needed in the first "
+                                    "functional version), source (where it came "
+                                    "from — your memory, a doc, a site), "
+                                    "confidence (high/med/low)."),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "role": {"type": "string"},
+                            "mvp": {"type": "boolean"},
+                            "source": {"type": "string"},
+                            "confidence": {"type": "string",
+                                           "enum": ["high", "med", "low"]},
+                        },
+                        "required": ["name"],
+                    },
+                },
+                "proposed_scope": {"type": "string",
+                                   "description": "What to build now vs defer."},
+                "open_questions": {"type": "array", "items": {"type": "string"},
+                                   "description": "Unknowns to confirm with the owner."},
+                "domain": {"type": "string",
+                           "description": "Optional domain tag (e.g. 'ecommerce')."},
+            },
+            "required": ["title", "components"],
+        },
+        handler=_frame_problem_handler,
     )
     reg.register_func(
         name="list_trackers",

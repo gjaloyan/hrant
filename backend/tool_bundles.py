@@ -90,6 +90,11 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # conversational, owner-gated action — it belongs always-on.
     "create_tracker", "list_trackers", "get_tracker",
     "add_step", "update_step",
+    # Critical-thinking framing — reachable always so the agent can frame a
+    # big task into its real components and confirm scope before building
+    # (2026-06-23). Gating it would re-create the "model can't reach the tool,
+    # so it hand-rolls" trap.
+    "frame_problem",
     # Plan scratchpad (2026-06-11) — multi-step checklist the model
     # declares up front and ticks off; self-correction refuses a
     # final answer while steps are still pending.
