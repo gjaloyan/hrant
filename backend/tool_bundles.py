@@ -31,7 +31,6 @@ TOOL_BUNDLES: Final[dict[str, list[str]]] = {
     "self": [
         "propose_skill",
         "propose_self_modification",
-        "delegate",
     ],
     "media": [
         "agent_browser",
@@ -49,8 +48,7 @@ BUNDLE_DESCRIPTIONS: Final[dict[str, str]] = {
     "self": (
         "Write a new reusable skill (propose_skill), propose "
         "structural code changes to the agent itself "
-        "(propose_self_modification), delegate a focused subtask "
-        "to a specialised subagent (delegate)."
+        "(propose_self_modification)."
     ),
     "media": (
         "Drive a headless Chromium for JS-rendered / login-walled "
@@ -95,6 +93,11 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # (2026-06-23). Gating it would re-create the "model can't reach the tool,
     # so it hand-rolls" trap.
     "frame_problem",
+    # Delegation — moved to BASE 2026-06-23 so the agent USES subagents often
+    # (research / build a component / review) to keep its own context clean,
+    # instead of doing everything in one window. Gating it behind `self` meant
+    # the model rarely loaded it and rarely delegated.
+    "delegate",
     # Plan scratchpad (2026-06-11) — multi-step checklist the model
     # declares up front and ticks off; self-correction refuses a
     # final answer while steps are still pending.
