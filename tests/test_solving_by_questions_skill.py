@@ -25,3 +25,6 @@ def test_skill_covers_levels_and_answering_discipline():
     # answering discipline keywords
     for kw in ("triangulat", "verify", "escalat", "frame_problem", "ask_user"):
         assert kw in text
+    # subagent-driven execution (use subagents often, builder can DO)
+    for kw in ("delegate", "subagent", "builder", "researcher", "reviewer"):
+        assert kw in text
