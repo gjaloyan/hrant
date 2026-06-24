@@ -28,3 +28,6 @@ def test_skill_covers_levels_and_answering_discipline():
     # subagent-driven execution (use subagents often, builder can DO)
     for kw in ("delegate", "subagent", "builder", "researcher", "reviewer"):
         assert kw in text
+    # depth + honest coverage (don't call a 3% slice "the shop")
+    for kw in ("subsystem", "honest", "percent", "database"):
+        assert kw in text

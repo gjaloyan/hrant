@@ -25,9 +25,17 @@ depth to the task — do not over-think a one-liner, do not under-think a system
   does NOT make it scoped — the scope is *which components are real*, and that is
   exactly what you must not assume. Ask: *what IS this thing? what are its REAL
   components? what does a functional version need (NOT a demo)? data model? flows?
-  MVP vs full? what is unknown?* Then call `frame_problem` to record the component
-  map + a proposed scope, confirm scope with the owner via `ask_user`, and build
-  only the confirmed scope.
+  MVP vs full? what is unknown?* **Go DEEP — interrogate to the SUBSYSTEM level.**
+  A real system has DOZENS of components, not 8. A real online shop alone:
+  catalog, search/filter, product pages (variants, real images), cart, accounts/
+  auth, REAL payments (gateway, PCI, tax, refunds), orders & lifecycle, inventory,
+  admin panel, shipping, notifications, reviews, security, a real DATABASE (not a
+  JSON file), analytics, SEO. If your map is short, you under-interrogated — dig
+  again. Then call `frame_problem` to record the full component map + a proposed
+  scope, confirm scope with the owner via `ask_user`, and build only the confirmed
+  scope. **Be brutally honest about coverage:** when you ship an MVP, state plainly
+  what percent of the full map it covers and what is deferred — a 3% demo is a
+  slice, NEVER call it "the shop / the app / the system".
 - **L4 Project** — too big for one session. Materialize a project: goals, a
   short spec, a plan, decomposed tasks; persist state in files (`create_tracker`
   + workspace docs). Then build it step by step by **delegating each task to a

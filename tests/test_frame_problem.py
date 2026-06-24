@@ -48,6 +48,25 @@ def test_frame_problem_persists_and_returns_scope_options(tools, tmp_path):
     assert saved["open_questions"] == ["Real payments or stubbed?"]
 
 
+def test_frame_problem_reports_honest_coverage(tools):
+    out = json.loads(tools._frame_problem_handler(
+        title="Online shop",
+        components=[
+            {"name": "catalog", "mvp": True},
+            {"name": "cart", "mvp": True},
+            {"name": "payments", "mvp": False},
+            {"name": "admin", "mvp": False},
+        ],
+    ))
+    cov = out["frame"]["coverage"]
+    assert cov["mvp_components"] == 2 and cov["total_listed"] == 4
+    assert cov["mvp_pct_of_listed"] == 50
+    # the note must force honesty (percent + "slice", not "the whole")
+    low = out["note"].lower()
+    assert "2/4" in out["note"] or "~50%" in out["note"]
+    assert "slice" in low and "under-interrogated" in low
+
+
 def test_frame_problem_owner_gated(tools):
     import backend.builtin_tools as bt
     bt._check_owner = lambda *a, **k: ("refused", None)

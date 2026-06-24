@@ -2020,11 +2020,16 @@ def _frame_problem_handler(
 
     fid = "frame_" + uuid.uuid4().hex[:10]
     slug = _slug(title or fid)
+    total = len(comps)
+    mvp_n = sum(1 for c in comps if c["mvp"])
+    coverage_pct = round(100 * mvp_n / total) if total else 0
     frame = {
         "id": fid,
         "title": str(title or "").strip(),
         "domain": str(domain or "general").strip(),
         "components": comps,
+        "coverage": {"mvp_components": mvp_n, "total_listed": total,
+                     "mvp_pct_of_listed": coverage_pct},
         "proposed_scope": str(proposed_scope or "").strip(),
         "open_questions": [str(q).strip() for q in (open_questions or [])
                            if str(q).strip()],
@@ -2048,9 +2053,18 @@ def _frame_problem_handler(
         "frame_id": fid,
         "frame": frame,
         "scope_options": scope_options,
-        "note": ("Frame saved. Confirm scope with the owner via ask_user using "
-                 "scope_options, then build only the confirmed scope. For work "
-                 "too big for one session, seed a create_tracker project."),
+        "note": (
+            f"MVP = {mvp_n}/{total} of the components you listed (~{coverage_pct}%). "
+            "Be HONEST about this: an MVP is a SLICE, not the finished product — in "
+            "your answer state what percent it covers and what is deferred; never "
+            "call a fraction 'the shop/app/system'. If your list looks short for a "
+            "real system (a real online shop alone has dozens of subsystems: "
+            "accounts/auth, real payments, admin panel, inventory, search, reviews, "
+            "order management, notifications, shipping, security, a real database, "
+            "analytics...), you under-interrogated — go deeper before scoping. Then "
+            "confirm scope with the owner via ask_user, and for multi-session work "
+            "seed a create_tracker project."
+        ),
     }, ensure_ascii=False)
 
 
