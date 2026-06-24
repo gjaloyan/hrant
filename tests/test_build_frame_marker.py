@@ -4,7 +4,28 @@ agent's own tool stream), NOT keyword routing on the user's message.
 """
 from __future__ import annotations
 
-from backend.unified_agent import _build_frame_marker, _BUILD_FRAME_THRESHOLD
+from backend.unified_agent import (
+    _build_frame_marker, _should_block_build,
+    _BUILD_FRAME_THRESHOLD, _BUILD_BLOCK_THRESHOLD,
+)
+
+
+def test_block_refuses_build_write_after_threshold_without_frame():
+    st = {"writes": _BUILD_BLOCK_THRESHOLD, "framed": False}
+    assert _should_block_build(st, "terminal_exec") is True
+    assert _should_block_build(st, "save_to_workspace") is True
+    # a read-only tool is never blocked
+    assert _should_block_build(st, "read_file") is False
+
+
+def test_block_allows_when_under_threshold():
+    st = {"writes": _BUILD_BLOCK_THRESHOLD - 1, "framed": False}
+    assert _should_block_build(st, "terminal_exec") is False
+
+
+def test_block_allows_after_framing():
+    st = {"writes": _BUILD_BLOCK_THRESHOLD + 5, "framed": True}
+    assert _should_block_build(st, "terminal_exec") is False
 
 
 def test_fires_once_after_threshold_build_writes():

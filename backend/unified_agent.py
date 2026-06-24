@@ -1772,7 +1772,22 @@ def _decide_self_correction(
 # can stop and frame mid-flow. Soft (the agent ignores it on a non-system
 # build), so no false-positive cost; behavioural, so no keyword classification.
 _BUILD_WRITE_TOOLS = frozenset({"save_to_workspace", "terminal_exec", "run_python"})
-_BUILD_FRAME_THRESHOLD = 4
+_BUILD_FRAME_THRESHOLD = 4   # soft FRAME-CHECK marker fires here
+_BUILD_BLOCK_THRESHOLD = 4   # hard block: refuse build-writes past this w/o a frame
+
+
+def _should_block_build(state: dict, tool_name: str) -> bool:
+    """Hard gate decision: refuse a build-write tool once the agent has built
+    several times this turn WITHOUT calling frame_problem. Soft nudges (soul,
+    skill, the FRAME-CHECK marker) don't stop the build-eager model, so this
+    blocks until it frames. Behavioural — keyed on the agent's own tool stream,
+    not the user's words. A frame is one cheap call; an unframed system build is
+    the decorative-demo trap. Trivial tasks (<= threshold build-writes) pass."""
+    return (
+        tool_name in _BUILD_WRITE_TOOLS
+        and not state.get("framed")
+        and state.get("writes", 0) >= _BUILD_BLOCK_THRESHOLD
+    )
 
 
 def _build_frame_marker(state: dict, tool_name: str, is_error: bool) -> str:
@@ -2514,6 +2529,22 @@ def run_unified(
             pass
 
     def _execute_with_progress(name: str, args: dict):
+        # HARD build-without-frame gate (structural backstop — see
+        # _should_block_build). Returns a blocked error WITHOUT executing, so
+        # the model must call frame_problem before more building this turn.
+        if _should_block_build(_build_frame_state, name):
+            blocked = json.dumps({
+                "ok": False,
+                "error": (
+                    f"BLOCKED: you've run {_build_frame_state.get('writes', 0)} "
+                    "build actions without framing this work. Before ANY more "
+                    "building this turn you MUST call `frame_problem` with the "
+                    "FULL component map (real subsystems — not 8 surface items) "
+                    "and confirm scope via `ask_user`. Then continue building "
+                    "the confirmed scope. A frame is one cheap call."
+                ),
+            }, ensure_ascii=False)
+            return blocked, True
         preview = ", ".join(str(k) for k in (args or {}).keys())
         agent.progress(
             "tool_starting",
