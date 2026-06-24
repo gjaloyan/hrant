@@ -1763,6 +1763,43 @@ def _decide_self_correction(
     )
 
 
+# ─── Build-without-frame nudge (structural, no keyword routing) ─────
+# The soul/skill telling the agent to frame a big build is a soft nudge the
+# model under-applies (it jumps to building, especially when a detail like a
+# port is given). This is a STRUCTURAL backstop that reads the agent's OWN
+# behaviour — not the user's words: once it has taken several build-write
+# actions WITHOUT calling frame_problem, inject a one-time, timely nudge so it
+# can stop and frame mid-flow. Soft (the agent ignores it on a non-system
+# build), so no false-positive cost; behavioural, so no keyword classification.
+_BUILD_WRITE_TOOLS = frozenset({"save_to_workspace", "terminal_exec", "run_python"})
+_BUILD_FRAME_THRESHOLD = 4
+
+
+def _build_frame_marker(state: dict, tool_name: str, is_error: bool) -> str:
+    """Mutate `state` and return a one-time FRAME-CHECK marker (or "").
+
+    `state` keys: writes (int), framed (bool), fired (bool)."""
+    if tool_name in ("frame_problem", "create_tracker"):
+        state["framed"] = True
+        return ""
+    if not is_error and tool_name in _BUILD_WRITE_TOOLS:
+        state["writes"] = state.get("writes", 0) + 1
+    if (state.get("writes", 0) >= _BUILD_FRAME_THRESHOLD
+            and not state.get("framed")
+            and not state.get("fired")):
+        state["fired"] = True
+        return (
+            "🧭 **FRAME-CHECK** — you've taken several build actions without "
+            "calling `frame_problem`. IF you are building an app / shop / site / "
+            "system: STOP now and `frame_problem` the FULL component map "
+            "(subsystems — accounts, payments, admin, inventory, search, "
+            "security, a real DB, …), confirm scope with `ask_user`, and be "
+            "honest that an MVP is a slice, not the whole. If this is NOT a "
+            "system build, ignore this."
+        )
+    return ""
+
+
 # ─── Main entry point ──────────────────────────────────────────────
 
 
@@ -2419,6 +2456,8 @@ def run_unified(
     # composed): drift catches the bloat mid-flow so the agent
     # doesn't burn 40 read_files before snapping out of it.
     _drift_state = {"consecutive_readonly": 0, "marker_fired": 0}
+    # Build-without-frame nudge state (see _build_frame_marker).
+    _build_frame_state = {"writes": 0, "framed": False, "fired": False}
 
     # AskUserQuestion follow-up: when the agent calls the `ask_user`
     # tool, the handler persists a PendingQuestion and returns a
@@ -2612,6 +2651,13 @@ def run_unified(
         except Exception:
             marker_drift = ""
 
+        # Build-without-frame nudge (structural backstop for the soft
+        # soul/skill framing rule the build-eager model under-applies).
+        try:
+            marker_frame = _build_frame_marker(_build_frame_state, name, is_error)
+        except Exception:
+            marker_frame = ""
+
         # T3: no-progress detector — hash the FULL raw_result head
         # (before truncation) so identical-with-noise outputs still
         # match. Marker appended OUTSIDE truncation so it survives.
@@ -2652,6 +2698,8 @@ def run_unified(
             out_parts.append(marker_nopr.lstrip())
         if marker_drift:
             out_parts.append(marker_drift.lstrip())
+        if marker_frame:
+            out_parts.append(marker_frame.lstrip())
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 
