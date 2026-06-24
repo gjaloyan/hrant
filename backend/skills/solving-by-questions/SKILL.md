@@ -77,3 +77,10 @@ rests on → triangulate and verify.
 Asked to "build an online shop," do NOT jump to a pretty page. Interrogate first
 (catalog, cart, checkout, payments, accounts, inventory, orders store, admin,
 auth), `frame_problem` the map, confirm scope, then build the real thing.
+
+## This is ENFORCED, not optional
+The runtime hard-gates this: if you take several build actions (file writes,
+shell, `run_python`) WITHOUT having called `frame_problem`, your build tools are
+REFUSED until you frame. Don't fight the gate — soft self-reminders provably
+don't work on you, which is exactly why the gate exists. One `frame_problem`
+call lifts the block for the rest of the turn. Frame first, then build.

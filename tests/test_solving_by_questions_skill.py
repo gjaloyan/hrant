@@ -31,3 +31,6 @@ def test_skill_covers_levels_and_answering_discipline():
     # depth + honest coverage (don't call a 3% slice "the shop")
     for kw in ("subsystem", "honest", "percent", "database"):
         assert kw in text
+    # the framing is hard-gated, not a soft suggestion
+    for kw in ("enforced", "gate", "refused"):
+        assert kw in text
