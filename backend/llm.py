@@ -113,14 +113,38 @@ def _is_provider_malformed(err: "LLMError") -> bool:
     return any(marker in msg for marker in _PROVIDER_MALFORMED_MARKERS)
 
 
+_MODEL_UNAVAILABLE_MARKERS: tuple[str, ...] = (
+    "model is unavailable",
+    "is unavailable for free",     # OpenRouter discontinuing a :free tier
+    "use this slug instead",       # OpenRouter's "switch to the paid slug" hint
+    "model not found",
+    "no such model",
+    "no endpoints found",          # OpenRouter: a model with no live providers
+    "not a valid model",
+    "unknown model",
+)
+
+
+def _is_model_unavailable(err: "LLMError") -> bool:
+    """True iff the pinned model no longer exists / can't be served by this
+    provider (e.g. a 404 'model is unavailable'). Surfaced 2026-06-24: OpenRouter
+    discontinued `nex-n2-pro:free`, returning a 404 — and because that wasn't a
+    fallback class, EVERY turn on the pinned model hard-crashed instead of
+    degrading to a working provider. A dead/renamed model should fall back, not
+    take the agent down."""
+    msg = (str(err) or "").lower()
+    return any(marker in msg for marker in _MODEL_UNAVAILABLE_MARKERS)
+
+
 def _should_fallback(err: "LLMError") -> bool:
     """The router fallback engages on a safety refusal, a quota/rate-limit
-    failure, OR a malformed/truncated provider response. All three mean 'this
-    provider can't serve this call right now; try the next one.'"""
+    failure, a malformed/truncated provider response, OR an unavailable/dead
+    model. All mean 'this provider can't serve this call; try the next one.'"""
     return (
         _is_safety_refusal(err)
         or _is_quota_exhausted(err)
         or _is_provider_malformed(err)
+        or _is_model_unavailable(err)
     )
 
 
@@ -290,6 +314,8 @@ def _short_fallback_reason(err: "LLMError") -> str:
         return "rate limited"
     if _is_provider_malformed(err):
         return "provider error (malformed/truncated response)"
+    if _is_model_unavailable(err):
+        return "model unavailable (pin is dead/renamed)"
     return s[:80].strip()
 
 
