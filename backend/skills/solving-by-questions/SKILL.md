@@ -38,10 +38,17 @@ depth to the task — do not over-think a one-liner, do not under-think a system
   slice, NEVER call it "the shop / the app / the system".
 - **L4 Project** — too big for one session. Materialize a project: goals, a
   short spec, a plan, decomposed tasks; persist state in files (`create_tracker`
-  + workspace docs). Then build it step by step by **delegating each task to a
-  fresh `builder` subagent** (and `researcher` for fact-finding, `reviewer` for a
-  second opinion) — subagent-driven, so no single context carries the whole
-  project and nothing gets forgotten. Review each result before the next.
+  + workspace docs). **Decompose GRANULARLY — one tracker step per real
+  component from your frame, each a single bite-sized deliverable.** A real
+  system is 15+ steps, NOT 4. "backend / frontend / launch / verify" is far too
+  coarse for a shop — break the backend into its real parts: DB schema, product
+  model + API, cart, checkout, auth register/login, JWT, admin, inventory,
+  payments, each its own step. If your tracker has a handful of mega-steps, you
+  under-decomposed — split them. Then build step by step by **delegating each
+  step to a fresh `builder` subagent** (and `researcher` for fact-finding,
+  `reviewer` for a second opinion) — subagent-driven, so no single context
+  carries the whole project. Mark a step `done` only after its builder verified
+  it; review each result before the next.
 
 ## Use subagents often — and let them DO, not just read
 A subagent is a fresh, focused context. Use `delegate(role, task)` whenever a
