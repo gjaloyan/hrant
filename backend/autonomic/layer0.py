@@ -164,6 +164,16 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=3600.0,
         ),
         LayerZeroRule(
+            # Drive user/learning goals to completion, one subtask per fire
+            # (2026-06-25 audit: those goal types were created but never
+            # executed by anything). Long cooldown bounds the spend.
+            name="goal_drive_tick",
+            predicate=lambda s: True,
+            lever="FIRE_GOAL_DRIVE",
+            params={},
+            cooldown_seconds=7200.0,
+        ),
+        LayerZeroRule(
             name="note_curation_tick",
             predicate=lambda s: True,
             lever="FIRE_NOTE_CURATION",
