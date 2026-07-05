@@ -31,6 +31,10 @@ def test_skill_covers_levels_and_answering_discipline():
     # depth + honest coverage (don't call a 3% slice "the shop")
     for kw in ("subsystem", "honest", "percent", "database"):
         assert kw in text
+    # team-of-subagents doctrine for hard builds (foreman pattern)
+    for kw in ("team", "foreman", "background=true", "check_subagents",
+               "independen"):
+        assert kw in text
     # granular L4 decomposition (one step per component, not a few mega-steps)
     for kw in ("granular", "bite-sized", "under-decomposed"):
         assert kw in text

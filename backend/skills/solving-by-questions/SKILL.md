@@ -50,6 +50,24 @@ depth to the task — do not over-think a one-liner, do not under-think a system
   carries the whole project. Mark a step `done` only after its builder verified
   it; review each result before the next.
 
+## Hard projects: assemble a TEAM, act as the foreman
+On a hard build (L4), do not work as a solo builder with occasional helpers —
+run a coordinated team and stay the coordinator:
+1. **Slice by independence**: from your frame, group components into
+   independent work packages with NO shared files (e.g. auth module vs survey
+   builder vs results/charts — each its own files/dir).
+2. **Fan out**: dispatch one `builder` per package with
+   `delegate(role="builder", task=…, background=true)` — 2-3 in parallel;
+   each task must name its OWN file boundary so parallel builders never write
+   the same file. Research questions go to a parallel `researcher`.
+3. **Collect + review**: `check_subagents` to gather results; send integration
+   points or risky pieces to a `reviewer` before wiring them together.
+4. **Integrate sequentially yourself**: the merge/glue step is YOURS, one
+   thread, after the packages land. Verify (verify_web) after each
+   integration, then mark tracker steps done.
+Your own context stays clean coordination state: the frame, the tracker, who
+is building what — not the code itself.
+
 ## Use subagents often — and let them DO, not just read
 A subagent is a fresh, focused context. Use `delegate(role, task)` whenever a
 piece of work is self-contained — to keep YOUR context clean and avoid
