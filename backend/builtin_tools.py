@@ -2121,6 +2121,47 @@ def _verify_web_handler(url: str, expect_texts: list | None = None,
     }, ensure_ascii=False)
 
 
+_GRANULARITY_MIN_COMPONENTS = 8      # gate only kicks in for real systems
+_GRANULARITY_FRESH_SECONDS = 900     # frame from this turn (~15 min window)
+
+
+def _tracker_granularity_error(steps: list | None) -> str:
+    """Return a blocking error JSON when a FRESH frame has many components but
+    the proposed tracker collapses them into a few mega-steps. Empty string =
+    pass. Never raises."""
+    try:
+        if not steps:
+            return ""   # step-less create → recall/proposal path, not a plan
+        import time as _t
+        from .paths import workspace_dir
+        best, best_m = None, 0.0
+        for p in (workspace_dir() / "frames").glob("*.json"):
+            m = p.stat().st_mtime
+            if m > best_m:
+                best, best_m = p, m
+        if best is None or (_t.time() - best_m) > _GRANULARITY_FRESH_SECONDS:
+            return ""
+        frame = json.loads(best.read_text(encoding="utf-8"))
+        n_comp = len(frame.get("components") or [])
+        if n_comp < _GRANULARITY_MIN_COMPONENTS:
+            return ""
+        if len(steps) * 3 < n_comp:
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    f"BLOCKED: your frame lists {n_comp} components but this "
+                    f"tracker has only {len(steps)} steps — that's mega-step "
+                    "decomposition. One step per real component (DB schema, "
+                    "products API, cart, checkout, auth, admin, …), each a "
+                    "small verifiable deliverable. Re-call create_tracker "
+                    "with the granular steps."
+                ),
+            }, ensure_ascii=False)
+        return ""
+    except Exception:
+        return ""
+
+
 def _frame_problem_handler(
     title: str,
     components: list | None = None,
@@ -2210,6 +2251,12 @@ def _create_tracker_handler(title: str, domain: str = "work",
     if refuse:
         return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
     from .tracker import TRACKERS
+    # Granularity gate (2026-06-25): a fresh frame with many components must
+    # not collapse into a handful of mega-steps (GLM turned a 16-component
+    # shop frame into 4 steps). One step per component is the contract.
+    gate = _tracker_granularity_error(steps)
+    if gate:
+        return gate
     # Idempotency guard: if an active tracker with the same title already
     # exists, return it instead of minting a duplicate. The model sometimes
     # re-issues create_tracker within a single turn (2026-06-19 audit: 2 calls
