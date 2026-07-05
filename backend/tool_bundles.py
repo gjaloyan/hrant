@@ -93,6 +93,10 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # (2026-06-23). Gating it would re-create the "model can't reach the tool,
     # so it hand-rolls" trap.
     "frame_problem",
+    # Verification-as-action (2026-06-25): render what you built the way the
+    # user's browser would, BEFORE claiming done. Pairs with the hard
+    # verify-before-done gate in unified_agent.
+    "verify_web",
     # Delegation — moved to BASE 2026-06-23 so the agent USES subagents often
     # (research / build a component / review) to keep its own context clean,
     # instead of doing everything in one window. Gating it behind `self` meant

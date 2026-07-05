@@ -1985,6 +1985,73 @@ def _propose_steps_from_experience(title: str) -> list[dict]:
     return []
 
 
+def _verify_web_handler(url: str, expect_texts: list | None = None,
+                        timeout_sec: int = 40) -> str:
+    """Render a URL the way a USER's browser would (headless Chrome, JS
+    executed) and report what actually appears: HTTP status, DOM size,
+    which expected texts are present/missing, visible headings. This is the
+    difference between 'the files exist' and 'the page really works'."""
+    import shutil as _sh
+    import subprocess as _sp
+
+    url = (url or "").strip()
+    if not url.startswith(("http://", "https://")):
+        return json.dumps({"ok": False, "error": "http(s) url required"},
+                          ensure_ascii=False)
+    # 1) reachability + status
+    try:
+        import httpx as _hx
+        r = _hx.get(url, timeout=10, follow_redirects=True)
+        status = r.status_code
+        raw_body = r.text or ""
+    except Exception as e:
+        return json.dumps({
+            "ok": False,
+            "error": f"unreachable: {type(e).__name__}: {e}",
+        }, ensure_ascii=False)
+    # 2) headless render (JS executed) — fall back to raw HTML if no browser
+    dom = ""
+    renderer = "raw-html (no headless browser found)"
+    chrome = (_sh.which("google-chrome") or _sh.which("chromium")
+              or _sh.which("chromium-browser"))
+    if chrome:
+        try:
+            p = _sp.run(
+                [chrome, "--headless", "--disable-gpu", "--no-sandbox",
+                 "--virtual-time-budget=9000", "--dump-dom", url],
+                capture_output=True, text=True, timeout=max(15, timeout_sec),
+            )
+            dom = p.stdout or ""
+            renderer = "headless-chrome (JS executed)"
+        except Exception as e:
+            log.debug("verify_web headless failed: %s", e)
+    if not dom:
+        dom = raw_body
+    # 3) checks
+    low = dom.lower()
+    found: dict[str, bool] = {}
+    for t in (expect_texts or []):
+        t = str(t).strip()
+        if t:
+            found[t] = t.lower() in low
+    import re as _re
+    headings = _re.findall(r"<h[123][^>]*>\s*([^<]{2,60})", dom)[:8]
+    missing = [t for t, ok_ in found.items() if not ok_]
+    ok = status == 200 and not missing
+    return json.dumps({
+        "ok": ok,
+        "http_status": status,
+        "renderer": renderer,
+        "dom_bytes": len(dom),
+        "found": found,
+        "missing": missing,
+        "headings": [h.strip() for h in headings],
+        "note": ("all expected content rendered" if ok and found else
+                 ("page reachable; pass expect_texts to assert real content"
+                  if ok else "verification FAILED — do not claim done")),
+    }, ensure_ascii=False)
+
+
 def _frame_problem_handler(
     title: str,
     components: list | None = None,
@@ -2384,6 +2451,32 @@ def register_builtin_tools() -> None:
             "required": ["title"],
         },
         handler=_create_tracker_handler,
+    )
+    reg.register_func(
+        name="verify_web",
+        description=(
+            "Verify a web page the way a USER's browser sees it: headless-"
+            "render the URL (JS executed) and report HTTP status, which "
+            "expect_texts actually appear in the rendered DOM, and visible "
+            "headings. USE THIS after building/changing anything web-facing, "
+            "BEFORE claiming it works or marking a step done — 'files exist' "
+            "is not 'page works'."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "http(s) URL to check."},
+                "expect_texts": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": ("Strings that MUST appear in the rendered "
+                                    "page (e.g. product names from the API)."),
+                },
+                "timeout_sec": {"type": "integer",
+                                "description": "Render timeout (default 40)."},
+            },
+            "required": ["url"],
+        },
+        handler=_verify_web_handler,
     )
     reg.register_func(
         name="frame_problem",

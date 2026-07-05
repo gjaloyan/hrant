@@ -1776,6 +1776,31 @@ _BUILD_FRAME_THRESHOLD = 4   # soft FRAME-CHECK marker fires here
 _BUILD_BLOCK_THRESHOLD = 4   # hard block: refuse build-writes past this w/o a frame
 
 
+_VERIFY_TOOLS = frozenset({"verify_web"})
+
+
+def _note_verify_tools(state: dict, tool_name: str) -> None:
+    """Mark the turn as having verified its work (a verification-class tool
+    ran). Even an unreachable-result is a look at reality — the gate's goal is
+    'look before you claim', not 'the look must succeed'."""
+    if tool_name in _VERIFY_TOOLS:
+        state["verified"] = True
+
+
+def _should_block_done(state: dict, tool_name: str, args: dict) -> bool:
+    """Hard gate: in a turn that made build-writes, refuse to mark a tracker
+    step `done` until a verification ran. The shop audits showed the agent
+    claiming 'done' three times while a human had to headless-check the page.
+    Behavioral (agent's own tool stream, no keywords); review-only turns (no
+    build-writes) mark steps freely."""
+    return (
+        tool_name == "update_step"
+        and str((args or {}).get("status", "")).lower() == "done"
+        and state.get("writes", 0) > 0
+        and not state.get("verified")
+    )
+
+
 def _should_block_build(state: dict, tool_name: str) -> bool:
     """Hard gate decision: refuse a build-write tool once the agent has built
     several times this turn WITHOUT calling frame_problem. Soft nudges (soul,
@@ -2624,6 +2649,22 @@ def run_unified(
                 ),
             }, ensure_ascii=False)
             return blocked, True
+        # HARD verify-before-done gate: built this turn => look at the result
+        # (verify_web) before marking a tracker step done.
+        if _should_block_done(_build_frame_state, name, args):
+            blocked = json.dumps({
+                "ok": False,
+                "error": (
+                    "BLOCKED: you made build changes this turn but haven't "
+                    "verified the result. Call `verify_web(url, expect_texts=…)` "
+                    "on what you built (does the page actually render? are the "
+                    "products/data really there?) — THEN mark the step done. "
+                    "Claiming done without looking is the failure mode this "
+                    "gate exists to stop."
+                ),
+            }, ensure_ascii=False)
+            return blocked, True
+        _note_verify_tools(_build_frame_state, name)
         preview = ", ".join(str(k) for k in (args or {}).keys())
         agent.progress(
             "tool_starting",
