@@ -1815,6 +1815,82 @@ def _build_frame_marker(state: dict, tool_name: str, is_error: bool) -> str:
     return ""
 
 
+# ─── Experience loop, write side: auto case notes ───────────────────
+# The "own knowledge first" pillar stood on an almost-empty KB because
+# save_knowledge was voluntary and the model rarely called it. Framed builds
+# are the highest-value experience — the frame (components/scope) + outcome is
+# a complete case — so persist it STRUCTURALLY at turn end, assembled
+# deterministically (no extra LLM call). Next similar task recalls it via
+# search_knowledge / the auto-recall block.
+
+_CASE_MIN_CONFIDENCE = 60
+
+
+def _auto_case_note(*, task: str, answer_head: str, tools_used: list,
+                    confidence: int, frame: dict | None) -> bool:
+    """Save a compact case note for a successful framed turn. Returns True
+    when a note was written. Never raises — this is best-effort plumbing."""
+    try:
+        if not frame or confidence < _CASE_MIN_CONFIDENCE:
+            return False
+        title = str(frame.get("title") or "").strip()
+        if not title:
+            return False
+        comps = frame.get("components") or []
+        comp_lines = "\n".join(
+            f"- {c.get('name')}{' (mvp)' if c.get('mvp') else ' (deferred)'}"
+            for c in comps if isinstance(c, dict) and c.get("name")
+        )
+        tool_counts: dict[str, int] = {}
+        for t in tools_used or []:
+            tool_counts[t] = tool_counts.get(t, 0) + 1
+        tools_line = ", ".join(
+            f"{k}×{v}" if v > 1 else k for k, v in tool_counts.items()
+        )
+        body = (
+            f"Task: {task.strip()[:300]}\n\n"
+            f"Component map ({len(comps)}):\n{comp_lines}\n\n"
+            f"Scope: {frame.get('proposed_scope', '')}\n\n"
+            f"How: {tools_line}\n\n"
+            f"Outcome (confidence {confidence}): {answer_head.strip()[:400]}"
+        )
+        kw = [str(frame.get("domain") or "").strip()] + [
+            str(c.get("name")) for c in comps[:6]
+            if isinstance(c, dict) and c.get("name")
+        ]
+        from .knowledge_manager import KM
+        KM.save_note(
+            topic=f"Case: {title}"[:120],
+            body=body,
+            category="projects",
+            keywords=[k for k in kw if k],
+            source="auto-case (experience loop)",
+            confidence="partial",
+        )
+        return True
+    except Exception as e:
+        log.debug("auto case note failed (non-fatal): %s", e)
+        return False
+
+
+def _load_turn_frame(turn_started_at: float) -> dict | None:
+    """Newest frame artifact written during this turn, or None."""
+    try:
+        from .paths import workspace_dir
+        d = workspace_dir() / "frames"
+        best, best_m = None, 0.0
+        for p in d.glob("*.json"):
+            m = p.stat().st_mtime
+            if m >= turn_started_at - 1 and m > best_m:
+                best, best_m = p, m
+        if best is None:
+            return None
+        import json as _json
+        return _json.loads(best.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
 # ─── Main entry point ──────────────────────────────────────────────
 
 
@@ -2473,6 +2549,9 @@ def run_unified(
     _drift_state = {"consecutive_readonly": 0, "marker_fired": 0}
     # Build-without-frame nudge state (see _build_frame_marker).
     _build_frame_state = {"writes": 0, "framed": False, "fired": False}
+    # Wall-clock turn start — used to pick THIS turn's frame artifact for the
+    # auto case note (file mtimes are wall-clock; t0 above is monotonic).
+    _run_started_at = _time.time()
 
     # AskUserQuestion follow-up: when the agent calls the `ask_user`
     # tool, the handler persists a PendingQuestion and returns a
@@ -3334,6 +3413,16 @@ def run_unified(
                     index_turn(turn_id, artifact)
                 except Exception as e:
                     log.debug("trajectory index failed (non-fatal): %s", e)
+                # Experience loop write side: a successful FRAMED turn
+                # becomes a case note in the KB (structural, no LLM call).
+                if _build_frame_state.get("framed"):
+                    _auto_case_note(
+                        task=task,
+                        answer_head=answer or "",
+                        tools_used=_turn_tool_names(agent),
+                        confidence=int(vr.confidence or 0),
+                        frame=_load_turn_frame(_run_started_at),
+                    )
         except Exception as e:
             log.debug("unified: save_turn failed (non-fatal): %s", e)
 
