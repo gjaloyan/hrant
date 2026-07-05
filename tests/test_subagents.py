@@ -36,8 +36,9 @@ from backend.subagents.roles import RoleConfig, get_role
 # --- role registry shape ----------------------------------------------
 
 
-def test_role_registry_contains_three_canonical_roles():
-    assert set(ROLE_REGISTRY) == {"researcher", "coder", "reviewer"}
+def test_role_registry_contains_canonical_roles():
+    # builder added 2026-06-23 (write-capable delegation for big projects)
+    assert set(ROLE_REGISTRY) == {"researcher", "coder", "reviewer", "builder"}
 
 
 def test_each_role_has_prompt_and_tools():
