@@ -131,6 +131,7 @@ def run_subagent(
     require_owner: bool = True,
     speaker_id: str | None = None,
     on_progress: Callable[[str, str], None] | None = None,
+    on_session: Callable[[str], None] | None = None,
 ) -> SubagentResult:
     """Run one subagent turn for the given role.
 
@@ -208,6 +209,13 @@ def run_subagent(
         parent_job_id=_current_parent_job_id(),
         parent_speaker=parent_speaker,
     )
+    if on_session is not None:
+        # Hand the session id to the caller immediately — background
+        # delegation returns this as a ticket while the run continues.
+        try:
+            on_session(session.id)
+        except Exception:
+            pass
 
     tool_schemas = _tool_schemas_for_role(role.tools)
     execute_tool = _make_tool_executor(role.tools)

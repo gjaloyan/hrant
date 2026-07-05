@@ -97,6 +97,8 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # user's browser would, BEFORE claiming done. Pairs with the hard
     # verify-before-done gate in unified_agent.
     "verify_web",
+    # Collect side of background (parallel) delegation.
+    "check_subagents",
     # Delegation — moved to BASE 2026-06-23 so the agent USES subagents often
     # (research / build a component / review) to keep its own context clean,
     # instead of doing everything in one window. Gating it behind `self` meant

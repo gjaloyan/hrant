@@ -1641,7 +1641,7 @@ def _propose_self_modification_handler(
     }, ensure_ascii=False)
 
 
-def _delegate_handler(role: str, task: str) -> str:
+def _delegate_handler(role: str, task: str, background: bool = False) -> str:
     """Dispatch a focused subtask to a role-specific subagent.
 
     The dispatcher itself enforces owner-only + depth-cap; the
@@ -1649,8 +1649,52 @@ def _delegate_handler(role: str, task: str) -> str:
     pass `depth` through from here because the LLM shouldn't be
     in control of recursion depth — the dispatcher hard-codes
     `depth=0` (top-level call) and refuses if a nested call
-    somehow leaks through."""
+    somehow leaks through.
+
+    `background=True` enables PARALLEL delegation: the subagent runs on a
+    daemon thread and the call returns a session ticket immediately, so the
+    parent can dispatch several independent subtasks side by side and collect
+    results later with `check_subagents`."""
     from .subagents import run_subagent
+    if background:
+        import threading as _th
+        from .roles import current_speaker as _cur_speaker
+        ready = _th.Event()
+        ticket: dict = {}
+
+        def _on_session(sid: str) -> None:
+            ticket["id"] = sid
+            ready.set()
+
+        # Capture the parent's speaker NOW — the thread has no context.
+        _speaker = _cur_speaker() or ""
+
+        def _bg() -> None:
+            try:
+                run_subagent(role, task, depth=0, speaker_id=_speaker,
+                             on_session=_on_session)
+            except Exception as e:
+                log.warning("background delegate crashed: %s", e)
+            finally:
+                ready.set()  # never leave the parent hanging
+
+        _th.Thread(target=_bg, daemon=True,
+                   name=f"delegate-bg-{role}").start()
+        ready.wait(timeout=10)
+        sid = ticket.get("id", "")
+        if not sid:
+            return json.dumps({
+                "ok": False,
+                "error": ("background delegation did not start (owner gate "
+                          "or bad role?) — check role/task and retry"),
+            }, ensure_ascii=False)
+        return json.dumps({
+            "ok": True,
+            "background": True,
+            "session_id": sid,
+            "note": ("subagent running in parallel; dispatch more, then "
+                     "collect results with check_subagents"),
+        }, ensure_ascii=False)
     res = run_subagent(role, task, depth=0)
     return json.dumps({
         "ok": res.ok,
@@ -1662,6 +1706,31 @@ def _delegate_handler(role: str, task: str) -> str:
         "elapsed_ms": res.elapsed_ms,
         "error": res.error,
     }, ensure_ascii=False)
+
+
+def _check_subagents_handler(session_id: str = "") -> str:
+    """Status/results of delegated subagents — the collect side of
+    background delegation."""
+    from .subagents.store import SUBAGENT_STORE
+    if session_id:
+        s = SUBAGENT_STORE.get(session_id.strip())
+        if s is None:
+            return json.dumps({"ok": False, "error": "session not found"},
+                              ensure_ascii=False)
+        sessions = [s]
+    else:
+        sessions = SUBAGENT_STORE.list(limit=6)
+    out = []
+    for s in sessions:
+        out.append({
+            "session_id": s.id,
+            "role": s.role,
+            "status": s.status,
+            "task": (s.task or "")[:120],
+            "answer": (getattr(s, "answer", "") or "")[:500],
+            "error": (getattr(s, "error", "") or "")[:200],
+        })
+    return json.dumps({"ok": True, "sessions": out}, ensure_ascii=False)
 
 
 def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
@@ -3073,10 +3142,36 @@ def register_builtin_tools() -> None:
                         "asking a colleague who just walked into the room."
                     ),
                 },
+                "background": {
+                    "type": "boolean",
+                    "description": (
+                        "true = run in PARALLEL: returns a session ticket "
+                        "immediately so you can dispatch several independent "
+                        "subtasks side by side; collect with check_subagents. "
+                        "Use for independent components of a big build."
+                    ),
+                },
             },
             "required": ["role", "task"],
         },
         handler=_delegate_handler,
+    )
+    reg.register_func(
+        name="check_subagents",
+        description=(
+            "Status/results of delegated subagents (the collect side of "
+            "background delegation): pass session_id for one, or omit for "
+            "the recent list. Shows status (running/completed/failed) and "
+            "the answer."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string",
+                               "description": "Optional specific session."},
+            },
+        },
+        handler=_check_subagents_handler,
     )
 
     reg.register_func(
