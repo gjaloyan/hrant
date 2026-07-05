@@ -1688,12 +1688,38 @@ def _delegate_handler(role: str, task: str, background: bool = False) -> str:
                 "error": ("background delegation did not start (owner gate "
                           "or bad role?) — check role/task and retry"),
             }, ensure_ascii=False)
+        # Collector guarantee (2026-07-06 battery finding): background
+        # builders often FINISH AFTER the parent's turn ends — their results
+        # landed in the store but nothing woke the agent to integrate them,
+        # so trackers sat "pending" next to completed work. Schedule a
+        # check-in to self so collection is structural, not hoped-for.
+        try:
+            from datetime import datetime as _dt2, timedelta as _td2, timezone as _tz2
+            from .scheduled_messages import schedule as _sched
+            from .roles import current_speaker as _cs
+            _sp2 = _cs() or "webui:default"
+            _sched(
+                target_speaker=_sp2,
+                text=("Collect background subagent results now: run "
+                      "check_subagents, integrate finished work, verify "
+                      "(verify_web where web-facing), and update the tracker "
+                      f"steps. Delegated task was: {task[:140]}"),
+                due_at=(_dt2.now(_tz2.utc) + _td2(minutes=12)
+                        ).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                requested_by=_sp2,
+                kind="check_in",
+                meta={"subagent_session": sid},
+            )
+        except Exception as e:
+            log.debug("collector check-in schedule failed: %s", e)
         return json.dumps({
             "ok": True,
             "background": True,
             "session_id": sid,
             "note": ("subagent running in parallel; dispatch more, then "
-                     "collect results with check_subagents"),
+                     "collect results with check_subagents. A collector "
+                     "check-in is scheduled in ~12 min in case the run "
+                     "outlives this turn."),
         }, ensure_ascii=False)
     res = run_subagent(role, task, depth=0)
     return json.dumps({
@@ -2121,7 +2147,8 @@ def _verify_web_handler(url: str, expect_texts: list | None = None,
     }, ensure_ascii=False)
 
 
-_GRANULARITY_MIN_COMPONENTS = 8      # gate only kicks in for real systems
+_GRANULARITY_MIN_COMPONENTS = 6      # gate kicks in for real systems (was 8;
+                                     # a 7-component platform frame dodged it)
 _GRANULARITY_FRESH_SECONDS = 900     # frame from this turn (~15 min window)
 
 
@@ -2182,6 +2209,29 @@ def _frame_problem_handler(
     if refuse:
         return json.dumps({"ok": False, "error": "owner/trusted only"},
                           ensure_ascii=False)
+
+    # Idempotency (2026-07-06 battery finding: the agent re-framed the same
+    # project on every continuation round — 5 frames for one platform). A
+    # fresh frame with the same slug is returned, not recreated; evolve the
+    # plan in the TRACKER, not by re-framing.
+    try:
+        import time as _t
+        from .paths import workspace_dir as _wd
+        from .knowledge_manager import _slug as _sl
+        existing = _wd() / "frames" / f"{_sl(title or '')}.json"
+        if existing.exists() and (_t.time() - existing.stat().st_mtime) < 6 * 3600:
+            prev = json.loads(existing.read_text(encoding="utf-8"))
+            return json.dumps({
+                "ok": True,
+                "frame_id": prev.get("id", ""),
+                "frame": prev,
+                "scope_options": [],
+                "note": ("this problem is ALREADY framed (see frame above) — "
+                         "don't re-frame; continue from the tracker and the "
+                         "existing scope."),
+            }, ensure_ascii=False)
+    except Exception:
+        pass
 
     comps = []
     for c in (components or []):
