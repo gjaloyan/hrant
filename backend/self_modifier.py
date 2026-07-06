@@ -162,6 +162,12 @@ class Proposal:
         success_criteria: str = "",
         rollback_plan: str = "",
         test_output: str = "",
+        # Multi-file refactors (2026-07-06, finding #6 from the self-work
+        # exam: a "move block to a new module" change touches two files and
+        # was inexpressible). Each entry: {module, old_code, new_code};
+        # old_code == "" means create/append the file. When `changes` is
+        # set it supersedes the single module/old_code/new_code trio.
+        changes: list | None = None,
     ):
         self.id = id or uuid.uuid4().hex[:10]
         self.module = module
@@ -182,6 +188,21 @@ class Proposal:
         self.success_criteria = success_criteria
         self.rollback_plan = rollback_plan
         self.test_output = test_output
+        self.changes = [
+            {
+                "module": str(c.get("module", "")).strip(),
+                "old_code": str(c.get("old_code") or ""),
+                "new_code": str(c.get("new_code") or ""),
+            }
+            for c in (changes or [])
+            if isinstance(c, dict) and str(c.get("module", "")).strip()
+        ]
+
+    def has_diff(self) -> bool:
+        """A real, applicable patch exists (single-file or multi-file)."""
+        if self.changes:
+            return any(c["old_code"] or c["new_code"] for c in self.changes)
+        return bool(self.old_code and self.new_code)
 
     def to_dict(self) -> dict:
         return {
@@ -202,6 +223,7 @@ class Proposal:
             "success_criteria": self.success_criteria,
             "rollback_plan": self.rollback_plan,
             "test_output": self.test_output,
+            "changes": [dict(c) for c in self.changes],
         }
 
     @classmethod
@@ -417,71 +439,108 @@ class SelfModifier:
             return {"ok": False, "message": "Proposal not found"}
         if proposal.status != "approved":
             return {"ok": False, "message": f"Proposal status is '{proposal.status}', must be 'approved'"}
-        if not proposal.old_code or not proposal.new_code:
+        if not proposal.has_diff():
             return {"ok": False, "message": "Proposal has no code diff"}
 
-        # Resolve file path
-        file_path = ROOT / proposal.module
-        if not file_path.exists():
-            proposal.status = "failed"
-            self._save()
-            return {"ok": False, "message": f"File not found: {proposal.module}"}
+        # Multi-change engine (2026-07-06, finding #6): a proposal is a list
+        # of file changes — the legacy single module/old_code/new_code trio
+        # becomes a 1-item list. All-or-nothing: validate everything first,
+        # write everything, compile everything, run tests once; ANY failure
+        # rolls back EVERY written file.
+        changes = proposal.changes or [{
+            "module": proposal.module,
+            "old_code": proposal.old_code,
+            "new_code": proposal.new_code,
+        }]
 
         try:
-            content = file_path.read_text(encoding="utf-8")
-            match_count = content.count(proposal.old_code)
-            if match_count == 0:
-                proposal.status = "failed"
-                proposal.review_note += " | old_code not found in file"
-                self._save()
-                return {"ok": False, "message": "old_code not found in file — code may have changed"}
-            if match_count > 1:
-                # Ambiguous patch: a generic snippet matches several
-                # places in the file. Refuse rather than guess — the
-                # `replace(..., 1)` we used to do silently picked the
-                # FIRST hit, which is exactly how patches end up in
-                # the wrong function.
-                proposal.status = "failed"
-                proposal.review_note += (
-                    f" | ambiguous: old_code matches {match_count} places, "
-                    "expand the snippet to a unique window"
-                )
-                self._save()
-                return {
-                    "ok": False,
-                    "message": (
-                        f"Ambiguous old_code: matched {match_count} times. "
-                        "Expand the snippet to a unique window before applying."
-                    ),
-                }
+            # Phase 1 — validate all changes, compute new contents.
+            plan: list[tuple] = []   # (path, original|None, new_text, module)
+            for ch in changes:
+                module = ch["module"]
+                old_c, new_c = ch["old_code"], ch["new_code"]
+                if not old_c and not new_c:
+                    continue
+                file_path = ROOT / module
+                if not old_c:
+                    # Pure addition: append to an existing file or CREATE a
+                    # new one (the two-file "extract to new module" case).
+                    if file_path.exists():
+                        original = file_path.read_text(encoding="utf-8")
+                        new_text = (original.rstrip("\n")
+                                    + "\n\n\n" + new_c.lstrip("\n"))
+                    else:
+                        original = None
+                        new_text = new_c
+                else:
+                    if not file_path.exists():
+                        proposal.status = "failed"
+                        self._save()
+                        return {"ok": False,
+                                "message": f"File not found: {module}"}
+                    original = file_path.read_text(encoding="utf-8")
+                    match_count = original.count(old_c)
+                    if match_count == 0:
+                        proposal.status = "failed"
+                        proposal.review_note += (
+                            f" | old_code not found in {module}"
+                        )
+                        self._save()
+                        return {"ok": False, "message": (
+                            f"old_code not found in {module} — code may "
+                            "have changed")}
+                    if match_count > 1:
+                        # Ambiguous patch: refuse rather than guess — a
+                        # silent first-hit replace is how patches land in
+                        # the wrong function.
+                        proposal.status = "failed"
+                        proposal.review_note += (
+                            f" | ambiguous: old_code matches {match_count} "
+                            f"places in {module}, expand the snippet"
+                        )
+                        self._save()
+                        return {"ok": False, "message": (
+                            f"Ambiguous old_code in {module}: matched "
+                            f"{match_count} times. Expand the snippet to a "
+                            "unique window before applying.")}
+                    new_text = original.replace(old_c, new_c, 1)
+                plan.append((file_path, original, new_text, module))
 
-            new_content = content.replace(proposal.old_code, proposal.new_code, 1)
-            file_path.write_text(new_content, encoding="utf-8")
+            if not plan:
+                return {"ok": False, "message": "Proposal has no code diff"}
 
-            # Validate by compile. If the patch produced a SyntaxError,
-            # roll back IMMEDIATELY — a half-applied .py file is worse
-            # than a rejected proposal because it can break the agent
-            # itself on next import.
+            # Phase 2 — write all files; py_compile each .py. Any failure
+            # restores every file written so far (created files deleted).
+            written: list[tuple] = []   # (path, original|None)
+
+            def _rollback_written() -> None:
+                for fp, orig in reversed(written):
+                    try:
+                        if orig is None:
+                            fp.unlink(missing_ok=True)
+                        else:
+                            fp.write_text(orig, encoding="utf-8")
+                    except OSError as re_:
+                        log.warning("rollback failed for %s: %s", fp, re_)
+
             import py_compile
-            try:
-                py_compile.compile(str(file_path), doraise=True)
-            except py_compile.PyCompileError as e:
-                file_path.write_text(content, encoding="utf-8")  # rollback
-                proposal.status = "failed"
-                proposal.review_note += f" | py_compile rejected: {e}"
-                self._save()
-                return {
-                    "ok": False,
-                    "message": f"Patch rolled back — py_compile failed: {e}",
-                }
+            for file_path, original, new_text, module in plan:
+                file_path.parent.mkdir(parents=True, exist_ok=True)
+                file_path.write_text(new_text, encoding="utf-8")
+                written.append((file_path, original))
+                if file_path.suffix == ".py":
+                    try:
+                        py_compile.compile(str(file_path), doraise=True)
+                    except py_compile.PyCompileError as e:
+                        _rollback_written()
+                        proposal.status = "failed"
+                        proposal.review_note += f" | py_compile rejected: {e}"
+                        self._save()
+                        return {"ok": False, "message": (
+                            f"Patch rolled back — py_compile failed: {e}")}
 
-            # P3 closed-loop: if the proposal carried test_commands,
-            # run them now AGAINST THE PATCHED FILE. Any non-zero
-            # exit, timeout, or rejected command (not on the allow
-            # list) triggers a rollback and a `tests_failed` status.
-            # This is the only way an autonomous self-modification
-            # round can land on master without a regression — the
-            # patch validates itself before staying on disk.
+            # Phase 3 — closed loop: run test_commands once against the
+            # fully-patched tree. Failure rolls back every file.
             if proposal.test_commands:
                 self._save()  # checkpoint before running tests
                 ok, output = _run_test_commands(
@@ -489,47 +548,46 @@ class SelfModifier:
                 )
                 proposal.test_output = output[:8000]
                 if not ok:
-                    file_path.write_text(content, encoding="utf-8")
+                    _rollback_written()
                     proposal.status = "tests_failed"
-                    proposal.review_note += " | tests rejected the patch — rolled back"
-                    self._save()
-                    return {
-                        "ok": False,
-                        "message": (
-                            "Patch rolled back — test_commands failed. "
-                            f"See proposal.test_output (first lines: "
-                            f"{output[:300]}…)"
-                        ),
-                    }
-
-            # Capture the change as a rollback-able patch in the user's
-            # data_dir. The file's already been written and tested, so
-            # apply_now=False — we're just recording the diff so
-            # `hrant update` can re-apply it and so Settings →
-            # Self-Modifications can revert it later.
-            try:
-                from . import self_mods
-                entry, mod_err = self_mods.record_and_apply(
-                    file_rel=proposal.module,
-                    old_text=content,
-                    new_text=new_content,
-                    title=proposal.title or f"self-mod: {proposal.module}",
-                    apply_now=False,
-                )
-                if entry is None:
-                    log.warning(
-                        "self_mod patch capture failed for %s: %s — apply succeeded but "
-                        "the change won't survive `hrant update`. Investigate.",
-                        proposal.module, mod_err,
+                    proposal.review_note += (
+                        " | tests rejected the patch — rolled back"
                     )
-                else:
-                    proposal.review_note += f" | patch={entry.id}"
-            except Exception as e:  # pragma: no cover — defensive
-                log.warning("self_mod recording crashed: %s; engine modification kept", e)
+                    self._save()
+                    return {"ok": False, "message": (
+                        "Patch rolled back — test_commands failed. "
+                        f"See proposal.test_output (first lines: "
+                        f"{output[:300]}…)")}
+
+            # Phase 4 — record each change in the self_mods ledger so
+            # `hrant update` re-applies it and Settings can revert it.
+            for file_path, original, new_text, module in plan:
+                try:
+                    from . import self_mods
+                    entry, mod_err = self_mods.record_and_apply(
+                        file_rel=module,
+                        old_text=original if original is not None else "",
+                        new_text=new_text,
+                        title=proposal.title or f"self-mod: {module}",
+                        apply_now=False,
+                    )
+                    if entry is None:
+                        log.warning(
+                            "self_mod patch capture failed for %s: %s — apply "
+                            "succeeded but the change will not survive "
+                            "hrant update. Investigate.", module, mod_err,
+                        )
+                    else:
+                        proposal.review_note += f" | patch={entry.id}"
+                except Exception as e:  # pragma: no cover — defensive
+                    log.warning(
+                        "self_mod recording crashed: %s; modification kept", e,
+                    )
 
             proposal.status = "applied"
             self._save()
-            return {"ok": True, "message": f"Applied to {proposal.module}"}
+            applied_to = ", ".join(m for _, _, _, m in plan)
+            return {"ok": True, "message": f"Applied to {applied_to}"}
 
         except Exception as e:
             proposal.status = "failed"
@@ -753,7 +811,18 @@ Rules:
 - Keep `old_code` under ~30 lines. If the change spans more, split into
   multiple JSON objects in an `improvements` array (same shape as
   ANALYZE_SYSTEM's output).
-- `test_commands` REQUIRED — at minimum `["python -m py_compile <file>"]`.
+- `test_commands` REQUIRED — at minimum `["python3 -m py_compile <file>"]`.
+- For a MULTI-FILE refactor (e.g. extract a block into a NEW module and
+  replace it in the source file with an import), return the same JSON but
+  with a `changes` array INSTEAD of top-level old_code/new_code:
+  "changes": [
+    {"module": "backend/new_module.py", "old_code": "",
+     "new_code": "<full text of the new file>"},
+    {"module": "backend/source.py", "old_code": "<exact block to remove>",
+     "new_code": "<replacement import lines>"}
+  ]
+  `old_code` == "" means create (or append to) that file. All changes are
+  applied atomically: any failure rolls back every file.
 - For pure additions (new file / new function appended), `old_code` is ""
   and `new_code` carries the full text to insert; the applier appends
   to end-of-file when `old_code` is empty.
@@ -796,28 +865,17 @@ def propose_with_diff(
         module_name += ".py"
     module_path = SELF_MODIFIER._backend_dir / module_name
     if not module_path.exists():
-        # Can't generate a diff if the file doesn't exist — fall
-        # back to a shell with an explanatory review_note.
-        shell = propose(
-            description=description, files=[f"backend/{module_name}"],
-            rationale=rationale, requester=requester,
-        )
-        if shell is not None:
-            shell.review_note = (
-                f"requested by {requester}; diff not generated: "
-                f"module backend/{module_name} not found on disk"
-            )
-            SELF_MODIFIER._save()
-        return shell
-
+        # Finding #6: no stub registration. A diff can't be generated for a
+        # missing file; fail honestly (multi-file creation goes through the
+        # `changes` shape against an EXISTING anchor module).
+        log.warning("propose_with_diff: module %s not found; no proposal "
+                    "created", module_name)
+        return None
     try:
         code = module_path.read_text(encoding="utf-8")
     except OSError as e:
-        log.warning("propose_with_diff: read failed: %s", e)
-        return propose(
-            description=description, files=[f"backend/{module_name}"],
-            rationale=rationale, requester=requester,
-        )
+        log.warning("propose_with_diff: read failed, no proposal created: %s", e)
+        return None
 
     # Truncate following the same head+tail strategy as
     # analyze_module so we don't drop module-bottom definitions.
@@ -849,18 +907,12 @@ def propose_with_diff(
             temperature=0.2,
         )
     except LLMError as e:
-        log.warning("propose_with_diff: LLM failed: %s", e)
-        shell = propose(
-            description=description, files=[f"backend/{module_name}"],
-            rationale=rationale, requester=requester,
-        )
-        if shell is not None:
-            shell.review_note = (
-                f"requested by {requester}; diff generation failed: "
-                f"{type(e).__name__}: {str(e)[:120]}"
-            )
-            SELF_MODIFIER._save()
-        return shell
+        # Finding #6 (2026-07-06): NO stub registration on failure. A
+        # diff-less "pending" shell reads as success to the agent and the
+        # owner, clogs the queue, and apply() refuses it anyway. Fail
+        # honestly; the caller retries or narrows the request.
+        log.warning("propose_with_diff: LLM failed, no proposal created: %s", e)
+        return None
 
     # The system prompt asks for ONE object, but tolerate `improvements`
     # array shape too (matches the ANALYZE_SYSTEM contract — same
@@ -871,45 +923,49 @@ def propose_with_diff(
         candidates = [data] if isinstance(data, dict) else []
 
     if not candidates:
-        shell = propose(
-            description=description, files=[f"backend/{module_name}"],
-            rationale=rationale, requester=requester,
-        )
-        if shell is not None:
-            shell.review_note = (
-                f"requested by {requester}; LLM returned no diff candidates"
-            )
-            SELF_MODIFIER._save()
-        return shell
+        log.warning("propose_with_diff: LLM returned no diff candidates; "
+                    "no proposal created")
+        return None
 
-    # Take the first candidate. If old_code AND new_code are BOTH
-    # empty, this isn't a valid patch — fall back to shell with note.
+    # Take the first candidate. Multi-file shape: `changes` is a list of
+    # {module, old_code, new_code} (finding #6 — an extract-to-new-module
+    # refactor touches two files). Single-file shape: old_code/new_code.
     imp = candidates[0]
+    raw_changes = imp.get("changes") or []
+    norm_changes = [
+        {
+            "module": str(c.get("module", "")).strip(),
+            "old_code": str(c.get("old_code") or ""),
+            "new_code": str(c.get("new_code") or ""),
+        }
+        for c in raw_changes
+        if isinstance(c, dict) and str(c.get("module", "")).strip()
+        and (c.get("old_code") or c.get("new_code"))
+    ]
     old_code = str(imp.get("old_code") or "")
     new_code = str(imp.get("new_code") or "")
-    if not old_code and not new_code:
-        shell = propose(
-            description=description, files=[f"backend/{module_name}"],
-            rationale=rationale, requester=requester,
-        )
-        if shell is not None:
-            shell.review_note = (
-                f"requested by {requester}; LLM produced empty diff "
-                "(both old_code and new_code blank)"
-            )
-            SELF_MODIFIER._save()
-        return shell
+    if not norm_changes and not old_code and not new_code:
+        # Finding #6: no stub registration — fail honestly instead.
+        log.warning("propose_with_diff: LLM produced empty diff; "
+                    "no proposal created")
+        return None
 
     raw_tests = imp.get("test_commands") or []
     if isinstance(raw_tests, str):
         raw_tests = [raw_tests]
 
+    _title = imp.get("title", description[:80] or "(no title)")
+    if SELF_MODIFIER._is_dupe_pending(f"backend/{module_name}", _title):
+        log.info("propose_with_diff: duplicate pending %r — not re-adding",
+                 _title)
+        return None
     proposal = Proposal(
         module=f"backend/{module_name}",
-        title=imp.get("title", description[:80] or "(no title)"),
+        title=_title,
         description=description or imp.get("description", ""),
         old_code=old_code,
         new_code=new_code,
+        changes=norm_changes,
         impact=imp.get("impact", ""),
         risk=imp.get("risk", "low"),
         reasoning=rationale or imp.get("reasoning", ""),

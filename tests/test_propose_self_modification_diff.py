@@ -64,12 +64,12 @@ def test_propose_with_diff_creates_proposal_with_old_and_new_code(
         sm.SELF_MODIFIER._proposals = []
 
 
-def test_propose_with_diff_falls_back_to_shell_on_llm_failure(
+def test_propose_with_diff_creates_nothing_on_llm_failure(
     monkeypatch, tmp_path,
 ):
-    """If the LLM raises, the function still creates a shell so the
-    user's request isn't silently dropped — but the review_note
-    explains the failure."""
+    """Finding #6 (2026-07-06): if the LLM raises, NO proposal is
+    registered — a diff-less pending stub reads as success, clogs the
+    review queue, and apply() refuses it anyway. Strict None."""
     from backend import self_modifier as sm
     from backend.llm import LLMError
 
@@ -89,10 +89,8 @@ def test_propose_with_diff_falls_back_to_shell_on_llm_failure(
             module="_psm_target2",
             requester="webui:default",
         )
-        assert p is not None
-        assert p.old_code == ""
-        assert p.new_code == ""
-        assert "diff generation failed" in p.review_note
+        assert p is None
+        assert sm.SELF_MODIFIER._proposals == []   # nothing registered
     finally:
         target.unlink(missing_ok=True)
         sm.SELF_MODIFIER._proposals = []
@@ -100,7 +98,7 @@ def test_propose_with_diff_falls_back_to_shell_on_llm_failure(
 
 def test_propose_with_diff_rejects_double_empty_llm_output(monkeypatch):
     """LLM returns valid JSON but both old_code AND new_code are
-    blank — that's NOT a patch. Fall back to shell with note."""
+    blank — that's NOT a patch. Finding #6: strict None, no stub."""
     from backend import self_modifier as sm
 
     target = sm.SELF_MODIFIER._backend_dir / "_psm_target3.py"
@@ -122,8 +120,8 @@ def test_propose_with_diff_rejects_double_empty_llm_output(monkeypatch):
             module="_psm_target3",
             requester="webui:default",
         )
-        assert p is not None
-        assert "empty diff" in p.review_note.lower()
+        assert p is None
+        assert sm.SELF_MODIFIER._proposals == []   # nothing registered
     finally:
         target.unlink(missing_ok=True)
         sm.SELF_MODIFIER._proposals = []

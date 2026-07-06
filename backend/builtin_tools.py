@@ -1612,14 +1612,22 @@ def _propose_self_modification_handler(
             "error": f"{type(e).__name__}: {e}",
         }, ensure_ascii=False)
     if proposal is None:
+        # Finding #6: strict mode — no stub was registered. Tell the model
+        # the truth so it can retry instead of claiming success.
         return json.dumps({
             "ok": False,
-            "error": "self_modifier.propose returned None (storage failure)",
+            "error": (
+                "NO proposal was created: diff generation failed (LLM error, "
+                "empty diff, duplicate pending, or module not found). Retry "
+                "with a narrower, more concrete request — do NOT report a "
+                "proposal as created."
+            ),
         }, ensure_ascii=False)
 
     has_diff = bool(
         (getattr(proposal, "old_code", "") or "").strip()
         or (getattr(proposal, "new_code", "") or "").strip()
+        or getattr(proposal, "changes", None)
     )
     return json.dumps({
         "ok": True,
