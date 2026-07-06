@@ -69,8 +69,25 @@ def test_framed_successful_turn_saves_case(monkeypatch):
 def test_low_confidence_turn_is_not_saved(monkeypatch):
     saved = _capture(monkeypatch)
     ok = _auto_case_note(task="t", answer_head="a", tools_used=["x"],
-                         confidence=40, frame=_FRAME)
+                         confidence=35, frame=_FRAME)
     assert ok is False and not saved
+
+
+def test_failed_delivery_is_not_saved(monkeypatch):
+    # re-audit 2026-07-06: real framed turns score 30-50; the gate is now
+    # confidence>=40 AND endpoint_met is not False (the dishonest exam turn
+    # was 30/False; honest battery turns were 50/True).
+    saved = _capture(monkeypatch)
+    ok = _auto_case_note(task="t", answer_head="a", tools_used=["x"],
+                         confidence=50, frame=_FRAME, endpoint_met=False)
+    assert ok is False and not saved
+
+
+def test_typical_real_framed_turn_is_saved(monkeypatch):
+    saved = _capture(monkeypatch)
+    ok = _auto_case_note(task="t", answer_head="built it", tools_used=["x"],
+                         confidence=50, frame=_FRAME, endpoint_met=True)
+    assert ok is True and saved
 
 
 def test_no_frame_no_case(monkeypatch):

@@ -83,3 +83,19 @@ def test_improvement_goals_left_to_goal_executor(env):
     goals_mod.GOALS.add("improve module X", goal_type="improvement")
     rep = _fire(gd)
     assert rep.status.value == "skipped"
+
+
+def test_archive_stale_sweeps_old_improvement_goals(env):
+    goals_mod, gd = env
+    g_old = goals_mod.GOALS.add("speed up the embedding backfill loop", goal_type="improvement")
+    g_old.created = "2026-06-01 10:00:00"           # 5 weeks stale
+    g_new = goals_mod.GOALS.add("add retry logic to telegram delivery", goal_type="improvement")
+    g_user = goals_mod.GOALS.add("user thing", goal_type="user")
+    g_user.created = "2026-06-01 10:00:00"          # old but NOT improvement
+    goals_mod.GOALS._save()
+
+    n = goals_mod.GOALS.archive_stale(goal_type="improvement", days=14)
+    assert n == 1
+    assert goals_mod.GOALS.get(g_old.id).status == "failed"
+    assert goals_mod.GOALS.get(g_new.id).status == "active"
+    assert goals_mod.GOALS.get(g_user.id).status == "active"   # untouched

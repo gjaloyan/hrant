@@ -95,6 +95,15 @@ class FIRE_GOAL_EXECUTOR(Lever):
         from backend.goals import GOALS
         from backend.self_modifier import SELF_MODIFIER
 
+        # Hygiene first (re-audit 2026-07-06: 254 active improvement goals,
+        # 248 stale — the proposals-zombie pattern on the goals side). Stale
+        # auto-goals are regenerable; archive before walking the queue.
+        stale_archived = GOALS.archive_stale(goal_type="improvement",
+                                             days=stale_days)
+        if stale_archived:
+            log.info("goal_executor: archived %d stale improvement goals",
+                     stale_archived)
+
         active = [g for g in GOALS._goals
                   if g.status == "active" and g.goal_type == "improvement"]
         if not active:

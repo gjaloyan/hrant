@@ -268,6 +268,28 @@ class GoalManager:
             self._save()
             return True
 
+    def archive_stale(self, *, goal_type: str = "improvement",
+                      days: int = 14) -> int:
+        """Auto-fail ACTIVE goals of an auto-generated type older than
+        `days`. Re-audit 2026-07-06 found 254 active improvement goals (248
+        older than 10 days) — the same clogged-queue zombie pattern as the
+        385 pending proposals: auto-generators outpace review, and a stale
+        auto-goal is regenerable, not precious. Returns count archived."""
+        from datetime import datetime, timedelta
+        cutoff = (datetime.now() - timedelta(days=days)).strftime(
+            "%Y-%m-%d %H:%M:%S")
+        n = 0
+        with self._LOCK:
+            for g in self._goals:
+                if (g.status == "active" and g.goal_type == goal_type
+                        and (g.created or "9999") < cutoff):
+                    g.fail(f"auto-archived: stale >{days}d without execution "
+                           "(hygiene sweep); regenerate if still relevant")
+                    n += 1
+            if n:
+                self._save()
+        return n
+
     def pause_goal(self, goal_id: str) -> bool:
         with self._LOCK:
             goal = self.get(goal_id)

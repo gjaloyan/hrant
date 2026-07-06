@@ -1848,15 +1848,22 @@ def _build_frame_marker(state: dict, tool_name: str, is_error: bool) -> str:
 # deterministically (no extra LLM call). Next similar task recalls it via
 # search_knowledge / the auto-recall block.
 
-_CASE_MIN_CONFIDENCE = 60
+# Re-audit 2026-07-06: the verifier scores long framed build turns 30-50
+# (honest partial-status answers sit at 50), so the original >=60 gate never
+# passed in practice and ZERO cases were written. Real signal: delivery
+# (endpoint_met) not False + moderate confidence.
+_CASE_MIN_CONFIDENCE = 40
 
 
 def _auto_case_note(*, task: str, answer_head: str, tools_used: list,
-                    confidence: int, frame: dict | None) -> bool:
+                    confidence: int, frame: dict | None,
+                    endpoint_met: bool | None = None) -> bool:
     """Save a compact case note for a successful framed turn. Returns True
     when a note was written. Never raises — this is best-effort plumbing."""
     try:
         if not frame or confidence < _CASE_MIN_CONFIDENCE:
+            return False
+        if endpoint_met is False:
             return False
         title = str(frame.get("title") or "").strip()
         if not title:
@@ -3463,6 +3470,7 @@ def run_unified(
                         tools_used=_turn_tool_names(agent),
                         confidence=int(vr.confidence or 0),
                         frame=_load_turn_frame(_run_started_at),
+                        endpoint_met=vr.endpoint_met,
                     )
         except Exception as e:
             log.debug("unified: save_turn failed (non-fatal): %s", e)
