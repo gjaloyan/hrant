@@ -248,6 +248,23 @@ class SelfModifier:
             except Exception:
                 pass
 
+    # ─── Pending hygiene (2026-07-06 audit: 385 pending proposals, 288 for
+    # one module, near-duplicates minted the same minute — the review gate
+    # was permanently clogged and the self-improvement loop dead-ended) ───
+
+    PENDING_PER_MODULE_CAP = 15
+
+    def _pending_for_module(self, module: str) -> list[Proposal]:
+        return [p for p in self._proposals
+                if p.status == "pending" and p.module == module]
+
+    def _is_dupe_pending(self, module: str, title: str) -> bool:
+        t = (title or "").strip().lower()
+        if not t:
+            return False
+        return any((p.title or "").strip().lower() == t
+                   for p in self._pending_for_module(module))
+
     def analyze_module(self, module_name: str) -> list[Proposal]:
         """Read a backend module and propose improvements."""
         # Resolve module file
@@ -297,6 +314,17 @@ class SelfModifier:
                 raw_tests = imp.get("test_commands") or []
                 if isinstance(raw_tests, str):
                     raw_tests = [raw_tests]
+                _mod = f"backend/{module_name}"
+                # Hygiene guards: no duplicate pending titles, and a hard cap
+                # per module — un-reviewed piles just clog the human gate.
+                if self._is_dupe_pending(_mod, imp.get("title", "")):
+                    log.info("analyze: skipping duplicate pending %r", imp.get("title", ""))
+                    continue
+                if len(self._pending_for_module(_mod)) >= self.PENDING_PER_MODULE_CAP:
+                    log.info("analyze: pending cap (%d) reached for %s; "
+                             "skipping remaining improvements",
+                             self.PENDING_PER_MODULE_CAP, _mod)
+                    break
                 proposal = Proposal(
                     module=f"backend/{module_name}",
                     title=imp.get("title", ""),
@@ -672,9 +700,15 @@ def propose(
     Returns the created Proposal, or None on storage failure.
     """
     try:
+        _mod = files[0] if files else ""
+        _title = (description or "")[:80] or "(no title)"
+        if SELF_MODIFIER._is_dupe_pending(_mod, _title):
+            log.info("propose: duplicate pending %r for %s — not re-adding",
+                     _title, _mod or "(no module)")
+            return None
         proposal = Proposal(
-            module=(files[0] if files else ""),
-            title=(description or "")[:80] or "(no title)",
+            module=_mod,
+            title=_title,
             description=description or "",
             reasoning=rationale or "",
             status="pending",

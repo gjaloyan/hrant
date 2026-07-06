@@ -164,6 +164,15 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=3600.0,
         ),
         LayerZeroRule(
+            # 2026-07-06 audit: the lever was registered but had NO rule —
+            # never fired once, and 385 pending proposals piled up since May.
+            name="stale_proposals_tick",
+            predicate=lambda s: True,
+            lever="FIRE_STALE_PROPOSALS",
+            params={},
+            cooldown_seconds=86400.0,
+        ),
+        LayerZeroRule(
             # Drive user/learning goals to completion, one subtask per fire
             # (2026-06-25 audit: those goal types were created but never
             # executed by anything). Long cooldown bounds the spend.
