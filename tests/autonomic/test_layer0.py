@@ -192,7 +192,7 @@ def test_default_rules_count_after_phase11():
     Audit T3.3 added fact_embedding_backfill_tick → 21."""
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
-    assert len(rules) == 21
+    assert len(rules) == 23  # +stale_proposals_tick +goal_drive_tick (2026-07-06)
 
 
 def test_default_rules_d07_scheduled_rules_present():

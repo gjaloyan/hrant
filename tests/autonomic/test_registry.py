@@ -196,5 +196,5 @@ def test_autonomic_plus_immune_total_count():
     clear_registry()
     register_default_immune_levers()
     register_default_autonomic_levers()
-    assert len(LeverRegistry.instance().names()) == 26
+    assert len(LeverRegistry.instance().names()) == 27  # +FIRE_GOAL_DRIVE (2026-07-06)
     clear_registry()
