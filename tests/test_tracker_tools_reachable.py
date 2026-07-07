@@ -29,11 +29,18 @@ def test_no_registered_builtin_is_orphaned():
     """No registered builtin may be unreachable (absent from BASE and every
     bundle). Guards against the tracker-style 'registered but never wired'
     regression for any future tool."""
+    # Pollution-proof (re-audit 2026-07-07): other tests register skill/test
+    # tools into the GLOBAL registry, which made this guard fail in full-suite
+    # runs while passing in isolation. Reload for a fresh registry holding
+    # builtins only.
+    import importlib
+    import backend.tool_registry as tr
+    importlib.reload(tr)
     import backend.builtin_tools as bt
+    importlib.reload(bt)
     bt.register_builtin_tools()
-    from backend.tool_registry import REGISTRY
 
-    registered = set(REGISTRY.names())
+    registered = set(tr.REGISTRY.names())
     reachable = set(BASE_TOOLS)
     for members in TOOL_BUNDLES.values():
         reachable |= set(members)

@@ -10,6 +10,28 @@ from ._auth import require_owner_for_writes
 router = APIRouter()
 
 
+@router.get("/api/frames")
+def list_frames():
+    """Problem frames (component maps from `frame_problem`) — newest first.
+
+    Re-audit 2026-07-07: frames were invisible to the owner (only flashed by
+    in the chat tool stream); this surfaces them next to trackers so the
+    owner can see WHAT the agent thinks a project consists of and which
+    slice was scoped."""
+    import json
+    from ..paths import workspace_dir
+    d = workspace_dir() / "frames"
+    out = []
+    if d.exists():
+        for p in sorted(d.glob("*.json"), key=lambda x: x.stat().st_mtime,
+                        reverse=True)[:30]:
+            try:
+                out.append(json.loads(p.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+    return {"frames": out}
+
+
 @router.get("/api/projects")
 def list_projects():
     return {"current": PROJECTS.current, "all": PROJECTS.list_projects()}

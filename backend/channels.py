@@ -1059,6 +1059,26 @@ class TelegramBot:
         return self._running and self._thread is not None and self._thread.is_alive()
 
     def _run(self) -> None:
+        """Supervision wrapper (re-audit 2026-07-07): PTB's updater dies on
+        transient httpx network blips, which used to kill this thread
+        (`_running = False`) and leave the bot down until an external
+        watchdog noticed — a crash/restart flap every ~30 min of bad network.
+        Restart in-place with capped backoff instead; a clean stop() still
+        exits immediately."""
+        import time as _t
+        backoff = 5.0
+        while self._running:
+            self._run_once()
+            if not self._running:
+                break  # clean stop via stop()
+            log.warning(
+                "Telegram bot %s: polling died; restarting in %.0fs",
+                self.channel_id, backoff,
+            )
+            _t.sleep(backoff)
+            backoff = min(backoff * 2, 60.0)
+
+    def _run_once(self) -> None:
         try:
             from telegram import Update
             from telegram.ext import (
@@ -2167,8 +2187,14 @@ class TelegramBot:
             loop.run_until_complete(app.shutdown())
 
         except Exception as e:
-            log.error("Telegram bot %s crashed: %s", self.channel_id, e, exc_info=True)
-            self._running = False
+            # Do NOT flip self._running here — the _run supervisor loop reads
+            # it to decide between restart (transient crash) and exit (clean
+            # stop). Keeping the thread alive also stops the external
+            # watchdog from double-starting a second poller (Conflict storm).
+            log.warning(
+                "Telegram bot %s polling crashed (%s: %s) — supervisor will "
+                "restart it", self.channel_id, type(e).__name__, e,
+            )
 
 
 def _log_channel_message(

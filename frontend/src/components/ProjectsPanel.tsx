@@ -10,6 +10,7 @@ import {
 } from "../api";
 import TrackerBoard from "./TrackerBoard";
 import TrackerCalendar from "./TrackerCalendar";
+import FramesView from "./FramesView";
 
 export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) {
   const [current, setCurrent] = useState<string | null>(null);
@@ -23,7 +24,7 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
   const [issueFix, setIssueFix] = useState("");
   const [msg, setMsg] = useState("");
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
-  const [view, setView] = useState<"journal" | "trackers" | "calendar">(
+  const [view, setView] = useState<"journal" | "trackers" | "calendar" | "frames">(
     "trackers",
   );
 
@@ -266,7 +267,7 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
       {/* Right: view switch (Trackers board / Calendar / Journal) */}
       <div className="flex flex-1 min-w-0 flex-col">
         <div className="flex gap-1 border-b border-slate-800 px-3 py-2 text-xs">
-          {(["trackers", "calendar", "journal"] as const).map((v) => (
+          {(["trackers", "calendar", "frames", "journal"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -278,12 +279,15 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
                 ? "Trackers"
                 : v === "calendar"
                 ? "Calendar"
+                : v === "frames"
+                ? "Frames"
                 : "Journal"}
             </button>
           ))}
         </div>
         {view === "trackers" && <TrackerBoard />}
         {view === "calendar" && <TrackerCalendar />}
+        {view === "frames" && <FramesView />}
         {view === "journal" && (
           <div className="flex-1 overflow-y-auto p-4">
             {selectedProject ? (

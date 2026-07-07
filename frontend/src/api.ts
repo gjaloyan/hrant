@@ -2443,6 +2443,31 @@ export interface Tracker {
   notes: string;
 }
 
+export interface FrameComponent {
+  name: string;
+  role: string;
+  mvp: boolean;
+  source: string;
+  confidence: string;
+}
+
+export interface Frame {
+  id: string;
+  title: string;
+  domain: string;
+  components: FrameComponent[];
+  coverage?: {
+    mvp_components: number;
+    total_listed: number;
+    mvp_pct_of_listed: number;
+  };
+  proposed_scope: string;
+  open_questions: string[];
+  created_at: string;
+}
+
+export const fetchFrames = () => json_get<{ frames: Frame[] }>("/api/frames");
+
 export const fetchTrackers = (status = "active") =>
   json_get<{ trackers: Tracker[] }>(
     `/api/trackers?status=${encodeURIComponent(status)}`,
