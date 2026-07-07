@@ -1742,6 +1742,12 @@ def _delegate_handler(role: str, task: str, background: bool = False) -> str:
     }, ensure_ascii=False)
 
 
+# A "running" subagent session older than this is a ghost: its thread died
+# with the parent process (battery finding 2026-07-06 — Phase-2 builder stuck
+# "running" forever). check_subagents reaps it to "stale" on sight.
+_SUBAGENT_STALE_SECONDS = 45 * 60
+
+
 def _check_subagents_handler(session_id: str = "") -> str:
     """Status/results of delegated subagents — the collect side of
     background delegation."""
@@ -1755,16 +1761,35 @@ def _check_subagents_handler(session_id: str = "") -> str:
     else:
         sessions = SUBAGENT_STORE.list(limit=6)
     out = []
+    import time as _time
     for s in sessions:
+        status = s.status
+        # Stale reaper (re-audit 2026-07-07): a builder thread that died with
+        # its parent process leaves the session "running" forever — the exam
+        # battery left one stuck >1h. Surface it honestly as stale so the
+        # agent re-dispatches instead of waiting on a ghost.
+        if (status == "running"
+                and _time.time() - (s.created_at or 0) > _SUBAGENT_STALE_SECONDS):
+            status = "stale"
+            try:
+                s.status = "stale"
+                s.error = (s.error or "") + " | reaped: running past stale timeout"
+                SUBAGENT_STORE._write(s)
+            except Exception:
+                pass
         out.append({
             "session_id": s.id,
             "role": s.role,
-            "status": s.status,
+            "status": status,
             "task": (s.task or "")[:120],
             "answer": (getattr(s, "answer", "") or "")[:500],
             "error": (getattr(s, "error", "") or "")[:200],
         })
-    return json.dumps({"ok": True, "sessions": out}, ensure_ascii=False)
+    return json.dumps({"ok": True, "sessions": out,
+                       "note": ("status 'stale' = the run outlived its parent "
+                                "process and will never finish — re-dispatch "
+                                "that task if it still matters")},
+                      ensure_ascii=False)
 
 
 def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
