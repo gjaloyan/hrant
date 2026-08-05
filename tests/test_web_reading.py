@@ -177,3 +177,64 @@ def test_fetch_url_does_not_render_a_healthy_page(monkeypatch):
     out = ws.fetch_url("https://blog.example")
     assert called["n"] == 0                       # fast path stayed fast
     assert "plain article text" in out
+
+
+# ── self-hosted SearXNG (deployed by the agent 2026-08-05) ────────────
+def test_searxng_parses_results(monkeypatch):
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+        @staticmethod
+        def json():
+            return {"results": [
+                {"title": "Bitcoin", "url": "https://bitcoin.org/",
+                 "content": "P2P money"},
+                {"title": "No URL", "content": "dropped"},
+            ]}
+
+    monkeypatch.setattr(ws.httpx, "get", lambda *a, **k: _Resp())
+    out = ws._searxng("bitcoin", 5)
+    assert len(out) == 1                      # the URL-less row is dropped
+    assert out[0].url == "https://bitcoin.org/" and out[0].snippet == "P2P money"
+
+
+def test_searxng_403_hints_at_the_json_format_gotcha(monkeypatch):
+    class _Resp:
+        status_code = 403
+        text = "Forbidden"
+
+    monkeypatch.setattr(ws.httpx, "get", lambda *a, **k: _Resp())
+    attempts = []
+    assert ws._searxng("q", 5, attempts=attempts) == []
+    assert "formats: [html, json]" in attempts[0]["reason"]
+
+
+def test_searxng_absence_is_recorded_not_fatal(monkeypatch):
+    def _boom(*a, **k):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr(ws.httpx, "get", _boom)
+    attempts = []
+    assert ws._searxng("q", 5, attempts=attempts) == []
+    assert "not reachable" in attempts[0]["reason"]
+
+
+def test_searxng_is_tried_before_the_scrapers(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.setattr(
+        ws, "_searxng",
+        lambda q, n, attempts=None: (
+            attempts.append({"provider": "searxng", "status": 200, "bytes": 10,
+                             "parsed": 1, "reason": ""}) if attempts is not None else None,
+            [ws.WebResult(title="T", url="https://x.example", snippet="S")],
+        )[1],
+    )
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("scraper ran even though searxng answered")
+
+    monkeypatch.setattr(ws, "_duckduckgo", _must_not_run)
+    detail = ws.web_search_detailed("q", 5)
+    assert detail["results"][0].url == "https://x.example"
+    assert detail["attempts"][0]["provider"] == "searxng"

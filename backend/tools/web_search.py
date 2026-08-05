@@ -111,6 +111,66 @@ def looks_unreadable(status: int, html: str, extracted: "str | None") -> bool:
     return len(_regex_strip_html(html or "")) < 600
 
 
+def _searxng(query: str, max_results: int,
+             attempts: list | None = None) -> list[WebResult]:
+    """Self-hosted SearXNG — the preferred source: local, key-free, and it
+    aggregates several engines at once.
+
+    Deployed on this box 2026-08-05 (docker, port 8888). It matters because the
+    engines this box can reach directly are exactly the ones that block us:
+    SearXNG reports duckduckgo CAPTCHA and brave rate-limited while still
+    returning 20+ results through the engines that do answer. Disabled by
+    simply not setting SEARXNG_URL / not running the container — the attempt is
+    recorded either way so an empty result set can explain itself."""
+    base = (os.getenv("SEARXNG_URL") or "http://127.0.0.1:8888").rstrip("/")
+    rec = {"provider": "searxng", "status": None, "bytes": 0, "parsed": 0,
+           "reason": ""}
+    try:
+        r = httpx.get(f"{base}/search",
+                      params={"q": query, "format": "json"},
+                      headers=_BROWSER_HEADERS, timeout=20.0,
+                      follow_redirects=True)
+    except Exception as e:
+        rec["reason"] = f"not reachable: {type(e).__name__}"
+        if attempts is not None:
+            attempts.append(rec)
+        return []
+    rec["status"] = r.status_code
+    rec["bytes"] = len(r.text or "")
+    if r.status_code >= 400:
+        # A 403 here usually means `formats: [html, json]` is missing from
+        # settings.yml — JSON output is off by default in SearXNG.
+        rec["reason"] = (f"http {r.status_code}"
+                         + (" (is `formats: [html, json]` set in settings.yml?)"
+                            if r.status_code == 403 else ""))
+        if attempts is not None:
+            attempts.append(rec)
+        return []
+    try:
+        data = r.json()
+    except Exception:
+        rec["reason"] = "response was not JSON"
+        if attempts is not None:
+            attempts.append(rec)
+        return []
+    out = [
+        WebResult(title=(item.get("title") or "").strip(),
+                  url=(item.get("url") or "").strip(),
+                  snippet=(item.get("content") or "").strip())
+        for item in (data.get("results") or [])
+        if item.get("url")
+    ][:max_results]
+    rec["parsed"] = len(out)
+    if not out:
+        rec["reason"] = "0 results"
+        dead = data.get("unresponsive_engines") or []
+        if dead:
+            rec["reason"] += f"; engines down: {dead[:3]}"
+    if attempts is not None:
+        attempts.append(rec)
+    return out
+
+
 def _unwrap_ddg_url(url: str) -> str:
     """DDG HTML pages return links of the form //duckduckgo.com/l/?uddg=<encoded>.
 
@@ -267,6 +327,10 @@ def web_search_detailed(query: str, max_results: int = 5) -> dict:
     model when `results` is empty so "the tool is blocked" is never again
     reported as "the web has nothing"."""
     attempts: list[dict] = []
+    # Self-hosted first: no key, no rate limit, several engines behind one call.
+    hits = _searxng(query, max_results, attempts=attempts)
+    if hits:
+        return {"results": hits, "attempts": attempts, "note": ""}
     if os.getenv("TAVILY_API_KEY"):
         hits = _tavily(query, max_results)
         attempts.append({"provider": "tavily", "status": None,
