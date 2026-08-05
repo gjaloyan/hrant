@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import sys
 import threading
 import uuid
 from datetime import datetime
@@ -669,6 +671,27 @@ def _validate_test_command(cmd: str) -> tuple[bool, str, list[str]]:
     ), argv
 
 
+def _bind_to_own_interpreter(argv: list[str]) -> list[str]:
+    """Rewrite a validated test argv to run under the interpreter the AGENT
+    itself runs on.
+
+    2026-08-05: a proposal whose tests ran fine for the agent was rolled back
+    with "No module named pytest" — the gate shelled out to the bare `python3`
+    on PATH (the system interpreter, PEP 668-managed and dependency-free),
+    while the agent lives in a pipx venv holding pytest and every runtime dep.
+    The gate was validating patches in an environment that could never import
+    the code it was testing. Validation still happens on the logical name, so
+    the allowlist is unchanged."""
+    if not argv:
+        return argv
+    head = os.path.basename(argv[0])
+    if head in ("python", "python3"):
+        return [sys.executable] + argv[1:]
+    if head == "pytest":
+        return [sys.executable, "-m", "pytest"] + argv[1:]
+    return argv
+
+
 def _run_test_commands(
     commands: list[str], *, cwd: Path,
 ) -> tuple[bool, str]:
@@ -685,6 +708,7 @@ def _run_test_commands(
         if not ok:
             out_lines.append(f"[{cmd}] REJECTED: {reason}")
             return False, "\n".join(out_lines)
+        argv = _bind_to_own_interpreter(argv)
         try:
             result = subprocess.run(
                 argv,

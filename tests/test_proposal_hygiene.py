@@ -47,3 +47,26 @@ def test_stale_proposals_has_layer0_rule():
     from backend.autonomic.layer0 import default_rules
     levers = [r.lever for r in default_rules()]
     assert "FIRE_STALE_PROPOSALS" in levers
+
+
+# ── the gate must test in the AGENT's environment (2026-08-05) ────────
+def test_test_commands_run_under_the_agents_interpreter():
+    """A proposal whose tests pass for the agent was rolled back with
+    "No module named pytest": the gate shelled out to the bare `python3` on
+    PATH (system interpreter, no deps) while the agent lives in a pipx venv.
+    The gate was validating patches in an environment that could not even
+    import the code under test."""
+    import sys
+    from backend.self_modifier import _bind_to_own_interpreter
+
+    assert _bind_to_own_interpreter(["python3", "-m", "pytest", "tests/x.py"]) == [
+        sys.executable, "-m", "pytest", "tests/x.py"]
+    assert _bind_to_own_interpreter(["python", "-m", "py_compile", "a.py"]) == [
+        sys.executable, "-m", "py_compile", "a.py"]
+    # bare `pytest` becomes `<agent python> -m pytest`, so it resolves even
+    # when the console script is not on PATH
+    assert _bind_to_own_interpreter(["pytest", "-q"]) == [
+        sys.executable, "-m", "pytest", "-q"]
+    # anything else is left alone
+    assert _bind_to_own_interpreter(["make", "test"]) == ["make", "test"]
+    assert _bind_to_own_interpreter([]) == []
