@@ -456,58 +456,69 @@ class SelfModifier:
         }]
 
         try:
-            # Phase 1 — validate all changes, compute new contents.
-            plan: list[tuple] = []   # (path, original|None, new_text, module)
+            # Phase 1 — validate all changes and fold them into ONE pending
+            # text per file. 2026-08-05: a proposal carrying two edits to the
+            # same module silently lost the first — each change re-read the
+            # file from disk, so the second write overwrote the first and the
+            # patch shipped half-applied (its tests then failed, and the
+            # AUTHOR looked wrong when the applier was). Edits accumulate now.
+            pending: dict = {}          # path -> [original|None, current_text]
+            order: list = []            # paths, first-touch order
             for ch in changes:
                 module = ch["module"]
                 old_c, new_c = ch["old_code"], ch["new_code"]
                 if not old_c and not new_c:
                     continue
                 file_path = ROOT / module
-                if not old_c:
-                    # Pure addition: append to an existing file or CREATE a
-                    # new one (the two-file "extract to new module" case).
+                if file_path not in pending:
                     if file_path.exists():
                         original = file_path.read_text(encoding="utf-8")
-                        new_text = (original.rstrip("\n")
-                                    + "\n\n\n" + new_c.lstrip("\n"))
-                    else:
-                        original = None
-                        new_text = new_c
-                else:
-                    if not file_path.exists():
+                    elif old_c:
                         proposal.status = "failed"
                         self._save()
                         return {"ok": False,
                                 "message": f"File not found: {module}"}
-                    original = file_path.read_text(encoding="utf-8")
-                    match_count = original.count(old_c)
-                    if match_count == 0:
-                        proposal.status = "failed"
-                        proposal.review_note += (
-                            f" | old_code not found in {module}"
-                        )
-                        self._save()
-                        return {"ok": False, "message": (
-                            f"old_code not found in {module} — code may "
-                            "have changed")}
-                    if match_count > 1:
-                        # Ambiguous patch: refuse rather than guess — a
-                        # silent first-hit replace is how patches land in
-                        # the wrong function.
-                        proposal.status = "failed"
-                        proposal.review_note += (
-                            f" | ambiguous: old_code matches {match_count} "
-                            f"places in {module}, expand the snippet"
-                        )
-                        self._save()
-                        return {"ok": False, "message": (
-                            f"Ambiguous old_code in {module}: matched "
-                            f"{match_count} times. Expand the snippet to a "
-                            "unique window before applying.")}
-                    new_text = original.replace(old_c, new_c, 1)
-                plan.append((file_path, original, new_text, module))
+                    else:
+                        original = None
+                    pending[file_path] = [original, original or ""]
+                    order.append(file_path)
+                current = pending[file_path][1]
+                if not old_c:
+                    # Pure addition: append to existing content, or create.
+                    pending[file_path][1] = (
+                        (current.rstrip("\n") + "\n\n\n" + new_c.lstrip("\n"))
+                        if current.strip() else new_c
+                    )
+                    continue
+                match_count = current.count(old_c)
+                if match_count == 0:
+                    proposal.status = "failed"
+                    proposal.review_note += f" | old_code not found in {module}"
+                    self._save()
+                    return {"ok": False, "message": (
+                        f"old_code not found in {module} — code may "
+                        "have changed")}
+                if match_count > 1:
+                    # Ambiguous patch: refuse rather than guess — a silent
+                    # first-hit replace is how patches land in the wrong
+                    # function.
+                    proposal.status = "failed"
+                    proposal.review_note += (
+                        f" | ambiguous: old_code matches {match_count} "
+                        f"places in {module}, expand the snippet"
+                    )
+                    self._save()
+                    return {"ok": False, "message": (
+                        f"Ambiguous old_code in {module}: matched "
+                        f"{match_count} times. Expand the snippet to a "
+                        "unique window before applying.")}
+                pending[file_path][1] = current.replace(old_c, new_c, 1)
 
+            plan: list[tuple] = [
+                (fp, pending[fp][0], pending[fp][1],
+                 str(fp.relative_to(ROOT)).replace("\\", "/"))
+                for fp in order
+            ]
             if not plan:
                 return {"ok": False, "message": "Proposal has no code diff"}
 
