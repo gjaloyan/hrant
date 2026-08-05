@@ -70,3 +70,21 @@ def test_test_commands_run_under_the_agents_interpreter():
     # anything else is left alone
     assert _bind_to_own_interpreter(["make", "test"]) == ["make", "test"]
     assert _bind_to_own_interpreter([]) == []
+
+
+def test_absolute_interpreter_path_is_accepted():
+    """A proposal that named the venv python by absolute path was rejected as
+    "prefix not in allow-list" — yet that is precisely the interpreter the
+    runner rebinds to. Compare on the basename (2026-08-05)."""
+    from backend.self_modifier import _validate_test_command
+    ok, reason, argv = _validate_test_command(
+        "/home/hrant/.local/share/pipx/venvs/agi-agent/bin/python -m pytest tests/x.py -q")
+    assert ok is True, reason
+    assert argv[0] == "python"          # normalized for the allowlist
+
+    ok2, _, _ = _validate_test_command("/usr/bin/pytest -q")
+    assert ok2 is True
+
+    # a non-interpreter absolute path is still refused
+    bad, reason_bad, _ = _validate_test_command("/bin/rm -rf /")
+    assert bad is False and "allow-list" in reason_bad

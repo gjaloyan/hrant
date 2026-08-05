@@ -662,6 +662,15 @@ def _validate_test_command(cmd: str) -> tuple[bool, str, list[str]]:
         return False, f"unparseable command: {e}", []
     if not argv:
         return False, "empty command", []
+    # An absolute interpreter path is the same thing as `python3` here — the
+    # runner rebinds every accepted command to sys.executable anyway. 2026-08-05:
+    # a proposal was rejected for writing the venv python's full path, which is
+    # exactly the interpreter we want. Compare on the basename so the allowlist
+    # keeps its meaning without punishing a more precise command.
+    argv = list(argv)
+    if os.path.isabs(argv[0]) and os.path.basename(argv[0]) in (
+            "python", "python3", "pytest"):
+        argv[0] = os.path.basename(argv[0])
     for prefix in _ALLOWED_TEST_PREFIXES:
         if tuple(argv[: len(prefix)]) == prefix:
             return True, "", argv
