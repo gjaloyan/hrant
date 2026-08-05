@@ -667,10 +667,15 @@ def _validate_test_command(cmd: str) -> tuple[bool, str, list[str]]:
     # a proposal was rejected for writing the venv python's full path, which is
     # exactly the interpreter we want. Compare on the basename so the allowlist
     # keeps its meaning without punishing a more precise command.
+    # Path check is done on separators, not os.path.isabs: on Windows
+    # (Python 3.13+) a POSIX path like "/home/…/python" is drive-relative and
+    # isabs() returns False, so the tests would pass on the prod box and fail
+    # on a dev machine.
     argv = list(argv)
-    if os.path.isabs(argv[0]) and os.path.basename(argv[0]) in (
+    head = argv[0]
+    if ("/" in head or "\\" in head) and head.replace("\\", "/").rsplit("/", 1)[-1] in (
             "python", "python3", "pytest"):
-        argv[0] = os.path.basename(argv[0])
+        argv[0] = head.replace("\\", "/").rsplit("/", 1)[-1]
     for prefix in _ALLOWED_TEST_PREFIXES:
         if tuple(argv[: len(prefix)]) == prefix:
             return True, "", argv
