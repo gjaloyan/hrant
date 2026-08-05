@@ -84,7 +84,9 @@ def test_overlap_is_caught_when_the_original_survives(tmp_path, monkeypatch):
     out = str(tmp_path / "out.pdf")
     # simulate the broken hand-rolled edit: draw over without redacting
     doc = fitz.open(src)
-    doc[0].insert_text((72, 100), "Jaloyan PE", fontsize=11)
+    # the full new string drawn on top while the original stays -> the page
+    # now carries the original AND the replacement (which embeds it)
+    doc[0].insert_text((72, 130), "Gor Jaloyan PE", fontsize=11)
     doc.save(out)
     doc.close()
 
