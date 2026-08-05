@@ -93,6 +93,9 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # (2026-06-23). Gating it would re-create the "model can't reach the tool,
     # so it hand-rolls" trap.
     "frame_problem",
+    # Document editing with built-in verification + delivery hint
+    # (2026-08-05: hand-rolled edits shipped overlapping text as "done").
+    "pdf_edit",
     # Verification-as-action (2026-06-25): render what you built the way the
     # user's browser would, BEFORE claiming done. Pairs with the hard
     # verify-before-done gate in unified_agent.

@@ -2231,6 +2231,40 @@ def _tracker_granularity_error(steps: list | None) -> str:
         return ""
 
 
+def _pdf_edit_handler(path: str, replacements: list | None = None,
+                      out_path: str = "") -> str:
+    """Replace text in an existing PDF and verify BOTH directions."""
+    refuse, _sp = _check_owner("pdf_edit")
+    if refuse:
+        return json.dumps({"ok": False, "error": "owner/trusted only"},
+                          ensure_ascii=False)
+    from .tools.pdf_edit import media_line, replace_text
+    rep = replace_text(path, replacements or [], out_path=out_path)
+    payload = {
+        "ok": rep.ok,
+        "out_path": rep.out_path,
+        "verified": rep.verified,
+        "verification_detail": rep.verification_detail,
+        "replacements": [
+            {"find": r.find, "replace": r.replace,
+             "occurrences": r.occurrences, "verified": r.verified,
+             "detail": r.detail}
+            for r in rep.replacements
+        ],
+    }
+    if rep.error:
+        payload["error"] = rep.error
+    if rep.install_hint:
+        payload["install_hint"] = rep.install_hint
+    if rep.ok:
+        payload["media_hint"] = media_line(rep.out_path)
+        payload["note"] = (
+            "Verified. Put the media_hint line on its own in your answer — "
+            "a correct file the owner never receives is a failed task."
+        )
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _frame_problem_handler(
     title: str,
     components: list | None = None,
@@ -2685,6 +2719,44 @@ def register_builtin_tools() -> None:
             "required": ["url"],
         },
         handler=_verify_web_handler,
+    )
+    reg.register_func(
+        name="pdf_edit",
+        description=(
+            "Replace text inside an EXISTING pdf and verify the result. "
+            "Removes the original text (redaction) instead of drawing over "
+            "it, matches the original font size, and supports a multi-line "
+            "replacement. Verifies BOTH directions — the new text present AND "
+            "the old text gone — then returns `media_hint`, the exact "
+            "`MEDIA:<path>` line you must include in your answer to actually "
+            "deliver the file to the owner. Owner/trusted only."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string",
+                         "description": "Absolute path of the input pdf."},
+                "replacements": {
+                    "type": "array",
+                    "description": ("Each item: {find, replace}. `replace` may "
+                                    "contain newlines to stack lines."),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "find": {"type": "string"},
+                            "replace": {"type": "string"},
+                        },
+                        "required": ["find", "replace"],
+                    },
+                },
+                "out_path": {"type": "string",
+                             "description": ("Optional output path; defaults to "
+                                             "workspace outbox so the file is "
+                                             "deliverable.")},
+            },
+            "required": ["path", "replacements"],
+        },
+        handler=_pdf_edit_handler,
     )
     reg.register_func(
         name="frame_problem",
