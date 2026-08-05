@@ -111,13 +111,38 @@ def _is_model_unavailable(err: "LLMError") -> bool:
     return any(marker in msg for marker in _MODEL_UNAVAILABLE_MARKERS)
 
 
+_STREAM_ERROR_MARKERS: tuple[str, ...] = (
+    "stream error",
+    "an error occurred while processing your request",
+    "stream disconnected",
+    "incomplete chunked read",
+    "peer closed connection",
+    "connection reset by peer",
+)
+
+
+def _is_provider_stream_error(err: "LLMError") -> bool:
+    """True iff the provider aborted mid-stream with its own internal error.
+
+    Surfaced 2026-08-05: `Codex Responses API stream error: An error occurred
+    while processing your request ... include the request ID ...` killed a whole
+    turn. The provider is telling us to retry — on it or on another provider —
+    so this belongs with the other retryable classes rather than taking the
+    agent down. Deliberately narrow: a client-side bad request or a safety
+    refusal does not carry these strings."""
+    msg = (str(err) or "").lower()
+    return any(marker in msg for marker in _STREAM_ERROR_MARKERS)
+
+
 def _should_fallback(err: "LLMError") -> bool:
     """The router fallback engages on a safety refusal, a quota/rate-limit
-    failure, a malformed/truncated provider response, OR an unavailable/dead
-    model. All mean 'this provider can't serve this call; try the next one.'"""
+    failure, a malformed/truncated provider response, an unavailable/dead
+    model, OR a provider-side mid-stream abort. All mean 'this provider can't
+    serve this call; try the next one.'"""
     return (
         _is_safety_refusal(err)
         or _is_quota_exhausted(err)
         or _is_provider_malformed(err)
         or _is_model_unavailable(err)
+        or _is_provider_stream_error(err)
     )

@@ -52,6 +52,7 @@ from .llm_error_classify import (  # noqa: F401
     _is_provider_malformed,
     _MODEL_UNAVAILABLE_MARKERS,
     _is_model_unavailable,
+    _is_provider_stream_error,
     _should_fallback,
 )
 
@@ -224,6 +225,8 @@ def _short_fallback_reason(err: "LLMError") -> str:
         return "provider error (malformed/truncated response)"
     if _is_model_unavailable(err):
         return "model unavailable (pin is dead/renamed)"
+    if _is_provider_stream_error(err):
+        return "provider aborted mid-stream"
     return s[:80].strip()
 
 
