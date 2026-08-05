@@ -193,14 +193,23 @@ def _verify(rep: EditReport, pairs: list, fitz=None) -> None:
     problems = []
     for r in rep.replacements:
         find, replace = r.find, r.replace
-        old_gone = find not in text
+        # A replacement may legitimately CONTAIN the original ("Gor Jaloyan" ->
+        # "Gor Jaloyan PE"), so "old gone" cannot be a plain substring test.
+        # The original is gone iff every surviving occurrence is accounted for
+        # by a replacement that embeds it.
+        expected = replace.count(find) * r.occurrences
+        actual = text.count(find)
+        old_gone = actual <= expected
         new_present = all(part.strip() in text
                           for part in replace.split("\n") if part.strip())
         r.verified = old_gone and new_present and r.occurrences > 0
         if r.occurrences == 0:
             r.detail = f"'{find}' was not found in the document"
         elif not old_gone:
-            r.detail = f"'{find}' is STILL present after the edit (overlap, not replacement)"
+            r.detail = (
+                f"'{find}' still appears {actual} time(s), expected at most "
+                f"{expected} — the original was drawn over, not replaced"
+            )
         elif not new_present:
             r.detail = f"'{replace}' is not present in the output"
         else:

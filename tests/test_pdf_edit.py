@@ -77,6 +77,26 @@ def test_original_text_is_gone_not_overlapped(tmp_path):
 
 
 @requires_fitz
+def test_overlap_is_caught_when_the_original_survives(tmp_path, monkeypatch):
+    """The Jul-21 failure mode itself: original left in place, new text added
+    beside it. Verification must REFUSE that, not call it done."""
+    src = _make_pdf(tmp_path / "in.pdf", ["Gor Jaloyan"])
+    out = str(tmp_path / "out.pdf")
+    # simulate the broken hand-rolled edit: draw over without redacting
+    doc = fitz.open(src)
+    doc[0].insert_text((72, 100), "Jaloyan PE", fontsize=11)
+    doc.save(out)
+    doc.close()
+
+    rep = pe.EditReport(out_path=out)
+    rep.replacements = [pe.ReplacementReport(
+        find="Gor Jaloyan", replace="Gor Jaloyan PE", occurrences=1)]
+    pe._verify(rep, [("Gor Jaloyan", "Gor Jaloyan PE")], fitz)
+    assert rep.verified is False
+    assert "drawn over, not replaced" in rep.verification_detail
+
+
+@requires_fitz
 def test_reports_when_the_target_is_absent(tmp_path):
     src = _make_pdf(tmp_path / "in.pdf", ["Nothing to see"])
     rep = pe.replace_text(src, [{"find": "Missing Name", "replace": "X"}],
