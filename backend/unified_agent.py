@@ -898,6 +898,50 @@ def _command_looks_like_wait(cmd: str) -> bool:
     return any(hint in low for hint in _WAIT_HINTS)
 
 
+_ARTIFACT_EXTENSIONS = (
+    ".pdf", ".docx", ".xlsx", ".csv", ".png", ".jpg", ".jpeg", ".mp4", ".mp3",
+    ".zip", ".pptx", ".txt", ".md", ".json", ".webm", ".ogg", ".wav", ".svg",
+)
+# Paths the Telegram bridge is allowed to attach (see _RULES_MEDIA_CONVENTION).
+_DELIVERABLE_DIRS = ("outbox", "/tmp/")
+
+
+def _detect_undelivered_artifact(trace, answer: str) -> str:
+    """Return the artifact path this turn produced but never delivered, or "".
+
+    Prod incident 2026-07-21: the agent correctly rewrote an invoice PDF into
+    workspace/outbox/ and answered without a MEDIA: line, so the owner never
+    received the file and read the turn as a failure. Producing a file the
+    user asked for and not attaching it is an undelivered result, not a
+    finished task. Deterministic — no LLM call."""
+    if "MEDIA:" in (answer or ""):
+        return ""
+    if not trace:
+        return ""
+    for step in reversed(list(trace)):
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        blob = " ".join(str(x) for x in (
+            (getattr(tc, "args", None) or (tc.get("args") if isinstance(tc, dict) else {}) or {}),
+            (getattr(tc, "result", "") or (tc.get("result") if isinstance(tc, dict) else "") or ""),
+        ))
+        for m in re.finditer(r"[/\w.\-]+\.\w{2,5}", blob):
+            path = m.group(0)
+            low = path.lower()
+            if not low.endswith(_ARTIFACT_EXTENSIONS):
+                continue
+            if not any(d in path for d in _DELIVERABLE_DIRS):
+                continue
+            if path.startswith("/") and path in (answer or ""):
+                # Mentioned in the answer but not as a MEDIA: line — still
+                # undelivered, and worth correcting.
+                return path
+            if path.startswith("/"):
+                return path
+    return ""
+
+
 def _detect_background_not_awaited(trace) -> bool:
     """True iff at least one terminal_exec command in `trace` was
     backgrounded AND no LATER command in the same trace waited/polled.
@@ -1640,6 +1684,22 @@ def _decide_self_correction(
     """
     if not (answer or "").strip():
         return "", ""
+    # Block 0 — undelivered artifact. Cheapest and most specific: a file the
+    # user asked for exists on disk and the answer has no MEDIA: line, so the
+    # user gets nothing (2026-07-21 PDF incident).
+    _artifact = _detect_undelivered_artifact(trace, answer)
+    if _artifact:
+        corrective = (
+            f"You produced `{_artifact}` this turn but your answer has no "
+            "MEDIA: line, so the user receives NOTHING — a correct file the "
+            "owner never gets is a failed task. Re-answer and include the "
+            f"line `MEDIA:{_artifact}` on its own (absolute path, under "
+            "~/.hrant/data/ or /tmp/) so the bridge attaches it. Verify the "
+            "file first (read it back / extract its text) and state what you "
+            "confirmed. If the file is NOT meant for the user (a scratch or "
+            "intermediate artifact), say so explicitly instead."
+        )
+        return "undelivered-artifact", corrective
     # Block 3 — background-not-awaited. Fire FIRST because it's the
     # most specific pattern (the agent literally spawned a process
     # and walked away).
