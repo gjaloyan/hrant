@@ -63,6 +63,50 @@ def _tavily(query: str, max_results: int) -> list[WebResult]:
     ]
 
 
+def _searxng(query: str, max_results: int,
+             attempts: list | None = None) -> list[WebResult]:
+    """Search a local SearXNG instance first; never raise to callers."""
+    base = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
+    url = f"{base}/search"
+    rec = {"provider": "searxng", "status": None, "bytes": 0,
+           "parsed": 0, "url": url, "reason": ""}
+    try:
+        r = httpx.get(
+            url,
+            params={"q": query, "format": "json"},
+            headers={"Accept": "application/json", "User-Agent": BROWSER_UA},
+            timeout=15.0,
+        )
+        rec["status"] = r.status_code
+        rec["bytes"] = len(r.text or "")
+        if r.status_code >= 400:
+            rec["reason"] = f"http {r.status_code}"
+            return []
+        data = r.json()
+        hits: list[WebResult] = []
+        for item in data.get("results", []):
+            url_value = item.get("url") or ""
+            if not url_value:
+                continue
+            hits.append(WebResult(
+                title=item.get("title", ""),
+                url=url_value,
+                snippet=item.get("snippet") or item.get("content") or "",
+            ))
+            if len(hits) >= max_results:
+                break
+        rec["parsed"] = len(hits)
+        if not hits:
+            rec["reason"] = "empty results"
+        return hits
+    except Exception as e:
+        rec["reason"] = f"{type(e).__name__}: {e}"[:160]
+        return []
+    finally:
+        if attempts is not None:
+            attempts.append(rec)
+
+
 _BOT_WALL_MARKERS: tuple[str, ...] = (
     "prove your humanity", "you've been blocked by network security",
     "enable javascript and cookies to continue", "checking your browser",
@@ -267,6 +311,9 @@ def web_search_detailed(query: str, max_results: int = 5) -> dict:
     model when `results` is empty so "the tool is blocked" is never again
     reported as "the web has nothing"."""
     attempts: list[dict] = []
+    hits = _searxng(query, max_results, attempts=attempts)
+    if hits:
+        return {"results": hits, "attempts": attempts, "note": "searxng"}
     if os.getenv("TAVILY_API_KEY"):
         hits = _tavily(query, max_results)
         attempts.append({"provider": "tavily", "status": None,
