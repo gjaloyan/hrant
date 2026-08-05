@@ -222,9 +222,11 @@ def test_web_search_handler_caches_results(monkeypatch):
 
     def fake_search(query: str, max_results: int = 5):
         calls.append((query, max_results))
-        return [WebResult(title="T", url="https://ex.com", snippet="S")]
+        return {"results": [WebResult(title="T", url="https://ex.com",
+                                      snippet="S")],
+                "attempts": [], "note": ""}
 
-    monkeypatch.setattr(bt, "web_search", fake_search)
+    monkeypatch.setattr(bt, "web_search_detailed", fake_search)
     bt.WEB_CACHE.clear()
 
     out1 = bt._web_search_handler("rs485 intro", max_results=3)
@@ -240,11 +242,23 @@ def test_web_search_handler_caches_results(monkeypatch):
 def test_web_search_handler_does_not_cache_empty_results(monkeypatch):
     import backend.builtin_tools as bt
 
-    monkeypatch.setattr(bt, "web_search", lambda q, max_results=5: [])
+    # An empty result set now returns a DIAGNOSTIC envelope, not a bare
+    # "[no results]": the model must be able to tell "the web has nothing"
+    # apart from "the provider served a CAPTCHA" (Jul-15 incident).
+    monkeypatch.setattr(
+        bt, "web_search_detailed",
+        lambda q, max_results=5: {"results": [], "attempts": [
+            {"provider": "ddg_html", "status": 202, "bytes": 14159,
+             "parsed": 0, "reason": "anti-bot challenge page"}],
+            "note": "Every search provider failed"},
+    )
     bt.WEB_CACHE.clear()
 
-    assert bt._web_search_handler("no hits") == "[no results]"
-    assert bt._web_search_handler("no hits") == "[no results]"
+    import json as _json
+    first = _json.loads(bt._web_search_handler("no hits"))
+    assert first["results"] == []
+    assert first["attempts"][0]["reason"] == "anti-bot challenge page"
+    assert "NOT" in first["note"] or "failed" in first["note"]
     # Ошибочные / пустые ответы не должны залипнуть в кэше.
     assert bt.WEB_CACHE.get("web_search", {"query": "no hits", "max_results": 5}) is None
 

@@ -59,6 +59,37 @@ _MAX_REVISION_TOKENS = 2000
 # nor appear in its critique block.
 _DELIVERY_MARKERS = ("endpoint_not_met:", "empty_propose_self_modification:")
 
+# Phrases that mark a revision RETRACTING the previous answer's claims
+# rather than fixing them. Matched case-insensitively on the revised text.
+# Both languages: the user is Russian-speaking, the agent answers in kind.
+_RETRACTION_MARKERS: tuple[str, ...] = (
+    "cannot confirm", "can not confirm", "cannot honestly confirm",
+    "unable to confirm", "was not verified", "not verified",
+    "i did not actually", "no proof that",
+    "не могу подтвердить", "не могу честно подтвердить",
+    "не подтверждено", "нет доказательств", "не был проверен",
+    "не была проверена", "не проверено",
+)
+
+
+def looks_like_retraction(text: str) -> bool:
+    """True when a revision walks the previous answer's claims back."""
+    low = (text or "").lower()
+    return any(m in low for m in _RETRACTION_MARKERS)
+
+
+def blind_retraction(revised: str, *, verify_calls: int) -> bool:
+    """A revision that RETRACTS work while having verified NOTHING.
+
+    Root cause of a real prod failure (2026-07-21): the agent correctly
+    edited a PDF, the verifier flagged the "file was created" claim as
+    unverified, and the critic — told to soften unsupportable claims —
+    replied "I cannot honestly confirm the PDF was changed". The file was
+    fine; the user simply never got it. Retracting real work without
+    spending one read_file is worse than the original imperfect answer,
+    so the caller keeps the original when this fires."""
+    return bool(revised) and verify_calls == 0 and looks_like_retraction(revised)
+
 
 def content_contradictions(vr: VerificationResult) -> list[str]:
     """vr.contradictions minus the delivery-class markers."""
@@ -134,12 +165,22 @@ def build_critique(vr: VerificationResult, prev_answer: str) -> str:
     parts.append("")
     parts.append(f"## Your previous answer (to revise):\n{prev_answer[:2000]}")
     parts.append(
-        "\nRewrite the answer fixing ONLY these issues. Re-check "
-        "evidence with the read-only tools if needed. Remove or "
-        "soften claims you cannot support; keep everything that was "
-        "correct. Do NOT start new work — no new actions are "
-        "available in this pass. Keep the user's language and the "
-        "original answer's format."
+        "\nRewrite the answer fixing ONLY these issues.\n\n"
+        "CHECK BEFORE YOU RETRACT. The read-only tools ARE available "
+        "to you right now — use them. If a flagged claim is about an "
+        "artifact YOU produced this turn (a file you wrote, a server "
+        "you started, a record you saved), VERIFY it: read_file the "
+        "path, extract the text, list the directory. A claim you can "
+        "cheaply check must be checked, never softened blind. "
+        "Retracting work you actually did is itself a falsehood — and "
+        "it costs the user the result.\n\n"
+        "Only soften a claim when you tried to verify it and could "
+        "not, and then say what you checked and what was missing. "
+        "Keep everything that was correct, including any MEDIA: line "
+        "delivering a file to the user. Do NOT start NEW work (no "
+        "new edits, no new builds) — verification of existing work is "
+        "not new work. Keep the user's language and the original "
+        "answer's format."
     )
     return "\n".join(parts)
 
@@ -151,9 +192,14 @@ def revise(
     vr: VerificationResult,
     system_prompt: str,
     on_tool_call=None,
+    tool_calls_out: list | None = None,
 ) -> Optional[str]:
     """One revision call with the read-only tool subset. Returns the
-    revised answer text or None on failure / empty output."""
+    revised answer text or None on failure / empty output.
+
+    `tool_calls_out`, when given, receives the name of every tool the
+    revision actually ran — the caller uses it to tell a checked
+    correction apart from a blind retraction (see `blind_retraction`)."""
     from .llm import LLMError, TaskType, router
     from .tool_registry import get_registry
 
@@ -161,6 +207,8 @@ def revise(
     tools = registry.to_anthropic_list(filter_names=set(READ_ONLY_TOOLS))
 
     def _execute(name, args):
+        if tool_calls_out is not None:
+            tool_calls_out.append(name)
         # Belt-and-suspenders: even if the model hallucinates a tool
         # name outside the filtered schema, refuse to run it.
         if name not in READ_ONLY_TOOLS:
@@ -205,11 +253,23 @@ def revise_and_pick(
     revision wins, (None, original_vr) otherwise. Delivery state
     (endpoint_met + its confidence clip) carries over unchanged —
     a read-only revision cannot deliver an action."""
+    revision_tools: list[str] = []
     revised = revise(
         task=task, answer=answer, vr=vr,
         system_prompt=system_prompt, on_tool_call=on_tool_call,
+        tool_calls_out=revision_tools,
     )
     if not revised or revised.strip() == (answer or "").strip():
+        return None, vr
+
+    # Refuse a retraction that verified nothing: keeping an imperfect but
+    # truthful answer beats shipping "I cannot confirm" over work that was
+    # actually done (2026-07-21 PDF incident — see `blind_retraction`).
+    if blind_retraction(revised, verify_calls=len(revision_tools)):
+        log.warning(
+            "answer_critic: rejecting blind retraction (0 verification "
+            "tool calls); keeping the original answer",
+        )
         return None, vr
 
     try:

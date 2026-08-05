@@ -54,6 +54,7 @@ def test_fetch_url_falls_back_when_no_main_content(monkeypatch):
     monkeypatch.setattr(ws, "_extract_main_content", lambda html, url: None)
 
     class _Resp:
+        status_code = 200
         text = "<body><div>just a tiny page</div></body>"
         def raise_for_status(self): pass
 
@@ -70,6 +71,7 @@ def test_fetch_url_uses_main_when_available(monkeypatch):
     )
 
     class _Resp:
+        status_code = 200
         text = "<body><nav>noise</nav><article>x</article></body>"
         def raise_for_status(self): pass
 
@@ -87,6 +89,7 @@ def test_fetch_url_respects_ssrf_and_max_chars(monkeypatch):
     monkeypatch.setattr(ws, "_extract_main_content", lambda h, u: "A" * 999)
 
     class _Resp:
+        status_code = 200
         text = "<body>x</body>"
         def raise_for_status(self): pass
 

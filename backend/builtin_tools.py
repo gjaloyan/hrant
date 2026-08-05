@@ -67,7 +67,7 @@ from .tools.terminal_exec import (
     MAX_TIMEOUT_SECONDS as _TERMINAL_MAX_TIMEOUT,
     run_terminal,
 )
-from .tools.web_search import fetch_url, web_search
+from .tools.web_search import fetch_url, web_search, web_search_detailed
 from .tools.agent_browser import (
     run_agent_browser as _run_agent_browser,
     DEFAULT_TIMEOUT_SEC as _AGENT_BROWSER_DEFAULT_TIMEOUT,
@@ -138,9 +138,18 @@ def _web_search_handler(query: str, max_results: int = 5) -> str:
     cached = WEB_CACHE.get("web_search", args)
     if cached is not None:
         return cached
-    results = web_search(query, max_results=max_results)
+    detail = web_search_detailed(query, max_results=max_results)
+    results = detail.get("results") or []
     if not results:
-        return "[no results]"
+        # Never answer a blocked/broken search with a bare "[no results]" —
+        # the model reads that as "the web has nothing" and states it as fact
+        # (Jul-15 incident: DDG served a CAPTCHA under HTTP 202). Hand back
+        # the per-provider attempt log so it can tell the two apart.
+        return json.dumps({
+            "results": [],
+            "attempts": detail.get("attempts") or [],
+            "note": detail.get("note") or "",
+        }, ensure_ascii=False)
     out = json.dumps(
         [{"title": r.title, "url": r.url, "snippet": r.snippet} for r in results],
         ensure_ascii=False,
