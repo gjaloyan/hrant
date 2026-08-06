@@ -75,7 +75,20 @@ def _searxng(query: str, max_results: int,
             url,
             params={"q": query, "format": "json"},
             headers={"Accept": "application/json", "User-Agent": BROWSER_UA},
-            timeout=15.0,
+            # Fail FAST on an unreachable instance. A flat 15s timeout meant
+            # every single web_search paid the full 15s before falling back
+            # whenever the host blackholed the packet (measured 2026-08-05:
+            # 15.02s to a DROPped address). SearXNG is normally on loopback or
+            # one Tailscale hop away, so a connect that has not landed in 2s
+            # is not going to; the read budget stays generous because the
+            # instance itself proxies slow upstream engines.
+            timeout=httpx.Timeout(10.0, connect=2.0),
+            # httpx does NOT follow redirects by default (unlike requests).
+            # Without this, putting the instance behind a reverse proxy or an
+            # http->https hop returns a 3xx whose empty body fails to parse,
+            # and the provider silently reports "no results" instead of
+            # following the hop.
+            follow_redirects=True,
         )
         rec["status"] = r.status_code
         rec["bytes"] = len(r.text or "")
@@ -328,11 +341,20 @@ def web_search_detailed(query: str, max_results: int = 5) -> dict:
     note = ""
     if not hits:
         blocked = [a for a in attempts if "anti-bot" in (a.get("reason") or "")]
+        # Name the PRIMARY provider's failure first. SearXNG is self-hosted, so
+        # when it is the thing that broke, the actionable repair is "restart
+        # your own instance" — telling the model to go buy a Tavily key
+        # instead sends it down a road it cannot walk.
+        searx = next((a for a in attempts
+                      if a.get("provider") == "searxng" and a.get("reason")), None)
         note = (
             "Every search provider failed — this is NOT evidence that nothing "
-            "exists. " + ("A provider served an anti-bot challenge; retry, "
-                          "rephrase, or fetch a known URL directly. "
-                          if blocked else "")
+            "exists. "
+            + (f"The local SearXNG instance at {searx.get('url')} failed "
+               f"({searx['reason']}) — check that it is running before "
+               "concluding anything about the query. " if searx else "")
+            + ("A provider served an anti-bot challenge; retry, "
+               "rephrase, or fetch a known URL directly. " if blocked else "")
             + "Set TAVILY_API_KEY for a reliable API path."
         )
         log.warning("web_search exhausted providers for %r: %s", query, attempts)
