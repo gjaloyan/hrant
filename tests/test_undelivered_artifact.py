@@ -71,7 +71,11 @@ def test_self_correction_fires_with_the_media_instruction():
     )
     assert tag == "undelivered-artifact"
     assert f"MEDIA:{OUT}" in corrective
-    assert "never gets is a failed task" in corrective
+    # Reworded 2026-08-06: the corrective now ASKS whether the file is the
+    # user's before assuming it is. Assuming it is how the agent's own scratch
+    # measurements got shipped as the deliverable.
+    assert "Did the USER ask for this file?" in corrective
+    assert "is a failed task" in corrective
 
 
 def test_self_correction_silent_when_delivered():

@@ -113,7 +113,12 @@ def test_toolful_readonly_endpoint_not_met_triggers_correction(monkeypatch):
     # The corrective must reference both paths the agent can take.
     assert "start_background_job" in corrective
     assert "ask_user" in corrective
-    assert "read-only" in corrective
+    # This trace ran six terminal_exec calls, so the corrective must NOT open
+    # by calling them all read-only (2026-08-06). A first sentence the agent
+    # can see is false teaches it to discount the rest of the instruction.
+    assert "ALL of them were read-only" not in corrective
+    assert "nothing in your answer shows the change actually taking effect" \
+        in corrective
 
 
 def test_toolful_readonly_endpoint_met_no_correction(monkeypatch):

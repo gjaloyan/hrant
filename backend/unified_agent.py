@@ -903,7 +903,13 @@ _ARTIFACT_EXTENSIONS = (
     ".zip", ".pptx", ".txt", ".md", ".json", ".webm", ".ogg", ".wav", ".svg",
 )
 # Paths the Telegram bridge is allowed to attach (see _RULES_MEDIA_CONVENTION).
-_DELIVERABLE_DIRS = ("outbox", "/tmp/")
+# `/tmp/` was REMOVED on 2026-08-06: it is where the agent keeps its own
+# working material, so every scratch .txt matched here and this gate then
+# told the agent to attach it. That is how a per-engine measurement dump
+# shipped as the answer to "calibrate the search engines". A real
+# deliverable belongs in outbox; scratch does not become a deliverable by
+# living in a directory the bridge happens to allow.
+_DELIVERABLE_DIRS = ("outbox",)
 
 
 def _detect_undelivered_artifact(trace, answer: str) -> str:
@@ -1647,6 +1653,30 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
 # ─── Self-correction gating ────────────────────────────────────────
 
 
+_OPEN_STATUS_MARKER = "[TURN GATE] NOT DONE"
+
+
+def _append_open_status(answer: str, tag: str) -> str:
+    """Append the honest status line when the turn is STILL open after the
+    correction rounds.
+
+    Written by code on purpose. Composing an accurate account of its own
+    incompleteness is the exact thing the agent fails at — three separate
+    2026-08-05/06 turns ended with a confident success report over unfinished
+    work. Asking it once more to write that sentence is asking the same
+    question that already got the wrong answer twice.
+    """
+    text = (answer or "").rstrip()
+    if _OPEN_STATUS_MARKER in text:
+        return text
+    return (
+        f"{text}\n\n---\n{_OPEN_STATUS_MARKER} ({tag}) — after two correction "
+        "rounds this turn still did not satisfy the request. Treat the report "
+        "above as unverified: check what was actually changed before relying "
+        "on it."
+    )
+
+
 def _decide_self_correction(
     *,
     task: str,
@@ -1684,22 +1714,13 @@ def _decide_self_correction(
     """
     if not (answer or "").strip():
         return "", ""
-    # Block 0 — undelivered artifact. Cheapest and most specific: a file the
-    # user asked for exists on disk and the answer has no MEDIA: line, so the
-    # user gets nothing (2026-07-21 PDF incident).
-    _artifact = _detect_undelivered_artifact(trace, answer)
-    if _artifact:
-        corrective = (
-            f"You produced `{_artifact}` this turn but your answer has no "
-            "MEDIA: line, so the user receives NOTHING — a correct file the "
-            "owner never gets is a failed task. Re-answer and include the "
-            f"line `MEDIA:{_artifact}` on its own (absolute path, under "
-            "~/.hrant/data/ or /tmp/) so the bridge attaches it. Verify the "
-            "file first (read it back / extract its text) and state what you "
-            "confirmed. If the file is NOT meant for the user (a scratch or "
-            "intermediate artifact), say so explicitly instead."
-        )
-        return "undelivered-artifact", corrective
+    # NOTE ON ORDER (2026-08-06): the undelivered-artifact block used to run
+    # HERE, first. It matched on a file existing, which is far weaker than the
+    # structural gates below, yet it preempted every one of them — including
+    # the free plan-incomplete backstop. An unfinished turn that happened to
+    # leave a file behind got "attach the file" instead of "you have 3 steps
+    # left". It now runs last, after everything that can prove the turn is
+    # structurally unfinished.
     # Block 3 — background-not-awaited. Fire FIRST because it's the
     # most specific pattern (the agent literally spawned a process
     # and walked away).
@@ -1770,6 +1791,34 @@ def _decide_self_correction(
             f"the final answer reflecting the TRUE completion state."
         )
         return f"plan-incomplete — {len(_pending)} pending", corrective
+    # Block 0 — undelivered artifact (2026-07-21 PDF incident): a file the
+    # user asked for exists on disk and the answer has no MEDIA: line, so the
+    # user receives nothing.
+    #
+    # The corrective below deliberately does NOT hand over the finished
+    # `MEDIA:<path>` line. The 2026-08-06 version did, and because
+    # `endpoint_met` then treated that substring as proof of delivery, an
+    # unfinished turn was being told the exact string that would silence
+    # every remaining check. A gate must never name the artifact that
+    # satisfies it. The question it asks now is the one that matters —
+    # whether the file is the user's or the agent's own working material.
+    _artifact = _detect_undelivered_artifact(trace, answer)
+    if _artifact:
+        corrective = (
+            f"This turn produced `{_artifact}` and your answer does not "
+            "deliver it. Did the USER ask for this file?\n"
+            "  (a) Yes — read it back, state in one sentence what you "
+            f"confirmed is in it, and put `MEDIA:{_artifact}` on its own "
+            "line so the bridge attaches it.\n"
+            "  (b) No — it is your own working material (measurements, "
+            "scratch, an intermediate dump). Then it is NOT a deliverable "
+            "and you must not attach it. Instead, name the part of the "
+            "request that is still not done, and either do it now or say "
+            "plainly that it is undone.\n"
+            "Handing over your own scratch output as the result is a "
+            "failed task, not a delivery."
+        )
+        return "undelivered-artifact", corrective
     from .endpoint_check import (
         _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
         endpoint_met,
@@ -1794,10 +1843,22 @@ def _decide_self_correction(
     shown = ", ".join(turn_tools[:6])
     if len(turn_tools) > 6:
         shown += f", … (+{len(turn_tools) - 6} more)"
+    # Don't assert "all read-only" on a turn that ran twenty shell commands —
+    # `terminal_exec`/`run_python` are deliberately outside _EXECUTE_TOOLS
+    # because they can be either, and a corrective whose first sentence is
+    # visibly false teaches the model to discount the rest of it.
+    _mutation_capable = ("terminal_exec", "run_python", "save_to_workspace",
+                         "save_knowledge", "pdf_edit")
+    _ran_shell = any(t in _mutation_capable for t in turn_tools)
+    _opening = (
+        "none of them is a tool that records a completed action, and "
+        "nothing in your answer shows the change actually taking effect"
+        if _ran_shell else
+        "ALL of them were read-only (inspection, reads, greps)"
+    )
     corrective = (
         f"Your previous turn called {len(turn_tools)} tool(s) "
-        f"({shown}) but ALL of them were read-only (inspection, "
-        f"reads, greps). You delivered no state-changing action "
+        f"({shown}) but {_opening}. You delivered no state-changing action "
         f"AND did not honestly state a concrete blocker. This is "
         f"the long-investigation giveup failure mode.\n\n"
         f"Pick ONE of two paths NOW:\n"
@@ -3081,15 +3142,26 @@ def run_unified(
     # are LLM judgments (language-agnostic, no keyword lists). Supervisor
     # turns skip both — they're internal plumbing.
     if not supervisor_mode and (answer or "").strip():
-        _turn_tools = _turn_tool_names(agent)
-        _correction_tag, _corrective = _decide_self_correction(
-            task=task,
-            answer=answer,
-            turn_tools=_turn_tools,
-            trace=getattr(agent, "_trace", None),
-            speaker_id=speaker_id,
-        )
-        if _corrective:
+        # Two rounds, and the RE-ANSWER IS RE-GATED (2026-08-06). The single
+        # -shot version accepted whatever came back unexamined, so a corrective
+        # could be answered with a fresh false completion and shipped. When the
+        # second round still leaves the turn open, the honest status line is
+        # appended by CODE — the model never gets to write it, because writing
+        # it is precisely what it does badly.
+        _last_tag = ""
+        for _round in range(2):
+            _turn_tools = _turn_tool_names(agent)
+            _correction_tag, _corrective = _decide_self_correction(
+                task=task,
+                answer=answer,
+                turn_tools=_turn_tools,
+                trace=getattr(agent, "_trace", None),
+                speaker_id=speaker_id,
+            )
+            if not _corrective:
+                _last_tag = ""
+                break
+            _last_tag = _correction_tag
             agent.progress("self_correct", f"{_correction_tag} — re-prompting")
             try:
                 answer = router().call_with_tools(
@@ -3105,7 +3177,9 @@ def run_unified(
                 )
                 answer = _rewrite_xml_tool_call_dump(answer, agent)
             except LLMError:
-                pass  # keep the original answer if the corrective call fails
+                break  # keep the current answer if the corrective call fails
+        if _last_tag:
+            answer = _append_open_status(answer, _last_tag)
 
     # 2026-05-21: refusal-rewriter dropped. The previous version
     # ran a ~25-keyword regex over the answer head ("не могу",

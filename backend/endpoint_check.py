@@ -12,10 +12,12 @@ harbor", "docker is available") was verifiable, so the verifier
 returned 75.
 
 This module adds an orthogonal check: for action requests, require
-at least one execute-class tool call OR a MEDIA: file delivery in
-the answer. If neither, an LLM judge decides whether the request was
-satisfied (language-agnostic, no keyword lists). If not satisfied,
-confidence is capped at 30 and the turn is marked endpoint-missed.
+at least one execute-class tool call. Failing that, an LLM judge decides
+whether the request was satisfied (language-agnostic, no keyword lists) —
+judging against `_turn_evidence`, a block of facts assembled by CODE
+(which tools ran, whether each attached file exists), never against the
+assistant's prose alone. If not satisfied, confidence is capped at 30 and
+the turn is marked endpoint-missed.
 """
 from __future__ import annotations
 
@@ -86,18 +88,48 @@ _EXECUTE_TOOLS: frozenset[str] = frozenset({
 
 _ENDPOINT_JUDGE_SYSTEM = """You judge whether an assistant's answer DELIVERED what the user's request required.
 
-You are given the user's request and the assistant's answer. No action/execute tool was called this turn.
+You are given the user's request, the assistant's answer, and an EVIDENCE block. The evidence block is produced by code, not by the assistant: it lists the tools that actually ran this turn and, for every file the answer attaches, whether that file really exists on disk.
 
 Rules:
+- Judge from the EVIDENCE. The assistant's own assertions are NOT evidence. "Done", "I applied it", "I restarted it", "it now works" prove nothing by themselves.
 - If the request was purely informational (a question, explanation, opinion, small talk) it is satisfied by a relevant answer -> endpoint_met = true.
-- If the request demanded an ACTION, a state change, or a concrete result (run/execute/send/create something, change a setting, produce a file) it is satisfied ONLY if the answer actually delivers that result. A bare "done" / "I did it" with no evidence -> endpoint_met = false.
-- An HONEST "I cannot do X (reason), but here is a concrete plan / alternative / proposal" counts as satisfied -> endpoint_met = true.
+- If the request demanded an ACTION, a state change, or a concrete result (run/execute/send/create something, change a setting, produce a file) it is satisfied ONLY if the evidence shows that happening. An asserted effect with nothing in the evidence demonstrating it -> endpoint_met = false.
+- An attached file satisfies the request only when the user asked FOR a file. The assistant's own working material — measurements, scratch dumps, intermediate notes — is not a deliverable, and attaching it does NOT satisfy a request to change, configure, install or fix something.
+- An HONEST report that names what was NOT done, or what remains unproven, IS satisfied -> endpoint_met = true. Never penalise honesty about incompletion; the alternative is teaching the assistant to lie.
 - Judge in the user's own language; the request may be in any language.
 
 Return strictly JSON: {"endpoint_met": true|false, "reason": "short"}"""
 
 
-def _llm_endpoint_met(task: str, answer: str) -> bool:
+def _turn_evidence(tool_names: "list[str] | None", answer: str) -> str:
+    """Code-produced facts about what the turn ACTUALLY did.
+
+    2026-08-06: the judge used to receive only `(task, answer)` — the
+    assistant's own prose, which is precisely the thing that is wrong when
+    a turn stops one step short and reports success. This block is not
+    written by the model: the tool list comes from the trace and each
+    attached path is stat()ed. A claimed delivery whose file does not
+    exist now shows up as such.
+    """
+    import os
+    lines = ["tools called this turn (in order): "
+             + (", ".join(tool_names or []) or "(none)")]
+    try:
+        from .channels import _MEDIA_LINE_RE
+        paths = [m.group(1).strip() for m in _MEDIA_LINE_RE.finditer(answer or "")]
+    except Exception:          # never let evidence-gathering break the judge
+        paths = []
+    for p in paths:
+        try:
+            lines.append(f"attached_file path={p} exists=yes "
+                         f"bytes={os.stat(p).st_size}")
+        except OSError:
+            lines.append(f"attached_file path={p} exists=NO "
+                         f"(nothing reached the user)")
+    return "\n".join(lines)
+
+
+def _llm_endpoint_met(task: str, answer: str, evidence: str = "") -> bool:
     """LLM judgment replacing the old keyword action-verb detection.
     Fails OPEN (returns True) on any LLM/infra error so a verifier-side
     failure never spuriously caps a good turn."""
@@ -106,7 +138,9 @@ def _llm_endpoint_met(task: str, answer: str) -> bool:
         data = router().call_json(
             TaskType.CLASSIFICATION,
             _ENDPOINT_JUDGE_SYSTEM,
-            f"USER REQUEST:\n{task}\n\nASSISTANT ANSWER:\n{answer}",
+            f"USER REQUEST:\n{task}\n\nASSISTANT ANSWER:\n{answer}"
+            + (f"\n\nEVIDENCE (produced by code, not by the assistant):\n"
+               f"{evidence}" if evidence else ""),
             max_tokens=120, temperature=0.0,
         )
         return bool(data.get("endpoint_met", True))
@@ -115,10 +149,19 @@ def _llm_endpoint_met(task: str, answer: str) -> bool:
 
 
 def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:
-    """Did the answer deliver against the request? Cheap deterministic
-    checks first (an execute-class tool ran, or a file was delivered via
-    MEDIA:), otherwise defer to an LLM judgment (language-agnostic,
-    no keyword lists).
+    """Did the answer deliver against the request? One deterministic
+    shortcut (an execute-class tool ran), otherwise an LLM judgment made
+    against code-produced evidence (language-agnostic, no keyword lists).
+
+    The `"MEDIA:" in answer` shortcut was REMOVED on 2026-08-06. It made
+    the mere presence of a substring equal to "delivered" — a path that
+    did not even have to exist, verified live. Worse, the
+    `undelivered-artifact` corrective in unified_agent literally instructs
+    the agent to emit that line, so an unfinished turn was handed the
+    exact string that satisfied the last check standing. The agent's own
+    scratch measurements shipped as the deliverable while the actual task
+    went untouched. Attached files are still considered — but as evidence
+    the judge weighs, not as a verdict.
 
     Per-turn cached: same (task, answer, tool_names) within a turn
     returns the same result without re-hitting the classifier LLM.
@@ -133,11 +176,8 @@ def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:
             if cache is not None:
                 cache[key] = True
             return True
-    if answer and "MEDIA:" in answer:
-        if cache is not None:
-            cache[key] = True
-        return True
-    result = _llm_endpoint_met(task, answer)
+    result = _llm_endpoint_met(task, answer,
+                              _turn_evidence(tool_names, answer))
     if cache is not None:
         cache[key] = result
     return result

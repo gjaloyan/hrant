@@ -18,7 +18,7 @@ def test_endpoint_met_called_only_once_per_turn(monkeypatch):
 
     call_count = {"n": 0}
 
-    def _fake_llm(task, answer):
+    def _fake_llm(task, answer, evidence=""):
         call_count["n"] += 1
         return False
 
@@ -50,7 +50,7 @@ def test_endpoint_met_cache_key_includes_tool_names(monkeypatch):
 
     seen = []
 
-    def _fake_llm(task, answer):
+    def _fake_llm(task, answer, evidence=""):
         seen.append((task, answer))
         return False
 
@@ -77,7 +77,7 @@ def test_endpoint_met_no_cache_outside_turn_window(monkeypatch):
 
     call_count = {"n": 0}
 
-    def _fake_llm(task, answer):
+    def _fake_llm(task, answer, evidence=""):
         call_count["n"] += 1
         return True
 
@@ -100,7 +100,7 @@ def test_execute_tool_short_circuits_before_llm(monkeypatch):
 
     call_count = {"n": 0}
 
-    def _fake_llm(task, answer):
+    def _fake_llm(task, answer, evidence=""):
         call_count["n"] += 1
         return False
 

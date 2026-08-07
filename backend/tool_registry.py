@@ -90,13 +90,19 @@ def reset_per_turn_call_cache() -> None:
     _per_turn_nudge_state.set({"n_inspections": 0, "nudge_fired": False})
 
 
+# 2026-08-06: "MEDIA: emit" was removed from the list below. Offering it as a
+# way out of a no-progress spiral taught exactly the wrong lesson — the agent
+# attached whatever scratch file it had to hand and ended the turn with the
+# real task untouched. `write_file` was removed too: no such tool is
+# registered, so it was advertising an escape that does not exist.
 _NUDGE_BANNER = (
     "[NUDGE] You have made {n} tool calls without any state-changing "
     "action this turn. Either:\n"
     "  - pick an execute-class tool now (set_setting, start_background_job, "
-    "ask_user, write_file, MEDIA: emit, complete_supervisor); OR\n"
+    "ask_user, complete_supervisor); OR\n"
     "  - call `ask_user(question, options)` if you are genuinely blocked.\n"
-    "Re-running inspections will not change the state of the world.\n"
+    "Re-running inspections will not change the state of the world. Neither "
+    "does emitting a file path: attaching a file is not performing a task.\n"
     "\n--- original tool result follows ---\n\n"
 )
 
