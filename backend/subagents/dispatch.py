@@ -105,7 +105,24 @@ def _make_tool_executor(allowed: tuple[str, ...]):
                     f"allowed: {sorted(allowed_set)}"
                 ),
             }, ensure_ascii=False), True
-        return full.execute(name, args)
+        result, is_error = full.execute(name, args)
+        # Subagents used to call full.execute directly, bypassing the parent
+        # turn's interception point entirely — so a builder subagent that
+        # edited a config and never restarted the service produced an EMPTY
+        # parent contract, and the parent reported success (2026-08-06). The
+        # contract is a ContextVar, so a subagent running in this thread
+        # shares the parent's; the obligation it raises is the parent's to
+        # discharge.
+        try:
+            from ..unified_agent import _BUILD_WRITE_TOOLS
+            if not is_error and name in _BUILD_WRITE_TOOLS:
+                from ..turn_contract import note_mutation
+                marker = note_mutation()
+                if marker:
+                    result = f"{marker}{result}"
+        except Exception:
+            pass
+        return result, is_error
 
     return _execute
 

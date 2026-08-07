@@ -1669,11 +1669,17 @@ def _append_open_status(answer: str, tag: str) -> str:
     text = (answer or "").rstrip()
     if _OPEN_STATUS_MARKER in text:
         return text
+    detail = ""
+    try:
+        from . import turn_contract as _tc
+        detail = _tc.render_user_block()
+    except Exception:
+        detail = ""
     return (
         f"{text}\n\n---\n{_OPEN_STATUS_MARKER} ({tag}) — after two correction "
         "rounds this turn still did not satisfy the request. Treat the report "
         "above as unverified: check what was actually changed before relying "
-        "on it."
+        "on it." + (f"\n\n{detail}" if detail else "")
     )
 
 
@@ -1791,6 +1797,17 @@ def _decide_self_correction(
             f"the final answer reflecting the TRUE completion state."
         )
         return f"plan-incomplete — {len(_pending)} pending", corrective
+    # Turn contract — deterministic and free, so it runs with the other
+    # structural gates rather than behind an LLM judgment. The turn changed
+    # state and never demonstrated the change took effect. This is the one
+    # gate that reads the WORLD (a shell check's exit status) rather than the
+    # agent's account of it; everything above still grades output.
+    try:
+        from . import turn_contract as _tc
+        if _tc.is_open():
+            return "contract-open", _tc.corrective_text()
+    except Exception:
+        pass
     # Block 0 — undelivered artifact (2026-07-21 PDF incident): a file the
     # user asked for exists on disk and the answer has no MEDIA: line, so the
     # user receives nothing.
@@ -2112,6 +2129,14 @@ def run_unified(
     # 1300+ lines of branches would just be footgun-bait.
     from .endpoint_check import begin_turn_cache as _ec_begin
     _ec_begin()
+    # Turn contract — same ContextVar lifecycle and the same reasoning about
+    # not tracking a reset token. A turn that changes state owes one proof
+    # that the change took effect; see backend/turn_contract.py.
+    try:
+        from .turn_contract import begin_turn as _tc_begin
+        _tc_begin()
+    except Exception:
+        pass
     # Reset the per-turn router fallback reason so the honest model notice
     # only reflects THIS turn's fallback (if any).
     try:
@@ -2937,6 +2962,18 @@ def run_unified(
         except Exception:
             marker_frame = ""
 
+        # Turn contract — the obligation is raised at the MOMENT state
+        # changes, not at the end of the turn when the agent has already
+        # composed its success story. Same trigger as the build-frame
+        # counter: the agent's own tool stream, no keywords.
+        marker_contract = ""
+        try:
+            if not is_error and name in _BUILD_WRITE_TOOLS:
+                from .turn_contract import note_mutation as _tc_note
+                marker_contract = _tc_note()
+        except Exception:
+            marker_contract = ""
+
         # T3: no-progress detector — hash the FULL raw_result head
         # (before truncation) so identical-with-noise outputs still
         # match. Marker appended OUTSIDE truncation so it survives.
@@ -2979,6 +3016,8 @@ def run_unified(
             out_parts.append(marker_drift.lstrip())
         if marker_frame:
             out_parts.append(marker_frame.lstrip())
+        if marker_contract:
+            out_parts.append(marker_contract.lstrip())
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 
@@ -3180,6 +3219,18 @@ def run_unified(
                 break  # keep the current answer if the corrective call fails
         if _last_tag:
             answer = _append_open_status(answer, _last_tag)
+        else:
+            # The turn closed, but an obligation may have been discharged by
+            # waiving it or with a check that proved nothing. That is an
+            # acceptable ending — and the owner has to see it, or "waived"
+            # quietly becomes indistinguishable from "done".
+            try:
+                from . import turn_contract as _tc
+                _block = _tc.render_user_block()
+            except Exception:
+                _block = ""
+            if _block:
+                answer = f"{(answer or '').rstrip()}\n\n---\n{_block}"
 
     # 2026-05-21: refusal-rewriter dropped. The previous version
     # ran a ~25-keyword regex over the answer head ("не могу",

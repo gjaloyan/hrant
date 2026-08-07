@@ -2231,6 +2231,17 @@ def _tracker_granularity_error(steps: list | None) -> str:
         return ""
 
 
+def _prove_change_handler(description: str, check_cmd: str,
+                          check_cwd: str = "") -> str:
+    from .turn_contract import prove_change
+    return prove_change(description, check_cmd, check_cwd)
+
+
+def _waive_proof_handler(reason: str, obligation_id: str = "") -> str:
+    from .turn_contract import waive_proof
+    return waive_proof(reason, obligation_id)
+
+
 def _pdf_edit_handler(path: str, replacements: list | None = None,
                       out_path: str = "") -> str:
     """Replace text in an existing PDF and verify BOTH directions."""
@@ -2719,6 +2730,69 @@ def register_builtin_tools() -> None:
             "required": ["url"],
         },
         handler=_verify_web_handler,
+    )
+    reg.register_func(
+        name="prove_change",
+        description=(
+            "Prove that a change you made actually took effect, by running a "
+            "shell command and letting CODE read its exit status. Required "
+            "once per turn that changes state. The command must FAIL right "
+            "now and PASS after your work lands — register it BEFORE doing "
+            "the work, then call this again with the SAME check_cmd to "
+            "capture the transition. A command that already passes proves "
+            "nothing and is recorded as unproven. Writing a file is not "
+            "proof that anything reads it: to show a service picked up a new "
+            "config, compare its restart time to the file's mtime; to show a "
+            "package installed, import it; to show a port is served, connect "
+            "to it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": ("What this proves, in the owner's terms "
+                                    "(e.g. 'searxng is running the new "
+                                    "engine set')."),
+                },
+                "check_cmd": {
+                    "type": "string",
+                    "description": ("Shell command. Exit 0 means proved. Must "
+                                    "fail before the work and pass after."),
+                },
+                "check_cwd": {"type": "string",
+                              "description": "Working directory (optional)."},
+            },
+            "required": ["description", "check_cmd"],
+        },
+        handler=_prove_change_handler,
+    )
+    reg.register_func(
+        name="waive_proof",
+        description=(
+            "Discharge this turn's proof obligation WITHOUT proving it — "
+            "because the turn only inspected, or because you genuinely "
+            "cannot verify the change from here. One call, no penalty, no "
+            "retry: an honest 'I could not verify this' is always better "
+            "than a success you did not demonstrate. The reason is shown to "
+            "the owner."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": ("What you could not verify, and why. Be "
+                                    "specific."),
+                },
+                "obligation_id": {
+                    "type": "string",
+                    "description": "Optional: waive one obligation by id.",
+                },
+            },
+            "required": ["reason"],
+        },
+        handler=_waive_proof_handler,
     )
     reg.register_func(
         name="pdf_edit",

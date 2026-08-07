@@ -64,6 +64,13 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "read_file", "save_to_workspace",
     # Execution
     "terminal_exec", "run_python",
+    # Turn contract (2026-08-06). These MUST be in BASE, not a bundle: the
+    # proof obligation is raised by the same tools listed on the line above,
+    # which are themselves always-on, so a turn can owe a proof before any
+    # bundle has been loaded. Gated, they would reproduce the exact
+    # "registered but the model never sees it" class that stranded
+    # schedule_message and the tracker tools below.
+    "prove_change", "waive_proof",
     # Search / navigation + knowledge education (read + deliberate write)
     "locate_symbol", "search_knowledge", "save_knowledge",
     "list_skills", "load_skill",

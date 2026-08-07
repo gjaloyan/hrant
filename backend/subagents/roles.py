@@ -161,9 +161,14 @@ ROLE_REGISTRY: dict[str, RoleConfig] = {
             "own context clean."
         ),
         system_prompt=_BUILDER_PROMPT,
+        # prove_change/waive_proof (2026-08-06): builder is the only role that
+        # can mutate, so it is the only one that can raise the turn's proof
+        # obligation — and it is the one that knows what it changed, so it
+        # must be able to discharge it in place. Without these it would see
+        # the PROOF OWED marker and have no tool to answer it with.
         tools=("read_file", "locate_symbol", "save_to_workspace",
                "terminal_exec", "run_python", "web_search", "fetch_url",
-               "verify_web"),
+               "verify_web", "prove_change", "waive_proof"),
         max_iterations=12,
         task_type="complex_solving",
     ),
