@@ -98,7 +98,14 @@ def test_user_text_includes_digest_when_present():
     txt = _build_synth_user_text(
         "review", ["- read_file({}) → line 1"], [],
     )
-    assert "Investigation already done" in txt
+    # The header used to read "Investigation already done". That wording was
+    # removed deliberately on 2026-06-22 (17a633c7): framing the digest as an
+    # investigation pushed the model to DENY its own completed work at the
+    # iteration cap — it disclaimed a shop it had actually built and served.
+    # See tests/test_synth_reports_actions.py. Do not restore the old string;
+    # this assertion has been red since that commit because it was never
+    # updated.
+    assert "Work you already did this turn" in txt
     assert "line 1" in txt
 
 

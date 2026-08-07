@@ -158,3 +158,73 @@ def tmp_kb(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_mod, "_router", None, raising=False)
 
     return fresh_km
+
+
+# --- CONFIG identity guard --------------------------------------------
+# 14 test files do `monkeypatch.setenv("HRANT_DATA_DIR", tmp); reload(config)`
+# to get a config pointed at a tmp dir. The reload REBINDS
+# `backend.config.CONFIG` to a brand-new object — but every module that did
+# `from .config import CONFIG` at import time still holds the ORIGINAL. From
+# that point on the two are different objects, so a later test doing
+#     monkeypatch.setitem(CONFIG._data, "knowledge", {... "base_dir": tmp})
+# patches an object nobody reads, while `backend.sessions` and friends keep
+# reading the original — which points at the developer's REAL data dir.
+#
+# That is the whole "12 red in the full run, green in isolation" problem:
+# test_speaker_id asserted 2 sessions and got 33, because it was counting the
+# real user's sessions.json. Proven 2026-08-07:
+#     before reload: sessions.CONFIG is config.CONFIG -> True
+#     after  reload: sessions.CONFIG is config.CONFIG -> False
+#
+# Restoring the identity after each test is enough, and it does not disturb
+# the reloading tests themselves: they reload inside their own fixture and
+# only need the fresh object for their own duration.
+try:
+    import backend.config as _config_mod
+    _ORIGINAL_CONFIG = _config_mod.CONFIG
+except Exception:                                    # pragma: no cover
+    _config_mod = None
+    _ORIGINAL_CONFIG = None
+
+
+@pytest.fixture(autouse=True)
+def _restore_config_identity():
+    yield
+    if _config_mod is None or _ORIGINAL_CONFIG is None:
+        return
+    if getattr(_config_mod, "CONFIG", None) is not _ORIGINAL_CONFIG:
+        _config_mod.CONFIG = _ORIGINAL_CONFIG
+    # Restoring `backend.config.CONFIG` is not enough on its own. A backend
+    # module imported for the FIRST time while a reloaded config was in place
+    # captures that throwaway object permanently — `backend.scheduled_messages`
+    # is imported lazily inside test bodies and hit exactly this. Re-point any
+    # backend module still holding a foreign CONFIG.
+    import sys as _sys
+    for _name, _mod in list(_sys.modules.items()):
+        if not _name.startswith("backend."):
+            continue
+        if getattr(_mod, "CONFIG", None) is not None and \
+                getattr(_mod, "CONFIG") is not _ORIGINAL_CONFIG:
+            try:
+                _mod.CONFIG = _ORIGINAL_CONFIG
+            except Exception:
+                pass
+
+
+@pytest.fixture(autouse=True)
+def _isolate_gate_metrics(tmp_path, monkeypatch):
+    """Never let a test append telemetry to the developer's real data dir.
+
+    `prove_change`, `waive_proof` and the completion judge's fail-open path all
+    append to knowledge/gate_metrics.jsonl. Any test that touches them without
+    redirecting base_dir writes into ~/.hrant/data — found 2026-08-07 with 43
+    rows of test output sitting in the real file, minutes after this session
+    finished removing exactly this class of leak. One guard here beats
+    remembering it in every future test.
+    """
+    try:
+        import backend.gate_metrics as _gm
+    except ImportError:
+        return
+    monkeypatch.setattr(_gm, "_path",
+                        lambda: tmp_path / "gate_metrics.jsonl")

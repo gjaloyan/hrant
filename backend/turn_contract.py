@@ -130,6 +130,15 @@ def note_mutation() -> str:
     return _MUTATION_MARKER
 
 
+def _metric(**fields) -> None:
+    """Counters are advisory. They must never be able to break a turn."""
+    try:
+        from .gate_metrics import record_probe
+        record_probe(**fields)
+    except Exception:
+        pass
+
+
 # ── running a check ───────────────────────────────────────────────────
 
 def _run(cmd: str, cwd: str = "") -> tuple[str, int | None, str]:
@@ -175,6 +184,7 @@ def prove_change(description: str, check_cmd: str, check_cwd: str = "") -> str:
             # Passed BEFORE any further work — it cannot distinguish done from
             # not-done, so it demonstrates nothing. Resolved, but surfaced.
             ob.status = "unproven"
+            _metric(phase="registered", status="unproven", cmd=cmd)
             return (
                 f"[{ob.id}] This command ALREADY PASSES (exit {code}). It "
                 "cannot tell done from not-done, so it proves nothing and is "
@@ -186,6 +196,7 @@ def prove_change(description: str, check_cmd: str, check_cwd: str = "") -> str:
             return (f"[{ob.id}] The check could not run: {detail}. Fix the "
                     "command and call prove_change again.")
         ob.status = "unmet"
+        _metric(phase="registered", status="unmet", cmd=cmd)
         return (f"[{ob.id}] Registered, currently failing (exit {code}) — "
                 "good, that is what makes it a proof. Do the work, then call "
                 "prove_change again with the SAME check_cmd.")
@@ -194,6 +205,7 @@ def prove_change(description: str, check_cmd: str, check_cwd: str = "") -> str:
     existing.exit_code, existing.detail = code, detail
     if status == "met":
         existing.status = "met"
+        _metric(phase="resolved", status="met", cmd=cmd)
         return (f"[{existing.id}] PROVED: the check failed before your work "
                 f"and passes now (exit {code}).")
     existing.status = "unmet"
@@ -209,6 +221,13 @@ def waive_proof(reason: str, obligation_id: str = "") -> str:
     why = (reason or "").strip()
     if not why:
         return "A reason is required — say what you could not verify and why."
+    # Recorded here, above BOTH branches: the common case on a read-only turn
+    # is a waiver with no probe registered at all, which returns early below.
+    try:
+        from .gate_metrics import record_waive
+        record_waive(reason=why)
+    except Exception:
+        pass
     targets = [o for o in _iter(st)
                if o.status not in RESOLVED
                and (not obligation_id or o.id == obligation_id)]

@@ -143,9 +143,27 @@ def _llm_endpoint_met(task: str, answer: str, evidence: str = "") -> bool:
                f"{evidence}" if evidence else ""),
             max_tokens=120, temperature=0.0,
         )
+        if "endpoint_met" not in (data or {}):
+            # Malformed response: we still fail open, but this is the judge
+            # NOT ruling, and it must not look like a pass. Counted.
+            _note_fail_open("missing_key", str(data)[:120])
+            return True
         return bool(data.get("endpoint_met", True))
-    except Exception:
+    except Exception as e:
+        # Deliberate fail-open: a verifier-side outage must never cap a good
+        # turn. But provider failures are routine here, so without a counter
+        # the judge could be silently absent most of the time and nothing
+        # would say so. Counted, not changed.
+        _note_fail_open("exception", f"{type(e).__name__}: {e}")
         return True
+
+
+def _note_fail_open(kind: str, detail: str = "") -> None:
+    try:
+        from .gate_metrics import record_judge_fail_open
+        record_judge_fail_open(kind=kind, detail=detail)
+    except Exception:
+        pass
 
 
 def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:

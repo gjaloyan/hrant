@@ -309,10 +309,21 @@ class SelfEvaluator:
         total_chats = sum(1 for e in all_entries if e.get("is_chat"))
         all_confs = [e["confidence"] for e in all_entries if e.get("confidence") is not None and not e.get("is_chat")]
 
+        # Completion-gate counters. Surfaced here because a metric nobody
+        # looks at is not a metric: `first_try_pass_rate` near 1.0 means the
+        # proofs are decorative, and a climbing `judge_fail_open` means the
+        # completion judge is silently absent.
+        try:
+            from .gate_metrics import summary as _gate_summary
+            gates = _gate_summary(days=7)
+        except Exception:
+            gates = {}
+
         return {
             "total_logged": len(all_entries),
             "total_tasks": total_tasks,
             "total_chats": total_chats,
+            "gates": gates,
             "overall_avg_confidence": round(sum(all_confs) / len(all_confs), 1) if all_confs else 0,
             "today": today,
             "weekly_trend": trend,

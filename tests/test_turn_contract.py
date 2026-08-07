@@ -24,7 +24,15 @@ import backend.turn_contract as tc
 
 
 @pytest.fixture(autouse=True)
-def _turn():
+def _turn(tmp_path, monkeypatch):
+    # Redirect base_dir too: prove_change/waive_proof append to
+    # gate_metrics.jsonl, and without this the suite writes telemetry into the
+    # developer's REAL knowledge dir. Caught 2026-08-07 by reading the
+    # counters and finding 43 rows that came from test runs — the same class
+    # of leak this session spent its afternoon removing.
+    from backend.config import CONFIG
+    monkeypatch.setitem(CONFIG._data, "knowledge",
+                        {**CONFIG._data["knowledge"], "base_dir": str(tmp_path)})
     token = tc.begin_turn()
     yield
     tc.reset_turn(token)
