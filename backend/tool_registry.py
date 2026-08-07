@@ -95,6 +95,20 @@ def reset_per_turn_call_cache() -> None:
 # attached whatever scratch file it had to hand and ended the turn with the
 # real task untouched. `write_file` was removed too: no such tool is
 # registered, so it was advertising an escape that does not exist.
+# Tools whose whole value is observing a world that CHANGED between calls.
+# The dedup guard exists to stop the model re-running the same INSPECTION; for
+# these, the second identical call is the point. 2026-08-07: `prove_change`
+# tells the agent "call it again with the SAME check_cmd afterwards to capture
+# the transition" — and the cache answered that second call with the stale
+# first result, so the turn contract could never be discharged through the
+# tool path at all.
+NEVER_DEDUP: frozenset[str] = frozenset({
+    "prove_change", "waive_proof", "verify_web",
+    "check_subagents", "get_background_job", "list_background_jobs",
+    "terminal_exec", "run_python",
+})
+
+
 _NUDGE_BANNER = (
     "[NUDGE] You have made {n} tool calls without any state-changing "
     "action this turn. Either:\n"
@@ -271,7 +285,9 @@ class ToolRegistry:
         # handler. The handler is NOT invoked for duplicates.
         cache = _per_turn_call_cache.get()
         cache_key = (name, _canonical_args(arguments))
-        if cache_key in cache:
+        if name in NEVER_DEDUP:
+            cache_key = None
+        if cache_key is not None and cache_key in cache:
             prev_text, prev_is_error = cache[cache_key]
             synth = (
                 f"[DUPLICATE CALL] You already invoked {name!r} with "
@@ -300,8 +316,9 @@ class ToolRegistry:
         # Store in cache for the rest of this turn. Mutate-then-set
         # so we don't lose interleaved writes from other tools that
         # share the ContextVar in this same turn.
-        cache[cache_key] = (text, is_error)
-        _per_turn_call_cache.set(cache)
+        if cache_key is not None:
+            cache[cache_key] = (text, is_error)
+            _per_turn_call_cache.set(cache)
         # No-progress nudge: prepend a banner if we've crossed the
         # inspect-without-execute threshold this turn.
         banner = _update_nudge_state_and_maybe_banner(name)

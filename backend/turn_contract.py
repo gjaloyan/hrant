@@ -65,6 +65,7 @@ class Obligation:
     probe_cwd: str = ""
     exit_code: int | None = None
     detail: str = ""              # stderr/stdout tail, or the waiver reason
+    resolved_at: int = 0          # mutation generation this resolution covers
 
 
 @dataclass
@@ -72,8 +73,10 @@ class _State:
     obligations: dict = field(default_factory=dict)
     order: list = field(default_factory=list)
     required: bool = False        # did this turn make build-writes?
-    notified: bool = False        # has the one-time marker fired?
+    notified: bool = False        # has the marker fired for THIS generation?
     seq: int = 0
+    mut_seq: int = 0              # generation, bumped on every build-write
+    notified_at: int = 0          # generation the marker last fired for
 
 
 _state: ContextVar["_State | None"] = ContextVar("_turn_contract", default=None)
@@ -124,8 +127,15 @@ def note_mutation() -> str:
     if st is None:
         return ""
     st.required = True
-    if st.notified:
-        return ""
+    # Generational (2026-08-07 audit): a waiver or proof only covers what had
+    # happened when it was made. Without this, `waive_proof("just looking
+    # around")` as the FIRST call of a turn discharged every state change that
+    # followed — one call, no penalty, and the corrective never fired again.
+    was_covered = _covered(st)      # discharged as of the PREVIOUS generation?
+    st.mut_seq += 1
+    if st.notified and not was_covered:
+        return ""            # still owed and already said so — say it once
+    st.notified_at = st.mut_seq
     st.notified = True
     return _MUTATION_MARKER
 
@@ -184,6 +194,7 @@ def prove_change(description: str, check_cmd: str, check_cwd: str = "") -> str:
             # Passed BEFORE any further work — it cannot distinguish done from
             # not-done, so it demonstrates nothing. Resolved, but surfaced.
             ob.status = "unproven"
+            ob.resolved_at = st.mut_seq
             _metric(phase="registered", status="unproven", cmd=cmd)
             return (
                 f"[{ob.id}] This command ALREADY PASSES (exit {code}). It "
@@ -203,8 +214,19 @@ def prove_change(description: str, check_cmd: str, check_cwd: str = "") -> str:
 
     # Re-probe of a known command: this is the transition that counts.
     existing.exit_code, existing.detail = code, detail
+    if existing.status == "unproven":
+        # It passed at registration, so it never demonstrated a failing state
+        # and a later pass proves nothing. Refusing to promote it is what stops
+        # `prove_change(d1, "true")` + `prove_change(d2, "true")` from printing
+        # "PROVED: the check failed before your work and passes now" — a
+        # literally false sentence the 2026-08-07 audit reproduced.
+        return (f"[{existing.id}] Still UNPROVEN: this command already passed "
+                "before any work, so running it again demonstrates nothing. "
+                "Register a check that FAILS now and passes once the work "
+                "lands, or waive_proof with a reason.")
     if status == "met":
         existing.status = "met"
+        existing.resolved_at = st.mut_seq
         _metric(phase="resolved", status="met", cmd=cmd)
         return (f"[{existing.id}] PROVED: the check failed before your work "
                 f"and passes now (exit {code}).")
@@ -234,12 +256,12 @@ def waive_proof(reason: str, obligation_id: str = "") -> str:
     if not targets and not st.obligations:
         st.seq += 1
         ob = Obligation(id=f"c{st.seq}", description="(no proof registered)",
-                        status="waived", detail=why)
+                        status="waived", detail=why, resolved_at=st.mut_seq)
         st.obligations[ob.id] = ob
         st.order.append(ob.id)
         return f"[{ob.id}] Waived: {why}. The owner will see this."
     for o in targets:
-        o.status, o.detail = "waived", why
+        o.status, o.detail, o.resolved_at = "waived", why, st.mut_seq
     return (f"Waived {len(targets)} obligation(s): {why}. The owner will see "
             "this — it is not a penalty.")
 
@@ -250,15 +272,33 @@ def _iter(st: "_State"):
     return [st.obligations[i] for i in st.order if i in st.obligations]
 
 
+def _covered(st: "_State") -> bool:
+    """Is the CURRENT mutation generation discharged by some resolution?"""
+    return any(o.status in RESOLVED and o.resolved_at >= st.mut_seq
+               for o in _iter(st))
+
+
 def is_open() -> bool:
-    """True iff this turn changed state and never discharged the obligation."""
+    """True iff this turn changed state and has not discharged the obligation.
+
+    Two ways it stays open, both found by the 2026-08-07 audit reproducing
+    real bypasses:
+
+    * A registered check that is STILL FAILING is an open obligation, even if
+      some other check passed. Previously ANY resolution closed the turn, so a
+      turn that proved "config written" and left "service restarted" failing
+      shipped silently — byte-for-byte the incident this module was written
+      for. An abandoned probe must be waived, not outvoted.
+    * A resolution only covers the mutations that had happened when it was
+      made. Otherwise `waive_proof("just looking around")` as the first call
+      discharged everything the turn went on to do.
+    """
     st = _get()
     if st is None or not st.required:
         return False
-    obs = _iter(st)
-    if not obs:
+    if any(o.status == "unmet" for o in _iter(st)):
         return True
-    return not any(o.status in RESOLVED for o in obs)
+    return not _covered(st)
 
 
 def open_obligations() -> list:
@@ -316,7 +356,6 @@ def render_user_block() -> str:
     if st is None:
         return ""
     obs = _iter(st)
-    proved = any(o.status == "met" for o in obs)
     rows = []
     for o in obs:
         label = o.description or o.probe_cmd
@@ -325,7 +364,13 @@ def render_user_block() -> str:
         elif o.status == "unproven":
             rows.append(f"⚠ UNPROVEN — {label}\n  the check already passed "
                         f"before the work, so it demonstrates nothing")
-        elif o.status not in RESOLVED and not proved:
+        elif o.status not in RESOLVED:
+            # No longer suppressed when some OTHER obligation was met. That
+            # suppression (added 2026-08-07 to stop crying wolf over abandoned
+            # probes) turned out to launder the unproved half of a two-part
+            # turn — "config written" met, "service restarted" unmet, block
+            # empty. is_open() now keeps such a turn open instead, so by the
+            # time anything renders, an unmet row is a real one.
             rows.append(
                 f"⚠ NOT DONE — {label or 'the change was never verified'}"
                 + (f"\n  check still failing (exit {o.exit_code})"

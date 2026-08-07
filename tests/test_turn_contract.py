@@ -277,11 +277,19 @@ def test_the_only_mutating_subagent_role_can_discharge_its_own_obligation():
 
 # ── calibrated against three live turns, 2026-08-07 ───────────────────
 
-def test_a_proved_turn_does_not_cry_wolf_over_abandoned_probes(tmp_path):
-    """Observed live: the agent registered a check, refined it, registered a
-    better one, PROVED the work — and the answer still carried NOT DONE for
-    the superseded attempt. A gate that cries wolf on a successful turn gets
-    ignored on a failing one."""
+def test_an_abandoned_probe_must_be_waived_not_outvoted(tmp_path):
+    """Revised 2026-08-07 after the audit. The original version of this test
+    asserted that proving ANY obligation suppressed the others, which is how
+    the agent iterates — register a check, refine it, register a better one.
+
+    That was too generous, and the audit reproduced the cost: a turn proving
+    "config written" while "service restarted" stayed failing shipped with an
+    EMPTY status block. The suppression laundered the unproved half of exactly
+    the incident this module exists for.
+
+    The turn now stays open instead, so the agent must either make the
+    abandoned probe pass or waive it with a reason — one call either way. It
+    still does not cry wolf, because it no longer ends the turn silently."""
     marker = tmp_path / "done.txt"
     good = _cmd(f"os.path.exists(r'{marker}')")
     tc.note_mutation()
@@ -290,6 +298,8 @@ def test_a_proved_turn_does_not_cry_wolf_over_abandoned_probes(tmp_path):
     marker.write_text("x", encoding="utf-8")
     tc.prove_change("the real check", good)
 
+    assert tc.is_open() is True, "an abandoned failing probe is still open"
+    tc.waive_proof("superseded by the real check")
     assert tc.is_open() is False
     assert "NOT DONE" not in tc.render_user_block()
 
@@ -311,3 +321,63 @@ def test_an_honest_waiver_does_not_read_like_a_failure():
     assert "NOT PROVED" not in block and "NOT DONE" not in block
     assert "not verified" in block
     assert "only inspected" in block
+
+
+# ── bypasses found by the 2026-08-07 audit ────────────────────────────
+
+def test_the_second_probe_survives_the_dedup_cache(tmp_path):
+    """The contract's whole mechanic is 'call it again with the SAME
+    check_cmd'. The per-turn duplicate-call cache answered that second call
+    with the stale first result, so the contract could never be discharged
+    through the tool path at all — invisible to the suite because every other
+    test calls prove_change directly."""
+    from backend.tool_registry import get_registry, reset_per_turn_call_cache
+    reset_per_turn_call_cache()
+    marker = tmp_path / "m.txt"
+    args = {"description": "marker exists",
+            "check_cmd": _cmd(f"os.path.exists(r'{marker}')")}
+    reg = get_registry()
+    tc.note_mutation()
+    reg.execute("prove_change", args)
+    marker.write_text("x", encoding="utf-8")
+    text, _ = reg.execute("prove_change", args)
+    assert "DUPLICATE" not in text
+    assert "PROVED" in text
+    assert tc.is_open() is False
+
+
+def test_a_waiver_does_not_cover_state_changed_after_it():
+    """`waive_proof("just looking around")` as the first call of a turn used
+    to discharge every mutation that followed — one call, no penalty, and the
+    corrective never fired again."""
+    tc.waive_proof("just looking around")
+    tc.note_mutation()
+    assert tc.is_open() is True
+
+
+def test_an_always_passing_check_cannot_be_promoted_by_a_second_call():
+    """Two calls of a command that exits 0 used to print 'PROVED: the check
+    failed before your work and passes now' — a literally false sentence that
+    restored the cost of faking a proof to one trivial command."""
+    tc.note_mutation()
+    tc.prove_change("did the work", _cmd("True"))
+    out = tc.prove_change("re-check", _cmd("True"))
+    assert "PROVED" not in out
+    assert "UNPROVEN" in out
+
+
+def test_a_met_obligation_does_not_launder_an_unmet_one(tmp_path):
+    """The 2026-08-06 incident verbatim: 'config written' provable, 'service
+    restarted' not. Any single resolution used to close the turn AND suppress
+    the failing row, so it shipped silently."""
+    marker = tmp_path / "cfg.txt"
+    check = _cmd(f"os.path.exists(r'{marker}')")
+    tc.note_mutation()
+    tc.prove_change("config written", check)
+    marker.write_text("y", encoding="utf-8")
+    tc.prove_change("config written", check)
+    tc.prove_change("service restarted", _cmd("False"))
+
+    assert tc.is_open() is True
+    block = tc.render_user_block()
+    assert "NOT DONE" in block and "service restarted" in block
