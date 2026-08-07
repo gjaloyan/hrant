@@ -480,7 +480,10 @@ def test_read_key_unix_lone_esc_returns_esc():
 
     master, slave = _os.openpty() if hasattr(_os, "openpty") else pty.openpty()
     try:
-        _os.write(master, b"\x1b")  # only ESC, no [X follow-up
+        # Delivered after raw mode for the same reason as the arrow test:
+        # tty.setraw() flushes pending input, so a write issued before the
+        # call is discarded and the read blocks forever.
+        writer = _type_after_raw_mode(master, b"\x1b")  # only ESC, no [X
         slave_file = _os.fdopen(slave, "rb", buffering=0)
         real_stdin = _sys.stdin
         try:
