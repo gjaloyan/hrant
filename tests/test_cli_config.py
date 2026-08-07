@@ -387,6 +387,30 @@ def test_cli_menu_returns_default_on_eof(monkeypatch):
 # would let the bug recur without anyone noticing.
 
 
+def _type_after_raw_mode(master_fd, payload, delay=0.05):
+    """Deliver `payload` to the pty AFTER the code under test has entered raw
+    mode, and return the thread so the caller can join it.
+
+    `_read_key_unix` calls `tty.setraw(fd)`, which is
+    `termios.tcsetattr(fd, TCSAFLUSH, ...)` — and TCSAFLUSH DISCARDS pending
+    input. Writing the payload before the call therefore races: the bytes are
+    flushed away and the following `os.read` blocks forever on input that no
+    longer exists. On Windows both tests are skipped, so the suite looked green
+    while every full run on the Linux box hung here (measured 2026-08-07: the
+    prod suite sat at 18% for 66 minutes on this file).
+
+    Writing from a timer thread also models reality better — a human presses
+    the key after the menu has entered raw mode, not before.
+    """
+    import os as _os
+    import threading
+
+    t = threading.Timer(delay, lambda: _os.write(master_fd, payload))
+    t.daemon = True
+    t.start()
+    return t
+
+
 @pytest.mark.skipif(
     __import__("sys").platform == "win32",
     reason="pty + termios are Unix-only; the Windows arrow path "
@@ -414,9 +438,10 @@ def test_read_key_unix_decodes_arrow_keys_from_real_pty():
     for payload, expected in cases:
         master, slave = pty.openpty()
         try:
-            # Push the keystrokes into the master end so they're
-            # readable from the slave (which we'll point stdin at).
-            _os.write(master, payload)
+            # Delivered from a timer thread: tty.setraw() flushes pending
+            # input, so a write issued before the call is discarded and the
+            # read blocks forever. See _type_after_raw_mode.
+            writer = _type_after_raw_mode(master, payload)
             # Replace sys.stdin with the slave-side file object for
             # the duration of the call. `_read_key_unix` reads via
             # `sys.stdin.fileno()`, then does the actual read with
@@ -429,6 +454,7 @@ def test_read_key_unix_decodes_arrow_keys_from_real_pty():
                 got = cli_menu._read_key_unix()
             finally:
                 _sys.stdin = real_stdin
+                writer.join(timeout=1)
             assert got == expected, (
                 f"payload={payload!r}: expected {expected!r}, got {got!r}"
             )
@@ -462,6 +488,7 @@ def test_read_key_unix_lone_esc_returns_esc():
             got = cli_menu._read_key_unix()
         finally:
             _sys.stdin = real_stdin
+            writer.join(timeout=1)
         assert got == "esc"
     finally:
         try:
