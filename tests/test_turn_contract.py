@@ -145,7 +145,7 @@ def test_a_waiver_is_shown_to_the_owner_not_hidden():
     tc.note_mutation()
     tc.waive_proof("ran out of context before verifying the systemd unit")
     block = tc.render_user_block()
-    assert "NOT PROVED" in block
+    assert "not verified" in block
     assert "ran out of context" in block
 
 
@@ -160,7 +160,7 @@ def test_waiver_clears_a_registered_but_failing_check():
     tc.prove_change("restarted", _cmd("False"))
     tc.waive_proof("no permission to restart the service")
     assert tc.is_open() is False
-    assert "NOT PROVED" in tc.render_user_block()
+    assert "not verified" in tc.render_user_block()
 
 
 # ── robustness ────────────────────────────────────────────────────────
@@ -265,3 +265,41 @@ def test_the_only_mutating_subagent_role_can_discharge_its_own_obligation():
         if mutates:
             assert "prove_change" in tools, f"{name} can mutate but not prove"
             assert "waive_proof" in tools, f"{name} can mutate but not waive"
+
+
+# ── calibrated against three live turns, 2026-08-07 ───────────────────
+
+def test_a_proved_turn_does_not_cry_wolf_over_abandoned_probes(tmp_path):
+    """Observed live: the agent registered a check, refined it, registered a
+    better one, PROVED the work — and the answer still carried NOT DONE for
+    the superseded attempt. A gate that cries wolf on a successful turn gets
+    ignored on a failing one."""
+    marker = tmp_path / "done.txt"
+    good = _cmd(f"os.path.exists(r'{marker}')")
+    tc.note_mutation()
+    tc.prove_change("first attempt, later abandoned", _cmd("False"))
+    tc.prove_change("the real check", good)
+    marker.write_text("x", encoding="utf-8")
+    tc.prove_change("the real check", good)
+
+    assert tc.is_open() is False
+    assert "NOT DONE" not in tc.render_user_block()
+
+
+def test_an_unproved_turn_still_says_not_done():
+    """The mirror: with nothing proved, the open probe must still be flagged."""
+    tc.note_mutation()
+    tc.prove_change("service restarted", _cmd("False"))
+    assert "NOT DONE" in tc.render_user_block()
+
+
+def test_an_honest_waiver_does_not_read_like_a_failure():
+    """Observed live: a read-only 'how much free disk is there' turn printed a
+    bold NOT PROVED banner. The moment honesty looks like failure, the agent
+    stops being honest."""
+    tc.note_mutation()
+    tc.waive_proof("this turn only inspected disk usage and changed nothing")
+    block = tc.render_user_block()
+    assert "NOT PROVED" not in block and "NOT DONE" not in block
+    assert "not verified" in block
+    assert "only inspected" in block

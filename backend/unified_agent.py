@@ -3180,6 +3180,7 @@ def run_unified(
     # See `_decide_self_correction` for the gating logic; both decisions
     # are LLM judgments (language-agnostic, no keyword lists). Supervisor
     # turns skip both — they're internal plumbing.
+    _contract_status_tag = ""
     if not supervisor_mode and (answer or "").strip():
         # Two rounds, and the RE-ANSWER IS RE-GATED (2026-08-06). The single
         # -shot version accepted whatever came back unexamined, so a corrective
@@ -3217,20 +3218,16 @@ def run_unified(
                 answer = _rewrite_xml_tool_call_dump(answer, agent)
             except LLMError:
                 break  # keep the current answer if the corrective call fails
-        if _last_tag:
-            answer = _append_open_status(answer, _last_tag)
-        else:
-            # The turn closed, but an obligation may have been discharged by
-            # waiving it or with a check that proved nothing. That is an
-            # acceptable ending — and the owner has to see it, or "waived"
-            # quietly becomes indistinguishable from "done".
-            try:
-                from . import turn_contract as _tc
-                _block = _tc.render_user_block()
-            except Exception:
-                _block = ""
-            if _block:
-                answer = f"{(answer or '').rstrip()}\n\n---\n{_block}"
+        # The status line is NOT appended here. It is appended after the
+        # answer_critic pass, near the return — see `_contract_status_tag`.
+        # 2026-08-07, found by running this against the live agent: appending
+        # before the critic feeds the code-written block back into the model,
+        # which then edits it. An observed turn answered
+        #   "Proof note corrected: I should not have said 'NOT PROVED — no
+        #    proof registered'; the verifier shows proof was registered"
+        # — the agent arguing with the gate's own text. Whatever the model can
+        # rewrite, it will.
+        _contract_status_tag = _last_tag
 
     # 2026-05-21: refusal-rewriter dropped. The previous version
     # ran a ~25-keyword regex over the answer head ("не могу",
@@ -3761,6 +3758,21 @@ def run_unified(
     except Exception:
         _intended = ""
     _model_note = fallback_note(_intended, _model_used, turn_fallback_reason())
+    # Turn-contract status, appended LAST — after the critic, after every
+    # revision pass, immediately before the answer leaves. Nothing downstream
+    # can edit or drop it, which is the point: the model must not get a chance
+    # to soften the record of what it failed to prove.
+    if not supervisor_mode:
+        if _contract_status_tag:
+            answer = _append_open_status(answer, _contract_status_tag)
+        else:
+            try:
+                from . import turn_contract as _tc
+                _block = _tc.render_user_block()
+            except Exception:
+                _block = ""
+            if _block:
+                answer = f"{(answer or '').rstrip()}\n\n{_block}"
     return AgentAnswer(
         answer=answer or "",
         verification=vr,

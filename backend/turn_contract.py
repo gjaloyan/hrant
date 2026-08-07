@@ -276,23 +276,41 @@ def corrective_text() -> str:
 
 
 def render_user_block() -> str:
-    """The status the OWNER sees. Written from recorded state, never prose."""
+    """The status the OWNER sees. Written from recorded state, never prose.
+
+    Calibrated 2026-08-07 against three live turns, which exposed two ways of
+    crying wolf:
+
+    * A turn that DID prove its work still printed NOT DONE for probes it had
+      abandoned along the way. The agent iterates — it registers a check,
+      refines it, registers a better one — and the superseded attempts are not
+      failures. Once something is `met`, stale `unmet` probes are noise, and a
+      gate that cries wolf on a successful turn gets ignored on a failing one.
+
+    * A read-only turn that honestly waived printed a bold "NOT PROVED" over
+      the answer to "how much free disk is there". Nothing was at stake and
+      nothing was claimed, so the alarm was pure noise. A waiver is an honest
+      ending, and it must READ like one — the moment honesty looks like
+      failure, the agent stops being honest.
+    """
     st = _get()
     if st is None:
         return ""
+    obs = _iter(st)
+    proved = any(o.status == "met" for o in obs)
     rows = []
-    for o in _iter(st):
+    for o in obs:
+        label = o.description or o.probe_cmd
         if o.status == "waived":
-            rows.append(f"NOT PROVED — {o.description or o.probe_cmd}\n"
-                        f"  reason: {o.detail}")
+            rows.append(f"ⓘ not verified — {o.detail}")
         elif o.status == "unproven":
-            rows.append(f"UNPROVEN — {o.description or o.probe_cmd}\n"
-                        f"  the check already passed before the work, so it "
-                        f"demonstrates nothing")
-        elif o.status not in RESOLVED:
-            rows.append(f"NOT DONE — {o.description or o.probe_cmd or 'the change was never verified'}"
-                        + (f"\n  check still failing (exit {o.exit_code})"
-                           if o.exit_code is not None else ""))
-    if not rows and st.required and not _iter(st):
-        rows.append("NOT DONE — this turn changed state and never verified it")
+            rows.append(f"⚠ UNPROVEN — {label}\n  the check already passed "
+                        f"before the work, so it demonstrates nothing")
+        elif o.status not in RESOLVED and not proved:
+            rows.append(
+                f"⚠ NOT DONE — {label or 'the change was never verified'}"
+                + (f"\n  check still failing (exit {o.exit_code})"
+                   if o.exit_code is not None else ""))
+    if not rows and st.required and not obs:
+        rows.append("⚠ NOT DONE — this turn changed state and never verified it")
     return "\n".join(rows)
