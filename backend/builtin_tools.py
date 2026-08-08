@@ -205,6 +205,16 @@ def _read_file_handler(
     start_line: int | None = None,
     end_line: int | None = None,
 ) -> str:
+    # Owner gate (2026-08-08 audit, critical). Every other dangerous tool has
+    # one — terminal_exec, run_python, sandbox_exec, set_setting, the
+    # grant/revoke pair, self-modification — and read_file was simply left off
+    # that list. The only defence was `roles.permissions_block`, a soft prompt,
+    # in a codebase whose stated lesson is that soft prompts do not hold.
+    # Measured on prod: a guest Telegram speaker asking for the channels config
+    # got back the live bot token in plain text.
+    refuse, _speaker = _check_owner("read_file")
+    if refuse:
+        return refuse
     args = {
         "path": path, "max_chars": max_chars,
         "start_line": start_line, "end_line": end_line,

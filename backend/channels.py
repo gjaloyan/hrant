@@ -503,19 +503,43 @@ _MEDIA_IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".webp", ".gif"})
 _MEDIA_AUDIO_EXTS = frozenset({".mp3", ".m4a", ".ogg", ".oga", ".wav", ".flac"})
 
 
+# Files that must never leave the box as an attachment, no matter which
+# allowed root they sit in (2026-08-08 audit). data_dir used to be allowed
+# wholesale, and the secrets live inside it: `.env` and
+# `knowledge/channels.json` (the live bot token) both passed the check, and
+# `_strip_and_send_media` strips the MEDIA: line from the visible reply, so
+# the exfiltration left no trace in the message body.
+_MEDIA_SECRET_NAMES = frozenset({
+    ".env", "channels.json", "roles.json", "pairing.json",
+    "active_model.json", "router_state.json", "credentials.json",
+})
+
+
 def _media_path_is_safe(p: Path) -> bool:
-    """Allow paths under data_dir and the system /tmp only — guards
-    against `MEDIA:/etc/...` or other host-file leaks."""
+    """Allow attachments from the delivery directories only — guards against
+    `MEDIA:/etc/...` host-file leaks AND against the higher-value target the
+    old whole-data_dir allowlist exposed: the agent's own secrets."""
     try:
         rp = p.resolve()
     except Exception:
         return False
     if not rp.is_absolute() or not rp.exists() or not rp.is_file():
         return False
+    # Never a dotfile, never a known secret, anywhere.
+    if rp.name.startswith(".") or rp.name.lower() in _MEDIA_SECRET_NAMES:
+        return False
+    # Only the DELIVERY directories, not the whole data dir. outbox is where
+    # the agent is told to put things it means the owner to receive; the rest
+    # of data_dir is its private state.
+    delivery_roots: list[Path] = []
     try:
-        data_root = paths.data_dir(require=False).resolve()
+        _dd = paths.data_dir(require=False).resolve()
+        for rel in ("workspace/outbox", "outbox"):
+            cand = (_dd / rel)
+            if cand.exists():
+                delivery_roots.append(cand.resolve())
     except Exception:
-        data_root = None
+        pass
     # Cross-platform tempdir (audit 2026-06-10 N5): on Windows neither
     # /tmp nor /var/tmp exist, so the safety check would silently
     # refuse legitimate temp-file MEDIA: deliveries. tempfile.gettempdir()
@@ -527,7 +551,7 @@ def _media_path_is_safe(p: Path) -> bool:
         Path("/tmp"),
         Path("/var/tmp"),
     ]
-    candidates = ([data_root] if data_root else []) + tmp_roots
+    candidates = delivery_roots + tmp_roots
     for root in candidates:
         try:
             rp.relative_to(root)
@@ -645,6 +669,22 @@ class TelegramBot:
         # value is { 'shas': [...], 'caption': str, 'first_update':
         # Update, 'flush_task': asyncio.Task | None }.
         self._media_groups: dict[str, dict] = {}
+
+    def _current_allowed_users(self, fallback: "list | None" = None) -> list:
+        """The allowed_users list AS IT IS ON DISK RIGHT NOW.
+
+        Falls back to the constructor snapshot if the config cannot be read,
+        so a transient read error can never widen access beyond what the bot
+        started with — and can never lock the owner out either.
+        """
+        try:
+            cfg = get_channel(self.channel_id) or {}
+            live = (cfg.get("config") or {}).get("allowed_users")
+            if isinstance(live, list):
+                return live
+        except Exception:
+            pass
+        return list(fallback or self.allowed_users or [])
 
     def start(self) -> None:
         if self._running:
@@ -1487,7 +1527,14 @@ class TelegramBot:
                 decision = is_telegram_allowed(
                     user.id,
                     username=user.username or "",
-                    legacy_allowed=allowed,
+                    # Re-read per message (2026-08-08 audit). `allowed` is the
+                    # constructor snapshot taken when the bot started, so
+                    # `revoke_telegram_access` rewrote channels.json and the
+                    # running bot never noticed — the revoke reported success
+                    # and the user kept talking to the agent until the next
+                    # restart. A revocation must take effect on the next
+                    # message, not on the next deploy.
+                    legacy_allowed=self._current_allowed_users(allowed),
                     first_message=_initial_text,
                     label=user.full_name or user.username or "",
                 )

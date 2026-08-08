@@ -307,6 +307,22 @@ def is_telegram_allowed(
             reason=f"role={role}",
         )
 
+    # Layer 1b: DENY BEATS ALLOW (2026-08-08 audit). An explicit entry in
+    # roles.json is a decision the owner made; the legacy allowed_users list is
+    # a pre-roles snapshot nobody has curated. Before this, revoking someone by
+    # setting their role to `guest` was silently overridden by their lingering
+    # presence in that legacy list — the revoke appeared to work and did not.
+    try:
+        _explicit = ((_roles.list_roles().get("speakers") or {})
+                     .get(speaker_id) or {}).get("role")
+    except Exception:
+        _explicit = None
+    if _explicit and str(_explicit).lower() not in ("owner", "trusted"):
+        return AccessDecision(
+            allowed=False, role=role,
+            reason=f"explicitly set to {str(_explicit).lower()} in roles.json",
+        )
+
     # Layer 2: legacy allowed_users (string match against id or username)
     if legacy_allowed:
         if uid_str in legacy_allowed or (username and username in legacy_allowed):
