@@ -1619,16 +1619,29 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
     note_hits = []
     try:
         from .hybrid_searcher import HYBRID
-        # Re-use the post-Phase-2-audit min_raw_score of 0.55 so
-        # we don't pull noise (Mercury → Scary Movie).
-        note_hits = HYBRID.search(task, limit=limit)
+        # 2026-08-08 audit: the comment here used to claim a min_raw_score of
+        # 0.55 was applied. `HybridSearcher.search()` has no such parameter —
+        # only `find_best()` does — so the guard was documented and never
+        # ran. Worse, `search()` min-max normalises, so its top hit is ALWAYS
+        # 1.00 no matter how weak the match, and that fabricated 1.00 was
+        # printed into the prompt as if it were evidence. Use the call that
+        # actually enforces the floor.
+        # find_best returns a single entry, so it is used here as the GATE it
+        # is: when nothing clears the raw floor it returns None and we emit no
+        # notes at all. The list itself still comes from search().
+        if HYBRID.find_best(task, min_raw_score=0.55) is None:
+            note_hits = []
+        else:
+            note_hits = HYBRID.search(task, limit=limit)
     except Exception:
         note_hits = []
     fact_hits: list[dict] = []
     try:
         from .fact_search import search_facts
-        # search_facts returns [] when the embedder is disabled —
-        # never raises, but belt-and-suspenders anyway.
+        # No limit=2-always. search_facts now applies a measured score floor
+        # and drops synthetic (audit/benchmark) authors, so this returns
+        # nothing at all when nothing relevant exists — which is the honest
+        # answer, and what the old top-2 could never say.
         fact_hits = search_facts(task, limit=2)
     except Exception:
         fact_hits = []
@@ -1637,16 +1650,22 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
     lines = ["# AUTO-RECALL (related notes — read via read_file if relevant)"]
     for h in note_hits:
         e = h.entry
+        # No score here on purpose. `search()` min-max normalises, so the top
+        # hit is ALWAYS 1.00 and the last is ALWAYS 0.00 regardless of how
+        # weak the matches are — printing that as "score" fed the model a
+        # fabricated confidence. The list is ordered; the order is the signal.
         lines.append(
-            f"- {e.topic} (cat: {e.category}, score: {h.score:.2f}, "
-            f"source: {h.source}) → {e.path}"
+            f"- {e.topic} (cat: {e.category}, source: {h.source}) → {e.path}"
         )
     if fact_hits:
         lines.append("Long-term facts (consolidated memory):")
         for f in fact_hits:
             summary = str(f.get("summary") or "").strip()
             if summary:
-                lines.append(f"- {summary}")
+                # Carry the score, as the note lines above already do. Without
+                # it the model receives an unqualified assertion it has no way
+                # to discount — and these were being injected into EVERY turn.
+                lines.append(f"- {summary} (score: {float(f.get('score') or 0):.2f})")
     return "\n".join(lines)
 
 

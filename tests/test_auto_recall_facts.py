@@ -30,6 +30,13 @@ def test_facts_appended_to_recall_block(monkeypatch):
 
     import backend.hybrid_searcher as _hs
     class _H:
+        # find_best is the raw-score gate auto-recall now consults before
+        # emitting any note lines (2026-08-08 audit: the 0.55 floor was
+        # documented in a comment and never applied, because search() has no
+        # such parameter). Returning a truthy entry means "relevant enough".
+        def find_best(self, topic, *, min_raw_score=0.0):
+            return object()
+
         def search(self, q, limit=3):
             return [_NoteHit("tailscale-setup")]
     monkeypatch.setattr(_hs, "HYBRID", _H())
@@ -37,7 +44,7 @@ def test_facts_appended_to_recall_block(monkeypatch):
     import backend.fact_search as _fs
     monkeypatch.setattr(
         _fs, "search_facts",
-        lambda q, limit=5: [
+        lambda q, limit=5, **_kw: [
             {"summary": "User runs Hrant on Ubuntu box 100.124.210.21."},
             {"summary": "User prefers male TTS voice at +20% rate."},
         ],
@@ -56,6 +63,13 @@ def test_facts_alone_produce_block_without_notes(monkeypatch):
 
     import backend.hybrid_searcher as _hs
     class _H:
+        # find_best is the raw-score gate auto-recall now consults before
+        # emitting any note lines (2026-08-08 audit: the 0.55 floor was
+        # documented in a comment and never applied, because search() has no
+        # such parameter). Returning a truthy entry means "relevant enough".
+        def find_best(self, topic, *, min_raw_score=0.0):
+            return object()
+
         def search(self, q, limit=3):
             return []
     monkeypatch.setattr(_hs, "HYBRID", _H())
@@ -63,7 +77,7 @@ def test_facts_alone_produce_block_without_notes(monkeypatch):
     import backend.fact_search as _fs
     monkeypatch.setattr(
         _fs, "search_facts",
-        lambda q, limit=5: [{"summary": "User favorite color is teal."}],
+        lambda q, limit=5, **_kw: [{"summary": "User favorite color is teal."}],
     )
 
     block = ua._auto_recall_block("what color should the dashboard be?")
@@ -75,12 +89,19 @@ def test_no_hits_no_block(monkeypatch):
 
     import backend.hybrid_searcher as _hs
     class _H:
+        # find_best is the raw-score gate auto-recall now consults before
+        # emitting any note lines (2026-08-08 audit: the 0.55 floor was
+        # documented in a comment and never applied, because search() has no
+        # such parameter). Returning a truthy entry means "relevant enough".
+        def find_best(self, topic, *, min_raw_score=0.0):
+            return object()
+
         def search(self, q, limit=3):
             return []
     monkeypatch.setattr(_hs, "HYBRID", _H())
 
     import backend.fact_search as _fs
-    monkeypatch.setattr(_fs, "search_facts", lambda q, limit=5: [])
+    monkeypatch.setattr(_fs, "search_facts", lambda q, limit=5, **_kw: [])
 
     assert ua._auto_recall_block("a question long enough to search") == ""
 
@@ -90,6 +111,13 @@ def test_fact_search_exception_degrades_to_notes_only(monkeypatch):
 
     import backend.hybrid_searcher as _hs
     class _H:
+        # find_best is the raw-score gate auto-recall now consults before
+        # emitting any note lines (2026-08-08 audit: the 0.55 floor was
+        # documented in a comment and never applied, because search() has no
+        # such parameter). Returning a truthy entry means "relevant enough".
+        def find_best(self, topic, *, min_raw_score=0.0):
+            return object()
+
         def search(self, q, limit=3):
             return [_NoteHit("docker-notes")]
     monkeypatch.setattr(_hs, "HYBRID", _H())

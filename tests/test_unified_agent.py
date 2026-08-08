@@ -120,14 +120,18 @@ def test_auto_recall_formats_hits_when_present():
         project=None,
     )
     fake_hit = HybridHit(entry=fake_entry, score=0.75, source="fuzzy+vector")
-    with patch.object(HYBRID, "search", return_value=[fake_hit]):
+    with patch.object(HYBRID, "search", return_value=[fake_hit]),             patch.object(HYBRID, "find_best", return_value=fake_entry):
         out = ua._auto_recall_block(
             "Tell me about my test note in full detail please"
         )
     assert "AUTO-RECALL" in out
     assert "My Test Note" in out
-    assert "0.75" in out
     assert "fuzzy+vector" in out
+    # The score is deliberately NOT printed any more (2026-08-08 audit).
+    # HYBRID.search() min-max normalises, so the top hit is always 1.00 and the
+    # last always 0.00 however weak the matches are; printing that as "score"
+    # handed the model a fabricated confidence. The ordering is the signal.
+    assert "score:" not in out
 
 
 # --- end-to-end through Agent.run with the flag ----------------------
