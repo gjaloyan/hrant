@@ -1778,7 +1778,21 @@ def _check_subagents_handler(session_id: str = "") -> str:
                               ensure_ascii=False)
         sessions = [s]
     else:
-        sessions = SUBAGENT_STORE.list(limit=6)
+        # 2026-08-08 audit: this was a flat `limit=6` over the whole
+        # mtime-ordered history, with no truncation signal. Measured: 8
+        # subagents dispatched, all 8 completed, 6 collected — the parent
+        # believed two subtasks produced nothing and would re-dispatch them,
+        # duplicating side effects (builder holds terminal_exec). The
+        # `delegate` description tells the model to fan out; the collector
+        # could not keep up with its own advice.
+        #
+        # Take everything not yet terminal first, then pad with recent
+        # history, and always report the totals so the model can page.
+        _all = SUBAGENT_STORE.list(limit=200)
+        _live = [s for s in _all if s.status in ("running", "pending")]
+        _rest = [s for s in _all if s not in _live]
+        sessions = (_live + _rest)[:max(6, len(_live) + 6)]
+        _truncated = len(_all) - len(sessions)
     out = []
     import time as _time
     for s in sessions:
@@ -1804,11 +1818,21 @@ def _check_subagents_handler(session_id: str = "") -> str:
             "answer": (getattr(s, "answer", "") or "")[:500],
             "error": (getattr(s, "error", "") or "")[:200],
         })
-    return json.dumps({"ok": True, "sessions": out,
-                       "note": ("status 'stale' = the run outlived its parent "
-                                "process and will never finish — re-dispatch "
-                                "that task if it still matters")},
-                      ensure_ascii=False)
+    payload = {
+        "ok": True, "sessions": out,
+        "note": ("status 'stale' = the run outlived its parent process and "
+                 "will never finish — re-dispatch that task if it still "
+                 "matters"),
+    }
+    if not session_id:
+        payload["returned"] = len(out)
+        payload["truncated"] = max(0, _truncated)
+        if _truncated > 0:
+            payload["note"] += (
+                f". {_truncated} older session(s) not shown — ask for one by "
+                "session_id if you are missing a result"
+            )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _terminal_exec_handler(command: str, timeout: int = 0) -> str:

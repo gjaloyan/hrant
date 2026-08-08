@@ -110,6 +110,25 @@ class Goal:
             self.subtasks[index]["status"] = "done"
             self.subtasks[index]["result"] = result
 
+    # Attempt bookkeeping (2026-08-08 audit). There was none: a subtask that
+    # failed stayed `pending` with no record, so the driver re-dispatched the
+    # identical builder subagent every cycle, forever. Measured on prod: 52
+    # byte-identical subagent sessions for ONE subtask over four days, while
+    # the subtasks behind it were never attempted.
+    MAX_SUBTASK_ATTEMPTS = 3
+
+    def note_subtask_attempt(self, index: int, *, error: str = "") -> int:
+        """Record one failed attempt; block the subtask past the limit.
+        Returns the new attempt count."""
+        if not (0 <= index < len(self.subtasks)):
+            return 0
+        st = self.subtasks[index]
+        st["attempts"] = int(st.get("attempts") or 0) + 1
+        st["last_error"] = (error or "")[:300]
+        if st["attempts"] >= self.MAX_SUBTASK_ATTEMPTS:
+            st["status"] = "blocked"
+        return st["attempts"]
+
 
 def _normalize_description(s: str) -> str:
     """Canonical form for goal-description dedup.

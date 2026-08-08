@@ -104,7 +104,14 @@ class FIRE_GOAL_DRIVE(Lever):
         if not pending:
             GOALS.complete_goal(goal.id, note="all subtasks done (goal_drive)")
             return self._done(params, started, f"completed:{goal.id}")
-        idx, sub = pending[0]
+        # Least-attempted first (2026-08-08 audit). This used to be
+        # `pending[0]` unconditionally, and a failure left the subtask
+        # `pending` with no record — so the same subtask was re-dispatched
+        # every cycle forever and the ones behind it were never attempted.
+        # Measured on prod: 52 identical builder sessions for one subtask over
+        # four days, starving every other goal because the lever only ever
+        # picks the highest-priority one.
+        idx, sub = min(pending, key=lambda p: int(p[1].get("attempts") or 0))
         task_text = (
             f"You are executing one subtask of a larger goal.\n"
             f"Goal: {goal.description}\n"
@@ -126,7 +133,17 @@ class FIRE_GOAL_DRIVE(Lever):
             goal.complete_subtask(idx, result=answer)
             goal.add_progress(f"subtask {idx + 1} done via builder subagent")
         else:
-            goal.add_progress(f"subtask {idx + 1} attempt failed: {answer[:120]}")
+            attempts = goal.note_subtask_attempt(idx, error=answer)
+            if sub.get("status") == "blocked":
+                goal.add_progress(
+                    f"subtask {idx + 1} BLOCKED after {attempts} failed "
+                    f"attempts — needs the owner: {answer[:120]}"
+                )
+            else:
+                goal.add_progress(
+                    f"subtask {idx + 1} attempt {attempts}/"
+                    f"{goal.MAX_SUBTASK_ATTEMPTS} failed: {answer[:120]}"
+                )
         GOALS._save()
         left = sum(1 for st in goal.subtasks if st.get("status") == "pending")
         if left == 0:

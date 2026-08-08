@@ -249,13 +249,19 @@ class SubagentStore:
         status: Optional[str] = None,
         role: Optional[str] = None,
     ) -> list[SubagentSession]:
-        """Newest first. Filters are exact-match on status / role."""
+        """Newest first, by the session's own created_at. Filters are
+        exact-match on status / role.
+
+        Ordering used to be file mtime (2026-08-08 audit). Two problems, one
+        of them load-bearing: any REWRITE moved a session to the front, so the
+        stale reaper touching an old record could push an in-flight one out of
+        a caller's window; and finalising several sessions in quick succession
+        collapsed their mtimes into the same filesystem tick, which made
+        test_list_returns_newest_first fail about 2 runs in 5. created_at is
+        stored in the record, never rewritten, and is what "newest" means.
+        """
         with self._lock:
-            files = sorted(
-                self._ensure_root().glob("*.json"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
+            files = list(self._ensure_root().glob("*.json"))
         out: list[SubagentSession] = []
         for f in files:
             try:
@@ -268,6 +274,8 @@ class SubagentStore:
             if role and sess.role != role:
                 continue
             out.append(sess)
+        out.sort(key=lambda s: float(getattr(s, "created_at", 0) or 0),
+                 reverse=True)
         return out[offset : offset + max(1, limit)]
 
     def active(self) -> list[SubagentSession]:
