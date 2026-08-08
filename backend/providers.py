@@ -677,8 +677,66 @@ def resolve_auth_header(provider: dict) -> dict[str, str]:
         return {"Authorization": f"Bearer {key}"}
 
 
+def _normalize_model_key(model: str) -> list[str]:
+    """Candidate keys for a model id, most specific first.
+
+    Providers name the same model several ways: OpenRouter prefixes a vendor
+    ("anthropic/claude-sonnet-4-5"), some adapters append a date or a quant
+    suffix. KNOWN_PRICING is keyed on bare names, so an exact-key lookup
+    missed EVERY model actually running in production.
+    """
+    raw = (model or "").strip().lower()
+    if not raw:
+        return []
+    cands = [raw]
+    if "/" in raw:                      # vendor/model -> model
+        cands.append(raw.split("/", 1)[1])
+    for c in list(cands):               # model:free, model@ver -> model
+        for sep in (":", "@"):
+            if sep in c:
+                cands.append(c.split(sep, 1)[0])
+    seen, out = set(), []
+    for c in cands:
+        if c and c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+_PRICING_MISSES: set[str] = set()
+
+
 def get_model_pricing(model: str) -> dict[str, float]:
-    return KNOWN_PRICING.get(model, DEFAULT_PRICING)
+    """Per-million-token pricing for a model, or the default.
+
+    2026-08-08 audit: this was a bare exact-key dict lookup, and NOTHING
+    logged a miss. Measured on prod, every live model — gpt-5.5,
+    xiaomi/mimo-v2.5-pro, qwen/qwen3.6-35b-a3b, anthropic/claude-sonnet-4-5 —
+    and a deliberately invented name all returned the same DEFAULT_PRICING of
+    $3/$15. So the reported cost was a constant regardless of what ran, and
+    the cheap-model experiment could not be told from the expensive one.
+    """
+    lowered = {str(k).lower(): v for k, v in KNOWN_PRICING.items()}
+    for key in _normalize_model_key(model):
+        hit = lowered.get(key)
+        if hit is not None:
+            return hit
+    # Say so, once per unknown model, instead of silently billing $3/$15.
+    key = (model or "").strip()
+    if key and key not in _PRICING_MISSES:
+        _PRICING_MISSES.add(key)
+        log.warning(
+            "no pricing entry for model %r — billing it at the default "
+            "$%s/$%s per Mtok, so reported cost for this model is a guess",
+            key, DEFAULT_PRICING.get("input"), DEFAULT_PRICING.get("output"),
+        )
+    return DEFAULT_PRICING
+
+
+def unpriced_models() -> list[str]:
+    """Models seen this process with no pricing entry — surfaced so the
+    owner can see WHICH numbers in the cost report are fabricated."""
+    return sorted(_PRICING_MISSES)
 
 
 # ---------- OAuth Token Manager ----------

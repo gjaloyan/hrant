@@ -243,6 +243,21 @@ _READ_ONLY_TOOLS: frozenset[str] = frozenset({
 })
 
 
+# Which chain adapter actually answered this turn. Set by
+# _run_with_safety_fallback, read by the accounting hook and by
+# model_report — see the comment at the assignment site.
+_TURN_CHAIN_WINNER: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "llm_turn_chain_winner", default=None,
+)
+
+
+def turn_chain_winner() -> "dict | None":
+    try:
+        return _TURN_CHAIN_WINNER.get()
+    except Exception:
+        return None
+
+
 def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args, **kw):
     """Iterate `chain` and call `provider.<method_name>(task_type,
     system, user, *args, **kw)` on each. If a provider raises an
@@ -268,6 +283,7 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
     """
     _log = logging.getLogger("llm")
     last_err: LLMError | None = None
+    _TURN_CHAIN_WINNER.set(None)
     # Count side effects across the whole chain, not per provider.
     _effects = {"n": 0, "names": []}
     _inner = kw.get("execute_tool")
@@ -282,7 +298,24 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
     for prov in chain:
         try:
             method = getattr(prov, method_name)
-            return method(task_type, system, user, *args, **kw)
+            _out = method(task_type, system, user, *args, **kw)
+            # Record WHICH adapter answered (2026-08-08 audit). Without this
+            # the "which model served this turn" notice was decided by
+            # Counter.most_common over the turn's calls — the most FREQUENT
+            # model, not the one that produced the answer. A failed primary
+            # usually makes MORE calls than the fallback that finishes the
+            # job, so real fallbacks went unreported and healthy turns were
+            # labelled "your model was unavailable".
+            try:
+                _TURN_CHAIN_WINNER.set({
+                    "provider_id": getattr(prov, "provider_id", "")
+                    or getattr(prov, "name", ""),
+                    "model": getattr(prov, "model", "")
+                    or getattr(prov, "model_name", ""),
+                })
+            except Exception:
+                pass
+            return _out
         except LLMError as e:
             if _should_fallback(e):
                 if _effects["n"]:
@@ -4225,13 +4258,37 @@ class DualModelRouter:
         # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
         chain = _active_provider_chain(task_type)
         if chain:
-            return _run_with_safety_fallback(
+            # Account for it. This branch used to `return` straight out,
+            # which made the ENTIRE remainder of this function unreachable in
+            # production — the active-model branch, the failover chain, the
+            # A/B path with its daily-budget check, _track_active_model_call
+            # and _save_state. The give-away is the function's own docstring
+            # sitting just below as a dead string literal. Measured on prod
+            # 2026-08-08: router_state.json had not been written in 54 days
+            # (frozen at 27 calls on 2026-06-15) while the token tracker
+            # counted 197 calls that same day, and the owner's $5/day budget
+            # gate reads api_cost_today from that dead file — so it could
+            # never fire.
+            _out = _run_with_safety_fallback(
                 chain, "call_with_tools", task_type, system, user,
                 tools, execute_tool,
                 max_tokens=max_tokens, temperature=temperature,
                 max_iterations=max_iterations, on_tool_call=on_tool_call,
                 attachments=attachments, tools_provider=tools_provider,
             )
+            try:
+                _w = turn_chain_winner() or {}
+                self.state["last_reason"] = (
+                    f"provider chain: {_w.get('provider_id') or '?'}")
+                self._track_active_model_call(
+                    provider_id=_w.get("provider_id") or None,
+                    model=_w.get("model") or None,
+                )
+                self._save_state()
+            except Exception as _e:
+                _log_acct = logging.getLogger("llm")
+                _log_acct.debug("chain accounting failed: %s", _e)
+            return _out
         """Tool-use loop via selected model.
 
         If an active model is set and supports tools, use it. Otherwise

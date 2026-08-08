@@ -18,8 +18,24 @@ def _model_of(call) -> str:
 
 
 def primary_model_used(llm_calls) -> str:
-    """The model that did the turn's real work — the most frequent model
-    among the recorded calls. Empty string when nothing was recorded."""
+    """The model that produced the turn's answer.
+
+    Prefers the adapter the provider chain RECORDED as having answered. The
+    counter below is only a fallback (2026-08-08 audit): call count and
+    authorship are unrelated, so voting by frequency got it wrong in both
+    directions. A primary that dies after six tool iterations outnumbers the
+    fallback that finishes the job in three, so a real fallback was reported
+    as "nothing happened"; and cheap task-routed sub-calls (judges,
+    classifiers) outnumber the heavy answer calls, so a perfectly healthy
+    turn was reported as "your selected model was unavailable".
+    """
+    try:
+        from .llm import turn_chain_winner
+        won = (turn_chain_winner() or {}).get("model")
+        if won:
+            return str(won)
+    except Exception:
+        pass
     counts: Counter = Counter()
     for call in (llm_calls or []):
         m = _model_of(call)
