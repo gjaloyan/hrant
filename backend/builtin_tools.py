@@ -2962,10 +2962,16 @@ def register_builtin_tools() -> None:
         description=(
             "Run a Python snippet via the system interpreter (subprocess + "
             "wall-clock timeout). NOT a sandbox: full filesystem, imports, "
-            "network and OS access — caller's responsibility. For pure "
-            "arithmetic ALWAYS prefer `calc` (faster, no subprocess, "
-            "restricted AST). Use `run_python` for data parsing, multi-line "
-            "logic, or verification scripts."
+            "network and OS access — caller's responsibility. Use it for "
+            "data parsing, multi-line logic, or verification scripts."
+            # The "for pure arithmetic ALWAYS prefer `calc`" sentence was
+            # removed 2026-08-09. `calc` is a SKILL tool: it exists only when
+            # that skill is enabled, and on this box it is disabled — so the
+            # model was told, in an always-on description, to prefer a tool
+            # that is not in its schema. If calc is enabled its own
+            # description sells it; a permanent instruction to use a
+            # conditional tool is either dead weight or a wasted iteration
+            # answered with "[tool 'calc' not found in registry]".
         ),
         input_schema={
             "type": "object",
