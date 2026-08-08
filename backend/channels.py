@@ -1289,7 +1289,26 @@ class TelegramBot:
                     except Exception as e:
                         log.debug("callback_query early answer failed: %s", e)
 
-                result = _tg.dispatch_callback(data, ctx)
+                # Bind the clicker as the current speaker for the whole
+                # dispatch (2026-08-08 audit, critical). Every owner-gated
+                # handler reads roles.current_speaker(); this path never set
+                # it, so it was None. The self-mod Apply button therefore
+                # passed its own is_owner(clicker) check, marked the proposal
+                # approved, and then apply() fail-closed with "speaker 'None'
+                # is not owner" — leaving the proposal stuck in `approved`
+                # forever. The self-modification approval loop was dead on its
+                # primary channel and said nothing useful about why.
+                #
+                # Doing it here rather than in each handler also makes every
+                # other callback role-correct instead of re-deriving the
+                # clicker per handler. Mirrors backend/main.py:460.
+                from . import roles as _roles
+                _sp_token = _roles.set_current_speaker(
+                    ctx.get("clicker_speaker_id") or "")
+                try:
+                    result = _tg.dispatch_callback(data, ctx)
+                finally:
+                    _roles.reset_current_speaker(_sp_token)
 
                 # Always answer the callback so the spinning UI on
                 # the user's button stops; pass `text=` for a toast.

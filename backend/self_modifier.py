@@ -554,6 +554,23 @@ class SelfModifier:
 
             # Phase 3 — closed loop: run test_commands once against the
             # fully-patched tree. Failure rolls back every file.
+            #
+            # MANDATORY (2026-08-08 audit). This used to be `if
+            # proposal.test_commands:` with nothing requiring the list to be
+            # non-empty — the requirement lived only in two system prompts,
+            # i.e. a soft instruction, in a codebase whose stated lesson is
+            # that build-eager models ignore those. Measured: a proposal with
+            # test_commands=[] replacing `return 1` with
+            # `return undefined_symbol_xyz()` applied cleanly and reported
+            # success, because py_compile is satisfied by any syntactically
+            # valid name. If the author gave no tests we synthesize a floor
+            # rather than skipping the phase.
+            if not proposal.test_commands:
+                proposal.test_commands = _default_test_commands(plan)
+                log.warning(
+                    "self-mod %s had no test_commands; synthesized %s",
+                    proposal.id, proposal.test_commands,
+                )
             if proposal.test_commands:
                 self._save()  # checkpoint before running tests
                 ok, output = _run_test_commands(
@@ -715,6 +732,35 @@ def _bind_to_own_interpreter(argv: list[str]) -> list[str]:
     if head == "pytest":
         return [sys.executable, "-m", "pytest"] + argv[1:]
     return argv
+
+
+def _default_test_commands(plan) -> list[str]:
+    """The floor that runs when a proposal shipped no tests of its own.
+
+    py_compile on every touched .py, plus that module's own test file when one
+    exists. It is a floor, not a substitute: it cannot tell whether the change
+    is CORRECT, only that it imports and does not break the tests written for
+    that module. A proposal with real tests is always better, and the prompts
+    still ask for them — this exists so their absence cannot mean "no checks
+    at all".
+    """
+    # Emit the ALLOWLISTED spelling ("python3 -m ..."), not sys.executable:
+    # _validate_test_command only accepts a known argv[0], and
+    # _bind_to_own_interpreter rebinds python3 to the running interpreter
+    # anyway. Using the absolute path here made every synthesized command fail
+    # validation and roll the patch back — caught by the existing multi-file
+    # tests, which had never needed test_commands before.
+    cmds: list[str] = []
+    touched = [module for (_fp, _orig, _new, module) in plan
+               if str(module).endswith(".py")]
+    for module in touched:
+        cmds.append(f"python3 -m py_compile {module}")
+    for module in touched:
+        stem = os.path.basename(module)[:-3]
+        cand = f"tests/test_{stem}.py"
+        if (ROOT / cand).exists():
+            cmds.append(f"python3 -m pytest {cand} -q")
+    return cmds
 
 
 def _run_test_commands(
@@ -1094,7 +1140,12 @@ def _register_proposal_callback() -> None:
             if p_check is not None:
                 old = (p_check.old_code or "").strip()
                 new = (p_check.new_code or "").strip()
-                if not old and not new:
+                # has_diff() is the authority (2026-08-08 audit): a
+                # multi-file proposal carries its edits in `changes` and has
+                # BOTH old_code and new_code empty by construction, so this
+                # guard refused every refactor the multi-file path was added
+                # for — "proposal has no diff yet", on a proposal that had one.
+                if not p_check.has_diff() and not old and not new:
                     return _tg.CallbackResult(
                         ok=False,
                         toast=(

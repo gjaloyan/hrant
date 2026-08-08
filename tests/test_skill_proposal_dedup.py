@@ -266,13 +266,22 @@ def test_propose_skill_handler_allows_same_name_overwrite(
 
 
 def _isolated_skills_with(name, frontmatter, skills_dir, monkeypatch):
-    """Helper: write a skill at `skills_dir/<name>/SKILL.md`, install
-    an isolated SkillsManager pointing at it, and force owner role.
-    Returns the manager so the test can flip enabled state."""
-    _write_skill(skills_dir, name, frontmatter)
+    """Helper: write a skill at `user_skills/<name>/SKILL.md`, install an
+    isolated SkillsManager pointing at it, and force owner role. Returns the
+    manager so the test can flip enabled state.
+
+    The skill goes in the USER tier (2026-08-08). It used to be written into
+    the BUILT-IN dir, which made these tests exercise a path that cannot
+    happen: a "previously proposed skill" is by definition user-tier. That
+    distinction became load-bearing when propose() stopped treating a
+    collision with a BUILT-IN name as a silent update — an agent-authored
+    skill called `calc` was replacing the built-in one, staying enabled, and
+    firing no owner DM.
+    """
     from backend import skills as skills_mod
     user_dir = skills_dir.parent / "user_skills"
     user_dir.mkdir(exist_ok=True)
+    _write_skill(user_dir, name, frontmatter)
     isolated = SkillsManager(
         skills_dir=skills_dir, user_skills_dir=user_dir,
     )
