@@ -3988,11 +3988,28 @@ class DualModelRouter:
         # orchestration below runs unchanged.
         chain = _active_provider_chain(task_type)
         if chain:
-            return _run_with_safety_fallback(
+            # Account for it — see the note on the call_with_tools branch.
+            # Verified 2026-08-09 with a real prod turn: fixing only
+            # call_with_tools left this path unaccounted, because an ordinary
+            # chat turn goes through call(), and router_state.json stayed
+            # frozen at its 2026-06-15 value.
+            _out = _run_with_safety_fallback(
                 chain, "call", task_type, system, user,
                 max_tokens=max_tokens, temperature=temperature,
                 attachments=attachments,
             )
+            try:
+                _w = turn_chain_winner() or {}
+                self.state["last_reason"] = (
+                    f"provider chain: {_w.get('provider_id') or '?'}")
+                self._track_active_model_call(
+                    provider_id=_w.get("provider_id") or None,
+                    model=_w.get("model") or None,
+                )
+                self._save_state()
+            except Exception as _e:
+                logging.getLogger("llm").debug("chain accounting failed: %s", _e)
+            return _out
 
         # Check if user selected a specific model
         active = self._get_active_llm()
@@ -4186,9 +4203,21 @@ class DualModelRouter:
         # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
         chain = _active_provider_chain(task_type)
         if chain:
-            return _run_with_safety_fallback(
+            _out = _run_with_safety_fallback(
                 chain, "call_json", task_type, system, user, **kw,
             )
+            try:
+                _w = turn_chain_winner() or {}
+                self.state["last_reason"] = (
+                    f"provider chain: {_w.get('provider_id') or '?'}")
+                self._track_active_model_call(
+                    provider_id=_w.get("provider_id") or None,
+                    model=_w.get("model") or None,
+                )
+                self._save_state()
+            except Exception as _e:
+                logging.getLogger("llm").debug("chain accounting failed: %s", _e)
+            return _out
         raw = self.call(
             task_type,
             system + "\n\nReply with ONLY valid JSON, no markdown wrappers.",
