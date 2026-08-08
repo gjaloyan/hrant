@@ -2315,9 +2315,29 @@ def run_unified(
     # The decision IS the LLM's: it gets a tiny prompt with no tools
     # and either answers directly or emits `ESCALATE: <reason>` to
     # fall through to the full path. No keyword regex.
+    # ...and never for a turn that is RESUMING a paused task with the owner's
+    # answer to an ask_user question (2026-08-08, from the day's real Telegram
+    # log). "My choice: Быстрый MVP сейчас" is 43 chars with no attachment, so
+    # the fast lane took it, answered "Ок, делаем" with ZERO tools, and the
+    # work never started. Forty-five minutes later "status?" was answered with
+    # "waiting for you to choose" — a choice already made. The reply to a
+    # question the agent itself asked is the continuation of a task.
+    try:
+        from .tools.ask_user import (
+            clear_question_resume as _clear_resume,
+            is_question_resume as _is_resume,
+        )
+        _resuming = _is_resume()
+        # Consume it. Left set, the flag would persist for the life of the
+        # context and push every later turn off the fast lane — which the
+        # tests for this fix caught before it shipped.
+        _clear_resume()
+    except Exception:
+        _resuming = False
     if (
         not attachments
         and not matched_skills
+        and not _resuming
         and len(task or "") <= 500
     ):
         chat_answer = _try_chat_path(

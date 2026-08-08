@@ -1675,8 +1675,40 @@ class TelegramBot:
                             text = meta.transcript
                             break
                     if not text:
-                        # Image-only message — give the agent something to chew on
-                        text = "(see attached file)"
+                        # An AUDIO attachment with no transcript is not the
+                        # same thing as an image (2026-08-08, from the day's
+                        # real Telegram log). Speech-to-text was disabled on
+                        # the box — TRANSCRIBER.transcribe() returns None and
+                        # sets no error — so five voice notes in one
+                        # conversation reached the agent as "(see attached
+                        # file)". Each time it replied "I didn't receive a
+                        # transcript" and offered "send it again", the owner
+                        # sent it again, and it failed again. Ten of that
+                        # day's seventeen turns were spent on this loop.
+                        #
+                        # Tell the agent WHY, so it stops asking for a resend
+                        # that cannot succeed.
+                        _audio = [ATTACHMENTS.get_meta(s) for s in attachment_shas]
+                        if any(m and m.kind == "audio" for m in _audio):
+                            from .transcriber import TRANSCRIBER as _TX
+                            _st = _TX.status() if hasattr(_TX, "status") else {}
+                            _why = (_st.get("last_error")
+                                    or ("speech-to-text is not configured on "
+                                        "this machine"
+                                        if _st.get("backend") in (None, "disabled")
+                                        else "transcription returned nothing"))
+                            text = (
+                                "(voice message received, but it could NOT be "
+                                f"transcribed: {_why}. Do not ask the sender "
+                                "to resend it — the result will be the same. "
+                                "Say plainly that voice input is unavailable "
+                                "and ask for text, or offer to enable "
+                                "speech-to-text.)"
+                            )
+                        else:
+                            # Image-only message — give the agent something
+                            # to chew on.
+                            text = "(see attached file)"
 
                 if not text and not attachment_shas:
                     return

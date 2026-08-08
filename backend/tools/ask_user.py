@@ -44,6 +44,7 @@ import logging
 import secrets
 import threading
 import time
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
@@ -57,6 +58,43 @@ log = logging.getLogger(__name__)
 # "stop and surface this question to the user". Carries the question
 # id so the loop knows what to attach to the AgentAnswer.
 AWAITING_INPUT_KEY = "awaiting_input"
+
+
+# Marks a turn that is RESUMING a paused task by delivering the owner's answer
+# to an ask_user question (2026-08-08, from the day's real Telegram log).
+#
+# "My choice: Быстрый MVP сейчас" is 43 characters with no attachment, so the
+# fast chat lane took it, answered "Ок, делаем" with zero tools, and the work
+# never started. Forty-five minutes later the owner asked "status?" and was
+# told the agent was "waiting for you to choose" — a choice he had already
+# made. The answer to a question the agent itself asked is the continuation of
+# a task, never small talk.
+#
+# A ContextVar, not a text marker: the resume path is our own protocol, so it
+# can say so directly instead of anyone pattern-matching the message.
+_RESUMING_QUESTION: "ContextVar[bool]" = ContextVar(
+    "ask_user_resuming", default=False,
+)
+
+
+def mark_question_resume() -> None:
+    """Called by a resume runner before it invokes agent.run."""
+    _RESUMING_QUESTION.set(True)
+
+
+def clear_question_resume() -> None:
+    """Consume the marker. run_unified reads it once at turn entry and clears
+    it: without this the flag would persist for the life of the context and
+    push every later turn off the fast chat lane."""
+    _RESUMING_QUESTION.set(False)
+
+
+def is_question_resume() -> bool:
+    try:
+        return bool(_RESUMING_QUESTION.get())
+    except Exception:
+        return False
+
 
 
 @dataclass
@@ -393,6 +431,7 @@ def _register_telegram_callback() -> None:
 
         def _runner():
             try:
+                mark_question_resume()
                 ag = _agent_mod.Agent()
                 res = ag.run(
                     user_msg,
