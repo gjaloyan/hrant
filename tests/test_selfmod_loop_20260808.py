@@ -114,3 +114,45 @@ def test_updating_an_existing_user_skill_is_still_silent():
     was_enabled = bool(existing.enabled) if is_update else False
     assert is_update is True
     assert was_enabled is True
+
+
+# ── the per-turn tool filter (2026-08-09 dead-code audit) ─────────────
+
+def test_a_runtime_registered_tool_reaches_the_model():
+    """BASE_TOOLS and the bundles are hand-written frozensets, so a tool a
+    SKILL registers can never appear in them — the per-turn filter dropped it
+    from every request. Measured: `calc` (origin "skill:calc") is registered
+    on every boot and was in neither set, while run_python's own description
+    tells the model "for pure arithmetic ALWAYS prefer `calc`"."""
+    from backend.tool_registry import ToolRegistry, Tool
+    from backend.tool_bundles import BASE_TOOLS, TOOL_BUNDLES, expand_loaded
+
+    reg = ToolRegistry()
+    reg.register(Tool(name="calc", description="d", input_schema={},
+                      handler=lambda: "", origin="skill:calc"))
+    reg.register(Tool(name="read_file", description="d", input_schema={},
+                      handler=lambda: "", origin="builtin"))
+
+    allowed = set(BASE_TOOLS) | expand_loaded(set())
+    allowed |= {n for n, t in reg.tools.items()
+                if not str(getattr(t, "origin", "")).startswith("builtin")}
+
+    names = [t["name"] for t in reg.to_anthropic_list(filter_names=allowed)]
+    assert "calc" in names, "a skill-registered tool must be visible"
+    assert "read_file" in names
+
+
+def test_a_builtin_still_obeys_its_bundle_gate():
+    """The widening must not hand the model everything: a builtin parked in a
+    bundle stays gated until the bundle is loaded."""
+    from backend.tool_registry import ToolRegistry, Tool
+    from backend.tool_bundles import BASE_TOOLS, expand_loaded
+
+    reg = ToolRegistry()
+    reg.register(Tool(name="sandbox_exec", description="d", input_schema={},
+                      handler=lambda: "", origin="builtin"))
+    allowed = set(BASE_TOOLS) | expand_loaded(set())
+    allowed |= {n for n, t in reg.tools.items()
+                if not str(getattr(t, "origin", "")).startswith("builtin")}
+    names = [t["name"] for t in reg.to_anthropic_list(filter_names=allowed)]
+    assert "sandbox_exec" not in names

@@ -345,11 +345,19 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
             # job, so real fallbacks went unreported and healthy turns were
             # labelled "your model was unavailable".
             try:
+                # `_ProviderChainAdapter` exposes `id` and `name`, NOT
+                # `provider_id`/`model_name` (2026-08-09 dead-code audit).
+                # The fallbacks below covered it, but the breakdown was being
+                # keyed on a human label — "OpenAI Codex (ChatGPT
+                # subscription)" — instead of the stable provider id, which
+                # makes the per-provider cost table unjoinable with anything
+                # else. Prefer the id, keep name as the readable fallback.
                 _TURN_CHAIN_WINNER.set({
-                    "provider_id": getattr(prov, "provider_id", "")
-                    or getattr(prov, "name", ""),
-                    "model": getattr(prov, "model", "")
-                    or getattr(prov, "model_name", ""),
+                    "provider_id": (getattr(prov, "id", "")
+                                    or getattr(prov, "provider_id", "")
+                                    or getattr(prov, "name", "")),
+                    "model": (getattr(prov, "model", "")
+                              or getattr(prov, "model_name", "")),
                 })
             except Exception:
                 pass
@@ -4082,6 +4090,18 @@ class DualModelRouter:
             except Exception as _e:
                 logging.getLogger("llm").debug("chain accounting failed: %s", _e)
             return _out
+
+        # Instrumented for deletion (2026-08-09 dead-code audit). Everything
+        # below is the legacy A/B + Ollama routing tier. Prod has never taken
+        # it: total_a_calls=0 and total_b_calls=0 against 2619 active-model
+        # calls, and router_state.json went 54 days unwritten. It is kept for
+        # one observation window rather than deleted on the strength of that
+        # reasoning alone — if this warning never appears, it goes.
+        logging.getLogger("llm").warning(
+            "LEGACY A/B TAIL ENTERED in call() — this path was believed "
+            "unreachable and is scheduled for deletion; report it before it "
+            "is removed."
+        )
 
         # Check if user selected a specific model
         active = self._get_active_llm()

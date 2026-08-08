@@ -2743,6 +2743,23 @@ def run_unified(
         )
         loaded = get_loaded_bundles()
         allowed = set(BASE_TOOLS) | expand_loaded(loaded)
+        # Anything registered at RUNTIME is reachable too (2026-08-09
+        # dead-code audit). BASE_TOOLS and the bundles are static frozensets
+        # written by hand, so a tool a skill registers can never appear in
+        # them — the filter silently dropped it from every request. Measured:
+        # `calc` (origin "skill:calc") is registered on every boot and was in
+        # neither set, while run_python's own description tells the model
+        # "for pure arithmetic ALWAYS prefer `calc`". The model was being
+        # instructed to call a tool it could not see, and the reachability
+        # test could not catch it because that test reloads a registry
+        # holding builtins only.
+        try:
+            allowed |= {
+                name for name, tool in registry.tools.items()
+                if not str(getattr(tool, "origin", "")).startswith("builtin")
+            }
+        except Exception:
+            pass
         return registry.to_anthropic_list(filter_names=allowed)
 
     # Initial schema is the cold-start (base-only) view — passed for
