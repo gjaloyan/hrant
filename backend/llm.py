@@ -230,6 +230,19 @@ def _short_fallback_reason(err: "LLMError") -> str:
     return s[:80].strip()
 
 
+# Tools that only LOOK at the world. Everything not listed here is treated as
+# side-effecting, on purpose: a tool nobody has classified must not silently
+# license a double execution (2026-08-08 audit).
+_READ_ONLY_TOOLS: frozenset[str] = frozenset({
+    "read_file", "locate_symbol", "search_knowledge", "list_skills",
+    "load_skill", "load_tool_bundle", "fetch_url", "web_search",
+    "analyze_image", "get_background_job", "list_background_jobs",
+    "list_trackers", "get_tracker", "list_telegram_access",
+    "list_pending_pairings", "check_subagents", "frame_problem",
+    "set_plan", "update_plan", "verify_web",
+})
+
+
 def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args, **kw):
     """Iterate `chain` and call `provider.<method_name>(task_type,
     system, user, *args, **kw)` on each. If a provider raises an
@@ -237,15 +250,55 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
     advance to the next provider. Any non-safety LLMError propagates
     immediately. If every provider safety-refuses, the last refusal
     is re-raised. Empty chain -> LLMError("no providers configured").
+
+    RESTART SAFETY (2026-08-08 audit, critical). This wraps the WHOLE
+    `complete_with_tools` loop, not a single API call. When a provider died at
+    iteration N the chain advanced and the next provider began again from an
+    empty message list with the same `execute_tool` callback — so every
+    side-effecting tool the first provider had already run was run a SECOND
+    time, with nothing deduping and no record handed over. Reproduced: a
+    provider that ran terminal_exec + write_file and then aborted mid-stream
+    produced FOUR tool executions. Against `git push`, a migration or a
+    payment, that is unrecoverable.
+
+    So: failover is now allowed only while the world is untouched. Once any
+    non-read-only tool has executed this turn, the original error is raised
+    instead of silently restarting. A visibly failed turn is recoverable; a
+    silently duplicated deploy is not.
     """
     _log = logging.getLogger("llm")
     last_err: LLMError | None = None
+    # Count side effects across the whole chain, not per provider.
+    _effects = {"n": 0, "names": []}
+    _inner = kw.get("execute_tool")
+    if callable(_inner):
+        def _counting_execute_tool(name, arguments, *a, **k):
+            if name not in _READ_ONLY_TOOLS:
+                _effects["n"] += 1
+                if len(_effects["names"]) < 8:
+                    _effects["names"].append(name)
+            return _inner(name, arguments, *a, **k)
+        kw = {**kw, "execute_tool": _counting_execute_tool}
     for prov in chain:
         try:
             method = getattr(prov, method_name)
             return method(task_type, system, user, *args, **kw)
         except LLMError as e:
             if _should_fallback(e):
+                if _effects["n"]:
+                    _log.error(
+                        "router: provider %s failed (%s) AFTER %d "
+                        "side-effecting tool call(s) %s — refusing to fail "
+                        "over, because restarting would run them again.",
+                        getattr(prov, "name", "?"), _short_fallback_reason(e),
+                        _effects["n"], _effects["names"],
+                    )
+                    raise LLMError(
+                        f"{e} — provider failed after "
+                        f"{_effects['n']} state-changing tool call(s) "
+                        f"({', '.join(_effects['names'])}); not retried on "
+                        "another provider because that would repeat them"
+                    ) from e
                 _log.warning(
                     "router: provider %s returned a retryable failure (%s); "
                     "falling back to next. detail=%s",
