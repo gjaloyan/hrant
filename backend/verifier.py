@@ -637,13 +637,28 @@ Available topics: {', '.join(used_topics)}"""
     # line. Floor at SOURCE_GROUNDED_CONFIDENCE_FLOOR so the
     # critic-retry threshold doesn't trip on demonstrably-grounded
     # answers.
+    #
+    # 2026-08-08: the floor was a pure conjunction with no ratio term, so ONE
+    # verified claim among forty unverified ones was lifted to 75 as long as
+    # the turn had read 20 KB — ordinary for any coding turn. Measured on a
+    # stubbed verifier: {verified: 1, unverified: 40} scored 2 by formula and
+    # was REPORTED as 75, and one byte less tool output reported it as 2. A
+    # 73-point swing on an unrelated input.
+    #
+    # That is not cosmetic. answer_critic only fires below 60, so the critique
+    # pass that exists to fix unsupported claims was skipped precisely on the
+    # turns with forty of them, and the daily low-confidence flag never
+    # tripped. The floor is meant to rescue an over-cautious 67, not to
+    # manufacture a 75 — so it now lifts by a bounded amount and only when the
+    # claim mix is actually favourable.
     if (
         len(tool_context) >= SOURCE_GROUNDED_TOOL_CTX_MIN
         and len(verified) > 0
+        and len(verified) >= len(unverified)
         and len(contradictions) == 0
         and confidence < SOURCE_GROUNDED_CONFIDENCE_FLOOR
     ):
-        confidence = SOURCE_GROUNDED_CONFIDENCE_FLOOR
+        confidence = min(SOURCE_GROUNDED_CONFIDENCE_FLOOR, confidence + 25)
 
     return VerificationResult(
         confidence=confidence,

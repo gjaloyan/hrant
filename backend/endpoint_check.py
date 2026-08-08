@@ -242,7 +242,13 @@ def unbacked_action_claim(task: str, answer: str, tool_names: list[str]) -> str:
             f"TOOLS ACTUALLY CALLED THIS TURN: {tools_desc}",
             max_tokens=150, temperature=0.0,
         )
-        result = str(data.get("unbacked_claim", "") or "").strip()
+        # Only a genuine STRING counts as a claim (2026-08-08). `str(x)` on
+        # whatever the provider returned made any non-empty object truthy —
+        # a dict, a list, a stub — so a malformed judgment became "the answer
+        # claimed an action", and callers escalate on that. A judge that did
+        # not answer in the agreed shape has not found a claim.
+        raw = (data or {}).get("unbacked_claim", "")
+        result = raw.strip() if isinstance(raw, str) else ""
     except Exception:
         result = ""
     if cache is not None:

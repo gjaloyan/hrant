@@ -33,7 +33,6 @@ TOOL_BUNDLES: Final[dict[str, list[str]]] = {
         "propose_self_modification",
     ],
     "media": [
-        "agent_browser",
         "sandbox_exec",
     ],
 }
@@ -51,10 +50,8 @@ BUNDLE_DESCRIPTIONS: Final[dict[str, str]] = {
         "(propose_self_modification)."
     ),
     "media": (
-        "Drive a headless Chromium for JS-rendered / login-walled "
-        "pages (agent_browser — for plain HTML, the always-on "
-        "fetch_url is cheaper); run untrusted binaries under "
-        "bubblewrap/firejail/unshare isolation (sandbox_exec)."
+        "Run untrusted binaries under bubblewrap/firejail/unshare "
+        "isolation (sandbox_exec)."
     ),
 }
 
@@ -74,8 +71,15 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # Search / navigation + knowledge education (read + deliberate write)
     "locate_symbol", "search_knowledge", "save_knowledge",
     "list_skills", "load_skill",
-    # Web (basic — agent_browser is in `media` bundle)
-    "fetch_url", "web_search",
+    # Web. agent_browser moved out of the `media` bundle into BASE on
+    # 2026-08-08: it is the documented escalation for "fetch_url returned a JS
+    # skeleton", which can happen on ANY turn, and no agent looking for a way
+    # to read a legal-database SPA would think to load a bundle called
+    # "media". Measured cost of the old gating, from the real Telegram log:
+    # the agent spent a turn failing on DataLex, then proposed to the owner
+    # that he install a headless browser — while one sat behind that bundle.
+    # It is owner-gated inside its own handler, so BASE costs no privilege.
+    "fetch_url", "web_search", "agent_browser",
     # Multimodal
     "analyze_image",
     # Interaction + reminders. schedule_message moved to BASE 2026-06-18:

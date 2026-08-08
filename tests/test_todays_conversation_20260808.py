@@ -147,3 +147,129 @@ def test_an_ordinary_short_message_still_takes_the_fast_lane():
     task = "привет, как дела?"
     assert (not [] and not [] and not au.is_question_resume()
             and len(task) <= 500) is True
+
+
+# ── the DataLex turn: tools the agent could not see ───────────────────
+
+def test_the_browser_is_reachable_without_loading_a_bundle():
+    """2026-08-08: asked to read a JS-only legal database, the agent tried
+    web_search + fetch_url + terminal_exec, gave up, and then proposed that
+    the owner "connect a headless browser" — while agent_browser sat behind a
+    bundle named "media", which nobody researching case law would open."""
+    from backend.tool_bundles import BASE_TOOLS, TOOL_BUNDLES, BUNDLE_DESCRIPTIONS
+    assert "agent_browser" in BASE_TOOLS
+    assert "agent_browser" not in TOOL_BUNDLES.get("media", [])
+    # and the catalog must not still advertise it as a bundle member
+    assert "agent_browser" not in BUNDLE_DESCRIPTIONS.get("media", "")
+
+
+def test_an_unreadable_page_names_the_escalation_in_its_own_result(monkeypatch):
+    """The tool RESULT is the one place the model always reads — stronger
+    than any prompt, and the place the old code said nothing."""
+    import backend.tools.web_search as ws
+    hint = ws._NEXT_TOOL_HINT
+    assert "agent_browser" in hint
+    assert "do not propose installing a browser" in hint.lower()
+
+
+def test_a_blocked_fetch_points_at_the_browser(monkeypatch):
+    import backend.tools.web_search as ws
+
+    class _R:
+        status_code, text = 403, "<html>Enable JavaScript and cookies to continue</html>"
+        content = text.encode()
+        headers = {"content-type": "text/html"}
+
+    monkeypatch.setattr(ws.httpx, "get", lambda *a, **k: _R())
+    monkeypatch.setattr(ws, "_ssrf_check", lambda url: "")
+    out = ws.fetch_url("https://datalex.am/case/1")
+    assert "blocked" in out.lower()
+    assert "agent_browser" in out
+
+
+# ── confidence that tracks effort ─────────────────────────────────────
+
+def test_one_verified_claim_among_forty_is_not_lifted_to_75():
+    """Measured: {verified: 1, unverified: 40} scored 2 by formula and was
+    REPORTED as 75, because the floor had no ratio term. answer_critic only
+    fires below 60, so the critique pass was skipped exactly on the turns
+    that needed it most."""
+    from backend import verifier as v
+    conf = 2
+    verified, unverified, contradictions = ["a"], ["b"] * 40, []
+    tool_context = "x" * (v.SOURCE_GROUNDED_TOOL_CTX_MIN + 10)
+    if (len(tool_context) >= v.SOURCE_GROUNDED_TOOL_CTX_MIN
+            and len(verified) > 0 and len(verified) >= len(unverified)
+            and not contradictions and conf < v.SOURCE_GROUNDED_CONFIDENCE_FLOOR):
+        conf = min(v.SOURCE_GROUNDED_CONFIDENCE_FLOOR, conf + 25)
+    assert conf == 2, "a 1-in-41 claim mix must not be called well-grounded"
+
+
+def test_an_over_cautious_but_grounded_answer_is_still_rescued():
+    """The floor's real purpose: a turn that read the source and got 67."""
+    from backend import verifier as v
+    conf = 67
+    verified, unverified, contradictions = ["a", "b", "c"], ["d"], []
+    tool_context = "x" * (v.SOURCE_GROUNDED_TOOL_CTX_MIN + 10)
+    if (len(tool_context) >= v.SOURCE_GROUNDED_TOOL_CTX_MIN
+            and len(verified) > 0 and len(verified) >= len(unverified)
+            and not contradictions and conf < v.SOURCE_GROUNDED_CONFIDENCE_FLOOR):
+        conf = min(v.SOURCE_GROUNDED_CONFIDENCE_FLOOR, conf + 25)
+    assert conf == v.SOURCE_GROUNDED_CONFIDENCE_FLOOR
+
+
+# ── "Ок, делаем" with nothing started ─────────────────────────────────
+
+def test_the_fast_lane_escalates_when_it_promises_an_action(monkeypatch):
+    """The 14:54 answer verbatim. The fast lane has ZERO tools and returns
+    before any gate runs, so a promise made there can never be kept: nothing
+    started, and 45 minutes later "status?" said "nothing is running"."""
+    import backend.unified_agent as ua
+
+    monkeypatch.setattr(
+        "backend.endpoint_check.unbacked_action_claim",
+        lambda task, answer, tools: ("делаем быстрый MVP сейчас"
+                                     if "делаем" in answer else ""))
+    monkeypatch.setattr(ua, "_claims_save_without_tool", lambda h: False)
+
+    class _Agent:
+        def progress(self, *a, **k): pass
+
+    import backend.llm as llm_mod
+
+    def _fake_call(*a, **k):
+        return "Ок, Гор — делаем быстрый MVP сейчас."
+
+    monkeypatch.setattr(llm_mod, "router", lambda: type(
+        "R", (), {"call_with_tools": staticmethod(_fake_call),
+                  "call": staticmethod(_fake_call),
+                  "complete": staticmethod(_fake_call)})())
+
+    out = ua._try_chat_path(
+        task="My choice: Быстрый MVP сейчас (Recommended)",
+        agent=_Agent(), speaker_id="telegram:1", snapshot="", convo="")
+    assert out is None, "a promise of work must fall through to the full path"
+
+
+def test_the_fast_lane_still_answers_an_ordinary_question(monkeypatch):
+    """The lane exists to skip a ~15 KB preamble on cheap turns; the guard
+    must not swallow real chat."""
+    import backend.unified_agent as ua
+
+    monkeypatch.setattr("backend.endpoint_check.unbacked_action_claim",
+                        lambda task, answer, tools: "")
+    monkeypatch.setattr(ua, "_claims_save_without_tool", lambda h: False)
+
+    class _Agent:
+        def progress(self, *a, **k): pass
+
+    import backend.llm as llm_mod
+    _hi = lambda *a, **k: "Привет! Всё хорошо."
+    monkeypatch.setattr(llm_mod, "router", lambda: type(
+        "R", (), {"call_with_tools": staticmethod(_hi),
+                  "call": staticmethod(_hi),
+                  "complete": staticmethod(_hi)})())
+
+    out = ua._try_chat_path(task="привет, как дела?", agent=_Agent(),
+                            speaker_id="telegram:1", snapshot="", convo="")
+    assert out == "Привет! Всё хорошо."

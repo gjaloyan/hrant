@@ -627,6 +627,32 @@ def _try_chat_path(
         except Exception:
             pass
         return None
+    # The general case (2026-08-08, from the owner's real Telegram log). The
+    # regex above only catches SAVE-shaped claims. On 2026-08-08 the fast lane
+    # answered "Ок, Гор — делаем быстрый MVP сейчас." — a commitment to do
+    # work, with zero tools — and returned before any gate ran, so nothing
+    # started. Forty-five minutes later "status?" reported "nothing is
+    # running". The lane must not be able to promise an action it has no
+    # tools to take.
+    #
+    # `unbacked_action_claim` is the existing language-agnostic judge for
+    # exactly this, so no new keyword list. It costs one cached
+    # classification call on a lane that exists to skip a ~15 KB preamble and
+    # a whole tool loop — cheap next to silently losing an afternoon.
+    try:
+        from .endpoint_check import unbacked_action_claim
+        _claim = unbacked_action_claim(task, head or "", [])
+    except Exception:
+        _claim = ""
+    if _claim:
+        try:
+            agent.progress(
+                "chat_fast_path",
+                f"escalating: promised an action with no tool — {_claim[:60]}",
+            )
+        except Exception:
+            pass
+        return None
     try:
         agent.progress("chat_fast_path", "answered directly")
     except Exception:

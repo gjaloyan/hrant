@@ -152,6 +152,18 @@ def visible_text_ratio(html: str) -> float:
     return len(stripped) / max(len(html), 1)
 
 
+# Below this many characters of extracted text, a page that also LOOKS
+# script-heavy is treated as genuinely unread rather than merely terse.
+_UNREADABLE_TEXT_CHARS = 400
+
+_NEXT_TOOL_HINT = (
+    "NEXT STEP: use `agent_browser` — it drives a real Chromium (click, "
+    "fill, wait for network, screenshot) and is the escalation path for "
+    "exactly this. Do not conclude the content does not exist, and do not "
+    "propose installing a browser: one is already available."
+)
+
+
 def looks_unreadable(status: int, html: str, extracted: "str | None") -> bool:
     """True when the cheap HTTP path produced nothing a human could read,
     so the caller should pay for a headless render.
@@ -553,7 +565,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
             f"[blocked: HTTP {status}{' + anti-bot challenge' if looks_like_bot_wall(body) else ''}] "
             "This is an ACCESS failure, not evidence the information does not "
             "exist. Try another source, an official API, or an authenticated "
-            f"route.\n--- page said ---\n{head}"
+            f"route. {_NEXT_TOOL_HINT}\n--- page said ---\n{head}"
         )
 
     # JS-only shell -> pay for a real browser once.
@@ -567,10 +579,29 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
                 return (
                     "[blocked: anti-bot challenge survived a headless render] "
                     "This site refuses automated access; it is not evidence "
-                    "the information does not exist.\n--- page said ---\n"
+                    f"the information does not exist. {_NEXT_TOOL_HINT}"
+                    "\n--- page said ---\n"
                     + rendered[:1200]
                 )
             if len(rendered.strip()) > len(text.strip()):
                 return ("[rendered via headless browser]\n"
                         + rendered[:max_chars])
+        # A JS shell that rendering could not open AND that left us with
+        # nothing worth reading. Naming the next tool HERE matters more than
+        # any prompt: the 2026-08-08 DataLex turn ran web_search + fetch_url +
+        # terminal_exec, gave up, and then proposed that the owner "connect a
+        # headless browser" — one was already installed. The tool result is
+        # the one place the model always reads.
+        #
+        # Guarded on the text actually being thin: `looks_unreadable` fires on
+        # page SHAPE, and a page can look script-heavy while still yielding a
+        # clean article body. Overriding good content with an error message
+        # would be a worse bug than the one this fixes.
+        if not (main and main.strip()) and len(text.strip()) < _UNREADABLE_TEXT_CHARS:
+            return (
+                "[unreadable: this page is a JavaScript shell and rendering it "
+                f"did not reveal the content. {_NEXT_TOOL_HINT}] Do NOT report "
+                "the information as missing — it was not read.\n"
+                "--- what came back ---\n" + text[:1200]
+            )
     return text[:max_chars]
