@@ -258,6 +258,44 @@ def turn_chain_winner() -> "dict | None":
         return None
 
 
+
+def _cheapest_first(chain):
+    """Order chain adapters cheapest-first by known pricing.
+
+    Unknown-priced adapters sort last, not first: an unpriced model is a
+    guess, and guessing "cheap" is how a spend cap becomes decorative.
+    """
+    from .providers import get_model_pricing, DEFAULT_PRICING
+
+    def _cost(prov):
+        model = getattr(prov, "model", "") or getattr(prov, "model_name", "")
+        pr = get_model_pricing(model)
+        if pr is DEFAULT_PRICING:
+            return float("inf")
+        return float(pr.get("input", 0)) + float(pr.get("output", 0))
+
+    return sorted(chain, key=_cost)
+
+
+def _budget_exceeded(cfg_router, state) -> "tuple[bool, float, float]":
+    """Is today's spend at or over the owner's cap? (over, spent, cap).
+
+    Lives here, at module level, on purpose. The check used to sit inside
+    `Router._pick()` — which is called ONLY from the tails of call() and
+    call_with_tools(), both of which return earlier at `if chain: ...`. Prod
+    proof (2026-08-09): total_a_calls=0 and total_b_calls=0 against
+    total_active_model_calls=2619, i.e. that tail has never executed once. So
+    the owner could set daily_api_budget_usd in the UI, see it validated and
+    persisted, and it could never throttle anything.
+    """
+    try:
+        cap = float(cfg_router.get("daily_api_budget_usd", 0.0) or 0.0)
+        spent = float(state.get("api_cost_today", 0.0) or 0.0)
+    except Exception:
+        return (False, 0.0, 0.0)
+    return (cap > 0 and spent >= cap, spent, cap)
+
+
 def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args, **kw):
     """Iterate `chain` and call `provider.<method_name>(task_type,
     system, user, *args, **kw)` on each. If a provider raises an
@@ -3675,6 +3713,32 @@ class DualModelRouter:
             # Never let logging crash an already-failing path.
             pass
 
+    def _apply_budget_policy(self, chain):
+        """Degrade to the cheapest adapter once the daily cap is reached.
+
+        The documented rule is "daily_api_budget_usd exceeded -> fallback to
+        B" — degrade, not brick — so this reorders the chain rather than
+        refusing the call. A hard stop would leave the agent unusable for the
+        rest of the day, which is not what a spend CAP means.
+        """
+        over, spent, cap = _budget_exceeded(self.cfg_router, self.state)
+        if not over or len(chain) < 2:
+            if over:
+                self.state["last_reason"] = (
+                    f"over budget (${spent:.2f} >= ${cap:.2f}), no cheaper "
+                    "provider available")
+            return chain
+        ordered = _cheapest_first(chain)
+        if ordered and ordered[0] is not chain[0]:
+            logging.getLogger("llm").warning(
+                "daily budget reached ($%.2f >= $%.2f) — preferring the "
+                "cheapest provider %r for the rest of the day",
+                spent, cap, getattr(ordered[0], "name", "?"),
+            )
+        self.state["last_reason"] = (
+            f"over budget (${spent:.2f} >= ${cap:.2f}) -> cheapest first")
+        return ordered
+
     def _track_active_model_call(
         self,
         *,
@@ -3983,11 +4047,19 @@ class DualModelRouter:
         # Safety-refusal fallback chain (Task 5). When
         # `_active_provider_chain` yields a non-empty ordered list
         # (tests monkeypatch this seam), iterate it and skip past any
-        # provider that raises a safety-shaped LLMError. Production
-        # default returns [], so the existing A/B + failover-chain
-        # orchestration below runs unchanged.
+        # NOTE (2026-08-09 dead-code audit): the comment that used to sit here
+        # claimed "production default returns [], so the A/B + failover-chain
+        # orchestration below runs unchanged". That was false, and it is the
+        # kind of false that costs weeks — `_active_provider_chain()` returns
+        # [] only when every provider is disabled, i.e. when the agent cannot
+        # make a call at all. On any working install this branch fires and
+        # EVERYTHING below is unreachable. Prod proof: total_a_calls=0 and
+        # total_b_calls=0 against total_active_model_calls=2619. The A/B tail
+        # below has never executed in production; treat it as legacy, and put
+        # anything that must actually run ABOVE this dispatch.
         chain = _active_provider_chain(task_type)
         if chain:
+            chain = self._apply_budget_policy(chain)
             # Account for it — see the note on the call_with_tools branch.
             # Verified 2026-08-09 with a real prod turn: fixing only
             # call_with_tools left this path unaccounted, because an ordinary
@@ -4203,6 +4275,7 @@ class DualModelRouter:
         # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
         chain = _active_provider_chain(task_type)
         if chain:
+            chain = self._apply_budget_policy(chain)
             _out = _run_with_safety_fallback(
                 chain, "call_json", task_type, system, user, **kw,
             )
@@ -4287,6 +4360,7 @@ class DualModelRouter:
         # Safety-refusal fallback chain (Task 5). See `call()` for rationale.
         chain = _active_provider_chain(task_type)
         if chain:
+            chain = self._apply_budget_policy(chain)
             # Account for it. This branch used to `return` straight out,
             # which made the ENTIRE remainder of this function unreachable in
             # production — the active-model branch, the failover chain, the
