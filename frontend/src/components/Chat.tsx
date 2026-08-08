@@ -1063,7 +1063,16 @@ const Chat = forwardRef<ChatHandle, {
     setMsgs((m) => [...m, { role: "agent", text: "", progress }]);
     scroll();
 
-    await chatStream(text, project, (ev: StreamEvent) => {
+    // try/catch/finally (2026-08-08 audit). `chatStream` REJECTS on any
+    // transport failure — backend restarted (`hrant update` does exactly
+    // that), Tailscale blip, laptop sleeps. The rejection propagated out of
+    // send(), so setBusy(false) below never ran: `busy` stayed true forever,
+    // every control is disabled={busy}, and the first line of send() bails on
+    // busy — so the composer was dead until a manual page reload, with no
+    // error shown. And because setInput("") runs BEFORE the call, the message
+    // the owner had just typed was gone with no way to recover it.
+    try {
+      await chatStream(text, project, (ev: StreamEvent) => {
       if (ev.type === "progress") {
         progress.push(`${ev.event}: ${ev.message}`);
         setMsgs((m) => {
@@ -1146,9 +1155,30 @@ const Chat = forwardRef<ChatHandle, {
           return copy;
         });
       }
-    }, attached.map((a) => a.sha256), channel);
-
-    setBusy(false);
+      }, attached.map((a) => a.sha256), channel);
+    } catch (e: any) {
+      // Surface it where the user is already looking. The Msg type has an
+      // `error` field and Chat already renders an ErrorCard for it, so this
+      // reuses the existing path rather than inventing a second one.
+      const detail = String(e?.message || e || "connection lost");
+      setMsgs((m) => {
+        if (m.length === 0) return m;
+        const copy = [...m];
+        const lastIdx = copy.length - 1;
+        const last = copy[lastIdx];
+        // Only the agent variant carries `error`; the placeholder pushed
+        // just above always is one, but narrow rather than assume.
+        if (last.role === "agent") {
+          copy[lastIdx] = { ...last, error: detail };
+        }
+        return copy;
+      });
+      // Give the typed message back instead of eating it.
+      setInput((cur) => (cur.trim() ? cur : text));
+      setPending((cur) => (cur.length ? cur : attached));
+    } finally {
+      setBusy(false);
+    }
     onRefreshStatus();
   };
 

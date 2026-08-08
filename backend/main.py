@@ -11,7 +11,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -541,6 +541,18 @@ if _FRONTEND_DIST.is_dir():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
+        # An /api/* path that reached the catch-all is a route that does not
+        # exist, and it must say so (2026-08-08 audit). Without this the SPA
+        # fallback answered 200 text/html to any unmatched API GET, so
+        # `json_get`'s `if (!r.ok) throw` was dead code: execution reached
+        # r.json(), which threw "Unexpected token '<'" from a line inside
+        # api.ts with no indication of WHICH endpoint had died. Measured on
+        # prod: /api/analogies (retired 2026-05-27, still called by
+        # IntelligencePanel) and /api/definitely-not-a-route both returned
+        # 200 text/html. Hand-probing the API with curl "succeeded" on typos
+        # too.
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail=f"no such route: /{full_path}")
         file_path = _FRONTEND_DIST / full_path
         if full_path and file_path.is_file():
             return FileResponse(file_path)

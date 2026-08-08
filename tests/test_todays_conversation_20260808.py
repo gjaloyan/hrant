@@ -273,3 +273,31 @@ def test_the_fast_lane_still_answers_an_ordinary_question(monkeypatch):
     out = ua._try_chat_path(task="привет, как дела?", agent=_Agent(),
                             speaker_id="telegram:1", snapshot="", convo="")
     assert out == "Привет! Всё хорошо."
+
+
+# ── silent degradation (audit section 5) ──────────────────────────────
+
+def test_an_unknown_api_route_is_a_404_not_a_page():
+    """The SPA fallback answered 200 text/html to any unmatched /api/* GET,
+    so json_get's `if (!r.ok) throw` was dead code: execution reached
+    r.json(), which threw "Unexpected token '<'" from inside api.ts with no
+    indication of WHICH endpoint had died. Hand-probing with curl "succeeded"
+    on typos too."""
+    from fastapi.testclient import TestClient
+    import backend.main as m
+
+    c = TestClient(m.app)
+    for path in ("/api/definitely-not-a-route", "/api/analogies"):
+        r = c.get(path)
+        assert r.status_code == 404, path
+        assert "json" in r.headers.get("content-type", "")
+
+
+def test_the_spa_itself_still_serves():
+    """The catch-all exists to serve the app; the guard must not break it."""
+    from fastapi.testclient import TestClient
+    import backend.main as m
+
+    r = TestClient(m.app).get("/")
+    assert r.status_code == 200
+    assert "text/html" in r.headers.get("content-type", "")

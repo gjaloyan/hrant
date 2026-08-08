@@ -424,6 +424,25 @@ async function readSSE(url: string, body: unknown, onEvent: (e: any) => void): P
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  // A non-2xx reply is NOT a stream (2026-08-08 audit). backend/api/chat.py
+  // raises require_owner_for_writes() (403) and check_chat_rate() (429)
+  // BEFORE it builds the EventSourceResponse, and FastAPI's HTTPException
+  // body is single-line JSON with no blank line — so the parse loop below
+  // found zero blank-line-delimited frames, delivered zero events, and RESOLVED
+  // NORMALLY. The user message posted, an empty agent bubble appeared, the
+  // spinner stopped, and the bubble stayed permanently blank with no error
+  // anywhere. Verified against prod: POST /api/chat with {} returns 422
+  // application/json, and the loop fired 0 events on it.
+  if (!r.ok) {
+    let detail = "";
+    try {
+      detail = await r.text();
+    } catch {
+      /* body already consumed or unreadable — status alone will do */
+    }
+    onEvent({ type: "error", message: detail || `${r.status} ${r.statusText}` });
+    return;
+  }
   if (!r.body) return;
   const reader = r.body.getReader();
   const decoder = new TextDecoder();
