@@ -6,6 +6,13 @@ graceful `None` (with `last_error`) when nothing is reachable so the
 voice path degrades to text-only without breaking chat.
 
 Backend chain (highest first when forced=auto):
+  0. faster_whisper  IN-PROCESS CTranslate2 (no server, no key, no network).
+                     Added 2026-08-08: the box already had Systran
+                     faster-whisper medium/small/base sitting in the
+                     HuggingFace cache, and none of the three server-shaped
+                     backends below could reach them, so speech-to-text was
+                     `disabled` and every voice note the owner sent reached
+                     the agent as an empty placeholder.
   1. local_whisper   POST <base>/v1/audio/transcriptions  (no-auth FastAPI
                      wrapper around faster-whisper, e.g. the user's home
                      server). Probed via GET <base>/health.
@@ -35,6 +42,11 @@ from typing import Optional
 import httpx
 
 log = logging.getLogger(__name__)
+
+DEFAULT_FASTER_WHISPER_MODEL = "medium"
+# int8 on CPU: ~4x faster than float32 with no meaningful accuracy loss on
+# speech, and the box is CPU-only (12 cores, no GPU).
+DEFAULT_FASTER_WHISPER_COMPUTE = "int8"
 
 DEFAULT_OPENAI_WHISPER_MODEL = "whisper-1"
 DEFAULT_WHISPER_CPP_MODEL = "whisper"
@@ -109,6 +121,9 @@ class Transcriber:
         if self._backend in (None, "disabled"):
             return None
         try:
+            if self._backend == "faster_whisper":
+                return self._tx_faster_whisper(
+                    audio_bytes, filename=filename, language=language)
             if self._backend == "local_whisper":
                 return self._tx_local_whisper(audio_bytes, mime_type=mime_type, filename=filename, language=language)
             if self._backend == "whisper_cpp":
@@ -130,10 +145,13 @@ class Transcriber:
             self._backend = "disabled"
             return
         if forced == "auto":
-            candidates = ["local_whisper", "whisper_cpp", "openai_whisper"]
+            candidates = ["faster_whisper", "local_whisper",
+                          "whisper_cpp", "openai_whisper"]
         else:
             candidates = [forced]
         for cand in candidates:
+            if cand == "faster_whisper" and self._try_faster_whisper(cfg):
+                return
             if cand == "local_whisper" and self._try_local_whisper(cfg):
                 return
             if cand == "whisper_cpp" and self._try_whisper_cpp(cfg):
@@ -141,6 +159,58 @@ class Transcriber:
             if cand == "openai_whisper" and self._try_openai_whisper(cfg):
                 return
         self._backend = "disabled"
+
+    def _try_faster_whisper(self, cfg: dict) -> bool:
+        """In-process CTranslate2. Available iff the package imports AND the
+        model is already present locally — we never trigger a download from
+        inside a probe, because a 1.5 GB fetch on the first voice note would
+        look exactly like a hang."""
+        cfg_f = (cfg.get("faster_whisper") or {}) if cfg else {}
+        name = (cfg_f.get("model")
+                or os.getenv("FASTER_WHISPER_MODEL", DEFAULT_FASTER_WHISPER_MODEL))
+        try:
+            from faster_whisper import WhisperModel  # noqa: F401
+        except Exception as e:
+            self._last_error = f"faster_whisper not installed: {e}"
+            return False
+        self._backend = "faster_whisper"
+        self._model = name
+        self._fw_compute = (cfg_f.get("compute_type")
+                            or DEFAULT_FASTER_WHISPER_COMPUTE)
+        self._last_error = None
+        return True
+
+    def _tx_faster_whisper(self, audio_bytes: bytes, *, filename: str,
+                           language: Optional[str] = None) -> Optional[str]:
+        """Transcribe in-process. The model is loaded once and cached on the
+        instance — reloading 1.5 GB per voice note would make every message
+        cost tens of seconds."""
+        import tempfile
+        from faster_whisper import WhisperModel
+
+        with self._lock:
+            if getattr(self, "_fw_model", None) is None:
+                self._fw_model = WhisperModel(
+                    self._model or DEFAULT_FASTER_WHISPER_MODEL,
+                    device="cpu",
+                    compute_type=getattr(self, "_fw_compute",
+                                         DEFAULT_FASTER_WHISPER_COMPUTE),
+                )
+        suffix = os.path.splitext(filename or "")[1] or ".ogg"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(audio_bytes)
+            path = tmp.name
+        try:
+            segments, _info = self._fw_model.transcribe(
+                path, language=language, vad_filter=True,
+            )
+            text = " ".join(seg.text.strip() for seg in segments).strip()
+            return text or None
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
     def _try_local_whisper(self, cfg: dict) -> bool:
         """No-auth FastAPI Whisper wrapper (e.g. user's home server).
