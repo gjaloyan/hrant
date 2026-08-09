@@ -29,7 +29,7 @@ def _build_app():
 def isolated_overrides(tmp_path, monkeypatch):
     """Redirect runtime_overrides.json to a tmp file AND snapshot/restore
     the in-memory CONFIG sections we mutate, so a test's apply_overrides
-    can't leak `verification.critic_max_retries=5` into the next test
+    can't leak `verification.critic_threshold=5` into the next test
     (e.g. tests/test_self_critic.py expects the default of 2)."""
     from backend.config import CONFIG
     p = tmp_path / "runtime_overrides.json"
@@ -138,7 +138,7 @@ def test_put_persists_and_returns_applied(isolated_overrides):
     client = TestClient(_build_app())
     r = client.put(
         "/api/engine/config",
-        json={"verification": {"min_confidence": 80, "critic_max_retries": 3}},
+        json={"verification": {"min_confidence": 80, "critic_threshold": 55}},
     )
     assert r.status_code == 200
     body = r.json()
@@ -152,12 +152,12 @@ def test_put_persists_and_returns_applied(isolated_overrides):
 
 
 def test_put_merges_partial_within_section(isolated_overrides):
-    """PUT with only min_confidence keeps an earlier critic_max_retries."""
+    """PUT with only min_confidence keeps an earlier critic_threshold."""
     client = TestClient(_build_app())
-    client.put("/api/engine/config", json={"verification": {"critic_max_retries": 5}})
+    client.put("/api/engine/config", json={"verification": {"critic_threshold": 5}})
     client.put("/api/engine/config", json={"verification": {"min_confidence": 70}})
     saved = json.loads(isolated_overrides.read_text(encoding="utf-8"))
-    assert saved["verification"]["critic_max_retries"] == 5
+    assert saved["verification"]["critic_threshold"] == 5
     assert saved["verification"]["min_confidence"] == 70
 
 
@@ -343,3 +343,29 @@ def test_apply_from_file_drops_invalid_silently(isolated_overrides, caplog):
     assert applied == {}
     # And produced a warning so we know it dropped something.
     assert any("invalid" in r.message for r in caplog.records)
+
+
+def test_knobs_for_a_removed_mechanism_are_rejected(isolated_overrides):
+    client = TestClient(_build_app())
+    """2026-08-09 dead-code audit. `critic_max_retries` and
+    `critic_retry_token_budget` configure the legacy pipeline/critic.py retry
+    loop; the unified critic makes ONE revision pass, so there was nothing for
+    them to tune. They were accepted, validated and persisted anyway — a knob
+    for a mechanism that does not exist is worse than no knob, because the
+    name implies a budget the system cannot honour."""
+    r = client.put("/api/engine/config", json={"verification": {
+        "critic_max_retries": 3, "critic_retry_token_budget": 50000}})
+    assert r.status_code == 200
+    rejected = r.json()["rejected"]
+    assert any("critic_max_retries" in x for x in rejected)
+    assert any("critic_retry_token_budget" in x for x in rejected)
+
+
+def test_the_critic_threshold_slider_actually_moves_the_critic(isolated_overrides):
+    client = TestClient(_build_app())
+    """The one verification knob that is genuinely wired."""
+    import backend.answer_critic as ac
+    r = client.put("/api/engine/config",
+                   json={"verification": {"critic_threshold": 37}})
+    assert r.status_code == 200
+    assert ac.content_confidence_bar() == 37

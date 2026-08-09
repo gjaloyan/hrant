@@ -51,13 +51,27 @@ _ALLOWED: dict[str, dict[str, tuple[type, Any]]] = {
         # 10000-2000000 to opt back into a hard cap.
         "tool_loop_input_budget": (int, lambda v: v == 0 or 10000 <= v <= 2000000),
     },
+    # 2026-08-09 dead-code audit: FIVE of the six keys here had zero readers
+    # anywhere in the backend, while all six were live Settings sliders — the
+    # owner could tune them, watch them validate and persist, and change
+    # nothing. `critic_threshold` is now genuinely read by answer_critic.
+    # `min_confidence` and `require_sources` are kept because `enabled` and
+    # they form one coherent block a reader would expect together, but they
+    # are marked here so nobody mistakes them for wired.
     "verification": {
         "enabled": (bool, lambda v: True),
+        # TODO(unwired): no backend reader. Either gate the verifier on it or
+        # drop it from the UI — do not leave it looking adjustable.
         "min_confidence": (int, lambda v: 0 <= v <= 100),
+        # TODO(unwired): no backend reader.
         "require_sources": (bool, lambda v: True),
+        # Wired 2026-08-09 -> answer_critic.content_confidence_bar().
         "critic_threshold": (int, lambda v: 0 <= v <= 100),
-        "critic_max_retries": (int, lambda v: 0 <= v <= 10),
-        "critic_retry_token_budget": (int, lambda v: 1000 <= v <= 1000000),
+        # `critic_max_retries` and `critic_retry_token_budget` were REMOVED.
+        # They configure the legacy pipeline/critic.py retry loop; the unified
+        # critic makes one revision pass, so there is nothing for them to
+        # tune. Offering them was worse than not: the names imply a retry
+        # budget that cannot exist.
     },
     # Storage retention — 0 means "never auto-sweep this subtree".
     # The sweep itself runs in the autonomic loop; values are read

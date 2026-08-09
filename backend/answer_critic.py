@@ -49,9 +49,43 @@ READ_ONLY_TOOLS: frozenset[str] = frozenset({
     "web_search",
 })
 
+# Defaults. The live values come from CONFIG.verification, which the Settings
+# UI writes and runtime_config validates (2026-08-09 dead-code audit): before
+# this, `critic_threshold`, `critic_max_retries` and `critic_retry_token_budget`
+# were offered as sliders, accepted, range-checked and persisted — and read by
+# nobody. The owner could tune when the critic fires and change nothing.
 _CONTENT_CONFIDENCE_BAR = 60
 _MAX_REVISION_ITERATIONS = 4
 _MAX_REVISION_TOKENS = 2000
+
+
+def _cfg(key: str, default):
+    """Read a verification knob, falling back to the module default.
+
+    Read per call, not cached at import: the Settings UI writes these live and
+    a slider that needs a restart to take effect is only half-connected.
+    """
+    try:
+        from .config import CONFIG
+        val = (CONFIG.verification or {}).get(key)
+        return default if val is None else type(default)(val)
+    except Exception:
+        return default
+
+
+def content_confidence_bar() -> int:
+    return _cfg("critic_threshold", _CONTENT_CONFIDENCE_BAR)
+
+
+# `critic_max_retries` and `critic_retry_token_budget` are deliberately NOT
+# wired here. They name a RETRY LOOP — the legacy pipeline/critic.py mixin —
+# and the unified critic makes exactly ONE revision pass. Mapping them onto
+# `max_iterations` (a tool-loop depth) and `max_tokens` (a per-call cap) would
+# look like connecting the sliders while silently changing what they mean:
+# critic_retry_token_budget=60000 would have become a 60k per-call max_tokens,
+# 30x the 2000 that is actually right for a revision. They are removed from
+# the Settings whitelist instead — a knob for a mechanism that no longer
+# exists should not be offered.
 
 # Delivery-class contradiction markers appended by the endpoint cap
 # and the psm empty-diff check. They describe PROCESS failures the
@@ -133,7 +167,7 @@ def should_critique(
     if contras:
         return True, f"{len(contras)} contradiction(s)"
     if (
-        _content_score(vr) < _CONTENT_CONFIDENCE_BAR
+        _content_score(vr) < content_confidence_bar()
         and (vr.unverified_claims or [])
     ):
         return True, (
