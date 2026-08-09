@@ -15,7 +15,13 @@ def _snapshot(**overrides) -> StateSnapshot:
         recent_errors=[],
         pending_approvals=0,
         kb_notes_count=0,
-        kb_graph_nodes=0,
+        # A HEALTHY graph by default (2026-08-09). It used to be 0, which is
+        # the collapsed-graph condition the new `graph_collapsed` recovery
+        # rule exists to catch — so every test that meant to exercise the
+        # scheduled-lever rotation was silently running against a snapshot
+        # that says "the knowledge graph has been wiped". Tests that want the
+        # collapsed case now ask for it explicitly.
+        kb_graph_nodes=6877,
     )
     base.update(overrides)
     return StateSnapshot(**base)
@@ -192,7 +198,9 @@ def test_default_rules_count_after_phase11():
     Audit T3.3 added fact_embedding_backfill_tick → 21."""
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
-    assert len(rules) == 23  # +stale_proposals_tick +goal_drive_tick (2026-07-06)
+    # +graph_collapsed +note_embedding_backfill_tick (2026-08-09): two levers
+    # that had been registered since May with no rule naming them.
+    assert len(rules) == 25
 
 
 def test_default_rules_d07_scheduled_rules_present():
@@ -211,10 +219,13 @@ def test_default_rules_d07_scheduled_rules_present():
         "disk_low", "memory_low", "cpu_high", "errors_present",
     ]
     assert names[4] == "scheduled_messages_tick"
-    assert names[-6:-3] == [
+    assert names[-7:-4] == [
         "self_reflection_tick", "finetune_qc_tick", "gap_detection_tick",
     ]
-    assert names[-1] == "fact_embedding_backfill_tick"
+    # note_embedding_backfill_tick was appended after it on 2026-08-09 —
+    # NOTE embeddings had no rule while FACT embeddings did.
+    assert names[-2] == "fact_embedding_backfill_tick"
+    assert names[-1] == "note_embedding_backfill_tick"
 
 
 def test_default_rules_d07_cooldowns():

@@ -114,6 +114,45 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=60.0,
         ),
         LayerZeroRule(
+            # 2026-08-09 audit. FIRE_GRAPH_REBUILD has been registered since
+            # May with NO rule naming it — zero fires, ever. Wired as a
+            # RECOVERY REFLEX, not a periodic tick, for two measured reasons.
+            #
+            # Its own drift gate is false on prod today (2801 facts vs 6877
+            # graph nodes), so a periodic rule would log "no_drift" forever
+            # while consuming a tick slot. And builder.rebuild() is
+            # destructive: it clear()s the graph and re-derives only from
+            # memory_facts/skills/goals, so it would silently delete the
+            # LLM-proposed `relates_to` edges that graph/proposer.py writes
+            # into the same file. The 12-nodes-vs-1453-facts numbers in the
+            # lever's docstring are stale; that drift was repaired long ago.
+            #
+            # What nothing else covers is catastrophic loss — the only other
+            # rebuild caller in the tree is the manual POST
+            # /api/kgraph/rebuild. 500 is ~7% of the live 6877 and
+            # unreachable by normal churn (nodes only grow via upsert): it is
+            # reached by a wipe, a truncation, or a legacy-schema regression.
+            # By the time it fires there is nothing curated left to destroy,
+            # which is what makes the destructive rebuild acceptable here.
+            #
+            # Conditional and false in steady state, so it cannot starve the
+            # always-true block below it despite sitting this high. Below
+            # scheduled_messages_tick per the 2026-06-12 starvation fix:
+            # user-facing delivery preempts repair.
+            # `kb_notes_count > 0` matters: on a FRESH install both counts
+            # are 0, and "no graph yet" is not "the graph was wiped" — there
+            # is nothing to recover and the rule would burn an hourly tick
+            # forever on a new box. The real recovery signal is knowledge
+            # present WITHOUT a graph (prod: 15 notes, 6877 nodes today; after
+            # a wipe: 15 notes, 0 nodes). Caught by an integration test that
+            # builds a real snapshot over an empty knowledge root.
+            name="graph_collapsed",
+            predicate=lambda s: s.kb_graph_nodes < 500 and s.kb_notes_count > 0,
+            lever="FIRE_GRAPH_REBUILD",
+            params={},
+            cooldown_seconds=3600.0,
+        ),
+        LayerZeroRule(
             name="integrity_tick",
             predicate=lambda s: True,
             lever="FIRE_INTEGRITY_HEARTBEAT",
@@ -249,6 +288,27 @@ def default_rules() -> list[LayerZeroRule]:
             name="fact_embedding_backfill_tick",
             predicate=lambda s: True,
             lever="FIRE_FACT_EMBEDDING_BACKFILL",
+            params={},
+            cooldown_seconds=86400.0,  # daily
+        ),
+        LayerZeroRule(
+            # 2026-08-09 audit. FACT embeddings got the daily rule above;
+            # NOTE embeddings never got one, so FIRE_EMBEDDING_BACKFILL sat
+            # registered with zero fires since May. The embedder lives on a
+            # LAN box rather than localhost, so a transient failure during
+            # note creation leaves that note permanently unsearchable — and
+            # both knowledge_manager._embed_note and the startup probe defer
+            # the repair to THIS lever, which could never run.
+            #
+            # Last in the list on purpose: pure housekeeping with no latency
+            # requirement, so being last costs it nothing, while any higher
+            # position would push one more always-true rule ahead of
+            # everything below it after a restart (the 2026-06-12 starvation
+            # fix). Skips cheaply without touching the network when coverage
+            # is already complete — prod is 15/15 today.
+            name="note_embedding_backfill_tick",
+            predicate=lambda s: True,
+            lever="FIRE_EMBEDDING_BACKFILL",
             params={},
             cooldown_seconds=86400.0,  # daily
         ),
