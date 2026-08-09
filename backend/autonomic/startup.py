@@ -136,10 +136,45 @@ def build_scheduler() -> SchedulerBundle:
     )
 
 
+def unreachable_levers() -> list[str]:
+    """Lever modules that no Layer0 rule can ever select.
+
+    A lever with no rule is not "idle waiting for its condition" — it is
+    unreachable code that reads as an autonomous capability. Measured
+    2026-08-09 on prod against 29 lever modules and a 21-rule table: EIGHT
+    could never fire, including `self_heal` and `service_repair`, which have
+    knowledge modules on disk describing what they do. If the box breaks,
+    nothing repairs it, while the documentation says otherwise.
+
+    Logged at startup so this cannot silently rot again — a capability that
+    quietly cannot run is the same class of lie as a budget cap that cannot
+    cap.
+    """
+    import os
+    import re
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        rules = set(re.findall(
+            r"FIRE_[A-Z_]+",
+            open(os.path.join(here, "layer0.py"), encoding="utf-8").read()))
+        mods = [f[:-3] for f in os.listdir(os.path.join(here, "levers"))
+                if f.endswith(".py") and f != "__init__.py"]
+    except Exception:
+        return []
+    return sorted(m for m in mods if f"FIRE_{m.upper()}" not in rules)
+
+
 async def start_autonomic_scheduler(bundle: SchedulerBundle) -> None:
     try:
         await bundle.scheduler.start()
         log.info("Autonomic scheduler started")
+        _orphans = unreachable_levers()
+        if _orphans:
+            log.warning(
+                "%d lever module(s) have NO Layer0 rule and can never fire: "
+                "%s — they read as capabilities the agent does not have",
+                len(_orphans), ", ".join(_orphans),
+            )
     except Exception as exc:
         log.error("Autonomic scheduler failed to start: %s", exc)
 
