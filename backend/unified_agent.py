@@ -15,11 +15,12 @@ tool access. It saves a fact, says "Понял", does nothing. Patching
 regexes (which I'd been doing) is whack-a-mole — there's always
 another phrasing.
 
-This module is the unified path. Wired in `agent.Agent.run` behind
-the `HRANT_UNIFIED_AGENT=1` env flag so it can run side-by-side
-with the legacy pipeline for A/B verification. When stable it
-becomes default and the legacy classifier / preference / pipeline-
-tier code gets removed (Phase C).
+This module IS the path. It was originally wired behind an
+`HRANT_UNIFIED_AGENT=1` env flag for side-by-side A/B against the
+legacy pipeline; that migration finished, the flag is read nowhere,
+and this text was still describing the transition as if it were
+ongoing (corrected 2026-08-09). Treat any remaining reference to a
+"legacy pipeline tier" as history, not as a live alternative.
 
 Shape of the unified turn:
 
@@ -1138,13 +1139,11 @@ _REFLECTION_TOOL_ALLOWLIST = frozenset({
 _NOPROGRESS_WINDOW = 3
 
 
-# I2: cap on the number of auto-fired install proposals per turn.
-# Without this, a skill with N missing required_tools would generate
-# N separate Telegram DMs to the owner in a single burst. Five is the
-# pragmatic ceiling: enough for any one skill's reasonable dep set,
-# small enough not to be a DM-flood. Remaining missing tools surface
-# as a "deferred" line so the LLM and the user still see them.
-AUTO_PROPOSE_CAP = 5
+# AUTO_PROPOSE_CAP was removed 2026-08-09. It capped auto-fired INSTALL
+# proposals per turn — a DM-flood guard for a mechanism deleted on 2026-05-21
+# when the install gate went away and the agent started installing via
+# terminal_exec directly. It had no readers left, but read as a live safety
+# limit: six lines explaining a flood it could not prevent.
 
 
 # Audit T1+T4: token budget thresholds (SIGNAL, not enforcement).

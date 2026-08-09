@@ -53,8 +53,14 @@ MIN_JOBS_FOR_RUN: int = int(
     os.environ.get("HRANT_CONSOLIDATION_MIN_JOBS", 1)
 )
 
-# Cost cap is OFF per the user's spec — track for reporting only,
-# never block. Set to a positive number to enforce a soft cap.
+# Cost is tracked for REPORTING only. Nothing enforces a cap.
+#
+# The previous comment ended "Set to a positive number to enforce a soft cap",
+# which was false: this constant has no readers, so a positive value changes
+# nothing (2026-08-09 dead-code audit). Left in place because the pipeline
+# does compute `estimated_cost_usd` per run, so the value is a reasonable
+# anchor for a future enforcement point — but until something reads it, the
+# comment must not promise a cap that does not exist.
 DAILY_COST_CAP_USD: float = float(
     os.environ.get("HRANT_CONSOLIDATION_COST_CAP_USD", 0.0)
 )

@@ -21,13 +21,20 @@ The design:
      plus clearing the manifest — the nuclear option, brings the
      engine back to exactly what's on GitHub.
 
-  5. `reapply_all()` is called by `backend/updater.py` after a
-     successful `git pull`. For each non-reverted patch in the
-     manifest, runs `git apply --3way`. On conflict, the patch is
-     marked "needs_review" (engine stays as-is — stability over the
-     user's customisation in this case; the patch file is kept so
-     the user can fix it manually in the Settings → Self-Modifications
-     tab).
+  5. THERE IS NO REAPPLY. This spot used to describe a `reapply_all()`
+     called by `backend/updater.py` after a successful `git pull`, running
+     `git apply --3way` per patch and marking conflicts "needs_review".
+     Corrected 2026-08-09: no such function exists anywhere in the repo,
+     the updater never called it, and no code path ever assigns
+     "needs_review" — so the whole conflict-handling story below was
+     describing a mechanism that was never built.
+
+     What `hrant update` ACTUALLY does (updater.py:81) is ARCHIVE every
+     active self-mod into data_dir/self_mods/history/<ts>/ and let the pull
+     overwrite the tree. An applied self-modification therefore does NOT
+     survive an update: it must be ported into git or it is gone. That is
+     the real contract, and it is the opposite of what this docstring
+     promised.
 
 Why patch files instead of a local git branch:
   - Cleaner audit trail (one file = one change)
@@ -74,9 +81,11 @@ class PatchEntry:
     file: str                  # relative path under repo_root
     title: str                 # one-line description for the UI
     created: str               # ISO timestamp
-    status: str                # "applied" | "needs_review" | "reverted"
+    # "needs_review" is UNREACHABLE — nothing assigns it (2026-08-09 audit).
+    # Kept in the type only so old manifests on disk still deserialise.
+    status: str                # "applied" | "reverted" | (legacy: needs_review)
     patch_filename: str        # NNNN-<slug>.patch — sortable
-    last_error: str = ""       # populated when status == "needs_review"
+    last_error: str = ""       # legacy field; nothing populates it today
 
 
 @dataclass
