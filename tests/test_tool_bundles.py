@@ -10,7 +10,13 @@ def test_bundles_constant_shape():
     `complete_supervisor` moved to BASE_TOOLS so supervisor turns
     work without a bundle dance."""
     from backend.tool_bundles import TOOL_BUNDLES
-    assert set(TOOL_BUNDLES.keys()) == {"admin", "self", "media"}
+    # `self` was dissolved into BASE on 2026-08-09: measured over 49 prod turn
+    # artifacts, load_tool_bundle("media") was called TEN times to reach
+    # propose_self_modification FOUR times. Self-improvement is the agent's
+    # core loop and should not pay a discovery round-trip.
+    assert set(TOOL_BUNDLES.keys()) == {"admin", "media"}
+    from backend.tool_bundles import BASE_TOOLS
+    assert {"propose_skill", "propose_self_modification"} <= set(BASE_TOOLS)
     for name, members in TOOL_BUNDLES.items():
         assert isinstance(members, list), f"{name} value must be list"
         assert all(isinstance(m, str) for m in members)
@@ -78,8 +84,8 @@ def test_expand_loaded_single_bundle():
 
 def test_expand_loaded_multiple_bundles_union():
     from backend.tool_bundles import expand_loaded, TOOL_BUNDLES
-    out = expand_loaded({"admin", "self"})
-    assert out == set(TOOL_BUNDLES["admin"]) | set(TOOL_BUNDLES["self"])
+    out = expand_loaded({"admin", "media"})
+    assert out == set(TOOL_BUNDLES["admin"]) | set(TOOL_BUNDLES["media"])
 
 
 def test_expand_loaded_unknown_bundle_ignored():
@@ -170,8 +176,8 @@ def test_handler_loads_multiple_independent_bundles():
     set_loaded_bundles(set())
     try:
         _load_tool_bundle_handler(name="admin")
-        _load_tool_bundle_handler(name="self")
-        assert get_loaded_bundles() == {"admin", "self"}
+        _load_tool_bundle_handler(name="media")
+        assert get_loaded_bundles() == {"admin", "media"}
     finally:
         set_loaded_bundles(set())
 

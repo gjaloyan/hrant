@@ -28,10 +28,13 @@ TOOL_BUNDLES: Final[dict[str, list[str]]] = {
         "list_telegram_access",
         "list_pending_pairings",
     ],
-    "self": [
-        "propose_skill",
-        "propose_self_modification",
-    ],
+    # The `self` bundle was dissolved 2026-08-09 — its two tools moved to
+    # BASE. Measured over the last 49 turn artifacts on prod:
+    # load_tool_bundle("self") was called TEN times to reach
+    # propose_self_modification FOUR times. Self-improvement is the agent's
+    # core loop, and making it pay a discovery round-trip every time is the
+    # same gating tax that kept agent_browser and the tracker tools out of
+    # reach. Both remain owner-gated inside their own handlers.
     "media": [
         "sandbox_exec",
     ],
@@ -44,11 +47,7 @@ BUNDLE_DESCRIPTIONS: Final[dict[str, str]] = {
         "user access (grant / revoke / list / approve_pairing / "
         "list_pending_pairings)."
     ),
-    "self": (
-        "Write a new reusable skill (propose_skill), propose "
-        "structural code changes to the agent itself "
-        "(propose_self_modification)."
-    ),
+
     "media": (
         "Run untrusted binaries under bubblewrap/firejail/unshare "
         "isolation (sandbox_exec)."
@@ -68,6 +67,8 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # "registered but the model never sees it" class that stranded
     # schedule_message and the tracker tools below.
     "prove_change", "waive_proof",
+    # Self-improvement — always-on since 2026-08-09, see the note above.
+    "propose_skill", "propose_self_modification",
     # Search / navigation + knowledge education (read + deliberate write)
     "locate_symbol", "search_knowledge", "save_knowledge",
     "list_skills", "load_skill",
