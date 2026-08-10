@@ -24,7 +24,10 @@ def test_a_lever_with_no_rule_is_reported():
     # this list it means somebody wired it — good — and the assertion below
     # should be updated deliberately rather than by accident.
     assert "self_heal" in out
-    assert "service_repair" in out
+    # service_repair was WIRED on 2026-08-10 after its five defects were
+    # fixed, so it is deliberately no longer here.
+    assert "service_repair" not in out
+    assert "tool_install" in out
 
 
 def test_a_lever_that_fires_in_production_is_not_reported():

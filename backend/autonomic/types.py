@@ -67,6 +67,15 @@ class StateSnapshot:
     pending_approvals: int
     kb_notes_count: int
     kb_graph_nodes: int
+    # Units systemd has GIVEN UP on (2026-08-09 audit). Nothing in the
+    # snapshot could observe service health, so the only predicate a repair
+    # rule could be written with was `True` — restart something on a timer,
+    # healthy or not. `failed` is the narrow, correct signal: systemd already
+    # retries crash-loops itself (Restart=always, RestartUSec 5-10s, far
+    # faster than any tick), and only stops once StartLimitBurst is exhausted.
+    # That is the state nothing else recovers from.
+    # Each entry is "<manager>:<unit>", e.g. "user:lightrag.service".
+    failed_services: list[str] = field(default_factory=list)
 
 
 @dataclass

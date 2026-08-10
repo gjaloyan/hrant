@@ -89,6 +89,30 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=300.0,
         ),
         LayerZeroRule(
+            # 2026-08-09/10. FIRE_SERVICE_REPAIR was registered with no rule
+            # and could never fire. It is wired here, in the reactive block,
+            # only after five defects were fixed — as it stood it would have
+            # restarted HEALTHY services on a timer and logged repairs that
+            # never happened.
+            #
+            # `failed` is the narrow, correct trigger: systemd retries
+            # crash-loops itself far faster than any tick (Restart=always,
+            # RestartUSec 5-10s; prod has units at 174k restarts) and only
+            # gives up once StartLimitBurst is exhausted. That give-up state
+            # is the one thing nothing else on the box recovers from.
+            #
+            # Measured on prod: zero failed units in either manager, so this
+            # predicate is FALSE today. That is the property that lets it sit
+            # this high — a reactive rule that is true every tick would
+            # starve the 20 working levers below it, which is exactly the
+            # 2026-06-12 starvation bug documented further down.
+            name="service_failed",
+            predicate=lambda s: bool(getattr(s, "failed_services", None)),
+            lever="FIRE_SERVICE_REPAIR",
+            params={},
+            cooldown_seconds=600.0,
+        ),
+        LayerZeroRule(
             name="errors_present",
             predicate=lambda s: len(s.recent_errors) > 0,
             lever="FIRE_ERROR_TRIAGE",

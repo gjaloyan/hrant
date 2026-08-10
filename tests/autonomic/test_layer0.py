@@ -155,9 +155,14 @@ def test_default_rules_errors_fires_only_when_nonempty():
 def test_default_rules_reactive_rules_come_first():
     from backend.autonomic.layer0 import default_rules
     rules = default_rules()
-    reactive_names = {"disk_low", "memory_low", "cpu_high", "errors_present"}
-    first_four = {r.name for r in rules[:4]}
-    assert first_four == reactive_names
+    # service_failed joined the reactive block on 2026-08-10 — a unit systemd
+    # has given up on is a safety condition, and like its neighbours its
+    # predicate is FALSE in steady state, so sitting this high starves
+    # nothing.
+    reactive_names = {"disk_low", "memory_low", "cpu_high",
+                      "service_failed", "errors_present"}
+    first_five = {r.name for r in rules[:5]}
+    assert first_five == reactive_names
 
 
 def test_default_rules_schedule_tick_cooldowns():
@@ -200,7 +205,7 @@ def test_default_rules_count_after_phase11():
     rules = default_rules()
     # +graph_collapsed +note_embedding_backfill_tick (2026-08-09): two levers
     # that had been registered since May with no rule naming them.
-    assert len(rules) == 25
+    assert len(rules) == 26
 
 
 def test_default_rules_d07_scheduled_rules_present():
@@ -216,9 +221,10 @@ def test_default_rules_d07_scheduled_rules_present():
     # Reactive quartet first (unchanged), then reminders lead the
     # always-true periodic block.
     assert names[:4] == [
-        "disk_low", "memory_low", "cpu_high", "errors_present",
+        "disk_low", "memory_low", "cpu_high", "service_failed",
     ]
-    assert names[4] == "scheduled_messages_tick"
+    # index 5 now: service_failed joined the reactive block at index 3.
+    assert names[5] == "scheduled_messages_tick"
     assert names[-7:-4] == [
         "self_reflection_tick", "finetune_qc_tick", "gap_detection_tick",
     ]

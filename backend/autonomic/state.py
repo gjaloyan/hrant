@@ -42,7 +42,44 @@ class StateSnapshotBuilder:
             pending_approvals=self._pending_count(),
             kb_notes_count=self._count_notes(),
             kb_graph_nodes=self._count_graph_nodes(),
+            failed_services=self._failed_services(),
         )
+
+    def _failed_services(self) -> list[str]:
+        """Units in the `failed` state, in both systemd managers.
+
+        `failed` means systemd has EXHAUSTED its own retries and stopped —
+        the one service condition nothing else on the box recovers from. A
+        crash-looping unit is deliberately NOT reported: it shows as
+        `activating (auto-restart)`, systemd is on it, and a lever restart
+        would only add contention (prod has four of those right now, one at
+        174k restarts).
+
+        Never raises and never blocks a tick: a missing systemctl, a slow
+        manager or a non-Linux host all yield an empty list, which reads as
+        "nothing to repair".
+        """
+        import subprocess as _sp
+        import sys as _sys
+        if not _sys.platform.startswith("linux"):
+            return []
+        out: list[str] = []
+        for manager, args in (("user", ["--user"]), ("system", [])):
+            try:
+                r = _sp.run(
+                    ["systemctl", *args, "list-units", "--state=failed",
+                     "--no-legend", "--plain", "--no-pager"],
+                    capture_output=True, text=True, timeout=5,
+                )
+            except Exception:
+                continue
+            if r.returncode != 0:
+                continue
+            for line in (r.stdout or "").splitlines():
+                unit = line.split()[0] if line.split() else ""
+                if unit.endswith(".service"):
+                    out.append(f"{manager}:{unit}")
+        return out
 
     def _disk_free_gb(self) -> float:
         target = str(self._knowledge_root.resolve()) if self._knowledge_root.exists() else "."
