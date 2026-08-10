@@ -169,7 +169,12 @@ def test_an_unreadable_page_names_the_escalation_in_its_own_result(monkeypatch):
     import backend.tools.web_search as ws
     hint = ws._NEXT_TOOL_HINT
     assert "agent_browser" in hint
-    assert "do not propose installing a browser" in hint.lower()
+    # Reworded 2026-08-10. The old line said "do not propose installing a
+    # browser: one is already available" — true but harmful: the binary was
+    # installed and merely absent from PATH, so the agent was pushed at a
+    # tool that could not run and told not to fix it.
+    assert "binary_missing" in hint
+    assert "npm install -g agent-browser" in hint
 
 
 def test_a_blocked_fetch_points_at_the_browser(monkeypatch):

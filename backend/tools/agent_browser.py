@@ -22,6 +22,8 @@ so the agent's next move is `terminal_exec 'npm install -g
 from __future__ import annotations
 
 import logging
+import os
+from pathlib import Path
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -60,10 +62,47 @@ class BrowserResult:
         return asdict(self)
 
 
+# Places a global npm install lands that a systemd service's PATH does not
+# include. Measured 2026-08-10: the binary WAS installed at
+# ~/.npm-global/bin/agent-browser and ran fine (v0.27.0, exit 0), but the
+# daemon's PATH is the systemd default — /usr/local/sbin:...:/snap/bin — so
+# shutil.which() found nothing and the tool reported "binary missing". The
+# agent then spent a whole conversation trying to install a package it
+# already had, and could not have fixed it by installing again.
+_NPM_BIN_DIRS = (
+    "~/.npm-global/bin",
+    "~/.local/bin",
+    "~/node_modules/.bin",
+    "/usr/local/lib/node_modules/.bin",
+)
+
+
 def _resolve_binary() -> Optional[str]:
-    """Find the `agent-browser` executable on PATH. Returns the
-    full path on success, None when the binary isn't installed."""
-    return shutil.which("agent-browser")
+    """Find the `agent-browser` executable. PATH first, then the usual
+    global-npm bin directories, then whatever `npm root -g` reports.
+
+    Returns the full path, or None when it genuinely is not installed."""
+    hit = shutil.which("agent-browser")
+    if hit:
+        return hit
+    for d in _NPM_BIN_DIRS:
+        cand = Path(d).expanduser() / "agent-browser"
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    # Last resort: ask npm where it puts global packages. Cheap and only
+    # reached when everything above missed.
+    try:
+        import subprocess as _sp
+        r = _sp.run(["npm", "root", "-g"], capture_output=True, text=True,
+                    timeout=10)
+        if r.returncode == 0:
+            root = Path((r.stdout or "").strip())
+            cand = root.parent / "bin" / "agent-browser"
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+    except Exception:
+        pass
+    return None
 
 
 def _truncate(text: str, cap: int) -> tuple[str, bool]:

@@ -113,6 +113,40 @@ class MetaLearner:
         except Exception:
             return []
 
+    def log_tool_error(
+        self,
+        *,
+        tool: str,
+        message: str,
+        args: Optional[dict] = None,
+        turn_id: str = "",
+    ) -> None:
+        """Record a FAILED TOOL CALL in the shape the immune matcher reads.
+
+        Added 2026-08-10. Until now error_log.jsonl held only low-confidence
+        TURN records — fields like `question`, `confidence`, `unverified` —
+        and none of the three fields `immune.SignatureStore.match()` reads:
+        `source`, `message`, `service`. So the matcher could never have
+        matched anything even if something had called it, and the 10590 fires
+        of FIRE_ERROR_TRIAGE were counting turn quality, not failures.
+
+        Tool errors are the right first source because they are frequent,
+        machine-shaped and genuinely actionable. Measured from the owner's
+        2026-08-10 conversation: agent_browser and npm failed repeatedly with
+        `404 Not Found` and `command not found` while the agent kept
+        retrying, and nothing anywhere recorded a single one of them.
+        """
+        entry = {
+            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "tool",
+            "service": str(tool or ""),
+            "message": str(message or "")[:600],
+            "severity": "error",
+            "tool_args": {k: str(v)[:120] for k, v in (args or {}).items()},
+            "turn_id": turn_id,
+        }
+        self._append_log(entry)
+
     def analyze_failure(
         self,
         question: str,

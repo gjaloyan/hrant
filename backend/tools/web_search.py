@@ -159,8 +159,10 @@ _UNREADABLE_TEXT_CHARS = 400
 _NEXT_TOOL_HINT = (
     "NEXT STEP: use `agent_browser` — it drives a real Chromium (click, "
     "fill, wait for network, screenshot) and is the escalation path for "
-    "exactly this. Do not conclude the content does not exist, and do not "
-    "propose installing a browser: one is already available."
+    "exactly this. Do not conclude the content does not exist. If the tool "
+    "answers `binary_missing`, install it with `npm install -g "
+    "agent-browser` (plain name, no scope) — but check its output first, "
+    "because it is usually already installed and merely absent from PATH."
 )
 
 

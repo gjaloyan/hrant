@@ -1997,6 +1997,41 @@ def _should_block_build(state: dict, tool_name: str) -> bool:
     )
 
 
+# How many failures of the SAME tool in one turn before the agent is told to
+# stop working around it and repair it. Three: one failure is noise, two can
+# be a transient, three in a row is a defect.
+_SELF_REPAIR_AFTER = 3
+
+
+def _self_repair_marker(tool: str, n: int, last_error: str) -> str:
+    """Tell the agent that a repeatedly-failing tool is ITS OWN BUG.
+
+    Not a suggestion to try harder — a redirect. The agent has
+    propose_self_modification always-on (2026-08-09) and the handler source
+    is readable with read_file; what was missing was any signal connecting
+    "this tool keeps failing" to "so fix the tool".
+    """
+    head = (last_error or "").strip().splitlines()
+    first = head[0][:200] if head else ""
+    return (
+        f"🔧 **THIS IS YOUR BUG** — `{tool}` has now failed {n} times this "
+        f"turn with the same class of error:\n"
+        f"    {first}\n\n"
+        "Retrying it will fail again. You are a self-modifying agent and "
+        "this tool is YOUR code:\n"
+        f"  1. `read_file` its handler (grep the repo for `{tool}`) and find "
+        "why it fails — a wrong path, a stale package name, a missing "
+        "fallback.\n"
+        "  2. `propose_self_modification` with the fix and a test. It is "
+        "always available; you do not need to load a bundle.\n"
+        "  3. If you genuinely cannot repair it, say so plainly and name "
+        "the blocker — do NOT keep calling it.\n"
+        "Working around a broken tool leaves it broken for the next turn, "
+        "and for the owner.\n"
+        "\n--- original tool result follows ---\n\n"
+    )
+
+
 def _build_frame_marker(state: dict, tool_name: str, is_error: bool) -> str:
     """Mutate `state` and return a one-time FRAME-CHECK marker (or "").
 
@@ -2808,6 +2843,16 @@ def run_unified(
     _drift_state = {"consecutive_readonly": 0, "marker_fired": 0}
     # Build-without-frame nudge state (see _build_frame_marker).
     _build_frame_state = {"writes": 0, "framed": False, "fired": False}
+    # Repeated failures of the SAME tool, this turn (2026-08-10). The owner's
+    # point, and he is right: a self-modifying agent that hits its own broken
+    # tool should FIX it, not work around it. On 2026-08-10 agent_browser
+    # failed on every call for ~140k tokens; the agent framed the problem,
+    # probed PATH, tried to install a package that does not exist, waived
+    # honestly and asked the owner — and never once considered that the
+    # defect was in its own handler, which it has always-on tools to repair.
+    # Nothing told it that a tool failing the same way repeatedly is a BUG IT
+    # OWNS rather than an environment it must route around.
+    _tool_failures: dict = {}
     # Wall-clock turn start — used to pick THIS turn's frame artifact for the
     # auto case note (file mtimes are wall-clock; t0 above is monotonic).
     _run_started_at = _time.time()
@@ -2843,6 +2888,22 @@ def run_unified(
             f"{name}({', '.join((args or {}).keys())}) -> {preview}",
             tool_call=detail,
         )
+        # Record failures where the immune matcher can see them (2026-08-10).
+        # Tool errors were visible ONLY in the turn's progress stream, which
+        # nothing outlives the turn to read — so a tool failing the same way
+        # every time left no trace anywhere. The owner's 2026-08-10
+        # conversation shows agent_browser and npm failing repeatedly with
+        # `404 Not Found` and `command not found`, retried across dozens of
+        # calls, and afterwards there was nothing to learn from.
+        if is_error:
+            try:
+                from .meta_learner import META_LEARNER
+                META_LEARNER.log_tool_error(
+                    tool=name, message=full_result[:600], args=args or {},
+                    turn_id=getattr(agent, "_request_id", "") or "",
+                )
+            except Exception:
+                pass
         if result:
             cap = _tool_cap.get(name, _DEFAULT_CAP) if not is_error else 2000
             snippet = result[:cap]
@@ -3047,6 +3108,16 @@ def run_unified(
         # changes, not at the end of the turn when the agent has already
         # composed its success story. Same trigger as the build-frame
         # counter: the agent's own tool stream, no keywords.
+        marker_self_repair = ""
+        try:
+            if is_error:
+                _n = _tool_failures.get(name, 0) + 1
+                _tool_failures[name] = _n
+                if _n == _SELF_REPAIR_AFTER:
+                    marker_self_repair = _self_repair_marker(name, _n, raw_result)
+        except Exception:
+            marker_self_repair = ""
+
         marker_contract = ""
         try:
             if not is_error and name in _BUILD_WRITE_TOOLS:
@@ -3099,6 +3170,8 @@ def run_unified(
             out_parts.append(marker_frame.lstrip())
         if marker_contract:
             out_parts.append(marker_contract.lstrip())
+        if marker_self_repair:
+            out_parts.append(marker_self_repair.lstrip())
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 

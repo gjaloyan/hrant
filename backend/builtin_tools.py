@@ -2570,7 +2570,7 @@ def register_builtin_tools() -> None:
             "--output /tmp/x.png`, `click 'button.submit'`, "
             "`eval 'document.title'`.\n\n"
             "On `binary_missing=true`: install via "
-            "`npm install -g @vercel/agent-browser` then retry."
+            "`npm install -g agent-browser` then retry. NOTE the package name: it is plain `agent-browser`. The old text here said `@vercel/agent-browser`, which does not exist — npm answers 404 — and an agent following it burned a whole conversation on 2026-08-10 trying to install its way out of a PATH problem."
         ),
         input_schema={
             "type": "object",
