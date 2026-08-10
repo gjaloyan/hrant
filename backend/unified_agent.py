@@ -1881,7 +1881,7 @@ def _decide_self_correction(
         )
         return "undelivered-artifact", corrective
     from .endpoint_check import (
-        _EXECUTE_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
+        _DELIVERY_TOOLS as _ENDPOINT_EXECUTE_TOOLS,
         endpoint_met,
         unbacked_action_claim,
     )
@@ -1911,18 +1911,35 @@ def _decide_self_correction(
     _mutation_capable = ("terminal_exec", "run_python", "save_to_workspace",
                          "save_knowledge", "pdf_edit")
     _ran_shell = any(t in _mutation_capable for t in turn_tools)
-    _opening = (
-        "none of them is a tool that records a completed action, and "
-        "nothing in your answer shows the change actually taking effect"
-        if _ran_shell else
-        "ALL of them were read-only (inspection, reads, greps)"
-    )
+    # 2026-08-10: instruments (agent_browser, sandbox_exec, delegate,
+    # start_background_job) left _DELIVERY_TOOLS, so they now reach this
+    # corrective. Calling 32 of them "read-only greps" would be visibly false
+    # — the exact thing the note above warns teaches the model to discount
+    # everything that follows.
+    from .endpoint_check import _INSTRUMENT_TOOLS
+    _instruments = [t for t in turn_tools if t in _INSTRUMENT_TOOLS]
+    if _instruments:
+        _opening = (
+            f"you drove {_instruments[0]} {len(_instruments)} time(s) and it "
+            f"produced no result the user can use, and no concrete blocker"
+        )
+    elif _ran_shell:
+        _opening = (
+            "none of them is a tool that records a completed action, and "
+            "nothing in your answer shows the change actually taking effect"
+        )
+    else:
+        _opening = "ALL of them were read-only (inspection, reads, greps)"
     corrective = (
         f"Your previous turn called {len(turn_tools)} tool(s) "
         f"({shown}) but {_opening}. You delivered no state-changing action "
         f"AND did not honestly state a concrete blocker. This is "
         f"the long-investigation giveup failure mode.\n\n"
         f"Pick ONE of two paths NOW:\n"
+        f"  (a0) If you were already using the right instrument and simply "
+        f"stopped short — keep going with it THIS TURN until you have the "
+        f"actual result. Do not switch tools to look busy, and do not end "
+        f"the turn by describing the next step: take it.\n"
         f"  (a) Take the actual action — `start_background_job` "
         f"for any long-running task (benchmarks, builds, "
         f"transcodes; the supervisor will iterate fixes/retries "

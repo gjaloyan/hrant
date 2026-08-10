@@ -67,10 +67,26 @@ def _cache_key(prefix: str, task: str, answer: str,
 # `run terminal-bench` revealed: 36 terminal_exec + 24 run_python
 # without one `start_background_job`, agent claimed "ran 3 tasks",
 # verifier accepted because run_python was in this set.
-_EXECUTE_TOOLS: frozenset[str] = frozenset({
+# Tools whose CALL IS the deliverable. Calling `set_setting` changes the
+# setting; there is no further step, so the turn is done and the judge does
+# not need to be paid to say so.
+#
+# The distinction this list encodes was missing until 2026-08-10, and it cost
+# the owner three consecutive turns. `agent_browser` and `sandbox_exec` were
+# in here, but they are INSTRUMENTS — they are how work gets done, not proof
+# that it was. A turn that called `agent_browser` 32 times, found nothing, and
+# said so plainly was stamped endpoint_met=True without the answer ever being
+# read, because one tool name appeared in one frozenset. The same set also
+# short-circuits the structural gate in unified_agent, so a single instrument
+# call switched off the entire completion machinery for the turn.
+#
+# This is the same defect as the `"MEDIA:" in answer` proxy removed on
+# 2026-08-06 — a stand-in for world state — and it was sitting three lines
+# above it. Instruments now go to the judge as EVIDENCE, which was always the
+# stated principle.
+_DELIVERY_TOOLS: frozenset[str] = frozenset({
     "set_setting",
     "save_user_fact",
-    "start_background_job",
     "define_task_endpoint",
     "complete_supervisor",
     "kick_supervisor",
@@ -80,11 +96,32 @@ _EXECUTE_TOOLS: frozenset[str] = frozenset({
     "approve_pairing",
     "propose_skill",
     "propose_self_modification",
+    "propose_soul_revision",
+    "propose_immune_signature",
+    "ask_user",          # asking IS the terminal act of the turn
+    # Launches stay here. The dividing line is not "tool vs action", it is
+    # whether the SYSTEM carries the work forward after the turn ends: a
+    # background job has a supervisor that iterates and retries it, and a
+    # delegated task is collected by check_subagents. Dispatching one is a
+    # completed, recorded act, and the corrective elsewhere in unified_agent
+    # explicitly tells the agent NOT to babysit it in-turn.
+    "start_background_job",
     "delegate",
-    "ask_user",
-    "sandbox_exec",
-    "agent_browser",
 })
+
+# In-turn instruments. Nothing carries these forward: `agent_browser` reads a
+# page and `sandbox_exec` runs a binary, both returning inside this turn. If
+# the turn ends without a result, no supervisor will get one later — the turn
+# WAS the chance. So their presence is evidence the judge weighs, never a
+# verdict on its own.
+_INSTRUMENT_TOOLS: frozenset[str] = frozenset({
+    "agent_browser",
+    "sandbox_exec",
+})
+
+# Back-compat alias for importers. Points at the narrow set on purpose: any
+# caller using it as "did the turn deliver" now gets the honest answer.
+_EXECUTE_TOOLS: frozenset[str] = _DELIVERY_TOOLS
 
 _ENDPOINT_JUDGE_SYSTEM = """You judge whether an assistant's answer DELIVERED what the user's request required.
 
@@ -95,7 +132,10 @@ Rules:
 - If the request was purely informational (a question, explanation, opinion, small talk) it is satisfied by a relevant answer -> endpoint_met = true.
 - If the request demanded an ACTION, a state change, or a concrete result (run/execute/send/create something, change a setting, produce a file) it is satisfied ONLY if the evidence shows that happening. An asserted effect with nothing in the evidence demonstrating it -> endpoint_met = false.
 - An attached file satisfies the request only when the user asked FOR a file. The assistant's own working material — measurements, scratch dumps, intermediate notes — is not a deliverable, and attaching it does NOT satisfy a request to change, configure, install or fix something.
-- An HONEST report that names what was NOT done, or what remains unproven, IS satisfied -> endpoint_met = true. Never penalise honesty about incompletion; the alternative is teaching the assistant to lie.
+- Honesty is never itself a failure, but it is also not delivery. Separate two cases:
+  * BLOCKED — the assistant names a concrete external obstacle it cannot pass (a login it has no credentials for, a site that is down, a permission it lacks, a missing input only the user can give). Nothing more was possible this turn -> endpoint_met = true.
+  * UNFINISHED — the assistant says the result is not there yet and names a next step IT could take itself ("next I should…", "I still need to…", "I did not get to…"). That is a turn that stopped mid-task -> endpoint_met = false. Say so even though the assistant was honest: the point is not to punish the confession, it is to send the assistant back to finish. Marking this "met" teaches it that describing the next step is as good as taking it.
+- Starting long-running work counts as delivery when starting it was the request, or when the work genuinely cannot finish inside one turn and the evidence shows the launch. It does NOT count when the user asked for the RESULT and the evidence shows only an attempt.
 - Judge in the user's own language; the request may be in any language.
 
 Return strictly JSON: {"endpoint_met": true|false, "reason": "short"}"""
