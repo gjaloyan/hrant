@@ -133,3 +133,60 @@ def test_nothing_failed_means_nothing_is_touched(monkeypatch):
     rep, calls = _report(monkeypatch, [])
     assert rep.status.name == "SKIPPED"
     assert calls == []
+
+
+# ── memory consolidation: two writers, one store ──────────────────────
+
+def test_the_two_fact_writers_share_one_dedup_horizon():
+    """The lever read 200 lines while the pipeline reads 5000 — so the lever
+    would re-add every fact the pipeline wrote more than 200 lines ago. Two
+    writers on one append-only store, the shorter horizon silently
+    duplicating the longer one's work. The pipeline's own comment anticipates
+    this by name ("concurrent appends (autonomic lever ...)")."""
+    import backend.autonomic.levers.memory_consolidation as mc
+    import inspect
+    from backend.consolidation import pipeline as pl
+
+    src = inspect.getsource(pl._existing_fact_summaries)
+    assert "limit: int = 5000" in src
+    assert mc.DEDUP_WINDOW == 5000
+
+
+def test_both_writers_stamp_who_they_are():
+    """The store had NO writer attribution across 2815 rows, so a duplicate
+    or a polluted row could not be traced to its source."""
+    import inspect
+    from backend.consolidation import pipeline as pl
+    import backend.autonomic.levers.memory_consolidation as mc
+
+    assert '"writer": "consolidation.pipeline"' in inspect.getsource(
+        pl._append_memory_fact)
+    assert '"writer": "autonomic.memory_consolidation"' in inspect.getsource(
+        mc.FIRE_MEMORY_CONSOLIDATION._append_durable_facts)
+
+
+def test_consolidation_does_not_fire_on_an_idle_box():
+    """It costs an LLM call; a timer-based trigger would spend money on ticks
+    with nothing to consolidate."""
+    from backend.autonomic.layer0 import default_rules
+    r = next(x for x in default_rules()
+             if x.name == "unconsolidated_sessions_tick")
+
+    class _Idle:
+        unconsolidated_sessions = 0
+
+    class _Work:
+        unconsolidated_sessions = 4
+
+    assert r.predicate(_Idle()) is False
+    assert r.predicate(_Work()) is True
+
+
+def test_a_broken_sessions_file_reads_as_nothing_to_do(tmp_path):
+    """A bad file must never make the agent consolidate on every tick."""
+    from backend.autonomic.state import StateSnapshotBuilder
+    (tmp_path / "sessions.json").write_text("{not json", encoding="utf-8")
+    b = StateSnapshotBuilder(
+        knowledge_root=tmp_path, error_log_path=tmp_path / "e",
+        pending_approvals_path=tmp_path / "p", lever_log_path=tmp_path / "l")
+    assert b._unconsolidated_sessions() == 0

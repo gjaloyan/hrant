@@ -316,6 +316,30 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=86400.0,  # daily
         ),
         LayerZeroRule(
+            # 2026-08-10. FIRE_MEMORY_CONSOLIDATION was registered with no
+            # rule and never ran. Wired only after the two things that made
+            # it dangerous were fixed.
+            #
+            # It shares an append-only fact store with
+            # backend/consolidation/pipeline.py, which runs daily and works.
+            # Its dedup horizon was 200 lines against the pipeline's 5000, so
+            # it would have re-added every fact the pipeline wrote more than
+            # 200 lines ago — two writers, the shorter horizon silently
+            # duplicating the longer one's work. Both now read 5000, and both
+            # stamp a `writer` field: the store had NO writer attribution at
+            # all until today, which is why synthetic rows sat in it
+            # unnoticed for months.
+            #
+            # The trigger is real work rather than a timer: sessions that
+            # ended without being consolidated. FALSE on an idle box, so this
+            # LLM-costing lever cannot fire on a tick with nothing to do.
+            name="unconsolidated_sessions_tick",
+            predicate=lambda s: getattr(s, "unconsolidated_sessions", 0) > 0,
+            lever="FIRE_MEMORY_CONSOLIDATION",
+            params={"max_sessions": 3},
+            cooldown_seconds=21600.0,  # 6h
+        ),
+        LayerZeroRule(
             # 2026-08-09 audit. FACT embeddings got the daily rule above;
             # NOTE embeddings never got one, so FIRE_EMBEDDING_BACKFILL sat
             # registered with zero fires since May. The embedder lives on a

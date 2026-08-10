@@ -48,7 +48,19 @@ Rules:
 DEFAULT_SESSIONS_PATH = Path("knowledge/sessions.json")
 DEFAULT_USER_MD_PATH = Path("knowledge/identity/user.md")
 DEFAULT_FACTS_PATH = Path("knowledge/memory_facts.jsonl")
-DEDUP_WINDOW = 200
+# Must match the consolidation pipeline's dedup horizon, not undercut it
+# (2026-08-10). This was 200 while backend/consolidation/pipeline.py reads
+# 5000 — a gap that pipeline's own comment anticipates by name ("concurrent
+# appends (autonomic lever ...)"). With 200, this lever re-adds any fact the
+# pipeline wrote more than 200 lines ago: two writers, one append-only store,
+# and the shorter horizon silently duplicating the longer one's work. That is
+# the mechanism, not a hypothetical — synthetic rows already polluted this
+# store once this week and nothing noticed for months.
+try:
+    from ...consolidation.pipeline import _existing_fact_summaries as _pipe_dedup  # noqa: F401
+    DEDUP_WINDOW = 5000
+except Exception:  # pragma: no cover - pipeline import optional in tests
+    DEDUP_WINDOW = 5000
 CONFIDENCE_THRESHOLD = 0.8
 
 
@@ -254,6 +266,10 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
                     "confidence": conf,
                     "ts": utcnow().isoformat(),
                     "source_turn": f"consolidation:{session_id}",
+                    # See the matching field in consolidation/pipeline.py:
+                    # two writers share this append-only store and until
+                    # 2026-08-10 neither said which one it was.
+                    "writer": "autonomic.memory_consolidation",
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 existing_summaries.add(key)

@@ -304,6 +304,12 @@ def _append_memory_fact(text: str, category: str, confidence: float,
         "confidence": float(confidence),
         "ts": time.time(),
         "source_turn": f"consolidation:{date_str}",
+        # Which code path produced this row (2026-08-10). Until now the store
+        # had NO writer attribution: the daily pipeline and the autonomic
+        # lever both append here in shapes that differ only by which optional
+        # fields they happen to set, so a duplicate or a polluted row could
+        # not be traced to its source. 2815 rows existed before this field.
+        "writer": "consolidation.pipeline",
     }
     with p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")

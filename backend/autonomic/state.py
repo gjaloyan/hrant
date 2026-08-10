@@ -43,7 +43,29 @@ class StateSnapshotBuilder:
             kb_notes_count=self._count_notes(),
             kb_graph_nodes=self._count_graph_nodes(),
             failed_services=self._failed_services(),
+            unconsolidated_sessions=self._unconsolidated_sessions(),
         )
+
+    def _unconsolidated_sessions(self) -> int:
+        """Ended sessions not yet folded into memory.
+
+        Cheap and defensive: a missing or unreadable sessions.json reads as
+        zero, i.e. "nothing to do", so a bad file can never make the agent
+        run an LLM consolidation pass on every tick.
+        """
+        import json as _json
+        p = self._knowledge_root / "sessions.json"
+        try:
+            blob = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return 0
+        try:
+            return sum(
+                1 for s in (blob.get("sessions") or [])
+                if not s.get("consolidated") and s.get("turns")
+            )
+        except Exception:
+            return 0
 
     def _failed_services(self) -> list[str]:
         """Units in the `failed` state, in both systemd managers.

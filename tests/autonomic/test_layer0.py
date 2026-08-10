@@ -205,7 +205,7 @@ def test_default_rules_count_after_phase11():
     rules = default_rules()
     # +graph_collapsed +note_embedding_backfill_tick (2026-08-09): two levers
     # that had been registered since May with no rule naming them.
-    assert len(rules) == 26
+    assert len(rules) == 27
 
 
 def test_default_rules_d07_scheduled_rules_present():
@@ -225,12 +225,14 @@ def test_default_rules_d07_scheduled_rules_present():
     ]
     # index 5 now: service_failed joined the reactive block at index 3.
     assert names[5] == "scheduled_messages_tick"
-    assert names[-7:-4] == [
+    assert names[-8:-5] == [
         "self_reflection_tick", "finetune_qc_tick", "gap_detection_tick",
     ]
     # note_embedding_backfill_tick was appended after it on 2026-08-09 —
     # NOTE embeddings had no rule while FACT embeddings did.
-    assert names[-2] == "fact_embedding_backfill_tick"
+    # unconsolidated_sessions_tick was inserted between them on 2026-08-10.
+    assert names[-3] == "fact_embedding_backfill_tick"
+    assert names[-2] == "unconsolidated_sessions_tick"
     assert names[-1] == "note_embedding_backfill_tick"
 
 

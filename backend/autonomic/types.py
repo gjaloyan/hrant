@@ -76,6 +76,12 @@ class StateSnapshot:
     # That is the state nothing else recovers from.
     # Each entry is "<manager>:<unit>", e.g. "user:lightrag.service".
     failed_services: list[str] = field(default_factory=list)
+    # Sessions that have ended without being consolidated (2026-08-10). Same
+    # reason as failed_services: FIRE_MEMORY_CONSOLIDATION had no rule because
+    # nothing in the snapshot could say whether there was anything to
+    # consolidate, so the only writable predicate was `True` — run an LLM
+    # consolidation pass every tick regardless.
+    unconsolidated_sessions: int = 0
 
 
 @dataclass
