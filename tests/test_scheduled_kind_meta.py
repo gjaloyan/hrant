@@ -7,10 +7,14 @@ import pytest
 
 @pytest.fixture
 def sched(tmp_path, monkeypatch):
-    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path))
-    import importlib
+    """An ISOLATED ledger — see the note in test_checkin_routing.py.
+
+    Setting HRANT_DATA_DIR and reloading isolates nothing: `_path()` resolves
+    against CONFIG at call time, so these tests appended to the developer's
+    real ledger on every run."""
     from backend import scheduled_messages as sm
-    importlib.reload(sm)
+    from backend.config import CONFIG
+    monkeypatch.setitem(CONFIG.knowledge, "base_dir", str(tmp_path))
     return sm
 
 

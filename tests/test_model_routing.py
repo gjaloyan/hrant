@@ -108,6 +108,9 @@ def router_with_route(routing, monkeypatch):
     r._active_llm = active_llm
     r._active_cfg_hash = "active:fake"
     r.state = {"last_reason": ""}
+    # Needed since 2026-08-10: with the legacy tail gone these tests reach the
+    # real chain dispatch, which consults the budget policy on the way in.
+    r.cfg_router = {}
     monkeypatch.setattr(r, "_save_state", lambda: None, raising=False)
     monkeypatch.setattr(
         r, "_track_active_model_call", lambda **kw: None, raising=False,
@@ -141,36 +144,66 @@ def test_routed_task_uses_routed_model(router_with_route):
     assert "task-routed" in r.state["last_reason"]
 
 
-def test_unrouted_task_uses_active(router_with_route):
+@pytest.fixture
+def chain_delivers(monkeypatch):
+    """Production shape: `_active_provider_chain` is NON-empty.
+
+    Ported 2026-08-10. These tests used to force the chain EMPTY and assert
+    the call landed on `_get_active_llm()` — the legacy A/B tail, which prod
+    has never executed (total_a_calls = total_b_calls = 0 against 2619 calls)
+    and which an empty chain reaches only when every provider is disabled,
+    i.e. when no call can succeed anyway. The invariants are real — an
+    unrouted task still gets answered, a failed or unresolvable route does not
+    lose the call — so they are asserted against the path production takes."""
+    import backend.llm as llm_mod
+    seen = {"n": 0}
+
+    def _chain(tt):
+        return [object()]
+
+    def _run(chain, kind, task_type, system, user, **kw):
+        seen["n"] += 1
+        return "chain-reply"
+
+    monkeypatch.setattr(llm_mod, "_active_provider_chain", _chain)
+    monkeypatch.setattr(llm_mod, "_run_with_safety_fallback", _run)
+    return seen
+
+
+def test_unrouted_task_goes_through_the_chain(router_with_route, chain_delivers):
     from backend.llm import TaskType
-    r, routed_llm, active_llm = router_with_route
+    r, routed_llm, _ = router_with_route
 
     out = r.call(TaskType.COMPLEX_SOLVING, "sys", "user")
-    assert out == "active-reply"
+    assert out == "chain-reply"
+    assert chain_delivers["n"] == 1
     assert routed_llm.calls == 0
-    assert active_llm.calls == 1
 
 
-def test_routed_failure_falls_back_to_active(router_with_route):
+def test_routed_failure_is_rescued_by_the_chain(router_with_route,
+                                                chain_delivers):
+    """A routed model going down must not lose the turn."""
     from backend.llm import TaskType
-    r, routed_llm, active_llm = router_with_route
+    r, routed_llm, _ = router_with_route
     routed_llm.fail = True
 
     out = r.call(TaskType.CLASSIFICATION, "sys", "user")
-    assert out == "active-reply"
-    assert routed_llm.calls == 1   # tried
-    assert active_llm.calls == 1   # rescued
+    assert out == "chain-reply"
+    assert routed_llm.calls == 1        # tried
+    assert chain_delivers["n"] == 1     # rescued
 
 
-def test_unresolvable_route_falls_back(router_with_route, monkeypatch):
+def test_unresolvable_route_is_rescued_by_the_chain(router_with_route,
+                                                    chain_delivers, monkeypatch):
     from backend.llm import TaskType
     import backend.failover as _fo
-    r, routed_llm, active_llm = router_with_route
+    r, routed_llm, _ = router_with_route
     monkeypatch.setattr(_fo, "resolve_entry_cfg", lambda pid, m: None)
 
     out = r.call(TaskType.CLASSIFICATION, "sys", "user")
-    assert out == "active-reply"
+    assert out == "chain-reply"
     assert routed_llm.calls == 0
+    assert chain_delivers["n"] == 1
 
 
 def test_route_wins_over_provider_chain(router_with_route, monkeypatch):

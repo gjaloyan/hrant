@@ -10,8 +10,14 @@ def store(tmp_path, monkeypatch):
     # KM resolves paths from HRANT_DATA_DIR at import; reload to pick up tmp.
     import importlib
     from backend import knowledge_manager, tracker
+    from backend.config import CONFIG
     importlib.reload(knowledge_manager)
     importlib.reload(tracker)
+    # A step with a due date schedules a check-in, and scheduled_messages
+    # resolves its ledger from CONFIG at call time — not from the env at
+    # import time. Without this the tracker tests appended rows to the
+    # developer's real ledger on every run.
+    monkeypatch.setitem(CONFIG.knowledge, "base_dir", str(tmp_path))
     return tracker.TRACKERS
 
 

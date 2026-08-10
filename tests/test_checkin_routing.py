@@ -7,10 +7,21 @@ import pytest
 
 @pytest.fixture
 def sched(tmp_path, monkeypatch):
-    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path))
-    import importlib
+    """An ISOLATED ledger.
+
+    This fixture used to set HRANT_DATA_DIR and reload the module, which
+    isolated nothing: `_path()` resolves against `CONFIG.knowledge["base_dir"]`
+    at call time, not against the environment at import time. So every run of
+    this test appended to the developer's real ledger
+    (~/.hrant/data/knowledge/scheduled_messages.jsonl — 343 rows by
+    2026-08-10), and `due_now()` returned that accumulated junk alongside the
+    two rows the test scheduled. It passed or failed depending on what was
+    lying in a shared file, which is how it stayed green for months while
+    asserting nothing, then went red when new test files shifted the order.
+    """
     from backend import scheduled_messages as sm
-    importlib.reload(sm)
+    from backend.config import CONFIG
+    monkeypatch.setitem(CONFIG.knowledge, "base_dir", str(tmp_path))
     return sm
 
 
