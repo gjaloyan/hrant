@@ -98,9 +98,13 @@ def test_preserves_existing_json_flag():
 
 
 def test_prefixes_binary_path():
-    """The full subprocess command is `<bin_path> <cmd>`, not just
-    `agent-browser <cmd>` — important when shutil.which returns a
-    non-PATH location (e.g. /opt/agent-browser/bin)."""
+    """argv[0] is the resolved binary path, not a bare `agent-browser` —
+    important when the binary lives outside PATH (e.g. the npm global bin
+    dir, which is exactly where it sits on prod).
+
+    Updated 2026-08-10: the wrapper stopped composing a shell string and now
+    passes an argv list, because /bin/sh was eating `&` in query URLs and
+    parentheses in `eval` JS. The invariant is unchanged."""
     captured = {}
 
     class _FakeProc:
@@ -114,9 +118,10 @@ def test_prefixes_binary_path():
 
     with patch.object(ab, "_resolve_binary", return_value="/opt/agent-browser/bin/agent-browser"), \
          patch.object(ab.subprocess, "run", side_effect=_fake_run):
-        ab.run_agent_browser("screenshot https://x.com")
+        ab.run_agent_browser("open https://x.com")
 
-    assert captured["cmd"].startswith("/opt/agent-browser/bin/agent-browser ")
+    assert captured["cmd"][0] == "/opt/agent-browser/bin/agent-browser"
+    assert captured["cmd"][1] == "open"
 
 
 # ─── successful + failed exec paths ───────────────────────────────

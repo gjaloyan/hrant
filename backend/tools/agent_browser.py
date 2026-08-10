@@ -105,6 +105,40 @@ def _resolve_binary() -> Optional[str]:
     return None
 
 
+# Sub-commands whose LAST parameter is a single free-form blob that runs to
+# the end of the line. Splitting these on whitespace is always wrong, and
+# requiring the model to quote a page of JavaScript perfectly is a contract it
+# will lose eventually — so take the remainder verbatim instead.
+_REST_OF_LINE: dict[str, int] = {
+    "eval": 1,          # eval <js>
+}
+
+
+def _split_command(raw: str) -> tuple[list[str], str]:
+    """Tokenise a sub-command into argv. Returns (argv, error_message).
+
+    Shell-free: `&`, `(`, `;`, `*` are ordinary characters here, which is the
+    whole point — a URL with query parameters must survive intact.
+    """
+    import shlex
+    head = raw.split(None, 1)
+    if not head:
+        return [], "empty command"
+    verb = head[0]
+    take_rest = _REST_OF_LINE.get(verb)
+    if take_rest is not None and len(head) > 1:
+        rest = head[1].strip()
+        # Strip one layer of matching quotes if the model added them; the
+        # blob is a single argument either way.
+        if len(rest) >= 2 and rest[0] == rest[-1] and rest[0] in "\"'":
+            rest = rest[1:-1]
+        return [verb, rest], ""
+    try:
+        return shlex.split(raw), ""
+    except ValueError as e:
+        return [], str(e)
+
+
 def _truncate(text: str, cap: int) -> tuple[str, bool]:
     if len(text) <= cap:
         return text, False
@@ -153,28 +187,58 @@ def run_agent_browser(
             binary_missing=True,
             error=(
                 "`agent-browser` binary not on PATH. Install via "
-                "terminal_exec, e.g. `npm install -g "
-                "@vercel/agent-browser` (needs Node + Chromium on "
-                "the box), then retry this tool. No service restart "
-                "needed — the wrapper resolves the binary per call."
+                "terminal_exec: `npm install -g agent-browser` (needs "
+                "Node + Chromium on the box), then retry this tool. The "
+                "package is plain `agent-browser` — this message said "
+                "`@vercel/agent-browser` until 2026-08-10, npm answers 404 "
+                "for it, and an agent following it spent a whole "
+                "conversation installing its way out of a PATH problem. "
+                "No service restart needed — the wrapper resolves the "
+                "binary per call."
             ),
         )
 
-    # Auto-add --json so we always get structured stdout.
-    if "--json" not in raw.split():
-        raw = raw + " --json"
-
-    # Compose the full shell command. We rely on /bin/sh because
-    # the LLM may use pipes / arg quoting that depends on shell
-    # parsing (same model as terminal_exec).
-    full_cmd = f"{bin_path} {raw}"
+    # Build an argv list — NO SHELL (2026-08-10).
+    #
+    # This used to be `subprocess.run(f"{bin_path} {raw}", shell=True)`,
+    # justified in a comment as "the LLM may use pipes ... same model as
+    # terminal_exec". That reasoning does not transfer: agent-browser is one
+    # CLI with subcommands, nothing here wants a pipe, and /bin/sh actively
+    # destroys the two most common arguments this tool takes. Measured on the
+    # owner's DataLex task, three distinct failures, one cause:
+    #
+    #   open ...?app=AppCaseSearch&tab=bankruptcy
+    #       -> `&` backgrounded the command; the rest became a second one.
+    #          exit 127, "/bin/sh: 1: --json: not found" — while the page had
+    #          actually loaded, so the agent saw a failure that was ours.
+    #   eval Array.from(...).map(...)
+    #       -> "/bin/sh: 1: Syntax error: \"(\" unexpected"
+    #   find text Դատական գործերի որոնում click
+    #       -> "Unknown subaction: գործերի" — unquoted words became argv slots.
+    #
+    # A URL with query parameters is not an edge case; it is the normal way to
+    # address a page. shlex tokenises the way a shell quotes WITHOUT giving
+    # the string to a shell: `&`, `(`, `)`, `;`, `*` are plain characters.
+    argv, parse_error = _split_command(raw)
+    if parse_error:
+        return BrowserResult(
+            ok=False, command=raw, exit_code=-1, stdout="", stderr="",
+            truncated=False, elapsed_ms=0,
+            error=(f"could not parse the command: {parse_error}. "
+                   "Quote any argument containing spaces, e.g. "
+                   "`eval \"document.title\"` or "
+                   "`find text \"two words\" click`."),
+        )
+    if "--json" not in argv:
+        argv.append("--json")
+    full_cmd = [str(bin_path), *argv]
     timeout = max(1, min(int(timeout_seconds or DEFAULT_TIMEOUT_SEC),
                          MAX_TIMEOUT_SEC))
     start = _time.monotonic()
     try:
         proc = subprocess.run(
             full_cmd,
-            shell=True,
+            shell=False,
             cwd=cwd or None,
             capture_output=True,
             timeout=timeout,
