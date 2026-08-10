@@ -809,6 +809,72 @@ def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
     )
 
 
+_FINDINGS_TOTAL_CAP = 4000
+_FINDINGS_PER_CALL_CAP = 320
+_FINDINGS_MAX_CALLS = 14
+
+
+def _turn_findings(agent, previous_answer: str = "") -> str:
+    """What this turn has ALREADY established, for the correction round.
+
+    Measured 2026-08-10 on the owner's DataLex task. The corrective re-prompt
+    passes only `task + corrective` to `call_with_tools`, which starts a fresh
+    message list — so the agent entered round two knowing nothing it had just
+    spent fifty tool calls learning. The trace shows exactly that: it had
+    found `#search_form` and enumerated its controls, then opened the site's
+    home page and began again. Twice, once per round.
+
+    That is not the model being forgetful. We deleted its notes and asked why
+    it started over. The corrective even says "keep going with it THIS TURN",
+    which was impossible to obey.
+
+    Newest calls first: the tail is where the turn actually got to, and it is
+    what survives the budget when a turn made fifty calls.
+    """
+    steps = list(getattr(agent, "_trace", None) or [])
+    lines: list[str] = []
+    used = 0
+    for _step in reversed(steps):
+        if len(lines) >= _FINDINGS_MAX_CALLS or used >= _FINDINGS_TOTAL_CAP:
+            break
+        tc = getattr(_step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None)
+        if not name:
+            continue
+        args = getattr(tc, "args", None)
+        if args is None and isinstance(tc, dict):
+            args = tc.get("args")
+        result = getattr(tc, "result", None)
+        if result is None and isinstance(tc, dict):
+            result = tc.get("result")
+        is_error = bool(getattr(tc, "is_error", False) or (
+            tc.get("is_error") if isinstance(tc, dict) else False))
+        arg_s = ", ".join(f"{k}={str(v)[:90]}" for k, v in (args or {}).items())
+        res_s = str(result or "").strip().replace("\n", " ")[:_FINDINGS_PER_CALL_CAP]
+        mark = "ERROR" if is_error else "ok"
+        entry = f"  [{mark}] {name}({arg_s}) -> {res_s}"
+        lines.append(entry)
+        used += len(entry)
+    if not lines and not (previous_answer or "").strip():
+        return ""
+    out = ["[WHAT YOU ALREADY DID THIS TURN — do not start over]"]
+    if (previous_answer or "").strip():
+        out.append("Your previous answer was:\n"
+                   + previous_answer.strip()[:800])
+    if lines:
+        # Collected newest-first so the budget keeps the TAIL — where the turn
+        # actually got to — then printed in the order they happened, which is
+        # how they read.
+        out.append(f"Your last {len(lines)} tool call(s), in order:")
+        out.extend(reversed(lines))
+        out.append("Continue from here. Re-running what already succeeded "
+                   "wastes the turn; the results above are still valid.")
+    return "\n".join(out)
+
+
 def _turn_tool_names(agent) -> list[str]:
     """Names of tools actually called this turn, read from the trace."""
     out: list[str] = []
@@ -3377,10 +3443,13 @@ def run_unified(
             _last_tag = _correction_tag
             agent.progress("self_correct", f"{_correction_tag} — re-prompting")
             try:
+                _findings = _turn_findings(agent, previous_answer=answer)
                 answer = router().call_with_tools(
                     TaskType.COMPLEX_SOLVING,
                     system_prompt,
-                    f"{task}\n\n[SELF-CORRECTION REQUIRED]\n{_corrective}",
+                    f"{task}\n\n"
+                    + (f"{_findings}\n\n" if _findings else "")
+                    + f"[SELF-CORRECTION REQUIRED]\n{_corrective}",
                     tools=_current_tool_schema_for_turn(),
                     tools_provider=_current_tool_schema_for_turn,
                     execute_tool=_execute_with_progress,
