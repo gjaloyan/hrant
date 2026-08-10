@@ -2282,6 +2282,16 @@ def run_unified(
     # CALL warning instead of re-running the handler).
     from .tool_registry import reset_per_turn_call_cache as _ptc_reset
     _ptc_reset()
+    # The browser tool hands the CLI's own guide to the FIRST browser call of
+    # a turn. Reset here so each turn gets it once — measured 2026-08-10, the
+    # agent never fetched that guide on its own across four turns even though
+    # the tool description points at it, and it contains the fact it kept
+    # tripping over (refs go stale after any click or re-render).
+    try:
+        from .tools.agent_browser import reset_guide_for_turn as _abg_reset
+        _abg_reset()
+    except Exception:
+        pass
     # Open a per-turn endpoint-judgment cache. _decide_self_correction,
     # the verifier-cap branch, and cap_confidence_for_endpoint all
     # evaluate endpoint_met on identical (task, answer, tool_names) —

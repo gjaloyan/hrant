@@ -28,6 +28,7 @@ agent-browser'`.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import re as _re
@@ -65,9 +66,15 @@ class BrowserResult:
     elapsed_ms: int
     binary_missing: bool = False
     error: str = ""
+    # The CLI's own usage guide, attached to the FIRST browser call of a turn
+    # and empty on every call after it. See `_core_guide`.
+    guide: str = ""
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        if not d.get("guide"):
+            d.pop("guide", None)      # keep the common result shape unchanged
+        return d
 
 
 # Places a global npm install lands that a systemd service's PATH does not
@@ -151,6 +158,56 @@ def _truncate(text: str, cap: int) -> tuple[str, bool]:
     if len(text) <= cap:
         return text, False
     return text[:cap] + f"\n…[truncated {len(text) - cap} chars]", True
+
+
+# The CLI ships its own usage guide, version-matched to the binary, whose
+# first line reads "Read this before running any agent-browser commands". Over
+# four measured turns on 2026-08-10 the agent consulted it ZERO times, despite
+# the tool description pointing at it — a soft instruction the model reliably
+# skips, the same way soft completion prompts were skipped before the gates
+# went in.
+#
+# What it was missing matters: the guide states that refs go stale the moment
+# the page changes, and that you must re-snapshot after any click, submit or
+# re-render. Not knowing that is exactly how a turn clicks a ref from an
+# earlier snapshot and concludes the element does not exist. (I made the same
+# mistake by hand while diagnosing this, which is how confident a paraphrase
+# can be while being wrong.)
+#
+# So the guide is delivered structurally, once per turn, on the first browser
+# call — the vendor's documentation rather than our summary of it. Our summary
+# is what invented `navigate` and `extract` in the first place.
+_GUIDE_CACHE: "dict[str, str]" = {}
+_guide_sent: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "hrant_browser_guide_sent", default=False)
+
+
+def reset_guide_for_turn() -> None:
+    """Called at turn start so the next turn's first browser call gets it."""
+    _guide_sent.set(False)
+
+
+def _core_guide(bin_path: str) -> str:
+    """The CLI's own short guide, fetched once per process."""
+    if bin_path in _GUIDE_CACHE:
+        return _GUIDE_CACHE[bin_path]
+    text = ""
+    try:
+        r = subprocess.run([bin_path, "skills", "get", "core", "--json"],
+                           capture_output=True, timeout=30, check=False)
+        raw = (r.stdout or b"").decode("utf-8", "replace")
+        try:
+            import json as _json
+            data = _json.loads(raw)
+            items = data.get("data") if isinstance(data, dict) else None
+            if isinstance(items, list) and items:
+                text = str(items[0].get("content") or "")
+        except Exception:
+            text = raw
+    except Exception as e:                    # never block a browser call
+        log.debug("agent_browser: could not read the core guide: %s", e)
+    _GUIDE_CACHE[bin_path] = text
+    return text
 
 
 def _session_name() -> str:
@@ -322,6 +379,22 @@ def run_agent_browser(
     err_cap = MAX_OUTPUT_CHARS - out_cap
     stdout_capped, out_trunc = _truncate(stdout_text, out_cap)
     stderr_capped, err_trunc = _truncate(stderr_text, err_cap)
+    # First browser call of the turn carries the CLI's own guide. Attached
+    # AFTER the call rather than as a separate probe so it costs no extra
+    # round-trip, and only once so a twenty-call turn pays for it once.
+    guide = ""
+    if not _guide_sent.get():
+        _guide_sent.set(True)
+        try:
+            g = _core_guide(str(bin_path))
+        except Exception as e:      # the guide is a nicety; the call is the job
+            log.debug("agent_browser: guide unavailable: %s", e)
+            g = ""
+        if g:
+            guide = ("READ THIS FIRST — the agent-browser guide shipped with "
+                     "this exact binary. It is authoritative; anything you "
+                     "remember about this CLI is not.\n\n" + g)
+
     return BrowserResult(
         ok=(proc.returncode == 0),
         command=raw,
@@ -331,4 +404,5 @@ def run_agent_browser(
         truncated=(out_trunc or err_trunc),
         elapsed_ms=elapsed,
         error="" if proc.returncode == 0 else f"exit code {proc.returncode}",
+        guide=guide,
     )
