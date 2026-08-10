@@ -108,3 +108,36 @@ def test_the_invented_commands_really_are_absent():
                          text=True, timeout=60).stdout
     assert "\n  extract " not in out
     assert "\n  navigate " not in out
+
+
+# ── the ref workflow: verified live against DataLex 2026-08-10 ──────
+
+def test_the_ref_syntax_is_documented_with_the_at_sign():
+    """`click @e14` works; `click [ref=e14]` returns "Element not found".
+    The agent tried the second form, and the third, and the fourth, on a page
+    whose snapshot listed the link it wanted."""
+    body = _text()
+    assert "click @e14" in body
+    assert "[ref=e14]" in body, "the wrong form must be named as wrong"
+    assert "snapshot" in body
+
+
+def test_guessing_selectors_is_discouraged_before_snapshot():
+    body = _text().lower()
+    assert "do not guess selectors" in body
+
+
+def test_quoting_multiword_values_is_spelled_out():
+    """`find text Դատական գործերի որոնում click` -> "Unknown subaction:
+    գործերի". The agent repeated this in two separate turns."""
+    assert 'find text "two words" click' in _text()
+
+
+def test_the_description_stays_site_agnostic():
+    """It was written while debugging one Armenian court site, and briefly
+    carried that site's link label as the ref example. A universal tool
+    manual must not name today's page — tomorrow it is a different one, and
+    a stale example reads as an instruction. Latin + punctuation only."""
+    body = _text()
+    exotic = sorted({c for c in body if ord(c) > 0x2500})
+    assert not exotic, f"site-specific script leaked into the manual: {exotic}"

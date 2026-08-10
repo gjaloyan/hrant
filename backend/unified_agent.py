@@ -1956,10 +1956,12 @@ def _decide_self_correction(
         f"from via `ask_user`.\n\n"
         f"Do not end this turn with another investigation summary."
     )
-    return (
-        f"toolful no-deliver — {len(turn_tools)} read-only tools",
-        corrective,
-    )
+    # The tag is what the USER sees in the [TURN GATE] NOT DONE line, so it
+    # must not describe 33 browser calls as "read-only tools" — the same
+    # visibly-false wording the corrective itself was just fixed for.
+    _what = (f"{len(_instruments)} {_instruments[0]} calls" if _instruments
+             else f"{len(turn_tools)} read-only tools")
+    return (f"toolful no-deliver — {_what}", corrective)
 
 
 # ─── Build-without-frame nudge (structural, no keyword routing) ─────

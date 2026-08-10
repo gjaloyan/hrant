@@ -213,8 +213,10 @@ def run_agent_browser(
     #          actually loaded, so the agent saw a failure that was ours.
     #   eval Array.from(...).map(...)
     #       -> "/bin/sh: 1: Syntax error: \"(\" unexpected"
-    #   find text Դատական գործերի որոնում click
-    #       -> "Unknown subaction: գործերի" — unquoted words became argv slots.
+    #   find text <unquoted multi word label> click
+    #       -> "Unknown subaction: <second word>" — each word became its own
+    #          argv slot. Common wherever link labels are phrases rather than
+    #          single identifiers, i.e. on most real pages.
     #
     # A URL with query parameters is not an edge case; it is the normal way to
     # address a page. shlex tokenises the way a shell quotes WITHOUT giving

@@ -172,3 +172,7 @@ def test_the_corrective_does_not_call_a_browser_turn_read_only(monkeypatch):
     # And it must tell the agent to FINISH with the instrument it already had,
     # not to switch tools to look busy.
     assert "keep going with it THIS TURN" in corrective
+    # The TAG is what the user sees in the [TURN GATE] line — it must not
+    # call 32 browser calls "read-only tools" either.
+    assert "read-only" not in kind
+    assert "agent_browser" in kind
