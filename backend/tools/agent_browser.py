@@ -10,19 +10,27 @@ The wrapper is intentionally a thin shell: the LLM constructs the
 agent-browser sub-command + args as a string, we prefix `agent-browser`
 + auto-append `--json`, exec via subprocess, parse the stdout JSON.
 This keeps the wrapper forward-compatible with any sub-command the
-CLI grows (navigate, extract, screenshot, click, fill, eval, HAR
-record, React inspect, etc.) without us having to keep a hand-
-written translation table in sync.
+CLI grows (open, get, snapshot, click, fill, eval, HAR record,
+React inspect, etc.) without us having to keep a hand-written
+translation table in sync.
+
+Two corrections dated 2026-08-10, both found by running a real task rather
+than a test: this docstring used to list `navigate` and `extract`, which the
+CLI has never had, and the install hint named `@vercel/agent-browser`, which
+npm answers 404 for. The package is plain `agent-browser`. Both had been
+copied into the user-facing tool description, so the agent was instructed to
+issue commands that could not work.
 
 When the binary isn't installed (fresh box), the wrapper returns a
 structured `binary_missing=True` payload with the install command,
 so the agent's next move is `terminal_exec 'npm install -g
-@vercel/agent-browser'` or whichever method the operator prefers.
+agent-browser'`.
 """
 from __future__ import annotations
 
 import logging
 import os
+import re as _re
 from pathlib import Path
 import shutil
 import subprocess
@@ -145,23 +153,59 @@ def _truncate(text: str, cap: int) -> tuple[str, bool]:
     return text[:cap] + f"\n…[truncated {len(text) - cap} chars]", True
 
 
+def _session_name() -> str:
+    """Which browser session this call belongs to.
+
+    agent-browser keeps ONE session named `default` unless told otherwise, so
+    every caller on the box shared a single browser. Two concurrent flows —
+    a background job and a foreground turn, a delegated subagent and its
+    parent, two Telegram users — would navigate each other's page mid-task and
+    each would see the other's DOM. Discovered 2026-08-10 by accident: a
+    diagnostic `open` issued while an agent turn was driving the same page
+    silently hijacked that turn.
+
+    Keyed on the turn's job id, which job_runner sets for every `agent.run`
+    (subagents get their own), falling back to the speaker so distinct users
+    are still separated, and finally to the CLI's own default.
+    """
+    try:
+        from ..failover import get_current_job_id
+        jid = get_current_job_id()
+        if jid:
+            return f"job-{jid}"
+    except Exception:
+        pass
+    try:
+        from ..roles import current_speaker
+        sp = current_speaker()
+        if sp:
+            return "sp-" + _re.sub(r"[^A-Za-z0-9_-]", "_", sp)[:40]
+    except Exception:
+        pass
+    return "default"
+
+
 def run_agent_browser(
     command: str,
     *,
     timeout_seconds: int = DEFAULT_TIMEOUT_SEC,
     cwd: Optional[str] = None,
+    session: Optional[str] = None,
 ) -> BrowserResult:
     """Invoke `agent-browser <command> --json` and return a
     structured result.
 
     `command` is the sub-command + args as a single string, exactly
     what you'd type after `agent-browser` on the shell. Examples:
-        navigate https://example.com
-        extract https://example.com --selector "article h1"
-        screenshot https://example.com --output /tmp/shot.png
+        open https://example.com
+        get text "article h1"
+        snapshot
         click "button.submit"
-        fill 'input[name="email"]' --value "user@example.com"
+        fill 'input[name="email"]' "user@example.com"
         eval 'document.querySelector("h1").innerText'
+
+    The session is per-turn (see `_session_name`), so concurrent flows do not
+    share one browser. Pass `session` to override.
 
     `--json` is auto-appended if not already present so we always
     get structured stdout. Timeout is clamped to [1, 300]; defaults
@@ -238,9 +282,15 @@ def run_agent_browser(
                          MAX_TIMEOUT_SEC))
     start = _time.monotonic()
     try:
+        # AGENT_BROWSER_SESSION rather than a `--session` flag: the CLI reads
+        # both, and the env var cannot collide with a session the caller
+        # supplied in `command`, nor depend on argument order.
+        env = dict(os.environ)
+        env.setdefault("AGENT_BROWSER_SESSION", session or _session_name())
         proc = subprocess.run(
             full_cmd,
             shell=False,
+            env=env,
             cwd=cwd or None,
             capture_output=True,
             timeout=timeout,

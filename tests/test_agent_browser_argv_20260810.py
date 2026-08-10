@@ -158,3 +158,87 @@ def test_the_install_hint_does_not_name_a_404_package(monkeypatch):
     assert res.binary_missing is True
     assert "npm install -g agent-browser" in res.error
     assert "@vercel/agent-browser` (needs" not in res.error
+
+
+# ── one browser per turn, not one browser per box ───────────────────
+
+def test_the_session_is_scoped_to_the_turn(monkeypatch):
+    """agent-browser keeps ONE session named `default` unless told otherwise.
+    Every caller on the box therefore shared a single browser: a background
+    job and a foreground turn, a delegated subagent and its parent, or two
+    Telegram users would navigate each other's page mid-task.
+
+    Found 2026-08-10 the embarrassing way — a diagnostic `open` issued while
+    an agent turn was driving the same page silently hijacked that turn, and
+    its result had to be thrown away."""
+    import backend.tools.agent_browser as ab
+    from backend.failover import set_current_job_id, reset_current_job_id
+
+    class _Proc:
+        returncode = 0
+        stdout = b"{}"
+        stderr = b""
+
+    seen = {}
+
+    def _fake_run(cmd, **kw):
+        seen["env"] = kw.get("env") or {}
+        return _Proc()
+
+    monkeypatch.setattr(ab, "_resolve_binary", lambda: "/usr/bin/agent-browser")
+    monkeypatch.setattr(ab.subprocess, "run", _fake_run)
+
+    token = set_current_job_id("bg-turn-1")
+    try:
+        ab.run_agent_browser("open https://x.test", timeout_seconds=5)
+        first = seen["env"].get("AGENT_BROWSER_SESSION")
+    finally:
+        reset_current_job_id(token)
+
+    token = set_current_job_id("bg-turn-2")
+    try:
+        ab.run_agent_browser("open https://x.test", timeout_seconds=5)
+        second = seen["env"].get("AGENT_BROWSER_SESSION")
+    finally:
+        reset_current_job_id(token)
+
+    assert first == "job-bg-turn-1"
+    assert second == "job-bg-turn-2"
+    assert first != second, "two turns must not share one browser"
+
+
+def test_distinct_speakers_are_separated_without_a_job(monkeypatch):
+    """Outside a tracked job the speaker still separates users."""
+    import backend.tools.agent_browser as ab
+    from backend import roles
+
+    monkeypatch.setattr(roles, "current_speaker", lambda: "telegram:42")
+    assert ab._session_name() == "sp-telegram_42"
+
+
+def test_the_session_name_is_shell_and_path_safe(monkeypatch):
+    """It becomes an env value and a session directory name."""
+    import backend.tools.agent_browser as ab
+    from backend import roles
+
+    monkeypatch.setattr(roles, "current_speaker",
+                        lambda: "telegram:../../etc/passwd; rm -rf /")
+    name = ab._session_name()
+    assert "/" not in name and ".." not in name and ";" not in name
+
+
+def test_an_explicit_session_wins(monkeypatch):
+    import backend.tools.agent_browser as ab
+
+    class _Proc:
+        returncode = 0
+        stdout = b"{}"
+        stderr = b""
+
+    seen = {}
+    monkeypatch.setattr(ab, "_resolve_binary", lambda: "/usr/bin/agent-browser")
+    monkeypatch.setattr(ab.subprocess, "run",
+                        lambda cmd, **kw: (seen.update(env=kw.get("env") or {}),
+                                           _Proc())[1])
+    ab.run_agent_browser("snapshot", timeout_seconds=5, session="mine")
+    assert seen["env"]["AGENT_BROWSER_SESSION"] == "mine"
