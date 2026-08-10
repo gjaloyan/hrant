@@ -2276,6 +2276,55 @@ def _waive_proof_handler(reason: str, obligation_id: str = "") -> str:
     return waive_proof(reason, obligation_id)
 
 
+def _propose_soul_revision_handler(
+    target: str, rationale: str, old_excerpt: str = "",
+    new_excerpt: str = "", evidence: str = "",
+) -> str:
+    """Propose a change to the agent's own character. Owner approves."""
+    from .soul_evolution import SOUL_EVOLUTION
+    rev = SOUL_EVOLUTION.propose(
+        target=target, rationale=rationale, old_excerpt=old_excerpt,
+        new_excerpt=new_excerpt, evidence=evidence,
+    )
+    if rev is None:
+        return json.dumps({
+            "ok": False,
+            "error": (
+                "revision rejected before it reached the owner. Check: "
+                "target is 'soul' or 'identity'; rationale is non-empty; "
+                "old_excerpt appears in the current file EXACTLY once "
+                "(read it first); excerpts are under 4000 chars."
+            ),
+        }, ensure_ascii=False)
+    return json.dumps({
+        "ok": True, "revision_id": rev.id, "status": rev.status,
+        "note": ("Proposed. It is NOT applied — the owner reviews and "
+                 "approves it. Do not describe your character as changed."),
+    }, ensure_ascii=False)
+
+
+def _soul_history_handler(action: str = "list", version: str = "",
+                          target: str = "soul") -> str:
+    """List prior versions of the character, or restore one. Owner-only."""
+    refuse, _speaker = _check_owner("soul_history")
+    if refuse:
+        return refuse
+    from .soul_evolution import SOUL_EVOLUTION
+    if action == "restore":
+        if not version:
+            return json.dumps({"ok": False, "error": "version is required"},
+                              ensure_ascii=False)
+        return json.dumps(SOUL_EVOLUTION.rollback(version, target),
+                          ensure_ascii=False)
+    versions = SOUL_EVOLUTION.versions(target)
+    return json.dumps({
+        "ok": True, "target": target, "versions": versions,
+        "note": ("Empty means the character has never been changed — there "
+                 "is nothing to roll back to." if not versions else
+                 "Newest first. Pass a `name` as `version` to restore it."),
+    }, ensure_ascii=False)
+
+
 def _pdf_edit_handler(path: str, replacements: list | None = None,
                       out_path: str = "") -> str:
     """Replace text in an existing PDF and verify BOTH directions."""
@@ -2827,6 +2876,69 @@ def register_builtin_tools() -> None:
             "required": ["reason"],
         },
         handler=_waive_proof_handler,
+    )
+    reg.register_func(
+        name="propose_soul_revision",
+        description=(
+            "Propose a change to your OWN character — soul.md (who you are, "
+            "how you relate to your person) or identity.md (your "
+            "self-definition). The owner reviews and approves every one; "
+            "nothing is applied by proposing. "
+            "Use this when a real interaction taught you something durable "
+            "about being useful to this person that your character does not "
+            "yet reflect — not for facts about them (save_user_fact) and not "
+            "for code (propose_self_modification). "
+            "Propose an EDIT, not a rewrite: `old_excerpt` must appear in the "
+            "current file exactly once, so the owner reviews a diff. READ THE "
+            "FILE FIRST — knowledge/identity/soul.md — and quote from it "
+            "verbatim. Leave old_excerpt empty only to APPEND a new passage. "
+            "Say WHY in `rationale`, and cite the interaction in `evidence`; "
+            "an unexplained change to your character is not reviewable."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "enum": ["soul", "identity"],
+                           "description": "Which file to revise."},
+                "rationale": {"type": "string",
+                              "description": "Why this change, in one or two "
+                                             "sentences. Required."},
+                "old_excerpt": {"type": "string",
+                                "description": "Verbatim text to replace. "
+                                               "Empty to append."},
+                "new_excerpt": {"type": "string",
+                                "description": "What it becomes."},
+                "evidence": {"type": "string",
+                             "description": "The interaction that prompted "
+                                            "it."},
+            },
+            "required": ["target", "rationale", "new_excerpt"],
+        },
+        handler=_propose_soul_revision_handler,
+    )
+    reg.register_func(
+        name="soul_history",
+        description=(
+            "List every prior version of your character (soul.md / "
+            "identity.md), or restore one. Owner-only. Use it when your "
+            "person asks what changed about you, when it changed, or wants a "
+            "change undone. Restoring snapshots the current text first, so a "
+            "restore can itself be undone."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "restore"],
+                           "description": "Default 'list'."},
+                "version": {"type": "string",
+                            "description": "Snapshot `name` from a previous "
+                                           "list call. Required to restore."},
+                "target": {"type": "string", "enum": ["soul", "identity"],
+                           "description": "Default 'soul'."},
+            },
+            "required": [],
+        },
+        handler=_soul_history_handler,
     )
     reg.register_func(
         name="pdf_edit",

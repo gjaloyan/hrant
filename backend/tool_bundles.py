@@ -69,6 +69,13 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "prove_change", "waive_proof",
     # Self-improvement — always-on since 2026-08-09, see the note above.
     "propose_skill", "propose_self_modification",
+    # Character evolution (2026-08-10). Always-on for the same reason as its
+    # code sibling: the agent should be able to say "I learned something about
+    # being useful to you" in the turn where it learned it, not after
+    # remembering to load a bundle. Every revision waits for the owner.
+    # soul_history is BASE for the same reason: "you changed and I don't like
+    # it, put it back" is exactly the moment a bundle round-trip is worst.
+    "propose_soul_revision", "soul_history",
     # Search / navigation + knowledge education (read + deliberate write)
     "locate_symbol", "search_knowledge", "save_knowledge",
     "list_skills", "load_skill",

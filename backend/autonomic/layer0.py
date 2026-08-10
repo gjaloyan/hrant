@@ -281,6 +281,17 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=86400.0,
         ),
         LayerZeroRule(
+            # Weekly, not nightly. Character is not a daily deliverable, and
+            # a lever that mails its person a new personality every morning
+            # gets its proposals dismissed unread. It also self-suppresses
+            # while a revision is pending.
+            name="character_reflection_tick",
+            predicate=lambda s: True,
+            lever="FIRE_CHARACTER_REFLECTION",
+            params={},
+            cooldown_seconds=604800.0,
+        ),
+        LayerZeroRule(
             name="finetune_qc_tick",
             predicate=lambda s: True,
             lever="FIRE_FINETUNE_QC",

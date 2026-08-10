@@ -898,6 +898,58 @@ class TelegramBot:
             except Exception as e:
                 log.warning("self-mod notify(%s) failed: %s", chat_id, e)
 
+    def _on_soul_revision(self, rev) -> None:
+        """Subscribed callback: the agent wants to change its own character.
+
+        This one is deliberately loud. A code proposal changes what the agent
+        can do; this changes who it is to the person reading the message, so
+        the owner sees the rationale and the evidence BEFORE the diff, and
+        nothing is written until they tap Apply."""
+        from . import roles as _roles
+        from . import contacts as _contacts
+        from . import tg_interactive as _tg
+
+        rid = getattr(rev, "id", "") or ""
+        if not rid:
+            return
+        try:
+            owner_state = _roles._load()
+        except Exception:
+            return
+        owner_ids = [
+            sid for sid in (owner_state.get("owner_speaker_ids") or [])
+            if isinstance(sid, str) and sid.startswith("telegram:")
+        ]
+        if not owner_ids:
+            return
+
+        kind = "append" if not (rev.old_excerpt or "").strip() else "edit"
+        text = (
+            f"📜 <b>I want to change my own character</b> "
+            f"(<code>{_tg.escape_html(rev.target)}.md</code>, {kind})\n\n"
+            f"<b>Why:</b> <i>{_tg.escape_html(rev.rationale)}</i>\n"
+            + (f"<b>From:</b> <i>{_tg.escape_html(rev.evidence)}</i>\n"
+               if (rev.evidence or "").strip() else "")
+            + f"<b>ID:</b> <code>{_tg.escape_html(rid)}</code>\n\n"
+            f"Nothing changes until you approve."
+        )
+        markup = (
+            _tg.InlineButtonSet()
+            .row(_tg.InlineButton("👀 Show diff", callback_data=f"soul:diff:{rid}"))
+            .row(
+                _tg.InlineButton("✅ Apply", callback_data=f"soul:apply:{rid}"),
+                _tg.InlineButton("❌ Reject", callback_data=f"soul:reject:{rid}"),
+            )
+        ).to_markup()
+        for owner_sid in owner_ids:
+            chat_id = _contacts.chat_id_for_speaker(owner_sid)
+            if chat_id is None:
+                continue
+            try:
+                self._send_with_buttons(chat_id, text, markup)
+            except Exception as e:
+                log.warning("soul-revision notify(%s) failed: %s", chat_id, e)
+
     # `_on_install_proposed` was removed 2026-05-23 (audit Important
     # #8). The install-gate (propose_install tool + installer.py
     # module + Telegram inline-callback approval flow) was retired
@@ -2197,6 +2249,14 @@ class TelegramBot:
                 _sm.register_on_proposal_created(self._on_self_mod_proposal)
             except Exception as e:
                 log.warning("self_modifier subscribe failed: %s", e)
+
+            # Same for character revisions — the agent proposes, the owner
+            # decides, in one tap from wherever they are.
+            try:
+                from . import soul_evolution as _se
+                _se.register_on_revision_proposed(self._on_soul_revision)
+            except Exception as e:
+                log.warning("soul_evolution subscribe failed: %s", e)
 
             # Subscribe to scheduled-message events so the requester
             # gets a preview DM with a [❌ Cancel] button. Post-create

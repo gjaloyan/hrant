@@ -90,6 +90,7 @@ def register_default_autonomic_levers() -> None:
     from .model_eval import FIRE_MODEL_EVAL
     from .note_curation import FIRE_NOTE_CURATION
     from .proactive_learn import FIRE_PROACTIVE_LEARN
+    from .character_reflection import FIRE_CHARACTER_REFLECTION
     from .self_reflection import FIRE_SELF_REFLECTION
     from .self_study import FIRE_SELF_STUDY
     from .session_archive import FIRE_SESSION_ARCHIVE
@@ -115,6 +116,7 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_LOG_ROTATION)
     register_lever(FIRE_COST_AUDIT)
     register_lever(FIRE_SELF_REFLECTION)
+    register_lever(FIRE_CHARACTER_REFLECTION)
     register_lever(FIRE_FINETUNE_QC)
     register_lever(FIRE_GAP_DETECTION)
     register_lever(FIRE_TOOL_INSTALL)
