@@ -14,6 +14,8 @@ their absence impossible to miss.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from backend.autonomic.startup import unreachable_levers
 
 
@@ -22,12 +24,30 @@ def test_a_lever_with_no_rule_is_reported():
     assert isinstance(out, list)
     # These were measured as ruleless on 2026-08-09. If one disappears from
     # this list it means somebody wired it — good — and the assertion below
-    # should be updated deliberately rather than by accident.
-    assert "self_heal" in out
-    # service_repair was WIRED on 2026-08-10 after its five defects were
-    # fixed, so it is deliberately no longer here.
-    assert "service_repair" not in out
-    assert "tool_install" in out
+    # should be updated deliberately rather than by accident. Three have been
+    # wired since, each deliberately:
+    #   service_repair (2026-08-10) — after its five defects were fixed
+    #   self_heal, tool_install (2026-08-10) — the immune follow-up queue now
+    #     dispatches them: error_triage matches a signature and queues
+    #     FIRE_SELF_HEAL, which queues the repair the signature prescribes.
+    for wired in ("service_repair", "self_heal", "tool_install"):
+        assert wired not in out, f"{wired} has a dispatch path"
+    # What remains is test scaffolding, and should stay reported.
+    assert "noop_green_tick" in out
+    assert "noop_yellow_demand" in out
+
+
+def test_reachability_reads_the_whitelist_rather_than_restating_it():
+    """The second dispatch path is the allowed-fix-lever list. A hand-copied
+    duplicate would drift and start lying — the exact failure this check
+    exists to catch."""
+    import backend.autonomic.startup as startup
+    from backend.autonomic.immune import ALLOWED_FIX_LEVERS
+    src = Path(startup.__file__).read_text(encoding="utf-8")
+    assert "ALLOWED_FIX_LEVERS" in src
+    for lever in ALLOWED_FIX_LEVERS:
+        module = lever.removeprefix("FIRE_").lower()
+        assert module not in unreachable_levers(), lever
 
 
 def test_a_lever_that_fires_in_production_is_not_reported():

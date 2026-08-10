@@ -76,6 +76,9 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # soul_history is BASE for the same reason: "you changed and I don't like
     # it, put it back" is exactly the moment a bundle round-trip is worst.
     "propose_soul_revision", "soul_history",
+    # Learning to recover from a failure is only useful in the turn where the
+    # failure was diagnosed — by the next one the evidence is gone.
+    "propose_immune_signature",
     # Search / navigation + knowledge education (read + deliberate write)
     "locate_symbol", "search_knowledge", "save_knowledge",
     "list_skills", "load_skill",

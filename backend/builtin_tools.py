@@ -2303,6 +2303,34 @@ def _propose_soul_revision_handler(
     }, ensure_ascii=False)
 
 
+def _propose_immune_signature_handler(
+    signature_id: str, source: str, msg_regex: str, fix_lever: str,
+    fix_params: dict | None = None, service: str = "",
+    severity: str = "error",
+) -> str:
+    """Teach the immune system to recognise and repair a failure."""
+    from .autonomic.immune import (
+        ALLOWED_FIX_LEVERS, ImmuneSignature, SignatureStore,
+    )
+    pattern: dict = {"source": source, "msg_regex": msg_regex}
+    if service:
+        pattern["service"] = service
+    ok, message = SignatureStore().add(ImmuneSignature(
+        id=signature_id, pattern=pattern, severity=severity,
+        fix_lever=fix_lever, fix_params=dict(fix_params or {}),
+    ))
+    if not ok:
+        return json.dumps({"ok": False, "error": message,
+                           "allowed_fix_levers": sorted(ALLOWED_FIX_LEVERS)},
+                          ensure_ascii=False)
+    return json.dumps({
+        "ok": True, "signature_id": signature_id,
+        "note": ("Live. The next matching error queues this repair "
+                 "automatically. It will not re-fire within an hour, and "
+                 "three failed repairs in a row quarantine it."),
+    }, ensure_ascii=False)
+
+
 def _soul_history_handler(action: str = "list", version: str = "",
                           target: str = "soul") -> str:
     """List prior versions of the character, or restore one. Owner-only."""
@@ -2915,6 +2943,51 @@ def register_builtin_tools() -> None:
             "required": ["target", "rationale", "new_excerpt"],
         },
         handler=_propose_soul_revision_handler,
+    )
+    reg.register_func(
+        name="propose_immune_signature",
+        description=(
+            "Teach yourself to recover from a failure automatically. A "
+            "signature says: when an error like THIS appears again, run THAT "
+            "repair — without waiting for anyone to notice.\n"
+            "Use it after you have diagnosed a failure that will recur and "
+            "whose fix is mechanical. Do not use it for one-off errors, for "
+            "anything you have not actually diagnosed, or for a fix that "
+            "needs judgement — those are for propose_self_modification or "
+            "for asking your person.\n"
+            "`msg_regex` is matched against the recorded error message, so "
+            "make it specific enough to only match this failure. "
+            "`fix_lever` must be one of the levers a signature is allowed to "
+            "trigger; the tool tells you the list if you pick wrongly. "
+            "Guards you do not need to build: a signature will not re-fire "
+            "within an hour, and three failed repairs in a row disable it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "signature_id": {"type": "string",
+                                 "description": "Short unique slug, e.g. "
+                                                "'lightrag_oom_restart'."},
+                "source": {"type": "string",
+                           "description": "Where the error came from: 'tool' "
+                                          "for a failed tool call, 'service' "
+                                          "for a systemd unit."},
+                "msg_regex": {"type": "string",
+                              "description": "Regex matched against the error "
+                                             "message. Be specific."},
+                "fix_lever": {"type": "string",
+                              "description": "The repair to run."},
+                "fix_params": {"type": "object",
+                               "description": "Params for the fix lever."},
+                "service": {"type": "string",
+                            "description": "Optional: only match errors from "
+                                           "this tool or unit."},
+                "severity": {"type": "string",
+                             "description": "info | warn | error | critical."},
+            },
+            "required": ["signature_id", "source", "msg_regex", "fix_lever"],
+        },
+        handler=_propose_immune_signature_handler,
     )
     reg.register_func(
         name="soul_history",

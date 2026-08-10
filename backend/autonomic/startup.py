@@ -137,7 +137,15 @@ def build_scheduler() -> SchedulerBundle:
 
 
 def unreachable_levers() -> list[str]:
-    """Lever modules that no Layer0 rule can ever select.
+    """Lever modules nothing can ever select.
+
+    Two dispatch paths count as reachable (2026-08-10): a Layer 0 rule, and
+    the immune follow-up queue, which now dispatches FIRE_SELF_HEAL from a
+    signature match and then whatever repair that signature prescribes. The
+    allowed-fix-lever whitelist is the authoritative list of the second kind,
+    so it is read here rather than restated — a hand-copied second list would
+    drift and start lying again, which is the exact failure this function
+    exists to catch.
 
     A lever with no rule is not "idle waiting for its condition" — it is
     unreachable code that reads as an autonomous capability. Measured
@@ -154,14 +162,19 @@ def unreachable_levers() -> list[str]:
     import re
     here = os.path.dirname(os.path.abspath(__file__))
     try:
-        rules = set(re.findall(
+        reachable = set(re.findall(
             r"FIRE_[A-Z_]+",
             open(os.path.join(here, "layer0.py"), encoding="utf-8").read()))
+        from .immune import ALLOWED_FIX_LEVERS
+        reachable |= set(ALLOWED_FIX_LEVERS)
+        # Queued by error_triage on a signature match — the entry point of
+        # the whole immune chain, and named nowhere in layer0.py.
+        reachable.add("FIRE_SELF_HEAL")
         mods = [f[:-3] for f in os.listdir(os.path.join(here, "levers"))
                 if f.endswith(".py") and f != "__init__.py"]
     except Exception:
         return []
-    return sorted(m for m in mods if f"FIRE_{m.upper()}" not in rules)
+    return sorted(m for m in mods if f"FIRE_{m.upper()}" not in reachable)
 
 
 async def start_autonomic_scheduler(bundle: SchedulerBundle) -> None:
@@ -171,10 +184,24 @@ async def start_autonomic_scheduler(bundle: SchedulerBundle) -> None:
         _orphans = unreachable_levers()
         if _orphans:
             log.warning(
-                "%d lever module(s) have NO Layer0 rule and can never fire: "
+                "%d lever module(s) have NO dispatch path and can never fire: "
                 "%s — they read as capabilities the agent does not have",
                 len(_orphans), ", ".join(_orphans),
             )
+        # The immune chain is wired, but a matcher with an empty rulebook
+        # still matches nothing. Say so, rather than let "self_heal is
+        # reachable" quietly stand in for "self_heal can happen".
+        try:
+            from .immune import SignatureStore
+            if not SignatureStore().load():
+                log.warning(
+                    "Immune rulebook is EMPTY (%s) — the match/heal/repair "
+                    "chain is connected but no error can trigger a repair "
+                    "until a signature exists",
+                    SignatureStore().path,
+                )
+        except Exception as exc:
+            log.debug("immune rulebook check failed: %s", exc)
     except Exception as exc:
         log.error("Autonomic scheduler failed to start: %s", exc)
 

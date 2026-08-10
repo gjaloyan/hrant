@@ -11,7 +11,7 @@ from .executor import LeverExecutor
 from .layer0 import Layer0Engine
 from .levers import LeverRegistry
 from .state import StateSnapshotBuilder
-from .types import TickDecision, utcnow
+from .types import LeverStatus, TickDecision, TickDecisionSource, utcnow
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +28,7 @@ def make_real_tick(
 
     def _tick() -> None:
         state = builder.build()
-        decision = engine.evaluate(state)
+        decision = _next_decision(state, engine)
         executed = False
         note = ""
         if decision.lever is not None:
@@ -37,8 +37,9 @@ def make_real_tick(
                 note = f"unknown_lever:{decision.lever}"
                 log.warning(note)
             else:
-                executor.execute(lever, decision.params, state)
+                report = executor.execute(lever, decision.params, state)
                 executed = True
+                _record_immune_outcome(decision, report)
         _append_tick_log(tick_log_path, decision, executed=executed, note=note)
         if event_bus is not None:
             try:
@@ -55,6 +56,56 @@ def make_real_tick(
                 log.warning("tick.completed publish failed: %s", exc)
 
     return _tick
+
+
+def _next_decision(state, engine: Layer0Engine) -> TickDecision:
+    """A queued follow-up outranks the periodic table.
+
+    Layer 0 is a schedule: things that should happen eventually. A follow-up
+    is a reaction to something that already happened — an error matched, a
+    repair planned — and making it wait behind the nightly log rotation is how
+    a two-step repair takes until tomorrow. Draining one per tick keeps the
+    "one lever per tick" invariant the executor and the safety gate assume.
+    """
+    from .followups import FOLLOWUPS
+    try:
+        fu = FOLLOWUPS.pop()
+    except Exception as exc:
+        log.warning("followup pop failed: %s", exc)
+        fu = None
+    if fu is not None:
+        params = dict(fu.params)
+        if fu.signature_id:
+            params.setdefault("_signature_id", fu.signature_id)
+        return TickDecision(
+            source=TickDecisionSource.L0_IMMUNE,
+            lever=fu.lever,
+            params=params,
+            reason=fu.reason or f"follow_up from {fu.origin or 'unknown'}",
+            rule_name=f"followup:{fu.id}",
+        )
+    return engine.evaluate(state)
+
+
+def _record_immune_outcome(decision: TickDecision, report) -> None:
+    """Close the learning loop: did the repair this signature prescribed work?
+
+    Only the REPAIR step counts. FIRE_SELF_HEAL merely names a lever, so
+    scoring its success would record a perfect record for signatures whose
+    fixes never work — the exact self-congratulatory metric that makes a
+    health dashboard worse than none.
+    """
+    sig_id = (decision.params or {}).get("_signature_id")
+    if not sig_id or decision.lever == "FIRE_SELF_HEAL":
+        return
+    success = report is not None and \
+        getattr(report, "status", None) is LeverStatus.SUCCESS
+    try:
+        from .immune import FireLog, SignatureStore
+        SignatureStore().record_outcome(sig_id, success)
+        FireLog().note_outcome(sig_id, success)
+    except Exception as exc:
+        log.warning("immune outcome record failed for %s: %s", sig_id, exc)
 
 
 def _append_tick_log(
