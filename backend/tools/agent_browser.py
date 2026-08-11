@@ -187,6 +187,104 @@ def reset_guide_for_turn() -> None:
     _guide_sent.set(False)
 
 
+# A session is a whole Chrome. Measured on prod 2026-08-11:
+#   1 session -> 14 processes, 1.1 GB
+#   2 sessions -> 29 processes, 2.4 GB
+#   3 sessions -> 44 processes, 3.6 GB
+#
+# Per-turn sessions were introduced hours earlier to stop concurrent flows
+# hijacking each other's page — a real bug, proved by hijacking a live turn.
+# But they were introduced with NO lifecycle, so every turn left a Chrome
+# running forever. On a 24 GB box with ~6.5 GB already in use, roughly the
+# fifteenth browsing turn exhausts memory and Chrome stops launching:
+#
+#   "Auto-launch failed: Chrome exited early without writing
+#    DevToolsActivePort ... FATAL:sandbox/linux/suid/client/setuid_sandbox"
+#
+# which is what the owner hit, twice, while the agent then burned 150k tokens
+# reverse-engineering the site's JavaScript instead of using a browser it no
+# longer had. A concurrency bug was traded for a worse resource leak.
+#
+# So the session is closed when the turn that owns it ends, and any session
+# orphaned by a crashed turn is reaped at the start of the next one.
+MAX_LIVE_SESSIONS = 3
+
+
+def close_session(name: str) -> bool:
+    """Close one browser session. Best-effort; never raises."""
+    if not name or name == "default":
+        return False
+    bin_path = _resolve_binary()
+    if not bin_path:
+        return False
+    try:
+        env = dict(os.environ)
+        env["AGENT_BROWSER_SESSION"] = name
+        subprocess.run([bin_path, "close"], env=env, capture_output=True,
+                       timeout=30, check=False)
+        return True
+    except Exception as e:
+        log.debug("agent_browser: close(%s) failed: %s", name, e)
+        return False
+
+
+def live_sessions() -> list[str]:
+    """Session names the CLI currently reports. Empty on any failure."""
+    bin_path = _resolve_binary()
+    if not bin_path:
+        return []
+    try:
+        r = subprocess.run([bin_path, "session", "list"], capture_output=True,
+                           timeout=30, check=False)
+        out = (r.stdout or b"").decode("utf-8", "replace")
+    except Exception:
+        return []
+    names = []
+    for line in out.splitlines():
+        s = line.strip().lstrip("→").strip()
+        if not s or s.lower().startswith("active sessions"):
+            continue
+        names.append(s)
+    return names
+
+
+def reap_orphan_sessions(keep: str = "") -> int:
+    """Close sessions whose owning job is no longer running.
+
+    A turn killed mid-flight cannot close its own browser, and one orphan is
+    1.1 GB. This is the backstop for that — but it must never close a session
+    belonging to a turn that is still working, which would reintroduce the
+    hijack bug in a worse form: killing the page instead of sharing it. So a
+    `job-<id>` session is reaped only when that job is no longer running, and
+    anything whose owner cannot be determined is left alone.
+    """
+    closed = 0
+    try:
+        names = live_sessions()
+        if len(names) <= 1:
+            return 0
+        from ..jobs import JOBS
+        for name in names:
+            if name == keep or name == "default":
+                continue
+            if not name.startswith("job-"):
+                continue        # not ours to judge
+            job_id = name[4:]
+            try:
+                job = JOBS.get(job_id)
+            except Exception:
+                continue
+            still_running = job is not None and \
+                str(getattr(job, "status", "")) in ("running", "queued")
+            if still_running:
+                continue
+            if close_session(name):
+                closed += 1
+    except Exception as e:
+        log.debug("agent_browser: reap failed: %s", e)
+    return closed
+
+
 def _core_guide(bin_path: str) -> str:
     """The CLI's own short guide, fetched once per process."""
     if bin_path in _GUIDE_CACHE:

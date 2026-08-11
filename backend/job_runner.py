@@ -193,6 +193,19 @@ def run_tracked(
             raise
         return answer, job.id
     finally:
+        # Release this turn's browser BEFORE the job id goes away — the
+        # session is named after it. A browser session is a whole Chrome
+        # (~14 processes, 1.1 GB measured on prod), and per-turn sessions
+        # shipped on 2026-08-10 with no lifecycle: every turn left one
+        # running forever, so the fifteenth browsing turn met "Chrome exited
+        # early without writing DevToolsActivePort" and the agent lost the
+        # browser mid-task. Released here because this is where the job that
+        # owns it ends — including when it ends by raising.
+        try:
+            from .tools.agent_browser import close_session as _ab_close
+            _ab_close(f"job-{job.id}")
+        except Exception:
+            pass
         # Always clear the ContextVar — leaking it would mean the
         # next request's LLM calls record onto the previous Job.
         _fo.reset_current_job_id(token)

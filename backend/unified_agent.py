@@ -2288,8 +2288,15 @@ def run_unified(
     # the tool description points at it, and it contains the fact it kept
     # tripping over (refs go stale after any click or re-render).
     try:
-        from .tools.agent_browser import reset_guide_for_turn as _abg_reset
+        from .tools.agent_browser import (
+            reap_orphan_sessions as _abg_reap,
+            reset_guide_for_turn as _abg_reset,
+        )
         _abg_reset()
+        # Backstop for a turn killed before its own cleanup ran. Skips any
+        # session whose job is still running, so a concurrent turn keeps its
+        # page.
+        _abg_reap()
     except Exception:
         pass
     # Open a per-turn endpoint-judgment cache. _decide_self_correction,
