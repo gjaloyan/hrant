@@ -228,3 +228,24 @@ def _isolate_gate_metrics(tmp_path, monkeypatch):
         return
     monkeypatch.setattr(_gm, "_path",
                         lambda: tmp_path / "gate_metrics.jsonl")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_autonomic_followups(tmp_path, monkeypatch):
+    """The immune follow-up queue is a real file; keep it out of the real dir.
+
+    Added with the queue itself on 2026-08-10 — and it should have been added
+    in the same commit. `FollowUpQueue` resolves to
+    ~/.hrant/data/knowledge/autonomic/followups.json, and the tick now drains
+    that queue BEFORE consulting Layer 0. So one test leaving an entry behind
+    made `test_reactive_rule_preempts_*` fire the queued lever instead of the
+    reactive one: eight order-dependent failures in one full run and none in
+    the next. Exactly the shared-file flakiness this file already guards
+    gate_metrics and scheduled_messages against.
+    """
+    try:
+        import backend.autonomic.followups as _fu
+    except ImportError:
+        return
+    monkeypatch.setattr(_fu.FOLLOWUPS, "_path",
+                        tmp_path / "followups.json", raising=False)

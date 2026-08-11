@@ -182,6 +182,28 @@ def _extract_code_identifiers(tool_context: str, *, max_idents: int = 200) -> li
 #      keep the original — verifier needs SOMETHING to compare.
 
 _ANSWER_IDENT_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]{3,})\b")
+
+# Anchors that are NOT ASCII identifiers: any token carrying a digit and at
+# least one non-digit character — case numbers, ticket ids, dates, versions,
+# part codes — in ANY script.
+#
+# 2026-08-10, measured. The regex above is ASCII-only, so an answer written in
+# Armenian, Russian, Greek or Chinese yielded ZERO identifiers. With no
+# identifiers `_compress_tool_context` degenerates to "keep the first 8 KB",
+# and evidence that arrived late in a long turn — which is where evidence
+# normally arrives, since you do the work and then report it — never reached
+# the verifier at all. Every claim then reads as unverified, confidence
+# collapses to 0, and the completion gate reports NOT DONE on a turn that
+# delivered.
+#
+# Measured on the real failure: 30 KB of tool context, the answer citing
+# `ՍնԴ/0038/04/22`, the backing web_search result in the last line. The
+# verifier saw the first 8 KB and marked all nineteen case numbers unverified.
+# The identical turn with a Latin id compressed to a 198-byte snippet
+# CENTRED on the evidence and verified fine. The machinery worked perfectly
+# for English and silently failed for the language the owner actually uses.
+_ANSWER_TOKEN_RE = re.compile(r"([^\s\"'`,;:()\[\]{}<>]*\d[^\s\"'`,;:()\[\]{}<>]*)")
+
 _CONTEXT_LINES_AROUND = 5
 # Audit 2026-06-10 (I10): tightened caps. Was 8000 / 12000 — at those
 # values a fact-check on a heavy code-read turn could put 12 KB into the
@@ -190,6 +212,24 @@ _CONTEXT_LINES_AROUND = 5
 # bounds: compress starting at 5 KB, cap output at 8 KB. Saves ~4 KB /
 # verifier call without measurably degrading claim-grounding.
 _FULL_KEEP_UNDER = 5000
+
+
+
+def _head_and_tail(text: str, max_chars: int) -> str:
+    """Both ends of an over-long context, not just the beginning.
+
+    A turn does its work and then reports, so the evidence for its final
+    claims sits at the END of the tool stream. Keeping only the head is why a
+    turn that had its backing in the last web_search of eighty-two calls read
+    as entirely unsupported.
+    """
+    if len(text) <= max_chars:
+        return text
+    sep = "\n…\n"
+    budget = max(0, max_chars - len(sep))     # the cap is a cap, separator included
+    head = budget // 2
+    tail = budget - head
+    return text[:head] + sep + text[-tail:] if tail else text[:max_chars]
 
 
 def _compress_tool_context(
@@ -212,8 +252,15 @@ def _compress_tool_context(
         m.group(1) for m in _ANSWER_IDENT_RE.finditer(answer or "")
         if len(m.group(1)) >= 4
     }
+    # Script-agnostic anchors: a token with a digit AND a non-digit, long
+    # enough not to match "2026" or "10". This is what makes a case number,
+    # ticket id or version string findable when the answer is not in English.
+    answer_idents |= {
+        t for t in _ANSWER_TOKEN_RE.findall(answer or "")
+        if len(t) >= 5 and not t.isdigit()
+    }
     if not answer_idents:
-        return tool_context[:max_chars]
+        return _head_and_tail(tool_context, max_chars)
 
     lines = tool_context.splitlines()
     keep_idx: set[int] = set()
@@ -228,9 +275,12 @@ def _compress_tool_context(
                 break
 
     if not found_any:
-        # The answer cites nothing the tool output covers — verifier
-        # still needs evidence to check the rest, so keep a head slice.
-        return tool_context[:max_chars]
+        # The answer cites nothing the tool output covers — the verifier
+        # still needs evidence to check the rest. Keep BOTH ends: a turn
+        # reports at the end, so the tail is where its evidence usually is,
+        # and a head-only slice is how a delivering turn got all its claims
+        # marked unverified on 2026-08-10.
+        return _head_and_tail(tool_context, max_chars)
 
     out_parts: list[str] = []
     prev_i = -2
