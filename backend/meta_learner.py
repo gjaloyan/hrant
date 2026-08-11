@@ -146,6 +146,15 @@ class MetaLearner:
             "turn_id": turn_id,
         }
         self._append_log(entry)
+        # Close the self-modification loop: a tool failing AFTER the agent
+        # patched it is the evidence that the patch did not work. Recorded
+        # here because this is the one place every tool failure passes
+        # through. Best-effort — the error path must never raise.
+        try:
+            from .self_mod_outcomes import OUTCOMES
+            OUTCOMES.note_tool_failure(str(tool or ""), str(message or ""))
+        except Exception:
+            pass
 
     def analyze_failure(
         self,

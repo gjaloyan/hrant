@@ -617,6 +617,23 @@ class SelfModifier:
             proposal.status = "applied"
             self._save()
             applied_to = ", ".join(m for _, _, _, m in plan)
+            # Open the back half of the loop. Tests above answered "did I
+            # break anything"; nothing answered "did this fix the thing I
+            # proposed it for". Measured over 74 production turns: four
+            # proposals, zero checks that any helped. From here, a later
+            # failure of the same tool marks this attempt as not having
+            # worked, and the agent is told so the next time that tool
+            # misbehaves — which is the difference between diagnosing and
+            # re-diagnosing.
+            try:
+                from .self_mod_outcomes import OUTCOMES
+                OUTCOMES.record_applied(
+                    proposal_id=proposal.id,
+                    title=proposal.title or proposal.description[:80],
+                    paths=[m for _, _, _, m in plan],
+                )
+            except Exception as e:      # never fail an applied patch on this
+                log.debug("self_mod outcome recording failed: %s", e)
             return {"ok": True, "message": f"Applied to {applied_to}"}
 
         except Exception as e:

@@ -2120,6 +2120,13 @@ def _self_repair_marker(tool: str, n: int, last_error: str) -> str:
     """
     head = (last_error or "").strip().splitlines()
     first = head[0][:200] if head else ""
+    # What was already tried on this tool, and whether it worked. Without
+    # this the fourth attempt looks exactly like the first.
+    try:
+        from .self_mod_outcomes import prior_attempts_note
+        prior = prior_attempts_note(tool)
+    except Exception:
+        prior = ""
     return (
         f"🔧 **THIS IS YOUR BUG** — `{tool}` has now failed {n} times this "
         f"turn with the same class of error:\n"
@@ -2154,6 +2161,7 @@ def _self_repair_marker(tool: str, n: int, last_error: str) -> str:
         "the tool.\n"
         "Working around a broken tool leaves it broken for the next turn, "
         "and for the owner.\n"
+        + prior +
         "\n--- original tool result follows ---\n\n"
     )
 
