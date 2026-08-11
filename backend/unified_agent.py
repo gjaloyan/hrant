@@ -2095,6 +2095,28 @@ def _self_repair_marker(tool: str, n: int, last_error: str) -> str:
     propose_self_modification always-on (2026-08-09) and the handler source
     is readable with read_file; what was missing was any signal connecting
     "this tool keeps failing" to "so fix the tool".
+
+    REWRITTEN 2026-08-11, because the first version sent it to the wrong
+    place and it obeyed. When agent_browser started failing with
+
+        Auto-launch failed: Chrome exited early without writing
+        DevToolsActivePort ... FATAL:sandbox/linux/suid/client/setuid_sandbox
+
+    this marker fired correctly, and the agent did exactly what it said: it
+    grepped the repo, ran locate_symbol, read backend/tools/agent_browser.py
+    twice, checked its imports and npm packages. All of that was faithful and
+    all of it was useless — the source was fine. Leaked Chrome sessions had
+    exhausted memory, so a NEW launch died. Nothing in the handler could show
+    that. It then spent 150k tokens working around the tool.
+
+    The diagnosis needed two cheap steps the old text never mentioned: read
+    what KIND of error it is, and measure the machine (`free -m`,
+    `pgrep -c chrome`). Plus a third the agent has never once used in 74
+    turns: `git log` — the browser broke because of a change made to it the
+    previous day, and the commit message said so.
+
+    So the order now goes error -> environment -> what changed -> source.
+    Reading the source is step FOUR, not step one.
     """
     head = (last_error or "").strip().splitlines()
     first = head[0][:200] if head else ""
@@ -2102,15 +2124,34 @@ def _self_repair_marker(tool: str, n: int, last_error: str) -> str:
         f"🔧 **THIS IS YOUR BUG** — `{tool}` has now failed {n} times this "
         f"turn with the same class of error:\n"
         f"    {first}\n\n"
-        "Retrying it will fail again. You are a self-modifying agent and "
-        "this tool is YOUR code:\n"
-        f"  1. `read_file` its handler (grep the repo for `{tool}`) and find "
-        "why it fails — a wrong path, a stale package name, a missing "
-        "fallback.\n"
-        "  2. `propose_self_modification` with the fix and a test. It is "
-        "always available; you do not need to load a bundle.\n"
-        "  3. If you genuinely cannot repair it, say so plainly and name "
-        "the blocker — do NOT keep calling it.\n"
+        "Retrying it will fail again. Diagnose it IN THIS ORDER — the first "
+        "two steps are cheap and are where most tool failures actually "
+        "live:\n"
+        "  1. READ THE ERROR ABOVE and decide what KIND of failure it is. "
+        "A message about a process dying, a port, a socket, memory, disk, a "
+        "permission, a certificate or a missing binary is the ENVIRONMENT, "
+        "not the source code. Reading the handler will not show it to you.\n"
+        "  2. If it looks environmental, MEASURE the machine before "
+        "theorising: `terminal_exec` with `free -m`, `df -h`, "
+        "`pgrep -c <process>`, `systemctl --user status <unit>`, "
+        "`journalctl --user -u <unit> -n 30`. A tool that worked an hour ago "
+        "and fails now is almost never a code change — something on the box "
+        "moved.\n"
+        "  3. CHECK WHAT CHANGED: `cd ~/hrant && git log --oneline -15` and "
+        "`git log -p -3 -- <the tool's file>`. You are modified regularly, "
+        "including by yourself. A tool that broke today was very likely "
+        "changed yesterday, and the commit message usually names the "
+        f"reason.\n"
+        f"  4. ONLY THEN read the source: `read_file` the handler (grep the "
+        f"repo for `{tool}`) — for a wrong path, a stale package name, a "
+        "missing fallback.\n"
+        "  5. Fix it with `propose_self_modification` (always available, no "
+        "bundle needed) — or, if the fault is in the environment rather than "
+        "the code, repair the environment directly with `terminal_exec` and "
+        "say what you did.\n"
+        "  6. If you genuinely cannot repair it, say so plainly and name the "
+        "blocker WITH the measurement that proves it — do NOT keep calling "
+        "the tool.\n"
         "Working around a broken tool leaves it broken for the next turn, "
         "and for the owner.\n"
         "\n--- original tool result follows ---\n\n"

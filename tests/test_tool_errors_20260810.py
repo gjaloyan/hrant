@@ -168,10 +168,13 @@ def test_the_marker_redirects_to_self_modification():
 
 
 def test_the_marker_forbids_retrying():
+    """Asserts the INVARIANT, not the phrasing. The wording was rewritten on
+    2026-08-11 (the old text sent the agent to read source code for a failure
+    that lived in the machine); the prohibition on blind retrying stands."""
     import backend.unified_agent as ua
     m = ua._self_repair_marker("agent_browser", 3, "boom")
     assert "will fail again" in m
-    assert "do NOT keep calling it" in m
+    assert "do NOT keep calling" in m
 
 
 def test_it_takes_three_failures_not_one():
