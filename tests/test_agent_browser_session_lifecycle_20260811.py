@@ -139,6 +139,14 @@ def test_live_sessions_parses_the_listing(monkeypatch):
     assert ab.live_sessions() == ["job-dead", "job-alive", "default"]
 
 
+def test_the_empty_listing_is_not_read_as_a_session(monkeypatch):
+    """The CLI prints "No active sessions"; that is a heading, not a name.
+    It was being returned as one, and only luck kept it harmless — the reaper
+    ignores anything not called `job-*`."""
+    _capture(monkeypatch, "No active sessions\n")
+    assert ab.live_sessions() == []
+
+
 def test_live_sessions_is_empty_when_the_cli_fails(monkeypatch):
     def _boom(*a, **k):
         raise OSError("gone")

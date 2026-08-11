@@ -242,7 +242,10 @@ def live_sessions() -> list[str]:
     names = []
     for line in out.splitlines():
         s = line.strip().lstrip("→").strip()
-        if not s or s.lower().startswith("active sessions"):
+        # Skip the CLI's own headings. "No active sessions" was being
+        # returned as a session NAME until 2026-08-11 — harmless downstream
+        # only by luck, because the reaper ignores anything not named `job-*`.
+        if not s or s.lower().startswith(("active sessions", "no active")):
             continue
         names.append(s)
     return names
