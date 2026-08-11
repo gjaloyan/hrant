@@ -257,6 +257,37 @@ _COMMON_OTHER = {
         # the 300k cap rarely triggering in practice anyway — the
         # natural max_iterations limit ends most runaway loops first.
         "tool_loop_input_budget": 0,
+        # How many tool-call rounds ONE turn may take before the loop is
+        # broken off and the model is forced to write a final answer.
+        #
+        # Was hardcoded 20 until 2026-08-11, with the comment "legacy solve
+        # used 6 ... so we widen a bit". Twenty is not a widening, it is a
+        # wall that every real task hits. When it is reached the model can no
+        # longer call anything — the only act left to it is prose — so it
+        # writes "the correct next step would be ...". The owner named that
+        # unacceptable, and he is right: it is not a personality flaw, it is
+        # the only behaviour the pipeline permits at that point.
+        #
+        # Measured against Hermes (nousresearch/hermes-agent), which the owner
+        # asked for the comparison with: default 500 iterations
+        # (`agent.max_turns`), subagents 50 each. Behaviour AT the cap is the
+        # same as ours — "returns a summary of work done". The difference is
+        # that Hermes effectively never reaches it and we reached it on an
+        # ordinary lookup: 47 tool calls against a budget of 20 + 2x6.
+        #
+        # Note what this cap had quietly become. `tool_loop_input_budget` is
+        # 0 because the owner said, 2026-05-21, "no limits, agent need to have
+        # a free work opportunity" — and the comment above admits the iteration
+        # cap was doing that job instead ("the natural max_iterations limit
+        # ends most runaway loops first"). His instruction was honoured in the
+        # setting he named and reversed by the one he did not.
+        #
+        # Cost is bounded where cost belongs: `daily_api_budget_usd` (live,
+        # and fixed on 2026-08-09 so it actually throttles). Loops are bounded
+        # by the duplicate-call guard and the self-repair marker at three
+        # identical failures. Iterations are not the right instrument for
+        # either, and using them as one silently capped the work instead.
+        "tool_loop_max_iterations": 500,
     },
     "knowledge": {
         "base_dir": "./knowledge",

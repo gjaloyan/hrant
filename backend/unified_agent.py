@@ -814,6 +814,27 @@ _FINDINGS_PER_CALL_CAP = 320
 _FINDINGS_MAX_CALLS = 14
 
 
+_DEFAULT_LOOP_ITERATIONS = 500
+
+
+def _configured_loop_iterations() -> int:
+    """How many tool rounds one turn may take. See config.py's long note.
+
+    Read at call time, not import time, so `set_setting` takes effect without
+    a restart. Defensive: a corrupt or absent setting must never make a turn
+    unable to run — it falls back to the documented default rather than
+    raising, and a value below 1 would silently produce a turn that cannot
+    call a single tool.
+    """
+    try:
+        from .config import CONFIG
+        n = int(CONFIG.router.get("tool_loop_max_iterations",
+                                  _DEFAULT_LOOP_ITERATIONS))
+    except Exception:
+        return _DEFAULT_LOOP_ITERATIONS
+    return n if n >= 1 else _DEFAULT_LOOP_ITERATIONS
+
+
 def _turn_findings(agent, previous_answer: str = "") -> str:
     """What this turn has ALREADY established, for the correction round.
 
@@ -3326,9 +3347,12 @@ def run_unified(
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 
-    # The big call. max_iterations: legacy solve used 6; unified
-    # turns can do more work in one loop (research + apply +
-    # report) so we widen a bit. Falls under failover chain.
+    # The big call. Iteration budget comes from
+    # `router.tool_loop_max_iterations` (200) — see the long note at its
+    # definition in config.py. It was hardcoded 20, which every real task hit,
+    # and a turn that runs out of iterations cannot call anything: the only
+    # act left is prose, so it writes "the correct next step would be…"
+    # instead of taking that step. Falls under failover chain.
     t0 = _time.monotonic()
     usage_before = TOKENS.request_usage()
     # Snapshot the request-call log length so we can emit a
@@ -3357,7 +3381,10 @@ def run_unified(
             # natural shape of complex workflows (load skill → find
             # file → probe → sample frames → analyze_image x N →
             # render → verify → deliver).
-            max_iterations=iterations if iterations is not None else 20,
+            max_iterations=(
+                iterations if iterations is not None
+                else _configured_loop_iterations()
+            ),
             on_tool_call=_on_tool_call,
             attachments=attachments or None,
             model_override=model_override,

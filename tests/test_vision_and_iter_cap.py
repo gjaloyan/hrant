@@ -185,17 +185,27 @@ def test_rewrite_empty_answer_passthrough():
 
 
 
-def test_run_unified_max_iterations_is_20(monkeypatch):
-    """Pin the iteration cap so a future audit doesn't silently
-    cut it back down. The skill workflow needs the headroom."""
+def test_run_unified_iteration_budget_is_not_a_wall(monkeypatch):
+    """Pin the iteration budget so a future audit doesn't silently cut it
+    down — but pin the PROPERTY, not the number.
+
+    This test used to assert the literal `20` and was named
+    `..._max_iterations_is_20`. It was doing its job faithfully: it locked in
+    the exact value that made the agent stop mid-task and write "the correct
+    next step would be…". A turn that runs out of iterations cannot call
+    anything; prose is the only act left. The owner called that a red line on
+    2026-08-11, and the value moved to `router.tool_loop_max_iterations` = 500
+    — matching Hermes' documented default (`agent.max_turns`, 500).
+
+    What a guard here can usefully assert is that the budget stays large and
+    stays configurable, not that it equals any particular integer."""
     import inspect
     from backend import unified_agent
     src = inspect.getsource(unified_agent)
-    # 2026-06-12: the literal became a parameter default - the cascade
-    # small-tier attempt runs with its own (lower) budget while the
-    # strong/main path keeps the full 20.
-    assert "iterations if iterations is not None else 20" in src
+    assert "_configured_loop_iterations()" in src
+    assert "iterations if iterations is not None else 20" not in src
     assert "max_iterations=10" not in src
+    assert unified_agent._configured_loop_iterations() >= 100
 
 
 def test_rules_document_media_convention():
