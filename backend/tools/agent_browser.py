@@ -210,6 +210,30 @@ def reset_guide_for_turn() -> None:
 MAX_LIVE_SESSIONS = 3
 
 
+def close_session_forced(name: str) -> bool:
+    """Close a session by name, including `default`.
+
+    Separate from `close_session` on purpose: the normal path must never
+    touch `default`, because a turn asking to close its OWN session should
+    not be able to kill a browser somebody else is driving. The reaper may,
+    because by then it has established that no job owns anything.
+    """
+    if not name:
+        return False
+    bin_path = _resolve_binary()
+    if not bin_path:
+        return False
+    try:
+        env = dict(os.environ)
+        env["AGENT_BROWSER_SESSION"] = name
+        subprocess.run([bin_path, "close"], env=env, capture_output=True,
+                       timeout=30, check=False)
+        return True
+    except Exception as e:
+        log.debug("agent_browser: forced close(%s) failed: %s", name, e)
+        return False
+
+
 def close_session(name: str) -> bool:
     """Close one browser session. Best-effort; never raises."""
     if not name or name == "default":
@@ -268,7 +292,19 @@ def reap_orphan_sessions(keep: str = "") -> int:
             return 0
         from ..jobs import JOBS
         for name in names:
-            if name == keep or name == "default":
+            if name == keep:
+                continue
+            if name == "default":
+                # Our wrapper NEVER uses `default` — it always names a
+                # session. So a live `default` came from the CLI being run
+                # straight from the shell, which the agent does (it has a
+                # full terminal and uses it). Nothing closes those: measured
+                # 2026-08-12, twenty-four Chrome processes and 10 GB held by
+                # a `default` session twenty hours old, from direct
+                # `agent-browser` calls during a debugging turn. Reaping it
+                # here is the only place that leak can be caught.
+                if close_session_forced(name):
+                    closed += 1
                 continue
             if not name.startswith("job-"):
                 continue        # not ours to judge
@@ -445,6 +481,22 @@ def run_agent_browser(
         # supplied in `command`, nor depend on argument order.
         env = dict(os.environ)
         env.setdefault("AGENT_BROWSER_SESSION", session or _session_name())
+        # Headless-service hardening, kept from a fix the agent wrote itself
+        # on prod 2026-08-11 while its browser was failing. Its DIAGNOSIS was
+        # wrong — it concluded the system Chrome's SUID sandbox was unusable
+        # and pointed the tool at a Playwright build by absolute path; the
+        # system Chrome in fact starts and prints "DevTools listening on ws://"
+        # when asked, and a hardcoded `chromium-1234` path breaks on the next
+        # Playwright update. The real fault was memory pressure from leaked
+        # sessions.
+        #
+        # These two flags are kept because they are correct on their own
+        # terms: a service account has no usable Chrome sandbox, and
+        # /dev/shm in a systemd user scope is small enough that Chrome
+        # crashes on it under load. Keeping them is not agreement with the
+        # diagnosis — it is the part of the patch that stands.
+        env.setdefault("AGENT_BROWSER_ARGS",
+                       "--no-sandbox,--disable-dev-shm-usage")
         proc = subprocess.run(
             full_cmd,
             shell=False,

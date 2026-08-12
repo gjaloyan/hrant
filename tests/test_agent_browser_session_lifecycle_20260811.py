@@ -118,6 +118,31 @@ def test_the_current_turns_session_is_kept(monkeypatch):
     assert "job-alive" not in closed
 
 
+def test_a_default_session_left_by_direct_cli_use_is_reaped(monkeypatch):
+    """Our wrapper never uses `default`, so a live one came from the CLI being
+    run straight from the shell — which the agent does, having a full
+    terminal. Nothing else closes those. Measured 2026-08-12: 24 Chrome
+    processes and 10 GB held by a `default` session 20 hours old."""
+    listing = """Active sessions:
+  default
+  job-dead
+"""
+    calls = _capture(monkeypatch, listing)
+    _jobs(monkeypatch, running=set())
+    ab.reap_orphan_sessions()
+    closed = [s for cmd, s in calls if len(cmd) > 1 and cmd[1] == "close"]
+    assert "default" in closed
+
+
+def test_a_turn_still_cannot_close_default_itself(monkeypatch):
+    """The reaper may, because it has checked no job owns anything. A turn
+    closing its own session must never be able to kill a browser somebody
+    else is driving."""
+    calls = _capture(monkeypatch)
+    assert ab.close_session("default") is False
+    assert calls == []
+
+
 def test_sessions_we_did_not_name_are_not_ours_to_judge(monkeypatch):
     calls = _capture(monkeypatch, "Active sessions:\n  job-dead\n  someones-repl\n")
     _jobs(monkeypatch, running=set())
