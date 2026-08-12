@@ -2391,7 +2391,28 @@ class CodexLLM(BaseLLM):
                             f"Codex Responses API {r.status_code} ({self.provider_name}/{self.model}): {body}"
                         )
                     return _consume_responses_sse(r.iter_lines())
-            except LLMError:
+            except LLMError as e:
+                # A mid-stream abort arrives AFTER HTTP 200, so none of the
+                # status-code retry logic above ever saw it: the next line
+                # used to be a bare `raise`, and the whole retry loop was
+                # skipped for the one class that most deserves it.
+                #
+                # Measured 2026-08-12 on the owner's box: Codex answered
+                # "Codex Responses API stream error: Our servers are
+                # currently overloaded" five minutes into a turn. That is
+                # OpenAI throttling, not a bad request — and the immediate
+                # fallback went to a provider whose credits had run out
+                # (402, "Prompt tokens limit exceeded: 30372 > 19733"), so
+                # the turn died and the owner got an error instead of an
+                # answer.
+                #
+                # Retry the provider that is merely busy before abandoning
+                # it. Genuine failures — quota exhausted, refusals, bad
+                # requests — still raise on the first try.
+                if _is_transient_stream_error(e) and attempt < _max_retries:
+                    last_error = e
+                    time.sleep(min(2 ** attempt * 2, 60.0))
+                    continue
                 raise
             except (httpx.HTTPError, httpx.TimeoutException) as e:
                 last_error = e
@@ -3227,6 +3248,28 @@ class CohereLLM(BaseLLM):
         except Exception:
             pass
         return final_text or "[max tool-use iterations reached]"
+
+
+# Stream-level failures that mean "this provider is busy", as opposed to
+# "this request is wrong". Narrow on purpose: a refusal, a quota exhaustion or
+# a malformed request must not be retried into the same wall five times.
+_TRANSIENT_STREAM_MARKERS: tuple[str, ...] = (
+    "overloaded",
+    "currently overloa",          # the message is sometimes truncated
+    "try again",
+    "temporarily unavailable",
+    "server_error",
+    "internal server error",
+    "capacity",
+)
+
+
+def _is_transient_stream_error(err: Exception) -> bool:
+    """Is this mid-stream abort worth retrying on the SAME provider?"""
+    msg = str(err or "").lower()
+    if "quota" in msg or "usage_limit_reached" in msg:
+        return False
+    return any(m in msg for m in _TRANSIENT_STREAM_MARKERS)
 
 
 def _consume_responses_sse(line_iter) -> tuple[str, list[dict], dict]:
