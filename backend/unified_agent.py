@@ -911,6 +911,32 @@ def _turn_findings(agent, previous_answer: str = "") -> str:
     return "\n".join(out)
 
 
+def _turn_tool_results(trace, limit: int = 6) -> "list[tuple[str, str]]":
+    """(tool, result-head) for the last few calls, for the endpoint judge.
+
+    Tool NAMES alone could not settle a concrete claim: asked to rule on
+    "recognised '6wuf', the case card opened" against a list reading
+    `agent_browser, terminal_exec`, the judge has nothing to confirm and says
+    not-delivered — a false NOT DONE on a turn that did the work, which is
+    worse than the miss the gate exists to catch.
+    """
+    out: list[tuple[str, str]] = []
+    steps = trace if isinstance(trace, list) else getattr(trace, "_trace", None)
+    for _step in (steps or []):
+        tc = getattr(_step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None) or (
+            tc.get("name") if isinstance(tc, dict) else None)
+        if not name:
+            continue
+        res = getattr(tc, "result", None)
+        if res is None and isinstance(tc, dict):
+            res = tc.get("result")
+        out.append((str(name), str(res or "")))
+    return out[-limit:]
+
+
 def _turn_tool_names(agent) -> list[str]:
     """Names of tools actually called this turn, read from the trace."""
     out: list[str] = []
@@ -2001,7 +2027,8 @@ def _decide_self_correction(
         return f"unbacked claim — {claim[:60]}", corrective
     if any(t in _ENDPOINT_EXECUTE_TOOLS for t in turn_tools):
         return "", ""
-    if endpoint_met(task=task, answer=answer, tool_names=turn_tools):
+    if endpoint_met(task=task, answer=answer, tool_names=turn_tools,
+                    tool_results=_turn_tool_results(trace)):
         return "", ""
     shown = ", ".join(turn_tools[:6])
     if len(turn_tools) > 6:

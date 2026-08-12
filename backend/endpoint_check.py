@@ -98,7 +98,6 @@ _DELIVERY_TOOLS: frozenset[str] = frozenset({
     "propose_self_modification",
     "propose_soul_revision",
     "propose_immune_signature",
-    "ask_user",          # asking IS the terminal act of the turn
     # Launches stay here. The dividing line is not "tool vs action", it is
     # whether the SYSTEM carries the work forward after the turn ends: a
     # background job has a supervisor that iterates and retries it, and a
@@ -117,6 +116,24 @@ _DELIVERY_TOOLS: frozenset[str] = frozenset({
 _INSTRUMENT_TOOLS: frozenset[str] = frozenset({
     "agent_browser",
     "sandbox_exec",
+    # `ask_user` moved here from the delivery set on 2026-08-12, reversing a
+    # decision made two days earlier on the reasoning that "asking IS the
+    # terminal act of the turn". Sometimes it is. Measured three times on the
+    # owner's own conversation, it was not:
+    #
+    #   "давай проверим локальную модель"  -> "которую именно?"
+    #   "тестируй Graf-J сейчас"           -> "продолжать в узком scope?"
+    #   "continue"                         -> "продолжать в узком scope?"
+    #
+    # Because asking auto-satisfied the completion gate, a question was the
+    # cheapest way to end a turn successfully: no work, no risk, full marks.
+    # The gate was paying the agent to ask instead of act.
+    #
+    # It is now judged like any other turn, against the same BLOCKED /
+    # UNFINISHED distinction. "I need credentials you have not given me" names
+    # a real external obstacle and still passes. "Shall I proceed?" after being
+    # told to proceed does not — and should not.
+    "ask_user",
 })
 
 # Back-compat alias for importers. Points at the narrow set on purpose: any
@@ -135,13 +152,25 @@ Rules:
 - Honesty is never itself a failure, but it is also not delivery. Separate two cases:
   * BLOCKED — the assistant names a concrete external obstacle it cannot pass (a login it has no credentials for, a site that is down, a permission it lacks, a missing input only the user can give). Nothing more was possible this turn -> endpoint_met = true.
   * UNFINISHED — the assistant says the result is not there yet and names a next step IT could take itself ("next I should…", "I still need to…", "I did not get to…"). That is a turn that stopped mid-task -> endpoint_met = false. Say so even though the assistant was honest: the point is not to punish the confession, it is to send the assistant back to finish. Marking this "met" teaches it that describing the next step is as good as taking it.
+- BOOKKEEPING IS NOT THE WORK. Saving a note, writing a summary to the knowledge base, updating a plan, re-reading a previous result, or filing what was learned are ADJACENT to the request, not the request. If the user asked for X and the evidence shows only that the assistant recorded something about X, endpoint_met = false — even though real tools ran and something real was written. Ask yourself: if the user read only this answer, would they have the thing they asked for, or a report about it?
+- A QUESTION back to the user is delivery only when the answer is genuinely required to continue and the assistant could not obtain it itself: a credential, a choice between options with real consequences, a missing fact only the user has. Asking permission to do the thing the user just asked for — "shall I proceed?", "continue in this scope?" — is NOT delivery; it is the UNFINISHED case wearing a question mark, and the user has already answered it.
 - Starting long-running work counts as delivery when starting it was the request, or when the work genuinely cannot finish inside one turn and the evidence shows the launch. It does NOT count when the user asked for the RESULT and the evidence shows only an attempt.
 - Judge in the user's own language; the request may be in any language.
 
 Return strictly JSON: {"endpoint_met": true|false, "reason": "short"}"""
 
 
-def _turn_evidence(tool_names: "list[str] | None", answer: str) -> str:
+# How much of each tool's output the judge sees. Names alone were not enough:
+# asked to rule on "recognised '6wuf', the case card opened" against a list
+# reading `agent_browser, terminal_exec`, the judge cannot confirm anything and
+# says not-delivered — a false NOT DONE on a turn that did the work, which is a
+# worse failure than the one the gate exists to catch.
+_EVIDENCE_RESULT_CAP = 300
+_EVIDENCE_MAX_RESULTS = 4
+
+
+def _turn_evidence(tool_names: "list[str] | None", answer: str,
+                   tool_results: "list[tuple[str, str]] | None" = None) -> str:
     """Code-produced facts about what the turn ACTUALLY did.
 
     2026-08-06: the judge used to receive only `(task, answer)` — the
@@ -154,6 +183,13 @@ def _turn_evidence(tool_names: "list[str] | None", answer: str) -> str:
     import os
     lines = ["tools called this turn (in order): "
              + (", ".join(tool_names or []) or "(none)")]
+    # The tail of what those tools RETURNED. The tail, because a turn works
+    # and then reports: the evidence for its final claim is at the end.
+    for name, result in (tool_results or [])[-_EVIDENCE_MAX_RESULTS:]:
+        body = " ".join(str(result or "").split())
+        if not body:
+            continue
+        lines.append(f"  {name} -> {body[:_EVIDENCE_RESULT_CAP]}")
     try:
         from .channels import _MEDIA_LINE_RE
         paths = [m.group(1).strip() for m in _MEDIA_LINE_RE.finditer(answer or "")]
@@ -206,7 +242,8 @@ def _note_fail_open(kind: str, detail: str = "") -> None:
         pass
 
 
-def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:
+def endpoint_met(*, task: str, answer: str, tool_names: list[str],
+                 tool_results: "list[tuple[str, str]] | None" = None) -> bool:
     """Did the answer deliver against the request? One deterministic
     shortcut (an execute-class tool ran), otherwise an LLM judgment made
     against code-produced evidence (language-agnostic, no keyword lists).
@@ -234,8 +271,8 @@ def endpoint_met(*, task: str, answer: str, tool_names: list[str]) -> bool:
             if cache is not None:
                 cache[key] = True
             return True
-    result = _llm_endpoint_met(task, answer,
-                              _turn_evidence(tool_names, answer))
+    result = _llm_endpoint_met(
+        task, answer, _turn_evidence(tool_names, answer, tool_results))
     if cache is not None:
         cache[key] = result
     return result

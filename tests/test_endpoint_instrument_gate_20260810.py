@@ -76,8 +76,13 @@ def test_launches_still_count_as_delivery():
 def test_tools_whose_call_is_the_deliverable_still_shortcut():
     """The shortcut has a real purpose: `set_setting` IS the change, and
     paying an LLM to confirm that would be waste."""
+    # `ask_user` was in this list until 2026-08-12 and is deliberately not
+    # any more: measured three times, a question was being used to end a turn
+    # successfully without doing the work the user had just asked for. It is
+    # judged now, so "I need a credential you have not given me" still passes
+    # and "shall I proceed?" does not.
     for tool in ("set_setting", "save_user_fact", "schedule_message",
-                 "ask_user", "propose_self_modification"):
+                 "propose_self_modification"):
         assert tool in _DELIVERY_TOOLS, tool
 
 

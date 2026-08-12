@@ -26,13 +26,17 @@ import pytest
 
 def _patch_judges(monkeypatch, *, claim="", endpoint_met=True):
     """Stub both LLM judges with deterministic returns."""
+    # **kwargs on purpose: these stubs stand in for judges whose signatures
+    # grow. `endpoint_met` gained `tool_results` on 2026-08-12 (the judge
+    # needed to see what tools RETURNED, not only their names) and a stub
+    # pinned to the old shape turned that into four unrelated red tests.
     monkeypatch.setattr(
         "backend.endpoint_check.unbacked_action_claim",
-        lambda task, answer, tool_names: claim,
+        lambda task, answer, tool_names, **kw: claim,
     )
     monkeypatch.setattr(
         "backend.endpoint_check.endpoint_met",
-        lambda *, task, answer, tool_names: endpoint_met,
+        lambda **kw: endpoint_met,
     )
 
 
