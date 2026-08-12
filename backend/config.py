@@ -288,6 +288,12 @@ _COMMON_OTHER = {
         # identical failures. Iterations are not the right instrument for
         # either, and using them as one silently capped the work instead.
         "tool_loop_max_iterations": 500,
+        # Budget for ONE self-correction round. Was hardcoded 6 — while the
+        # corrective it carries tells the agent to "keep going with it THIS
+        # TURN until you have the actual result". Six iterations cannot obey
+        # that, so both correction rounds ended the same way the main loop
+        # did: cut off, writing what it would have done next.
+        "correction_max_iterations": 50,
     },
     "knowledge": {
         "base_dir": "./knowledge",

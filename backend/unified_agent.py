@@ -815,6 +815,21 @@ _FINDINGS_MAX_CALLS = 14
 
 
 _DEFAULT_LOOP_ITERATIONS = 500
+# A correction round is a second chance inside an existing turn, not a fresh
+# turn, so it gets a smaller budget than the main loop — but a real one.
+# Hermes gives its subagents 50 against a parent's 500; the same ratio here.
+_DEFAULT_CORRECTION_ITERATIONS = 50
+
+
+def _configured_correction_iterations() -> int:
+    """Budget for one self-correction round. See `_configured_loop_iterations`."""
+    try:
+        from .config import CONFIG
+        n = int(CONFIG.router.get("correction_max_iterations",
+                                  _DEFAULT_CORRECTION_ITERATIONS))
+    except Exception:
+        return _DEFAULT_CORRECTION_ITERATIONS
+    return n if n >= 1 else _DEFAULT_CORRECTION_ITERATIONS
 
 
 def _configured_loop_iterations() -> int:
@@ -3547,7 +3562,14 @@ def run_unified(
                     tools_provider=_current_tool_schema_for_turn,
                     execute_tool=_execute_with_progress,
                     max_tokens=2000,
-                    max_iterations=6,
+                    # Same wall as the main loop had, in the one place it
+                    # hurts most: the corrective this round carries says
+                    # "keep going with it THIS TURN until you have the actual
+                    # result". With six iterations that is an order the agent
+                    # cannot obey — it re-reads the page and is cut off again,
+                    # which is how two correction rounds produced two more
+                    # "the correct next step would be" paragraphs.
+                    max_iterations=_configured_correction_iterations(),
                     on_tool_call=_on_tool_call,
                 )
                 answer = _rewrite_xml_tool_call_dump(answer, agent)

@@ -100,3 +100,36 @@ def test_cost_is_still_bounded_independently():
     over, spent, cap = _budget_exceeded(
         {"daily_api_budget_usd": 5.0}, {"api_cost_today": 99.0})
     assert over is True and cap == 5.0
+
+
+# ── the correction round had the same wall ──────────────────────────
+
+def test_a_correction_round_can_actually_finish_the_work():
+    """The corrective handed to a correction round says "keep going with it
+    THIS TURN until you have the actual result". That round ran with
+    max_iterations=6 — an order the agent could not obey, which is how two
+    correction rounds produced two more "the correct next step would be"
+    paragraphs after the main loop had already produced one."""
+    from backend.unified_agent import _configured_correction_iterations
+    assert _configured_correction_iterations() >= 25
+
+
+def test_the_correction_budget_is_configurable():
+    from backend.unified_agent import (
+        _DEFAULT_CORRECTION_ITERATIONS, _configured_correction_iterations,
+    )
+    CONFIG.router["correction_max_iterations"] = 12
+    try:
+        assert _configured_correction_iterations() == 12
+        CONFIG.router["correction_max_iterations"] = 0
+        assert _configured_correction_iterations() == _DEFAULT_CORRECTION_ITERATIONS
+    finally:
+        CONFIG.router.pop("correction_max_iterations", None)
+
+
+def test_the_correction_call_site_reads_the_setting():
+    import inspect
+    import backend.unified_agent as ua
+    src = inspect.getsource(ua.run_unified)
+    assert "_configured_correction_iterations()" in src
+    assert "max_iterations=6," not in src
