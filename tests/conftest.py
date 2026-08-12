@@ -231,6 +231,30 @@ def _isolate_gate_metrics(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_immune_stores(tmp_path, monkeypatch):
+    """The immune rulebook and fire log are real files in the data dir.
+
+    `FIRE_ERROR_TRIAGE` constructs `SignatureStore()` and `FireLog()` with no
+    path, so in tests they resolved to ~/.hrant/data/knowledge/immune/ — the
+    developer's real one, which by 2026-08-12 held five signatures and a
+    fires.json last written by a test run. Any tick test therefore matched
+    whatever happened to be in it, and `pytest-randomly` turned that into
+    eight order-dependent failures in one run and none in the next.
+
+    Same class as gate_metrics, scheduled_messages and the follow-up queue
+    below: a singleton resolving to real data instead of tmp.
+    """
+    try:
+        import backend.autonomic.immune as _im
+    except ImportError:
+        return
+    monkeypatch.setattr(_im, "DEFAULT_SIGNATURES_PATH",
+                        tmp_path / "signatures.jsonl")
+    monkeypatch.setattr(_im, "DEFAULT_FIRES_PATH", tmp_path / "fires.json")
+    monkeypatch.setattr(_im, "resolve_immune_path", lambda p: tmp_path / p.name)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_autonomic_followups(tmp_path, monkeypatch):
     """The immune follow-up queue is a real file; keep it out of the real dir.
 

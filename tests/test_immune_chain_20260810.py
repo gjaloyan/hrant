@@ -355,6 +355,15 @@ def test_self_heal_and_tool_install_are_reachable():
 
 def test_the_default_store_reads_the_data_dir_not_the_cwd():
     """The phantom-path class: a relative default resolves against the
-    service's cwd, so the writer and the reader used different files."""
+    service's cwd, so the writer and the reader used different files.
+
+    Checks the RESOLVER rather than a constructed store, because conftest
+    redirects the store into tmp for every test (the rulebook is real data and
+    tests were reading — and writing — the developer's own). The production
+    invariant is what the resolver does, and that is what this asserts."""
     from backend import paths
-    assert SignatureStore().path.is_relative_to(paths.knowledge_dir())
+    from backend.autonomic.lever import resolve_knowledge_path
+    from pathlib import Path
+    resolved = resolve_knowledge_path(Path("knowledge/immune/signatures.jsonl"))
+    assert resolved.is_relative_to(paths.knowledge_dir())
+    assert resolved.name == "signatures.jsonl"

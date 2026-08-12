@@ -2550,7 +2550,13 @@ def run_unified(
     # Per-thread conversation context — Wife's DM thread and Wife's
     # group-chat thread don't leak into each other's prompts even
     # though both have the same speaker_id.
-    convo = CONVERSATION.context_block(n=6, session_key=skey)
+    # Ten, not six (2026-08-12). Six was enough for chat and far too few
+    # for work: two `ask_user` round-trips cost four slots, and every
+    # background job that finishes costs another, so the exchange the
+    # owner actually cared about was routinely evicted before he
+    # replied to it. `recent()` now also keeps human turns ahead of
+    # machine ones inside the window.
+    convo = CONVERSATION.context_block(n=10, session_key=skey)
 
     # Audit follow-up — LLM-based fast chat path. Cheap turns
     # (greetings, recall, acknowledgements) shouldn't pay the full
