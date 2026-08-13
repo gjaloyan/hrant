@@ -27,6 +27,9 @@ def _ok_answer() -> AgentAnswer:
         verification=VerificationResult(confidence=100),
         learned_topics=[], used_topics=[],
         project=None, is_chat=True, thinking_trace=[],
+        execution_budget={
+            "profile": "normal", "max_iterations": 500,
+        },
     )
 
 
@@ -45,6 +48,7 @@ def test_happy_path_marks_completed(isolated_jobs):
     rec = isolated_jobs.get(job_id)
     assert rec.status == "completed"
     assert rec.response == "ok"
+    assert rec.execution_budget["profile"] == "normal"
     assert answer.answer == "ok"
 
 

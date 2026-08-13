@@ -252,6 +252,46 @@ export default function EngineTab({ flash }: Props) {
         >
           {numInput(router.tool_loop_input_budget, (v) => updateRouter("tool_loop_input_budget", v), 10000, 10000, 2000000)}
         </Row>
+
+        <Row
+          label="tool_loop_max_tool_calls"
+          field="tool_loop_max_tool_calls"
+          section="router"
+          hint="Optional normal-mode tool-call ceiling. Zero keeps the generous unlimited default."
+        >
+          {numInput(router.tool_loop_max_tool_calls, (v) => updateRouter("tool_loop_max_tool_calls", v), 1, 0, 5000)}
+        </Row>
+
+        <div className="pt-3 pb-1 text-xs font-semibold text-slate-300">
+          Read-only audit budget
+        </div>
+
+        <Row
+          label="audit_loop_max_iterations"
+          field="audit_loop_max_iterations"
+          section="router"
+          hint="Maximum LLM iterations in one explicit audit-mode turn."
+        >
+          {numInput(router.audit_loop_max_iterations, (v) => updateRouter("audit_loop_max_iterations", v), 1, 1, 200)}
+        </Row>
+
+        <Row
+          label="audit_loop_max_tool_calls"
+          field="audit_loop_max_tool_calls"
+          section="router"
+          hint="Maximum admitted read-only tool calls in one audit-mode turn."
+        >
+          {numInput(router.audit_loop_max_tool_calls, (v) => updateRouter("audit_loop_max_tool_calls", v), 1, 1, 500)}
+        </Row>
+
+        <Row
+          label="audit_loop_input_budget"
+          field="audit_loop_input_budget"
+          section="router"
+          hint="Maximum accumulated input tokens in one audit-mode turn."
+        >
+          {numInput(router.audit_loop_input_budget, (v) => updateRouter("audit_loop_input_budget", v), 10000, 10000, 500000)}
+        </Row>
       </div>
 
       {/* Verification section */}

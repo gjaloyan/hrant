@@ -257,6 +257,10 @@ _COMMON_OTHER = {
         # the 300k cap rarely triggering in practice anyway — the
         # natural max_iterations limit ends most runaway loops first.
         "tool_loop_input_budget": 0,
+        # Optional hard count for normal turns. Disabled by default to retain
+        # the owner's generous execution policy; useful as an emergency
+        # operator lever without conflating a tool call with one LLM round.
+        "tool_loop_max_tool_calls": 0,
         # How many tool-call rounds ONE turn may take before the loop is
         # broken off and the model is forced to write a final answer.
         #
@@ -288,6 +292,13 @@ _COMMON_OTHER = {
         # identical failures. Iterations are not the right instrument for
         # either, and using them as one silently capped the work instead.
         "tool_loop_max_iterations": 500,
+        # Explicit read-only audits are bounded independently from normal
+        # work. A diagnostic should gather evidence, not spend hundreds of
+        # iterations re-feeding status output. These values are read live by
+        # CapabilityBroker and can be adjusted through runtime config.
+        "audit_loop_max_iterations": 32,
+        "audit_loop_max_tool_calls": 32,
+        "audit_loop_input_budget": 60000,
         # Budget for ONE self-correction round. Was hardcoded 6 — while the
         # corrective it carries tells the agent to "keep going with it THIS
         # TURN until you have the actual result". Six iterations cannot obey

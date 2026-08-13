@@ -50,6 +50,14 @@ _ALLOWED: dict[str, dict[str, tuple[type, Any]]] = {
         # per the "no limits" directive. Operators can still set
         # 10000-2000000 to opt back into a hard cap.
         "tool_loop_input_budget": (int, lambda v: v == 0 or 10000 <= v <= 2000000),
+        "tool_loop_max_tool_calls": (
+            int, lambda v: v == 0 or 1 <= v <= 5000,
+        ),
+        "audit_loop_max_iterations": (int, lambda v: 1 <= v <= 200),
+        "audit_loop_max_tool_calls": (int, lambda v: 1 <= v <= 500),
+        "audit_loop_input_budget": (
+            int, lambda v: 10000 <= v <= 500000,
+        ),
     },
     # 2026-08-09 dead-code audit: FIVE of the six keys here had zero readers
     # anywhere in the backend, while all six were live Settings sliders — the

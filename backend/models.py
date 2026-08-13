@@ -1,6 +1,6 @@
 """Pydantic data models."""
 from __future__ import annotations
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 Category = Literal["fundamentals", "profession", "projects", "personal"]
@@ -266,6 +266,9 @@ class AgentAnswer(BaseModel):
     # Dev-mode payload: per-LLM-call captures with file blobs redacted.
     # Empty list when nothing was recorded (chat fast-path or skipped).
     llm_calls: list[LLMCallDetail] = []
+    # Deterministic capability/budget receipt for this turn. Empty on legacy
+    # and fast-chat paths; populated by the unified tool loop.
+    execution_budget: dict[str, Any] = Field(default_factory=dict)
     # Claim/evidence layer (P0). Populated from VerificationResult and
     # the thinking_trace by `claims.build_claims_and_evidence` so
     # consumers can render answers as "claim → its evidence" without

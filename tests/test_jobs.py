@@ -204,6 +204,24 @@ def test_mark_completed_persists_tool_calls(store):
     assert out.tool_calls[1]["error"] == "denied"
 
 
+def test_mark_completed_persists_execution_budget(store):
+    j = store.create(prompt="inspect")
+    receipt = {
+        "profile": "normal",
+        "max_iterations": 500,
+        "tool_calls_allowed": 3,
+        "exhausted": False,
+    }
+    store.mark_completed(
+        j.id,
+        response="done",
+        execution_budget=receipt,
+    )
+    out = store.get(j.id)
+    assert out is not None
+    assert out.execution_budget == receipt
+
+
 def test_mark_failed_stores_error(store):
     j = store.create(prompt="x", channel="webui", speaker_id="webui:default")
     out = store.mark_failed(j.id, error="Connection refused")

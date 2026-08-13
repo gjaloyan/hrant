@@ -180,6 +180,7 @@ def run_tracked(
                 job.id,
                 response=answer.answer or "",
                 tool_calls=tool_calls,
+                execution_budget=answer.execution_budget or {},
             )
             terminal_written = True
         except Exception as e:

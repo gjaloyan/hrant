@@ -43,3 +43,30 @@ the infrastructure layer.
 Tool traces and durable non-audit Job receipts carry the resolved `effect`, so
 proof, framing, action-drift, debugging, and future policy decisions can use one
 deterministic signal instead of independent tool-name lists.
+
+## Capability broker and bounded audit execution
+
+`backend/capability_broker.py` is the per-turn authority for both the schema
+shown to the model and admission of each concrete call. It derives the current
+base/bundle/runtime tool surface, applies the typed-effect audit filter, and
+checks the turn budget before the handler can run. The registry retains its
+own read-only guard as defense in depth.
+
+Normal work keeps the owner's deliberately generous policy: 500 configurable
+iterations, with tool-call and input-token limits disabled by default. Explicit
+audits use a separate bounded profile:
+
+- `router.audit_loop_max_iterations`: 32;
+- `router.audit_loop_max_tool_calls`: 32;
+- `router.audit_loop_input_budget`: 60000 accumulated input tokens.
+
+The values are runtime-configurable through the existing engine-config API.
+`router.tool_loop_max_tool_calls` is also available as an opt-in emergency cap
+for normal turns; its default is `0` (disabled).
+
+Once a hard audit budget is reached, the broker returns
+`TURN_BUDGET_EXCEEDED` without invoking the handler and instructs the model to
+produce an evidence-based partial report that names what remains unchecked.
+Every unified tool-loop response includes an `execution_budget` receipt with
+limits, attempted/allowed/denied calls, observed input tokens, and exhaustion
+reason. Normal durable Jobs and turn artifacts persist the same receipt.
