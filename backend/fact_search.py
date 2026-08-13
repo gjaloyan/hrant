@@ -210,11 +210,14 @@ def _is_synthetic_speaker(sid: "str | None") -> bool:
 
 def search_facts(query: str, limit: int = 5,
                  score_floor: float | None = None,
-                 include_synthetic: bool = False) -> list[dict]:
+                 include_synthetic: bool = False,
+                 *, speaker_id: str | None = None) -> list[dict]:
     """Facts above `score_floor`, by cosine similarity, authored by a real
-    speaker. Returns [{summary, category, score, ts, source_turn, speaker_id},
-    ...] — possibly FEWER than `limit`, including zero. Returns [] when the
-    embedder is unavailable or the store is empty — never raises.
+    speaker. When `speaker_id` is provided, only that exact private-memory
+    scope is eligible. Passing None is the unscoped owner-inspection mode.
+    Returns [{summary, category, score, ts, source_turn, speaker_id}, ...] —
+    possibly FEWER than `limit`, including zero. Returns [] when the embedder
+    is unavailable or the store is empty — never raises.
 
     Returning fewer than asked is the point: the previous version returned
     top-K unconditionally, so a query with no relevant fact was answered with
@@ -257,32 +260,47 @@ def search_facts(query: str, limit: int = 5,
         return []
     # Over-fetch: the floor and the speaker filter both drop rows, and
     # asking for exactly `limit` would return too few real hits.
-    scored = store.search(qvec, k=max(1, min((int(limit) or 5) * 4, 50)))
+    limit_n = max(1, int(limit) or 5)
+    # The legacy VectorStore has no metadata index, so speaker filtering is
+    # applied after vector lookup. In scoped mode request the full ranking;
+    # otherwise another speaker's top rows could hide the current speaker's
+    # valid hit. VectorStore already scores every vector before slicing.
+    search_k = store.count() if speaker_id is not None else min(limit_n * 4, 50)
+    scored = store.search(qvec, k=max(1, search_k))
     if not scored:
         return []
     # Map fact_id back to full row by re-scanning memory_facts.jsonl.
     # At ~1500 rows this is fast; if the corpus grows we'd build a
     # secondary id→row index.
-    rows_by_id: dict[str, dict] = {}
+    rows_by_id: dict[str, list[dict]] = {}
     for summary, row in _iter_facts():
-        rows_by_id[fact_id(summary)] = row
+        rows_by_id.setdefault(fact_id(summary), []).append(row)
     floor = FACT_SCORE_FLOOR if score_floor is None else float(score_floor)
     out: list[dict] = []
+    requested_speaker = speaker_id.strip() if speaker_id is not None else None
+    seen_rows: set[tuple[str, str]] = set()
     for fid, score in scored:
-        row = rows_by_id.get(fid)
-        if not row:
-            continue
         if float(score) < floor:
             continue
-        if not include_synthetic and _is_synthetic_speaker(row.get("speaker_id")):
-            continue
-        out.append({
-            "summary": _summary_of(row),
-            "category": row.get("category", "general"),
-            "score": round(float(score), 4),
-            "ts": row.get("ts"),
-            "source_turn": row.get("source_turn"),
-            "speaker_id": row.get("speaker_id"),
-            "tags": row.get("tags") or [],
-        })
+        for row in rows_by_id.get(fid, []):
+            row_speaker = str(row.get("speaker_id") or "").strip()
+            if requested_speaker is not None and row_speaker != requested_speaker:
+                continue
+            if not include_synthetic and _is_synthetic_speaker(row_speaker):
+                continue
+            row_key = (fid, row_speaker)
+            if row_key in seen_rows:
+                continue
+            seen_rows.add(row_key)
+            out.append({
+                "summary": _summary_of(row),
+                "category": row.get("category", "general"),
+                "score": round(float(score), 4),
+                "ts": row.get("ts"),
+                "source_turn": row.get("source_turn"),
+                "speaker_id": row.get("speaker_id"),
+                "tags": row.get("tags") or [],
+            })
+            if len(out) >= limit_n:
+                return out
     return out

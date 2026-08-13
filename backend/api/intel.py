@@ -12,6 +12,7 @@ from ..knowledge_graph import GRAPH, reindex_all_notes
 from ..llm import TOKENS
 from ..memory_extractor import MEMORY
 from ..meta_learner import META_LEARNER
+from ..roles import current_speaker
 from ..self_modifier import SELF_MODIFIER
 from ..vector_store import VECTOR_STORE
 from ._auth import require_owner_for_writes
@@ -198,7 +199,12 @@ def memory_stats():
 
 @router.get("/api/memory/facts")
 def memory_facts(limit: int = 50):
-    return {"facts": MEMORY.recent_facts(limit=limit)}
+    require_owner_for_writes(action="reading memory facts")
+    return {
+        "facts": MEMORY.recent_facts(
+            limit=limit, speaker_id=current_speaker(),
+        ),
+    }
 
 
 class MemoryRecallRequest(BaseModel):
@@ -213,8 +219,13 @@ def memory_recall(body: MemoryRecallRequest):
     # to the agent). Brute-force probing via this endpoint is a
     # memory-exfiltration vector if exposed.
     require_owner_for_writes(action="recalling memory")
-    facts = MEMORY.recall(body.query, limit=body.limit)
-    block = MEMORY.recall_block(body.query, max_facts=body.limit)
+    speaker_id = current_speaker()
+    facts = MEMORY.recall(
+        body.query, limit=body.limit, speaker_id=speaker_id,
+    )
+    block = MEMORY.recall_block(
+        body.query, max_facts=body.limit, speaker_id=speaker_id,
+    )
     return {"facts": facts, "block": block}
 
 

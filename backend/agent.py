@@ -435,7 +435,11 @@ class Agent(
                 parts.append(git_block)
         else:
             try:
-                memory_block = MEMORY.recall_block(task, max_facts=n_memory)
+                memory_block = MEMORY.recall_block(
+                    task,
+                    max_facts=n_memory,
+                    speaker_id=getattr(self, "_speaker_id", None),
+                )
             except Exception:
                 memory_block = ""
             if memory_block and memory_block.strip():

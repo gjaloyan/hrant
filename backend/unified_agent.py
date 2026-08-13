@@ -44,9 +44,10 @@ Shape of the unified turn:
       - LLM decides everything: chat, tool use, set_setting,
         save_user_fact, delegate, refuse, ask clarifying Q
   4.  Post-hoc:
-      - memory_extractor.extract_and_store   — feeds KG
       - verifier (opt-in via marker OR auto for named-entity-heavy
         answers — same rule as legacy task_mode)
+      - verified memory commit — user facts always eligible; assistant
+        claims only after successful verification
       - CONVERSATION.add_turn                — history persistence
       - EVALUATOR.log                         — analytics
 
@@ -1753,7 +1754,8 @@ def _post_turn_skill_reflection(
             pass
 
 
-def _auto_recall_block(task: str, *, limit: int = 3) -> str:
+def _auto_recall_block(task: str, *, limit: int = 3,
+                       speaker_id: str | None = None) -> str:
     """Cheap pre-flight: hybrid-search for notes related to the
     user's message and inject as a context block. Saves the LLM
     a `search_knowledge` tool call when the relevant notes are
@@ -1795,7 +1797,7 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
         # and drops synthetic (audit/benchmark) authors, so this returns
         # nothing at all when nothing relevant exists — which is the honest
         # answer, and what the old top-2 could never say.
-        fact_hits = search_facts(task, limit=2)
+        fact_hits = search_facts(task, limit=2, speaker_id=speaker_id)
     except Exception:
         fact_hits = []
     if not note_hits and not fact_hits:
@@ -1820,6 +1822,43 @@ def _auto_recall_block(task: str, *, limit: int = 3) -> str:
                 # to discount — and these were being injected into EVERY turn.
                 lines.append(f"- {summary} (score: {float(f.get('score') or 0):.2f})")
     return "\n".join(lines)
+
+
+def _commit_turn_memory(
+    *,
+    task: str,
+    answer: str,
+    verification: VerificationResult,
+    verification_performed: bool,
+    speaker_id: str,
+) -> None:
+    """Persist a turn only after the final answer has been verified.
+
+    User-authored facts remain eligible even when verification did not run or
+    failed. Assistant-authored claims are included only when a verifier really
+    ran, reached the confidence floor, and reported neither contradictions nor
+    unsupported claims. ``MemoryExtractor`` enforces the final trust gate from
+    these values; this helper makes the live unified path pass honest values.
+    """
+    from .memory_extractor import MEMORY
+
+    blockers = len(verification.unverified_claims or [])
+    try:
+        from .answer_critic import content_contradictions
+        blockers += len(content_contradictions(verification))
+    except Exception:
+        blockers += len(verification.contradictions or [])
+    confidence = (
+        int(verification.confidence or 0) if verification_performed else 0
+    )
+    MEMORY.extract_and_store(
+        task,
+        answer,
+        intent="task",
+        confidence=confidence,
+        contradictions=blockers,
+        speaker_id=speaker_id,
+    )
 
 
 # ─── Self-correction gating ────────────────────────────────────────
@@ -2562,7 +2601,7 @@ def run_unified(
     except Exception:
         snapshot = ""
 
-    recall = _auto_recall_block(task)
+    recall = _auto_recall_block(task, speaker_id=speaker_id)
     # Wake-up context (audit 2026-06-11): yesterday's consolidated
     # narrative + open threads + failure lessons. Cached per calendar
     # day inside the consolidation module, so this is a dict lookup
@@ -3723,22 +3762,6 @@ def run_unified(
         except Exception as e:
             log.warning("ask_user payload attach failed: %s", e)
 
-    # Post-hoc: memory extraction. Supervisor turns SKIP — the
-    # synthetic "BACKGROUND_JOB_COMPLETED: ..." text would otherwise
-    # land in the user's long-term memory as if they had said it.
-    # ask_user turns also SKIP — the "❓ …" placeholder isn't a fact
-    # worth storing, and routing it through the extractor wastes
-    # tokens for zero learning signal.
-    if not supervisor_mode and not question_payload:
-        try:
-            MEMORY.extract_and_store(
-                task, answer, intent="task",
-                confidence=100, contradictions=0,
-                speaker_id=speaker_id,
-            )
-        except Exception as e:
-            log.debug("unified: memory extract failed: %s", e)
-
     # Post-hoc: optional verifier. Same threshold as legacy
     # task_mode — only fires when there's grounding material to
     # verify against (notes + tool outputs).
@@ -3752,11 +3775,13 @@ def run_unified(
         tool_names=tool_names_from_trace(agent._trace or []),
     )
     vr = VerificationResult(confidence=85)
+    _verification_performed = False
     if _cascade_prevr is not None:
         # The cascade gate already verified THIS answer on the strong
         # model moments ago — reuse it instead of paying a second
         # verifier call on an accepted small-tier turn.
         vr = _cascade_prevr
+        _verification_performed = True
     elif should_verify(tool_outputs, agent._trace or []):
         try:
             from .verifier import verify
@@ -3767,6 +3792,7 @@ def run_unified(
                 used_topics=[],
                 tool_context="\n\n".join(tool_outputs),
             )
+            _verification_performed = True
         except Exception as e:
             log.debug("unified: verifier failed: %s", e)
 
@@ -3932,6 +3958,23 @@ def run_unified(
                 vr.confidence = min(vr.confidence, 30)
     except Exception as exc:
         log.debug("unified: psm empty-diff check failed: %s", exc)
+
+    # Memory is a commit phase, not a pre-verification side effect. Use the
+    # final answer and final VerificationResult after endpoint checks, critic
+    # revision, and confidence caps. If verification never ran, the extractor
+    # still mines user-authored facts but receives confidence=0 and therefore
+    # excludes assistant-authored claims.
+    if not supervisor_mode and not question_payload:
+        try:
+            _commit_turn_memory(
+                task=task,
+                answer=answer or "",
+                verification=vr,
+                verification_performed=_verification_performed,
+                speaker_id=speaker_id,
+            )
+        except Exception as e:
+            log.debug("unified: memory extract failed: %s", e)
 
     # Goals + conversation persistence + evaluator log.
     try:
