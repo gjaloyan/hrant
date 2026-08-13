@@ -293,11 +293,13 @@ def test_unified_audit_filters_schema_blocks_fabricated_write_and_skips_stores(
 
     captured = {
         "tools": set(), "blocked": "", "writes": [], "read_results": [],
+        "max_iterations": None,
     }
 
     class FakeRouter:
         def call_with_tools(self, *args, **kwargs):
             captured["tools"] = {t["name"] for t in kwargs["tools"]}
+            captured["max_iterations"] = kwargs["max_iterations"]
             for i in range(7):
                 call_args = {"command": f"systemctl status service{i}"}
                 text, is_error = kwargs["execute_tool"](
@@ -376,15 +378,21 @@ def test_unified_audit_filters_schema_blocks_fabricated_write_and_skips_stores(
     )
 
     assert result.mode == "audit"
+    assert captured["max_iterations"] == 32
     assert "set_setting" not in captured["tools"]
     assert "read_file" in captured["tools"]
     assert "terminal_exec" in captured["tools"]
-    assert json.loads(captured["blocked"])["error"] == "AUDIT_MODE_BLOCKED"
+    assert json.loads(captured["blocked"])["error"] == "CAPABILITY_DENIED"
     assert all(
         marker not in "\n".join(captured["read_results"])
         for marker in ("PROOF OWED", "ACTION DRIFT", "FRAME-CHECK", "NUDGE")
     )
     assert captured["writes"] == []
     assert result.turn_id == ""
+    assert result.execution_budget["profile"] == "audit"
+    assert result.execution_budget["max_tool_calls"] == 32
+    assert result.execution_budget["tool_calls_attempted"] == 8
+    assert result.execution_budget["tool_calls_allowed"] == 7
+    assert result.execution_budget["tool_calls_denied"] == 1
     tool_steps = [s for s in result.thinking_trace if s.tool_call is not None]
     assert tool_steps[-1].tool_call.effect == "write"

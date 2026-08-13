@@ -3072,37 +3072,28 @@ def run_unified(
     # MUST be after SKILLS.ensure_loaded() above so skill-provided
     # tools (handler.py register) make it into the schema.
     registry = get_registry()
+    from .capability_broker import CapabilityBroker, budget_from_config
+    capability_broker = CapabilityBroker(
+        registry,
+        audit_mode=audit_mode,
+        budget=budget_from_config(
+            audit_mode=audit_mode,
+            normal_max_iterations=_configured_loop_iterations(),
+        ),
+    )
+    if audit_mode:
+        # Guidance and enforcement share one resolved budget. The prompt helps
+        # the model plan; CapabilityBroker remains the actual trust boundary.
+        system_prompt = (
+            f"{system_prompt}\n\n---\n\n{capability_broker.prompt_block()}"
+        )
 
     def _current_tool_schema_for_turn() -> list[dict]:
         """Re-derive the tool schema from the current loaded-bundle
         state. Called by `call_with_tools` before each LLM iteration
         so a mid-turn `load_tool_bundle` is reflected in the next
         request."""
-        from .tool_bundles import (
-            BASE_TOOLS, expand_loaded, get_loaded_bundles,
-        )
-        loaded = get_loaded_bundles()
-        allowed = set(BASE_TOOLS) | expand_loaded(loaded)
-        # Anything registered at RUNTIME is reachable too (2026-08-09
-        # dead-code audit). BASE_TOOLS and the bundles are static frozensets
-        # written by hand, so a tool a skill registers can never appear in
-        # them — the filter silently dropped it from every request. Measured:
-        # `calc` (origin "skill:calc") is registered on every boot and was in
-        # neither set, while run_python's own description tells the model
-        # "for pure arithmetic ALWAYS prefer `calc`". The model was being
-        # instructed to call a tool it could not see, and the reachability
-        # test could not catch it because that test reloads a registry
-        # holding builtins only.
-        try:
-            allowed |= {
-                name for name, tool in registry.tools.items()
-                if not str(getattr(tool, "origin", "")).startswith("builtin")
-            }
-        except Exception:
-            pass
-        if audit_mode:
-            allowed = registry.audit_visible_names(allowed)
-        return registry.to_anthropic_list(filter_names=allowed)
+        return capability_broker.tool_schema()
 
     # Initial schema is the cold-start (base-only) view — passed for
     # back-compat with any provider path that ignores tools_provider.
@@ -3238,7 +3229,18 @@ def run_unified(
             pass
 
     def _execute_with_progress(name: str, args: dict):
-        call_semantics = registry.resolve_call_semantics(name, args)
+        try:
+            _input_tokens_used = int(
+                (TOKENS.request_usage() or {}).get("input_tokens", 0) or 0
+            )
+        except Exception:
+            _input_tokens_used = 0
+        capability_decision = capability_broker.authorize(
+            name, args, input_tokens_used=_input_tokens_used,
+        )
+        call_semantics = capability_decision.semantics
+        if not capability_decision.allowed:
+            return capability_broker.denial_result(capability_decision)
         # HARD build-without-frame gate (structural backstop — see
         # _should_block_build). Returns a blocked error WITHOUT executing, so
         # the model must call frame_problem before more building this turn.
@@ -3494,12 +3496,9 @@ def run_unified(
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 
-    # The big call. Iteration budget comes from
-    # `router.tool_loop_max_iterations` (200) — see the long note at its
-    # definition in config.py. It was hardcoded 20, which every real task hit,
-    # and a turn that runs out of iterations cannot call anything: the only
-    # act left is prose, so it writes "the correct next step would be…"
-    # instead of taking that step. Falls under failover chain.
+    # The big call. CapabilityBroker supplies the loop ceiling: normal turns
+    # retain the owner's generous configurable budget, while explicit audit
+    # turns use their own bounded diagnostic profile. Falls under failover.
     t0 = _time.monotonic()
     usage_before = TOKENS.request_usage()
     # Snapshot the request-call log length so we can emit a
@@ -3528,10 +3527,7 @@ def run_unified(
             # natural shape of complex workflows (load skill → find
             # file → probe → sample frames → analyze_image x N →
             # render → verify → deliver).
-            max_iterations=(
-                iterations if iterations is not None
-                else _configured_loop_iterations()
-            ),
+            max_iterations=capability_broker.iteration_limit(iterations),
             on_tool_call=_on_tool_call,
             attachments=attachments or None,
             model_override=model_override,
@@ -4087,6 +4083,9 @@ def run_unified(
             and getattr(s, "event", "") in ("tool", "tool_error")
         )
         tu = agent._get_token_usage()
+        capability_broker.observe_input_tokens(
+            (TOKENS.request_usage() or {}).get("input_tokens", 0),
+        )
         turn_record = {
             "ts": _dt.now().strftime("%Y-%m-%d %H:%M:%S"),
             "user": task,
@@ -4110,6 +4109,7 @@ def run_unified(
                 (tu.llm_calls if tu and getattr(tu, "llm_calls", 0) else None)
                 or len(agent._llm_calls or [])
             ),
+            "execution_budget": capability_broker.snapshot(),
             "level": _level.name,
         }
         if job_id:
@@ -4293,6 +4293,12 @@ def run_unified(
                 _block = ""
             if _block:
                 answer = f"{(answer or '').rstrip()}\n\n{_block}"
+    try:
+        capability_broker.observe_input_tokens(
+            (TOKENS.request_usage() or {}).get("input_tokens", 0),
+        )
+    except Exception:
+        pass
     return AgentAnswer(
         answer=answer or "",
         verification=vr,
@@ -4304,6 +4310,7 @@ def run_unified(
         token_usage=agent._get_token_usage(),
         thinking_trace=agent._trace,
         llm_calls=agent._llm_calls,
+        execution_budget=capability_broker.snapshot(),
         turn_id=("" if audit_mode else getattr(agent, "_last_turn_id", "") or ""),
         question=question_payload,
         model_used=_model_used,

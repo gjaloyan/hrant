@@ -64,6 +64,19 @@ export type EvidenceItem = {
   confidence: number;
 };
 
+export type ExecutionBudgetReceipt = {
+  profile: string;
+  max_iterations: number;
+  max_tool_calls: number;
+  max_input_tokens: number;
+  tool_calls_attempted: number;
+  tool_calls_allowed: number;
+  tool_calls_denied: number;
+  input_tokens_observed: number;
+  exhausted: boolean;
+  exhaustion_reason: string;
+};
+
 export type AgentAnswer = {
   answer: string;
   verification: VerificationResult;
@@ -77,6 +90,7 @@ export type AgentAnswer = {
   claims?: Claim[];
   evidence?: EvidenceItem[];
   turn_id?: string;
+  execution_budget?: ExecutionBudgetReceipt;
   // Honest model reporting: the model that ACTUALLY served the turn, and a
   // user-facing notice (non-empty only on a silent fallback off the selected
   // model). The UI must show what was used, never just what was selected.
@@ -241,6 +255,7 @@ export type TurnArtifact = {
     is_error?: boolean;
   }>;
   token_usage?: TokenUsage;
+  execution_budget?: ExecutionBudgetReceipt;
 };
 
 export type ConversationTurnRow = {
@@ -1557,6 +1572,10 @@ export type EngineRouterCfg = {
   fallback_to_local?: boolean;
   tool_synth_max_tokens?: number;
   tool_loop_input_budget?: number;
+  tool_loop_max_tool_calls?: number;
+  audit_loop_max_iterations?: number;
+  audit_loop_max_tool_calls?: number;
+  audit_loop_input_budget?: number;
 };
 
 export type EngineVerificationCfg = {
@@ -1981,6 +2000,7 @@ export type Job = {
     error?: string | null;
     elapsed_ms?: number;
   }>;
+  execution_budget?: ExecutionBudgetReceipt;
   attempts: Array<{
     provider_id: string;
     model: string;

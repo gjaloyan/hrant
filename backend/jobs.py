@@ -112,6 +112,9 @@ class Job:
     # {name, effect, args_summary, ok, error?, elapsed_ms}
     tool_calls: list[dict] = field(default_factory=list)
 
+    # Capability/budget receipt copied from AgentAnswer at completion.
+    execution_budget: dict = field(default_factory=dict)
+
     # Provider attempts — populated by the failover layer (Phase B).
     # Each entry: {provider_id, model, ok, error?, elapsed_ms, started_at}
     attempts: list[dict] = field(default_factory=list)
@@ -340,6 +343,7 @@ class JobStore:
         *,
         response: str,
         tool_calls: Optional[list[dict]] = None,
+        execution_budget: Optional[dict] = None,
     ) -> Optional[Job]:
         with self._lock:
             job = self.get(job_id)
@@ -355,6 +359,8 @@ class JobStore:
                 # accumulating list across retries (retries get a
                 # new job record).
                 job.tool_calls = tool_calls
+            if execution_budget is not None:
+                job.execution_budget = dict(execution_budget)
             job.error = None
             self._write(job)
         _publish_job_transition(job_id, prev_status, "completed")
