@@ -349,7 +349,10 @@ class MemoryExtractor:
                         and all(str(x).strip() for x in old[:3])
                     ):
                         try:
-                            GRAPH.invalidate(str(old[0]), str(old[1]), str(old[2]))
+                            GRAPH.invalidate(
+                                str(old[0]), str(old[1]), str(old[2]),
+                                scope=speaker_id,
+                            )
                         except Exception:
                             # Invalidation is best-effort — we'd rather
                             # have a stale-but-additive graph than a
@@ -367,6 +370,7 @@ class MemoryExtractor:
                     graph_triples,
                     source_note=self.GRAPH_SOURCE,
                     weight=fact.confidence,
+                    scope=speaker_id,
                 )
 
                 # Append to log
@@ -387,12 +391,14 @@ class MemoryExtractor:
         except Exception:
             pass
 
-    def recall(self, query: str, limit: int = 10) -> list[dict]:
+    def recall(self, query: str, limit: int = 10, *,
+               speaker_id: str | None = None) -> list[dict]:
         """Recall facts relevant to a query by searching the graph.
 
         Returns fact summaries from memory edges that match the query.
         This is the agent's "remember" function — it finds conversation
-        facts stored in the graph.
+        facts stored in the graph. Live callers must pass `speaker_id`; None
+        intentionally retains unscoped owner-inspection compatibility.
         """
         # Search graph for memory-sourced edges
         query_terms = GRAPH._extract_query_entities(query)
@@ -407,7 +413,10 @@ class MemoryExtractor:
             # Direct entity match
             if term_n in GRAPH._edges:
                 for edge in GRAPH._edges[term_n]:
-                    if edge.get("note") == self.GRAPH_SOURCE:
+                    if (
+                        edge.get("note") == self.GRAPH_SOURCE
+                        and (speaker_id is None or edge.get("scope") == speaker_id)
+                    ):
                         # Found a memory edge — look up the full fact
                         fact_info = {
                             "entity": term_n,
@@ -428,6 +437,8 @@ class MemoryExtractor:
             for entity, edge in GRAPH.find_facts_by_target(term_n):
                 if edge.get("note") != self.GRAPH_SOURCE:
                     continue
+                if speaker_id is not None and edge.get("scope") != speaker_id:
+                    continue
                 key = f"{entity}|{edge['relation']}|{edge['target']}"
                 if key not in seen_summaries:
                     seen_summaries.add(key)
@@ -442,12 +453,15 @@ class MemoryExtractor:
         relevant_facts.sort(key=lambda f: -f["weight"])
         return relevant_facts[:limit]
 
-    def recall_block(self, query: str, max_facts: int = 8) -> str:
+    def recall_block(self, query: str, max_facts: int = 8, *,
+                     speaker_id: str | None = None) -> str:
         """Build a memory context block for injection into prompts.
 
         Returns a formatted string of recalled facts, or "" if nothing found.
         """
-        facts = self.recall(query, limit=max_facts)
+        facts = self.recall(
+            query, limit=max_facts, speaker_id=speaker_id,
+        )
         if not facts:
             return ""
 
@@ -462,17 +476,29 @@ class MemoryExtractor:
 
         return "\n".join(lines)
 
-    def recent_facts(self, limit: int = 30) -> list[dict]:
+    def recent_facts(self, limit: int = 30, *,
+                     speaker_id: str | None = None) -> list[dict]:
         """Return recent facts from the log."""
+        limit_n = max(0, int(limit))
+        if limit_n == 0:
+            return []
         if not self.log_path.exists():
             return []
         try:
             lines = self.log_path.read_text(encoding="utf-8").strip().split("\n")
             facts = []
-            for line in lines[-limit:]:
+            for line in reversed(lines):
                 if line.strip():
-                    facts.append(json.loads(line))
-            facts.reverse()
+                    fact = json.loads(line)
+                    if (
+                        speaker_id is not None
+                        and str(fact.get("speaker_id") or "").strip()
+                        != speaker_id.strip()
+                    ):
+                        continue
+                    facts.append(fact)
+                    if len(facts) >= limit_n:
+                        break
             return facts
         except Exception:
             return []

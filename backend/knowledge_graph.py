@@ -164,6 +164,7 @@ class KnowledgeGraph:
         valid_to: Optional[str] = None,
         confidence: float = 1.0,
         auto_invalidate: bool = True,
+        scope: Optional[str] = None,
     ) -> int:
         """Add entity-relation-entity triples from a note.
 
@@ -174,6 +175,8 @@ class KnowledgeGraph:
             valid_from / valid_to: optional ISO-date strings bounding when
                 this fact was/is true. None = open-ended.
             confidence: 0..1 — how sure we are this triple holds.
+            scope: optional tenant/speaker boundary. Duplicate detection and
+                temporal invalidation never cross a non-None scope.
 
         Returns:
             Number of edges added.
@@ -194,6 +197,7 @@ class KnowledgeGraph:
                 valid_to=valid_to,
                 confidence=confidence,
                 auto_invalidate=auto_invalidate,
+                scope=scope,
             )
 
     def _add_relations_unlocked(
@@ -206,6 +210,7 @@ class KnowledgeGraph:
         valid_to: Optional[str] = None,
         confidence: float = 1.0,
         auto_invalidate: bool = True,
+        scope: Optional[str] = None,
     ) -> int:
         """Internal worker for add_relations. Caller MUST hold
         `self._LOCK`. Split out so the public method can keep the
@@ -246,6 +251,7 @@ class KnowledgeGraph:
                     e.get("relation") == rel_clean
                     and e.get("target") == obj_n
                     and e.get("valid_to") is None
+                    and e.get("scope") == scope
                     for e in self._edges[subj_n]
                 )
             ):
@@ -268,6 +274,7 @@ class KnowledgeGraph:
                         existing.get("relation") == rel_clean
                         and existing.get("target") != obj_n
                         and existing.get("valid_to") is None
+                        and existing.get("scope") == scope
                     ):
                         existing["valid_to"] = today
                         closed_something = True
@@ -278,6 +285,7 @@ class KnowledgeGraph:
                                 inv.get("target") == subj_n
                                 and inv.get("relation") == f"inverse:{rel_clean}"
                                 and inv.get("valid_to") is None
+                                and inv.get("scope") == scope
                             ):
                                 inv["valid_to"] = today
                 if closed_something and current_vfrom is None:
@@ -295,6 +303,7 @@ class KnowledgeGraph:
                 and e["note"] == source_note
                 and e.get("valid_from") == current_vfrom
                 and e.get("valid_to") == valid_to
+                and e.get("scope") == scope
                 for e in self._edges[subj_n]
             )
             if not exists:
@@ -310,6 +319,8 @@ class KnowledgeGraph:
                     edge["valid_to"] = valid_to
                 if confidence != 1.0:
                     edge["confidence"] = confidence
+                if scope is not None:
+                    edge["scope"] = scope
                 self._edges[subj_n].append(edge)
                 self._target_index[obj_n].append((subj_n, edge))
                 added += 1
@@ -325,6 +336,7 @@ class KnowledgeGraph:
                 and e["note"] == source_note
                 and e.get("valid_from") == current_vfrom
                 and e.get("valid_to") == valid_to
+                and e.get("scope") == scope
                 for e in self._edges[obj_n]
             )
             if not rev_exists:
@@ -340,6 +352,8 @@ class KnowledgeGraph:
                     rev_edge["valid_to"] = valid_to
                 if confidence != 1.0:
                     rev_edge["confidence"] = confidence
+                if scope is not None:
+                    rev_edge["scope"] = scope
                 self._edges[obj_n].append(rev_edge)
                 self._target_index[subj_n].append((obj_n, rev_edge))
 
@@ -588,6 +602,8 @@ class KnowledgeGraph:
         relation: str,
         target: str,
         ended_at: Optional[str] = None,
+        *,
+        scope: Optional[str] = None,
     ) -> int:
         """Close all open edges matching (subject, relation, target).
 
@@ -608,6 +624,7 @@ class KnowledgeGraph:
                         edge.get("target") == target_n
                         and edge.get("relation") == rel
                         and edge.get("valid_to") is None
+                        and (scope is None or edge.get("scope") == scope)
                     ):
                         edge["valid_to"] = ts
                         closed += 1
@@ -620,6 +637,7 @@ class KnowledgeGraph:
                         edge.get("target") == subj_n
                         and edge.get("relation") == inv_rel
                         and edge.get("valid_to") is None
+                        and (scope is None or edge.get("scope") == scope)
                     ):
                         edge["valid_to"] = ts
 

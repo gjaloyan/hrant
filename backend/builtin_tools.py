@@ -401,6 +401,7 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
     extracted facts."""
     from .hybrid_searcher import HYBRID
     from .fact_search import search_facts
+    from .roles import current_speaker
     limit_n = max(1, min(int(limit) or 5, 20))
     out: list[dict] = []
     try:
@@ -418,7 +419,9 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
     # Per-fact semantic search runs alongside. Embedder unavailable
     # → empty list, never raises.
     try:
-        for f in search_facts(query, limit=limit_n):
+        for f in search_facts(
+            query, limit=limit_n, speaker_id=current_speaker(),
+        ):
             out.append({
                 "summary": f["summary"],
                 "category": f.get("category"),

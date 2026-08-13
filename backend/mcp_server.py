@@ -142,6 +142,11 @@ async def list_tools() -> list[types.Tool]:
                 "properties": {
                     "query": {"type": "string"},
                     "limit": {"type": "integer", "default": 10},
+                    "speaker_id": {
+                        "type": "string",
+                        "default": "webui:default",
+                        "description": "Exact private-memory owner scope.",
+                    },
                 },
                 "required": ["query"],
             },
@@ -233,7 +238,11 @@ async def call_tool(name: str, arguments: dict | None) -> list[types.TextContent
 
         if name == "memory_recall":
             from .memory_extractor import MEMORY
-            facts = MEMORY.recall(args["query"], limit=int(args.get("limit", 10)))
+            facts = MEMORY.recall(
+                args["query"],
+                limit=int(args.get("limit", 10)),
+                speaker_id=str(args.get("speaker_id") or "webui:default"),
+            )
             return _ok({"query": args["query"], "facts": facts})
 
         return _err(f"unknown tool: {name}")
