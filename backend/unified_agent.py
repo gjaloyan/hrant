@@ -3561,6 +3561,17 @@ def run_unified(
     # are LLM judgments (language-agnostic, no keyword lists). Supervisor
     # turns skip both — they're internal plumbing.
     _contract_status_tag = ""
+    # An EMPTY answer used to skip this whole block, so the strongest possible
+    # signal of failure was the one thing that bypassed correction entirely.
+    # Measured 2026-08-13: a turn ran 181 tool calls (254 of them browser
+    # actions), hit 12 tool errors, produced no text at all, and shipped —
+    # endpoint_met=True, confidence 0, because there was nothing to judge.
+    # The owner received a blank message after $1.16 of work.
+    if not supervisor_mode and not (answer or "").strip():
+        answer = (
+            "I produced no answer for this turn. That is a failure, not a "
+            "result: I ran tools and then returned nothing."
+        )
     if not supervisor_mode and (answer or "").strip():
         # Two rounds, and the RE-ANSWER IS RE-GATED (2026-08-06). The single
         # -shot version accepted whatever came back unexamined, so a corrective

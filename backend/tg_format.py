@@ -430,11 +430,23 @@ def format_stats_block(token_usage: Any) -> str:
     calls = _attr(tu, "llm_calls", 0)
     cache_read = _attr(tu, "cache_read_tokens", 0)
     cache_create = _attr(tu, "cache_creation_tokens", 0)
-    # Format with thousands separator for readability.
-    parts = [
-        f"🔢 <b>{total:,}</b> tok",
-        f"<i>in {in_:,} · out {out:,}</i>",
-    ]
+    # The HEADLINE is everything that actually went over the wire, cache
+    # included. `total_tokens` is input+output only, and on a real working
+    # turn the cache is the overwhelming majority of the traffic — so the
+    # number the owner read as "tokens used" was off by more than an order of
+    # magnitude. Measured 2026-08-13 across 43 turns: shown 3,108,402, actual
+    # 55,458,674, because 52,350,272 of it was cache reads. He noticed before
+    # we did: "real token use for todays turns is 21M tokens but agent show me
+    # only 128000 for last turn".
+    #
+    # Cache reads are billed at a discount, not for free, and they are the
+    # reason a turn can cost dollars while reporting kilotokens. The breakdown
+    # still follows, so nothing is hidden either way.
+    real_total = total + cache_read + cache_create
+    parts = [f"🔢 <b>{real_total:,}</b> tok"]
+    if cache_read or cache_create:
+        parts.append(f"<i>new {total:,} · cached {cache_read + cache_create:,}</i>")
+    parts.append(f"<i>in {in_:,} · out {out:,}</i>")
     if cache_read or cache_create:
         cache_parts = []
         if cache_read:

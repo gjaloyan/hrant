@@ -706,6 +706,58 @@ def _normalize_model_key(model: str) -> list[str]:
 _PRICING_MISSES: set[str] = set()
 
 
+# Models billed by subscription rather than per token. Anything here costs
+# zero marginal tokens-money; pricing it per-token fabricates spend.
+_SUBSCRIPTION_MODELS: frozenset[str] = frozenset({
+    "gpt-5.6-sol", "gpt-5.6-sol-wm", "gpt-5.6-terra", "gpt-5.6-luna",
+    "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "codex-auto-review",
+})
+
+_OR_PRICING_CACHE: dict = {"at": 0.0, "data": {}}
+_OR_PRICING_TTL = 6 * 3600
+
+
+def _openrouter_pricing() -> dict[str, dict[str, float]]:
+    """Live per-Mtok prices from OpenRouter's public model list.
+
+    Added 2026-08-13. Every model actually in use — tencent/hy3,
+    xiaomi/mimo-v2.5-pro, z-ai/glm-5.2, gpt-5.5 — was missing from the static
+    table and therefore billed at the $3/$15 default. The owner caught it from
+    his own dashboard: "in openrouter i se 21m tokes use and pay for it 0,77
+    usd", against reported figures more than twenty times higher. Real
+    tencent/hy3 is $0.132/$0.528 per Mtok, not $3/$15.
+
+    A static table cannot keep up with a gateway that adds models weekly, so
+    this reads the source of truth and caches it. Failure is silent and falls
+    back to the static table: wrong-but-old beats crashing a cost calculation.
+    """
+    import time as _time
+    now = _time.time()
+    if _OR_PRICING_CACHE["data"] and now - _OR_PRICING_CACHE["at"] < _OR_PRICING_TTL:
+        return _OR_PRICING_CACHE["data"]
+    out: dict[str, dict[str, float]] = {}
+    try:
+        import httpx
+        r = httpx.get("https://openrouter.ai/api/v1/models", timeout=15.0)
+        if r.status_code == 200:
+            for m in r.json().get("data") or []:
+                mid = str(m.get("id") or "").lower()
+                pr = m.get("pricing") or {}
+                try:
+                    pin = float(pr.get("prompt") or 0) * 1_000_000
+                    pout = float(pr.get("completion") or 0) * 1_000_000
+                except (TypeError, ValueError):
+                    continue
+                if mid and (pin or pout):
+                    out[mid] = {"input": pin, "output": pout}
+    except Exception as e:
+        log.debug("openrouter pricing fetch failed: %s", e)
+    if out:
+        _OR_PRICING_CACHE.update({"at": now, "data": out})
+        return out
+    return _OR_PRICING_CACHE["data"] or {}
+
+
 def get_model_pricing(model: str) -> dict[str, float]:
     """Per-million-token pricing for a model, or the default.
 
@@ -716,7 +768,15 @@ def get_model_pricing(model: str) -> dict[str, float]:
     $3/$15. So the reported cost was a constant regardless of what ran, and
     the cheap-model experiment could not be told from the expensive one.
     """
+    # Codex models are covered by the ChatGPT subscription: there is no
+    # per-token charge at all, so billing them at ANY per-token rate invents
+    # spend that never happened. Measured 2026-08-13: the daily total reported
+    # to the owner was dominated by gpt-5.5 priced at the $3/$15 default.
+    if str(model or "").lower() in _SUBSCRIPTION_MODELS:
+        return {"input": 0.0, "output": 0.0}
+    live = _openrouter_pricing()
     lowered = {str(k).lower(): v for k, v in KNOWN_PRICING.items()}
+    lowered.update(live)
     for key in _normalize_model_key(model):
         hit = lowered.get(key)
         if hit is not None:
