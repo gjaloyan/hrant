@@ -325,7 +325,11 @@ PROVIDER_TYPES = {
         "key_env_default": "",
         # Default static list. Real list is per-account and lives in
         # ~/.codex/models_cache.json (read by /api/providers/codex/status).
-        "models": ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"],
+        # Frontier first. `gpt-5.6-sol` is the endpoint's own
+        # "Latest frontier agentic coding model"; it stayed invisible
+        # until 2026-08-13 because we asked with client_version 0.130.0.
+        "models": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                   "gpt-5.5", "gpt-5.4", "gpt-5.4-mini"],
         "supports_tools": True,
         "auth_types": ["codex_subscription"],
     },
@@ -1198,6 +1202,61 @@ class CodexAuthManager:
 
     # ----- model list (per-account, lives next to auth.json) -----
 
+    # The version we CLAIM to the models endpoint. It gates which models come
+    # back, so it must not lag the account's entitlements.
+    CODEX_CLIENT_VERSION = "0.160.0"
+    CODEX_MODELS_URL = "https://chatgpt.com/backend-api/codex/models"
+
+    def _fetch_models_from_api(self) -> "dict | None":
+        """Live model list for this account, or None on any failure.
+
+        Never raises and never blocks provider listing: a network hiccup or a
+        changed endpoint degrades to the CLI's cache, which is what this code
+        did unconditionally before.
+        """
+        try:
+            import httpx
+            auth = json.loads(self.path.read_text(encoding="utf-8"))
+            tok = auth.get("tokens") or {}
+            access = tok.get("access_token")
+            if not access:
+                return None
+            r = httpx.get(
+                self.CODEX_MODELS_URL,
+                params={"client_version": self.CODEX_CLIENT_VERSION},
+                headers={"Authorization": f"Bearer {access}",
+                         "chatgpt-account-id": tok.get("account_id") or ""},
+                timeout=20.0,
+            )
+            if r.status_code != 200:
+                return None
+            raw = r.json()
+        except Exception as e:
+            log.debug("codex model refresh failed, using cache: %s", e)
+            return None
+        models = []
+        for m in raw.get("models") or []:
+            if not isinstance(m, dict) or not m.get("slug"):
+                continue
+            if m.get("visibility") not in (None, "list", "default"):
+                continue
+            if m.get("supported_in_api") is False:
+                continue
+            models.append({
+                "slug": m["slug"],
+                "display_name": m.get("display_name") or m["slug"],
+                "description": m.get("description") or "",
+                "default_reasoning_level": m.get("default_reasoning_level") or "",
+                "supported_in_api": bool(m.get("supported_in_api", True)),
+                "visibility": m.get("visibility") or "list",
+            })
+        if not models:
+            return None
+        return {"ok": True, "models": models,
+                "fetched_at": raw.get("fetched_at") or "",
+                "client_version": self.CODEX_CLIENT_VERSION,
+                "source": "api"}
+
     def models(
         self,
         cache_path: Path = CODEX_MODELS_CACHE_FILE,
@@ -1217,10 +1276,26 @@ class CodexAuthManager:
             "reason": "<error when ok=False>",
           }
 
-        We don't fetch from the network — the Codex CLI manages this file,
-        and re-fetching would require knowing the right backend endpoint and
-        sending the same Codex-internal headers. Stale-by-a-few-hours is fine.
+        Refreshed from the network when possible, falling back to whatever the
+        Codex CLI last cached.
+
+        This used to say we don't fetch "because re-fetching would require
+        knowing the right backend endpoint and sending the same Codex-internal
+        headers". Both are known now, and not knowing them cost the owner a
+        model he already pays for. On 2026-08-13 he said "i have a access to
+        gpt 5.6 too in my codex app" while the agent offered only gpt-5.5. The
+        cache was nine days old AND written by client 0.130.0 — and the
+        endpoint gates its list on the client version you claim:
+
+            0.130.0 -> 4 models
+            0.150.0 -> 8, adding gpt-5.6-sol / -sol-wm / -terra / -luna
+
+        Nothing was broken and the login was fine. We were asking with an old
+        version number.
         """
+        fresh = self._fetch_models_from_api()
+        if fresh:
+            return fresh
         if not cache_path.exists():
             return {
                 "ok": False,

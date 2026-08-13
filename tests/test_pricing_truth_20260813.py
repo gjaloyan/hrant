@@ -74,3 +74,43 @@ def test_the_fetch_never_raises(monkeypatch):
     import httpx
     monkeypatch.setattr(httpx, "get", _boom)
     assert pr._openrouter_pricing() == {}
+
+
+# ── the Codex model list ────────────────────────────────────────────
+
+def test_the_client_version_we_claim_is_not_stale():
+    """The models endpoint gates its list on this. At 0.130.0 the account saw
+    4 models; at 0.150.0+, 8 — including the gpt-5.6 family the owner already
+    pays for. A number that lags entitlements hides models."""
+    from backend.providers import CodexAuthManager
+    parts = [int(x) for x in CodexAuthManager.CODEX_CLIENT_VERSION.split(".")]
+    assert parts >= [0, 150, 0], "client version predates the gpt-5.6 listing"
+
+
+def test_a_failed_refresh_falls_back_to_the_cache(monkeypatch, tmp_path):
+    """The network is optional; the provider list is not."""
+    from backend.providers import CODEX_AUTH
+    monkeypatch.setattr(CODEX_AUTH, "_fetch_models_from_api", lambda: None)
+    out = CODEX_AUTH.models(cache_path=tmp_path / "nope.json",
+                            fallback=["gpt-5.5"])
+    assert out["models"] and out["models"][0]["slug"] == "gpt-5.5"
+    assert out["source"] == "fallback"
+
+
+def test_a_live_list_wins_over_the_cache(monkeypatch, tmp_path):
+    from backend.providers import CODEX_AUTH
+    monkeypatch.setattr(
+        CODEX_AUTH, "_fetch_models_from_api",
+        lambda: {"ok": True, "source": "api",
+                 "models": [{"slug": "gpt-5.6-sol"}],
+                 "fetched_at": "", "client_version": "0.160.0"})
+    out = CODEX_AUTH.models(cache_path=tmp_path / "x.json")
+    assert out["source"] == "api"
+    assert out["models"][0]["slug"] == "gpt-5.6-sol"
+
+
+def test_the_static_default_lists_the_new_family():
+    """So a fresh install offers them before the first refresh."""
+    from backend.providers import PROVIDER_TYPES
+    models = PROVIDER_TYPES["openai_codex"]["models"]
+    assert "gpt-5.6-sol" in models
