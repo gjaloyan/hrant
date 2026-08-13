@@ -7,11 +7,12 @@ any module importing backend gets a ready-to-use registry.
 from __future__ import annotations
 import json
 import logging
+import shlex
 import time
 from collections import OrderedDict
 from typing import Any
 
-from .tool_registry import get_registry
+from .tool_registry import ToolEffect, get_registry
 
 
 log = logging.getLogger(__name__)
@@ -1874,6 +1875,160 @@ def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
     }, ensure_ascii=False)
 
 
+_AUDIT_SIMPLE_READ_COMMANDS = frozenset({
+    "cat", "date", "df", "dmesg", "du", "file", "free", "getent",
+    "grep", "head", "hostname", "id", "journalctl", "lscpu", "ls",
+    "lsblk", "lsof", "md5sum", "netstat", "pgrep", "ps", "pwd",
+    "readlink", "realpath", "rg", "sha256sum", "ss", "stat", "tail",
+    "uname", "uptime", "wc", "whereis", "which", "whoami",
+})
+_AUDIT_SHELL_META = (";", "&", "|", ">", "<", "`", "$", "\n", "\r")
+
+
+def _terminal_effect_for_call(arguments: dict[str, Any]) -> ToolEffect:
+    """Conservatively distinguish shell inspection from mutation.
+
+    The normal owner tool remains a full shell.  This resolver exists for two
+    narrower purposes: read-only audit enforcement and honest turn receipts.
+    Anything ambiguous is WRITE, so audit mode fails closed before spawning a
+    shell.
+    """
+    command = str((arguments or {}).get("command") or "").strip()
+    if not command or any(mark in command for mark in _AUDIT_SHELL_META):
+        return ToolEffect.WRITE
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return ToolEffect.WRITE
+    if not tokens:
+        return ToolEffect.WRITE
+    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
+    rest = tokens[1:]
+
+    if executable in _AUDIT_SIMPLE_READ_COMMANDS:
+        # These utilities have mutation switches despite being read-oriented.
+        forbidden = {
+            "--delete", "-delete", "--remove", "--vacuum-size",
+            "--vacuum-time", "--vacuum-files", "--rotate", "--flush",
+            "--sync", "--setup-keys", "--update-catalog",
+            "--relinquish-var", "--smart-relinquish-var",
+            "-i", "--in-place",
+        }
+        if any(
+            t in forbidden
+            or t.startswith("--vacuum-")
+            or t.startswith("--output=")
+            for t in rest
+        ):
+            return ToolEffect.WRITE
+        if executable == "date" and any(
+            t == "--set" or t.startswith("--set=") or t.startswith("-s")
+            for t in rest
+        ):
+            return ToolEffect.WRITE
+        if executable == "hostname":
+            # GNU hostname can mutate through a positional name, -F/--file,
+            # or -b/--boot even though the common no-argument form is a read.
+            if any(not t.startswith("-") for t in rest) or any(
+                t in {"-b", "--boot", "-F", "--file"}
+                or t.startswith("-F") or t.startswith("--file=")
+                for t in rest
+            ):
+                return ToolEffect.WRITE
+        if executable == "dmesg" and any(
+            t in {"-c", "-C", "-D", "-E", "-n", "--clear", "--read-clear",
+                  "--console-level", "--console-on", "--console-off"}
+            or t.startswith("-n")
+            or t.startswith("--console-level=")
+            for t in rest
+        ):
+            return ToolEffect.WRITE
+        if executable == "rg" and any(
+            t == "--pre" or t.startswith("--pre=") for t in rest
+        ):
+            return ToolEffect.WRITE
+        if executable == "ss" and any(
+            t in {"-K", "--kill"} for t in rest
+        ):
+            return ToolEffect.WRITE
+        return ToolEffect.READ
+
+    if executable == "find":
+        mutators = {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+        return (
+            ToolEffect.WRITE if any(
+                t in mutators
+                or t == "-fls"
+                or t.startswith("-fprint")
+                or t.startswith("-fprintf")
+                for t in rest
+            )
+            else ToolEffect.READ
+        )
+
+    if executable == "mount":
+        return ToolEffect.READ if not rest else ToolEffect.WRITE
+
+    if executable == "systemctl":
+        read_ops = {
+            "status", "show", "is-active", "is-enabled", "is-failed",
+            "list-units", "list-unit-files", "list-jobs", "cat",
+        }
+        op = next((t for t in rest if not t.startswith("-")), "")
+        return ToolEffect.READ if op in read_ops else ToolEffect.WRITE
+
+    if executable == "service":
+        return (
+            ToolEffect.READ
+            if len(rest) == 2 and rest[1].lower() == "status"
+            else ToolEffect.WRITE
+        )
+
+    if executable in {"git"}:
+        if any(t == "--output" or t.startswith("--output=") for t in rest):
+            return ToolEffect.WRITE
+        read_ops = {
+            "status", "log", "show", "diff", "rev-parse", "ls-files",
+            "ls-tree", "describe", "blame", "grep", "shortlog",
+        }
+        op = next((t for t in rest if not t.startswith("-")), "")
+        if op == "branch":
+            branch_args = rest[1:]
+            read_flags = {
+                "-a", "--all", "-r", "--remotes", "-v", "-vv",
+                "--verbose", "--list", "--show-current", "--no-color",
+                "--ignore-case", "--no-column",
+            }
+            only_read_flags = all(
+                t in read_flags
+                or t.startswith(("--color=", "--column=", "--format=", "--sort="))
+                for t in branch_args
+            )
+            return ToolEffect.READ if only_read_flags else ToolEffect.WRITE
+        if op == "remote":
+            return ToolEffect.READ if set(rest) <= {"remote", "-v"} else ToolEffect.WRITE
+        return ToolEffect.READ if op in read_ops else ToolEffect.WRITE
+
+    if executable in {"docker", "podman"}:
+        read_ops = {
+            "ps", "inspect", "logs", "stats", "images", "info", "version",
+            "top", "port", "diff",
+        }
+        op = next((t for t in rest if not t.startswith("-")), "")
+        return ToolEffect.READ if op in read_ops else ToolEffect.WRITE
+
+    if executable == "ip":
+        mutators = {
+            "add", "delete", "del", "set", "flush", "replace", "exec",
+        }
+        return (
+            ToolEffect.WRITE if any(t.lower() in mutators for t in rest)
+            else ToolEffect.READ
+        )
+
+    return ToolEffect.WRITE
+
+
 def _schedule_message_handler(
     target: str,
     text: str = "",
@@ -2354,6 +2509,12 @@ def _soul_history_handler(action: str = "list", version: str = "",
                  "is nothing to roll back to." if not versions else
                  "Newest first. Pass a `name` as `version` to restore it."),
     }, ensure_ascii=False)
+
+
+def _soul_history_effect_for_call(arguments: dict[str, Any]) -> ToolEffect:
+    """Listing history is a read; rollback restores files and snapshots."""
+    action = str((arguments or {}).get("action") or "list").strip().lower()
+    return ToolEffect.READ if action == "list" else ToolEffect.WRITE
 
 
 def _pdf_edit_handler(path: str, replacements: list | None = None,
@@ -3045,6 +3206,7 @@ def register_builtin_tools() -> None:
             "required": [],
         },
         handler=_soul_history_handler,
+        effect_resolver=_soul_history_effect_for_call,
     )
     reg.register_func(
         name="pdf_edit",
@@ -3759,6 +3921,8 @@ def register_builtin_tools() -> None:
             "required": ["command"],
         },
         handler=_terminal_exec_handler,
+        effect_resolver=_terminal_effect_for_call,
+        audit_visible=True,
     )
 
     reg.register_func(

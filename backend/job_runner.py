@@ -61,7 +61,7 @@ def _summarize_tool_args(raw: object) -> str:
 def _extract_tool_calls(answer: AgentAnswer) -> list[dict]:
     """Flatten the tool-call trace from an AgentAnswer into a list
     of compact dicts suitable for storage. Each entry:
-        {name, args_summary, ok, error?, elapsed_ms?}
+        {name, effect, args_summary, ok, error?, elapsed_ms?}
 
     We deliberately don't store full tool args — they can be huge
     (file contents, search results). The summary is enough for the
@@ -82,6 +82,7 @@ def _extract_tool_calls(answer: AgentAnswer) -> list[dict]:
             data = {}
         out.append({
             "name": data.get("name") or data.get("tool") or "?",
+            "effect": data.get("effect") or "unknown",
             "args_summary": _summarize_tool_args(
                 data.get("args_summary") or data.get("args")
             ),

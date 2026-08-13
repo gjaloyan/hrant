@@ -85,23 +85,39 @@ async def chat(req: ChatRequest, request: Request):
             # this server dies mid-run, the boot recovery hook will
             # mark the job `interrupted` so the user can retry it
             # from the WebUI Jobs tab or `hrant jobs retry <id>`.
-            res, job_id = await asyncio.to_thread(
-                lambda: run_tracked(
-                    agent,
-                    req.message,
-                    req.project or PROJECTS.current,
-                    req.attachments or None,
-                    channel=target_channel,
-                    speaker_id=target_speaker,
-                ),
-            )
+            if req.audit_mode:
+                # Deliberately bypass run_tracked: a durable Job is itself a
+                # post-turn write. Tool execution still produces live SSE
+                # progress, but cognitive/audit artifacts are not committed.
+                res = await asyncio.to_thread(
+                    lambda: agent.run(
+                        req.message,
+                        req.project or PROJECTS.current,
+                        req.attachments or None,
+                        channel=target_channel,
+                        speaker_id=target_speaker,
+                        audit_mode=True,
+                    )
+                )
+                job_id = None
+            else:
+                res, job_id = await asyncio.to_thread(
+                    lambda: run_tracked(
+                        agent,
+                        req.message,
+                        req.project or PROJECTS.current,
+                        req.attachments or None,
+                        channel=target_channel,
+                        speaker_id=target_speaker,
+                    ),
+                )
             # Audit-fix #2: SESSIONS.add_turn used to live HERE, but
             # the Telegram channel and CLI never duplicated it, so
             # 99% of production turns were invisible in the Sessions
             # panel. The write now happens inside `run_unified`
             # itself — one source of truth for every caller. This
             # endpoint no longer needs to assemble the turn record.
-            if res.thinking_trace:
+            if res.thinking_trace and not req.audit_mode:
                 TOKENS.save_request_trace(
                     question=req.message,
                     trace=[s.model_dump() for s in res.thinking_trace],
@@ -112,7 +128,7 @@ async def chat(req: ChatRequest, request: Request):
             # the answer into the TG bot's most-recent chat too so
             # the user's TG thread doesn't go silent. Best-effort —
             # forwarding failure leaves the WebUI answer intact.
-            if target_channel == "telegram":
+            if target_channel == "telegram" and not req.audit_mode:
                 try:
                     from ..channels import CHANNELS
                     forwarded = CHANNELS.send_to_first_telegram(res.answer or "")

@@ -114,8 +114,12 @@ def _make_tool_executor(allowed: tuple[str, ...]):
         # shares the parent's; the obligation it raises is the parent's to
         # discharge.
         try:
-            from ..unified_agent import _BUILD_WRITE_TOOLS
-            if not is_error and name in _BUILD_WRITE_TOOLS:
+            if hasattr(full, "resolve_call_semantics"):
+                semantics = full.resolve_call_semantics(name, args)
+            else:
+                from ..tool_registry import default_semantics_for_name
+                semantics = default_semantics_for_name(name)
+            if not is_error and semantics.requires_proof:
                 from ..turn_contract import note_mutation
                 marker = note_mutation()
                 if marker:

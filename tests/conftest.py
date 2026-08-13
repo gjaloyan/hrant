@@ -25,6 +25,18 @@ def _reset_per_turn_call_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_endpoint_turn_cache():
+    """Direct run_unified tests must not leak endpoint judgments onward."""
+    try:
+        from backend.endpoint_check import clear_turn_cache
+    except ImportError:
+        return
+    clear_turn_cache()
+    yield
+    clear_turn_cache()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_active_model(monkeypatch):
     """Don't let the user's runtime active-model selection leak into tests.
 

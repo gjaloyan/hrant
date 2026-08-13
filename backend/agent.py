@@ -597,6 +597,7 @@ class Agent(
         job_id: str | None = None,
         supervisor_mode: bool = False,
         supervisor_job_id: str | None = None,
+        audit_mode: bool = False,
     ) -> AgentAnswer:
         import time as _time
         from .sessions import normalize_speaker
@@ -613,7 +614,8 @@ class Agent(
                 "_trace", "_llm_calls", "_request_id",
                 "_self_analysis_unverified", "_t0", "_attachments",
                 "_channel", "_speaker_id", "_session_key", "_job_id",
-                "_role", "_role_token", "_mode",
+                "_role", "_role_token", "_mode", "_audit_mode",
+                "_last_turn_id",
             )
         }
         TOKENS.reset_request()
@@ -642,6 +644,9 @@ class Agent(
         # can deep-link the SESSIONS turn record to the durable Job.
         # None for CLI / fast-path callers that don't track jobs.
         self._job_id = job_id or None
+        # A failed persistence attempt (or a deliberately non-persistent audit
+        # turn) must never inherit the previous request's artifact id.
+        self._last_turn_id = ""
         # Phase 11: per-speaker role gating. Read once at run start
         # so tool checks below don't re-read the roles file per call.
         # Set the ContextVar so deeply-nested tool handlers
@@ -651,8 +656,13 @@ class Agent(
         from . import roles as _roles
         self._role: str = _roles.role_of(self._speaker_id)
         self._role_token = _roles.set_current_speaker(self._speaker_id)
+        from .turn_policy import begin_turn as _policy_begin
+        from .turn_policy import reset_turn as _policy_reset
+        _policy_token = _policy_begin(audit_mode=audit_mode)
+        from .endpoint_check import clear_turn_cache as _endpoint_cache_clear
         # Unified path — the only path. See backend/unified_agent.py.
-        self._mode = "unified"
+        self._audit_mode = bool(audit_mode)
+        self._mode = "audit" if audit_mode else "unified"
         from . import unified_agent as _ua
         try:
             return _ua.run_unified(
@@ -666,8 +676,11 @@ class Agent(
                 job_id=self._job_id,
                 supervisor_mode=supervisor_mode,
                 supervisor_job_id=supervisor_job_id,
+                **({"audit_mode": True} if audit_mode else {}),
             )
         finally:
+            _endpoint_cache_clear()
+            _policy_reset(_policy_token)
             try:
                 _roles.reset_current_speaker(self._role_token)
             except Exception:

@@ -26,7 +26,11 @@ from backend.models import (
 def _build_answer_with_tool(args: object) -> AgentAnswer:
     """Construct a minimal AgentAnswer carrying one `tool` step with
     the given `args` payload. Other fields stay default."""
-    tc = ToolCallDetail(name="web_search", args=args if isinstance(args, dict) else {})
+    tc = ToolCallDetail(
+        name="web_search",
+        args=args if isinstance(args, dict) else {},
+        effect="read",
+    )
     step = ThinkingStep(ts=0.1, event="tool", message="searching", tool_call=tc)
     return AgentAnswer(
         answer="...",
@@ -99,6 +103,7 @@ def test_extract_tool_calls_with_dict_args_does_not_crash():
     rows = _extract_tool_calls(answer)
     assert len(rows) == 1
     assert rows[0]["name"] == "web_search"
+    assert rows[0]["effect"] == "read"
     assert "Gyumri" in rows[0]["args_summary"]
 
 

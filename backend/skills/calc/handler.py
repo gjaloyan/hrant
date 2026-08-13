@@ -28,6 +28,7 @@ def calc(expression: str) -> str:
 
 
 def register(registry) -> None:
+    from ...tool_registry import ToolEffect
     if "calc" in registry.tools:
         return
     registry.register_func(
@@ -52,4 +53,6 @@ def register(registry) -> None:
         },
         handler=calc,
         origin="skill:calc",
+        effect=ToolEffect.READ,
+        audit_visible=True,
     )

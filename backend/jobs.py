@@ -109,7 +109,7 @@ class Job:
 
     # Tool-call trace (lightweight — populated from
     # AgentAnswer.thinking_trace at completion time). Each entry:
-    # {name, args_summary, ok, error?, elapsed_ms}
+    # {name, effect, args_summary, ok, error?, elapsed_ms}
     tool_calls: list[dict] = field(default_factory=list)
 
     # Provider attempts — populated by the failover layer (Phase B).
