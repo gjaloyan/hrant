@@ -216,6 +216,9 @@ class ToolCallDetail(BaseModel):
     result_full_len: int = 0   # original byte length, for dev panel display
     is_error: bool = False
     duration_ms: int = 0
+    # Deterministic receipt classification resolved from tool metadata plus
+    # concrete arguments (e.g. terminal_exec status=read, redirect=write).
+    effect: str = "unknown"
 
 
 class ThinkingStep(BaseModel):
@@ -316,6 +319,9 @@ class ChatRequest(BaseModel):
     # local WebUI user. Telegram channel sets it to "telegram:<tg_user_id>"
     # so each Telegram user gets their own session+profile.
     speaker_id: Optional[str] = None
+    # Read-only diagnostic turn. Mutating tools are filtered and blocked at
+    # execution time; cognitive post-turn persistence is disabled.
+    audit_mode: bool = False
 
 
 class LearnRequest(BaseModel):

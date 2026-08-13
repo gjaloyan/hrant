@@ -1929,6 +1929,12 @@ def _decide_self_correction(
     `set_setting`, `complete_supervisor`, etc. is considered to have
     taken action; we don't second-guess it.
     """
+    try:
+        from .turn_policy import current_policy
+        if not current_policy().enforce_action_progress:
+            return "", ""
+    except Exception:
+        pass
     if not (answer or "").strip():
         return "", ""
     # NOTE ON ORDER (2026-08-06): the undelivered-artifact block used to run
@@ -2170,7 +2176,9 @@ def _should_block_done(state: dict, tool_name: str, args: dict) -> bool:
     )
 
 
-def _should_block_build(state: dict, tool_name: str) -> bool:
+def _should_block_build(
+    state: dict, tool_name: str, *, semantics=None,
+) -> bool:
     """Hard gate decision: refuse a build-write tool once the agent has built
     several times this turn WITHOUT calling frame_problem. Soft nudges (soul,
     skill, the FRAME-CHECK marker) don't stop the build-eager model, so this
@@ -2178,7 +2186,11 @@ def _should_block_build(state: dict, tool_name: str) -> bool:
     not the user's words. A frame is one cheap call; an unframed system build is
     the decorative-demo trap. Trivial tasks (<= threshold build-writes) pass."""
     return (
-        tool_name in _BUILD_WRITE_TOOLS
+        (
+            bool(getattr(semantics, "build_action", False))
+            if semantics is not None
+            else tool_name in _BUILD_WRITE_TOOLS
+        )
         and not state.get("framed")
         and state.get("writes", 0) >= _BUILD_BLOCK_THRESHOLD
     )
@@ -2268,14 +2280,21 @@ def _self_repair_marker(tool: str, n: int, last_error: str) -> str:
     )
 
 
-def _build_frame_marker(state: dict, tool_name: str, is_error: bool) -> str:
+def _build_frame_marker(
+    state: dict, tool_name: str, is_error: bool, *, semantics=None,
+) -> str:
     """Mutate `state` and return a one-time FRAME-CHECK marker (or "").
 
     `state` keys: writes (int), framed (bool), fired (bool)."""
     if tool_name in ("frame_problem", "create_tracker"):
         state["framed"] = True
         return ""
-    if not is_error and tool_name in _BUILD_WRITE_TOOLS:
+    is_build_action = (
+        bool(getattr(semantics, "build_action", False))
+        if semantics is not None
+        else tool_name in _BUILD_WRITE_TOOLS
+    )
+    if not is_error and is_build_action:
         state["writes"] = state.get("writes", 0) + 1
     if (state.get("writes", 0) >= _BUILD_FRAME_THRESHOLD
             and not state.get("framed")
@@ -2391,6 +2410,7 @@ def run_unified(
     job_id: str | None = None,
     supervisor_mode: bool = False,
     supervisor_job_id: str | None = None,
+    audit_mode: bool = False,
 ) -> AgentAnswer:
     """Execute one unified-loop turn. Called from `Agent.run` when
     the env flag is set. `agent` is the calling Agent instance —
@@ -2414,7 +2434,14 @@ def run_unified(
         conversation log, sessions row) — supervisor turns are
         internal plumbing, not user conversation, and we don't
         want them to pollute long-term memory or trigger skill
-        proposals based on synthetic system messages."""
+        proposals based on synthetic system messages.
+
+    `audit_mode=True` is a stricter boundary: only calls whose resolved effect
+    is READ may execute, action-pressure gates are disabled, and the turn is
+    excluded from memory, conversation, trajectory, evaluator, and learning
+    stores. Provider usage counters remain operational telemetry."""
+    from .turn_policy import begin_turn as _policy_begin
+    _policy_begin(audit_mode=audit_mode)
     # Phase 2 (2026-05-23): reset the per-turn tool-bundle state at
     # the very start of every turn. The ContextVar's default is an
     # empty frozenset, but a previous turn in the same process may
@@ -2498,10 +2525,11 @@ def run_unified(
     # Pre-flight 1: long-history compaction (no-op when under budget).
     # Per-thread — same person in two chats grows long history
     # independently.
-    try:
-        _cc.maybe_compact(speaker_id=speaker_id, session_key=skey)
-    except Exception as e:
-        log.debug("unified: compaction failed (non-fatal): %s", e)
+    if not audit_mode:
+        try:
+            _cc.maybe_compact(speaker_id=speaker_id, session_key=skey)
+        except Exception as e:
+            log.debug("unified: compaction failed (non-fatal): %s", e)
 
     # Sticky-request detection was dropped 2026-05-21 (keyword-based
     # regexes per system attribute — voice / language / model / etc.)
@@ -2601,18 +2629,21 @@ def run_unified(
     except Exception:
         snapshot = ""
 
-    recall = _auto_recall_block(task, speaker_id=speaker_id)
+    recall = "" if audit_mode else _auto_recall_block(task, speaker_id=speaker_id)
     # Wake-up context (audit 2026-06-11): yesterday's consolidated
     # narrative + open threads + failure lessons. Cached per calendar
     # day inside the consolidation module, so this is a dict lookup
     # on all but the first turn of the day. Closes the read-side gap
     # where digests were written nightly but never re-entered
     # cognition — the agent woke up amnesiac.
-    try:
-        from .consolidation.recall import yesterday_block as _yb
-        yesterday = _yb()
-    except Exception:
+    if audit_mode:
         yesterday = ""
+    else:
+        try:
+            from .consolidation.recall import yesterday_block as _yb
+            yesterday = _yb()
+        except Exception:
+            yesterday = ""
     # Per-thread conversation context — Wife's DM thread and Wife's
     # group-chat thread don't leak into each other's prompts even
     # though both have the same speaker_id.
@@ -2622,7 +2653,7 @@ def run_unified(
     # owner actually cared about was routinely evicted before he
     # replied to it. `recent()` now also keeps human turns ahead of
     # machine ones inside the window.
-    convo = CONVERSATION.context_block(n=10, session_key=skey)
+    convo = "" if audit_mode else CONVERSATION.context_block(n=10, session_key=skey)
 
     # Audit follow-up — LLM-based fast chat path. Cheap turns
     # (greetings, recall, acknowledgements) shouldn't pay the full
@@ -2654,6 +2685,8 @@ def run_unified(
     except Exception:
         _resuming = False
     if (
+        not audit_mode
+        and
         not attachments
         and not matched_skills
         and not _resuming
@@ -2770,11 +2803,14 @@ def run_unified(
     # two similar PAST SOLVED turns and show their tool chains +
     # outcomes. Computed here — after the fast-path gate — so chat
     # turns never pay the embed. Best-effort: embedder down = "".
-    try:
-        from .trajectory_memory import past_experience_block
-        experience = past_experience_block(task)
-    except Exception:
+    if audit_mode:
         experience = ""
+    else:
+        try:
+            from .trajectory_memory import past_experience_block
+            experience = past_experience_block(task)
+        except Exception:
+            experience = ""
 
     # NOW block (2026-06-12): the agent defaulted to UTC for every
     # user-facing time ("напомни в понедельник" became Monday 10:00
@@ -2806,6 +2842,17 @@ def run_unified(
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
     ]
+    if audit_mode:
+        system_parts.append(
+            "---\n\n# READ-ONLY AUDIT MODE\n"
+            "Inspect, measure, and report. Do not change files, settings, "
+            "services, jobs, accounts, messages, or external systems. The "
+            "tool broker enforces this boundary from typed call effects. "
+            "A sequence of read-only probes is expected here: do not invent "
+            "an action or blocker merely to satisfy an action-progress rule. "
+            "This turn will not be committed to conversation, memory, "
+            "trajectory, evaluator, or learning stores."
+        )
     if now_block:
         system_parts.append(f"---\n\n{now_block}")
     if snapshot:
@@ -2864,7 +2911,7 @@ def run_unified(
     # only (attachments, sticky-request flag). The LLM uses the
     # "Chat vs task" + "Diagnose runtime bugs from journal" rules
     # always present in the preamble to decide its own behaviour.
-    _repeat_refusal = _recent_refusal_pattern(
+    _repeat_refusal = False if audit_mode else _recent_refusal_pattern(
         session_key=skey, speaker_id=speaker_id,
     )
     # Derive the TurnContext for v2 prompt-module loader. The fields
@@ -2900,7 +2947,7 @@ def run_unified(
     # explain to the user + propose a fix (config change, model
     # swap, or self-modification). Skipped for supervisor turns —
     # those are non-user-facing.
-    if not supervisor_mode:
+    if not supervisor_mode and not audit_mode:
         try:
             from .provider_error_log import recent_unresolved
             unresolved = recent_unresolved(within_hours=24)
@@ -3053,6 +3100,8 @@ def run_unified(
             }
         except Exception:
             pass
+        if audit_mode:
+            allowed = registry.audit_visible_names(allowed)
         return registry.to_anthropic_list(filter_names=allowed)
 
     # Initial schema is the cold-start (base-only) view — passed for
@@ -3128,6 +3177,7 @@ def run_unified(
     _pending_question_id = {"v": ""}
 
     def _on_tool_call(name: str, args: dict, result: str, is_error: bool) -> None:
+        call_semantics = registry.resolve_call_semantics(name, args)
         preview = (result or "").strip().splitlines()[0][:80] if result else ""
         tag = "tool_error" if is_error else "tool"
         _trace_result_cap = 4000
@@ -3141,6 +3191,7 @@ def run_unified(
             result_truncated=full_len > _trace_result_cap,
             result_full_len=full_len,
             is_error=bool(is_error),
+            effect=call_semantics.effect.value,
         )
         agent.progress(
             tag,
@@ -3154,7 +3205,7 @@ def run_unified(
         # conversation shows agent_browser and npm failing repeatedly with
         # `404 Not Found` and `command not found`, retried across dozens of
         # calls, and afterwards there was nothing to learn from.
-        if is_error:
+        if is_error and not audit_mode:
             try:
                 from .meta_learner import META_LEARNER
                 META_LEARNER.log_tool_error(
@@ -3187,10 +3238,13 @@ def run_unified(
             pass
 
     def _execute_with_progress(name: str, args: dict):
+        call_semantics = registry.resolve_call_semantics(name, args)
         # HARD build-without-frame gate (structural backstop — see
         # _should_block_build). Returns a blocked error WITHOUT executing, so
         # the model must call frame_problem before more building this turn.
-        if _should_block_build(_build_frame_state, name):
+        if _should_block_build(
+            _build_frame_state, name, semantics=call_semantics,
+        ):
             blocked = json.dumps({
                 "ok": False,
                 "error": (
@@ -3230,6 +3284,7 @@ def run_unified(
                 result_truncated=False,
                 result_full_len=0,
                 is_error=False,
+                effect=call_semantics.effect.value,
             ),
         )
         raw_result, is_error = registry.execute(name, args)
@@ -3320,12 +3375,14 @@ def run_unified(
         # call.
         marker_drift = ""
         try:
-            from .endpoint_check import _EXECUTE_TOOLS as _EXEC_T
-            if not is_error and name in _EXEC_T:
+            if audit_mode:
+                cur = 0
+            elif not is_error and call_semantics.advances:
                 _drift_state["consecutive_readonly"] = 0
             elif not is_error:
                 _drift_state["consecutive_readonly"] += 1
-            cur = _drift_state["consecutive_readonly"]
+            if not audit_mode:
+                cur = _drift_state["consecutive_readonly"]
             # Fire at 6 (first warning) and 12 (stronger). Beyond
             # that the end-of-turn self-correction will catch it
             # anyway; flooding markers wastes input tokens.
@@ -3359,7 +3416,10 @@ def run_unified(
         # Build-without-frame nudge (structural backstop for the soft
         # soul/skill framing rule the build-eager model under-applies).
         try:
-            marker_frame = _build_frame_marker(_build_frame_state, name, is_error)
+            marker_frame = _build_frame_marker(
+                _build_frame_state, name, is_error,
+                semantics=call_semantics,
+            )
         except Exception:
             marker_frame = ""
 
@@ -3379,7 +3439,7 @@ def run_unified(
 
         marker_contract = ""
         try:
-            if not is_error and name in _BUILD_WRITE_TOOLS:
+            if not is_error and call_semantics.requires_proof:
                 from .turn_contract import note_mutation as _tc_note
                 marker_contract = _tc_note()
         except Exception:
@@ -3824,32 +3884,39 @@ def run_unified(
                 name = tc.get("name")
             if isinstance(name, str):
                 _trace_tool_names.append(name)
-        _was_met = endpoint_met(
-            task=task, answer=answer or "", tool_names=_trace_tool_names,
-        )
-        # Grader calibration (2026-06-11): record the delivery
-        # judgment separately so the learning loop can distinguish
-        # "didn't deliver the action" from "bad content".
-        vr.endpoint_met = _was_met
-        if not _was_met:
-            _capped = cap_confidence_for_endpoint(
-                task=task, answer=answer or "",
-                tool_names=_trace_tool_names, confidence=vr.confidence,
+        if audit_mode:
+            # Audit is observation by definition. Do not pay an endpoint judge
+            # to demand a state-changing action from an intentionally read-only
+            # turn, and do not cap an otherwise grounded diagnostic report.
+            _was_met = True
+            vr.endpoint_met = True
+        else:
+            _was_met = endpoint_met(
+                task=task, answer=answer or "", tool_names=_trace_tool_names,
             )
-            if _capped != vr.confidence:
-                # Preserve the pre-clip content score for the
-                # meta-learner / daily report before clipping.
-                vr.content_confidence = vr.confidence
-                # Surface the reason so the WebUI / daily report
-                # explains the dip.
-                try:
-                    vr.contradictions.append(
-                        "endpoint_not_met: action-verb request without "
-                        "execute-class tool call or MEDIA: delivery"
-                    )
-                except Exception:
-                    pass
-                vr.confidence = _capped
+            # Grader calibration (2026-06-11): record the delivery
+            # judgment separately so the learning loop can distinguish
+            # "didn't deliver the action" from "bad content".
+            vr.endpoint_met = _was_met
+            if not _was_met:
+                _capped = cap_confidence_for_endpoint(
+                    task=task, answer=answer or "",
+                    tool_names=_trace_tool_names, confidence=vr.confidence,
+                )
+                if _capped != vr.confidence:
+                    # Preserve the pre-clip content score for the
+                    # meta-learner / daily report before clipping.
+                    vr.content_confidence = vr.confidence
+                    # Surface the reason so the WebUI / daily report
+                    # explains the dip.
+                    try:
+                        vr.contradictions.append(
+                            "endpoint_not_met: action-verb request without "
+                            "execute-class tool call or MEDIA: delivery"
+                        )
+                    except Exception:
+                        pass
+                    vr.confidence = _capped
     except Exception as exc:
         log.debug("unified: endpoint check failed: %s", exc)
 
@@ -3899,7 +3966,7 @@ def run_unified(
     # was already called this turn AND verifier confidence ≥ 50 AND
     # endpoint was met. See `_should_reflect_for_skill`. Supervisor
     # turns SKIP — internal plumbing, not workflows worth distilling.
-    if not supervisor_mode:
+    if not supervisor_mode and not audit_mode:
         try:
             _post_turn_skill_reflection(
                 agent, task, answer, speaker_id,
@@ -3964,7 +4031,7 @@ def run_unified(
     # revision, and confidence caps. If verification never ran, the extractor
     # still mines user-authored facts but receives confidence=0 and therefore
     # excludes assistant-authored claims.
-    if not supervisor_mode and not question_payload:
+    if not supervisor_mode and not audit_mode and not question_payload:
         try:
             _commit_turn_memory(
                 task=task,
@@ -3977,17 +4044,18 @@ def run_unified(
             log.debug("unified: memory extract failed: %s", e)
 
     # Goals + conversation persistence + evaluator log.
-    try:
-        GOALS.tick_interaction()
-    except Exception:
-        pass
+    if not audit_mode:
+        try:
+            GOALS.tick_interaction()
+        except Exception:
+            pass
 
     # Supervisor turns DON'T enter the user-facing conversation log.
     # They're internal plumbing — including them would make the
     # conversation buffer look like "user asked status, agent asked
     # status, user asked status…" because the synthetic
     # BACKGROUND_JOB_COMPLETED messages would surface as turns.
-    if not supervisor_mode:
+    if not supervisor_mode and not audit_mode:
         CONVERSATION.add_turn(
             task, answer or "",
             intent="task", is_chat=False,
@@ -4005,7 +4073,12 @@ def run_unified(
     # conversation history was retrievable. Now run_unified is the
     # single source of truth for both — every caller (WebUI, TG, CLI)
     # gets a Session entry on the new thread keyed by session_key.
+    class _SkipAuditPersistence(Exception):
+        pass
+
     try:
+        if audit_mode:
+            raise _SkipAuditPersistence()
         from .sessions import SESSIONS
         from datetime import datetime as _dt
         n_tools = sum(
@@ -4106,23 +4179,26 @@ def run_unified(
             speaker_id=speaker_id,
             session_key=skey,
         )
+    except _SkipAuditPersistence:
+        pass
     except Exception as e:
         log.debug("unified: sessions add_turn failed (non-fatal): %s", e)
 
-    try:
-        EVALUATOR.log(EvalEntry(
-            question=task,
-            intent="unified",
-            confidence=vr.confidence,
-            topics_used=[],
-            contradictions=len(vr.contradictions),
-            unverified=len(vr.unverified_claims),
-            verified=len(vr.verified_claims),
-            content_confidence=vr.content_confidence,
-            endpoint_met=vr.endpoint_met,
-        ))
-    except Exception:
-        pass
+    if not audit_mode:
+        try:
+            EVALUATOR.log(EvalEntry(
+                question=task,
+                intent="unified",
+                confidence=vr.confidence,
+                topics_used=[],
+                contradictions=len(vr.contradictions),
+                unverified=len(vr.unverified_claims),
+                verified=len(vr.verified_claims),
+                content_confidence=vr.content_confidence,
+                endpoint_met=vr.endpoint_met,
+            ))
+        except Exception:
+            pass
 
     # Fine-tune auto-collection (AGI roadmap, 2026-06-12). High-trust
     # delivered turns become distillation data for the small local
@@ -4131,7 +4207,7 @@ def run_unified(
     # evidence) — most turns skip. Mirror image of the meta-learner
     # wire below: that one learns from failures, this one harvests
     # successes. Best-effort; never blocks the reply.
-    if not supervisor_mode:
+    if not supervisor_mode and not audit_mode:
         try:
             from .finetune import collect_from_turn
             collect_from_turn(
@@ -4172,7 +4248,7 @@ def run_unified(
     # MetaLearner.stats() / extract_patterns() / FIRE_SELF_REFLECTION /
     # FIRE_GOAL_PROPOSE actually have material to work on. Best-effort
     # — never let analysis crash the user-facing reply.
-    if vr.confidence < 60 and not supervisor_mode:
+    if vr.confidence < 60 and not supervisor_mode and not audit_mode:
         try:
             MEMORY  # noqa: B018 — just ensures the module import succeeded
             from .meta_learner import META_LEARNER as _ML
@@ -4206,7 +4282,7 @@ def run_unified(
     # revision pass, immediately before the answer leaves. Nothing downstream
     # can edit or drop it, which is the point: the model must not get a chance
     # to soften the record of what it failed to prove.
-    if not supervisor_mode:
+    if not supervisor_mode and not audit_mode:
         if _contract_status_tag:
             answer = _append_open_status(answer, _contract_status_tag)
         else:
@@ -4224,11 +4300,11 @@ def run_unified(
         used_topics=[],
         project=project,
         is_chat=False,
-        mode="unified",
+        mode="audit" if audit_mode else "unified",
         token_usage=agent._get_token_usage(),
         thinking_trace=agent._trace,
         llm_calls=agent._llm_calls,
-        turn_id=getattr(agent, "_last_turn_id", "") or "",
+        turn_id=("" if audit_mode else getattr(agent, "_last_turn_id", "") or ""),
         question=question_payload,
         model_used=_model_used,
         model_note=_model_note,

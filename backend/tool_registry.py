@@ -15,7 +15,99 @@ from __future__ import annotations
 import json
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Callable, Optional
+
+
+class ToolEffect(str, Enum):
+    """Externally meaningful effect of one concrete tool call."""
+
+    READ = "read"
+    CONTROL = "control"
+    WRITE = "write"
+    EXTERNAL = "external"
+    UNKNOWN = "unknown"
+
+    @property
+    def changes_state(self) -> bool:
+        return self in (ToolEffect.WRITE, ToolEffect.EXTERNAL)
+
+    @property
+    def advances(self) -> bool:
+        return self in (
+            ToolEffect.CONTROL, ToolEffect.WRITE, ToolEffect.EXTERNAL,
+        )
+
+
+@dataclass(frozen=True)
+class ToolCallSemantics:
+    """Resolved semantics for a tool name plus its concrete arguments."""
+
+    effect: ToolEffect
+    audit_allowed: bool = False
+    requires_proof: bool = False
+    build_action: bool = False
+
+    @property
+    def advances(self) -> bool:
+        return self.effect.advances
+
+
+@dataclass(frozen=True)
+class DeclaredToolSemantics:
+    effect: ToolEffect = ToolEffect.UNKNOWN
+    audit_visible: bool = False
+    requires_proof: bool = False
+    build_action: bool = False
+
+
+# Compatibility defaults for the built-in catalog.  Every registered Tool
+# receives typed metadata; callers no longer maintain their own conflicting
+# name lists.  New skill/MCP tools default to UNKNOWN and therefore fail closed
+# in audit mode until their author declares an effect.
+_READ_TOOLS = frozenset({
+    "web_search", "fetch_url", "analyze_image", "read_file", "verify_web",
+    "soul_history", "list_trackers", "get_tracker", "search_knowledge",
+    "list_skills", "list_background_jobs",
+    "get_background_job", "locate_symbol", "list_telegram_access", "calc",
+})
+_CONTROL_TOOLS = frozenset({
+    "waive_proof", "set_plan", "update_plan", "load_skill",
+    "load_tool_bundle",
+})
+_WRITE_TOOLS = frozenset({
+    "create_tracker", "add_step", "update_step", "propose_soul_revision",
+    "propose_immune_signature", "pdf_edit", "frame_problem", "run_python",
+    "save_user_fact", "save_knowledge", "propose_skill",
+    "propose_self_modification", "set_setting", "terminal_exec",
+    "define_task_endpoint", "acknowledge_provider_issue",
+    "save_to_workspace", "grant_telegram_access", "revoke_telegram_access",
+    "approve_pairing", "prove_change", "check_subagents",
+    "list_pending_pairings",
+})
+_EXTERNAL_TOOLS = frozenset({
+    "agent_browser", "schedule_message", "delegate", "sandbox_exec",
+    "start_background_job", "ask_user", "complete_supervisor",
+    "kick_supervisor",
+})
+_PROOF_TOOLS = frozenset({"terminal_exec", "run_python", "save_to_workspace"})
+_BUILD_TOOLS = _PROOF_TOOLS
+
+
+def default_semantics_for_name(name: str) -> DeclaredToolSemantics:
+    if name in _READ_TOOLS:
+        return DeclaredToolSemantics(ToolEffect.READ, audit_visible=True)
+    if name in _CONTROL_TOOLS:
+        return DeclaredToolSemantics(ToolEffect.CONTROL)
+    if name in _WRITE_TOOLS:
+        return DeclaredToolSemantics(
+            ToolEffect.WRITE,
+            requires_proof=name in _PROOF_TOOLS,
+            build_action=name in _BUILD_TOOLS,
+        )
+    if name in _EXTERNAL_TOOLS:
+        return DeclaredToolSemantics(ToolEffect.EXTERNAL)
+    return DeclaredToolSemantics()
 
 
 # ─── Per-turn duplicate-call cache ────────────────────────────────
@@ -44,36 +136,9 @@ _per_turn_call_cache: ContextVar[dict] = ContextVar(
 # call resets the counter so subsequent inspections can earn
 # another nudge later in the same turn.
 #
-# Advancing = state-changing or terminal action: setting a config,
-# launching a job, asking the user, delegating, sending a message,
-# proposing a skill, etc. The remaining tools (read_file,
-# locate_symbol, search_knowledge, get_background_job, fetch_url,
-# analyze_image, preprocess_video, list_*) are pure inspection.
-# `terminal_exec` is treated as advancing because it's the primary
-# state-change vehicle; if the agent uses it for pure inspection
-# the dedup guard (above) catches the abuse.
-
-_ADVANCING_TOOLS = frozenset({
-    "set_setting",
-    "save_user_fact",
-    "terminal_exec",
-    "run_python",
-    "start_background_job",
-    "define_task_endpoint",
-    "schedule_message",
-    "grant_telegram_access",
-    "revoke_telegram_access",
-    "approve_pairing",
-    "propose_skill",
-    "propose_self_modification",
-    "complete_supervisor",
-    "delegate",
-    "ask_user",
-    "sandbox_exec",
-    "agent_browser",
-    "load_skill",
-    "load_tool_bundle",
-})
+# Advancing/read-only is resolved from the registered Tool metadata plus the
+# concrete call arguments.  This matters for dual-use tools: terminal_exec
+# status is READ while terminal_exec restart/redirect is WRITE.
 
 NUDGE_THRESHOLD = 5
 
@@ -121,13 +186,21 @@ _NUDGE_BANNER = (
 )
 
 
-def _update_nudge_state_and_maybe_banner(tool_name: str) -> str:
-    """Update the inspection counter for `tool_name` and return a
+def _update_nudge_state_and_maybe_banner(
+    semantics: ToolCallSemantics,
+) -> str:
+    """Update the inspection counter from call semantics and return a
     nudge banner string if this call crosses the threshold (empty
     string otherwise). The state-changing branch resets the counter
     AND clears the "nudge_fired" latch."""
+    try:
+        from .turn_policy import current_policy
+        if not current_policy().enforce_action_progress:
+            return ""
+    except Exception:
+        pass
     state = _per_turn_nudge_state.get()
-    if tool_name in _ADVANCING_TOOLS:
+    if semantics.advances:
         state["n_inspections"] = 0
         state["nudge_fired"] = False
         _per_turn_nudge_state.set(state)
@@ -161,6 +234,35 @@ class Tool:
     # Tool source — for logging and debugging.
     # "builtin" | "skill:<name>" | "mcp:<server>"
     origin: str = "builtin"
+    effect: ToolEffect = ToolEffect.UNKNOWN
+    effect_resolver: Optional[Callable[[dict[str, Any]], ToolEffect]] = None
+    audit_visible: bool = False
+    requires_proof: bool = False
+    build_action: bool = False
+
+    def resolve_semantics(
+        self, arguments: Optional[dict] = None,
+    ) -> ToolCallSemantics:
+        effect = self.effect
+        if self.effect_resolver is not None:
+            try:
+                resolved = self.effect_resolver(arguments or {})
+                effect = (
+                    resolved if isinstance(resolved, ToolEffect)
+                    else ToolEffect(resolved)
+                )
+            except Exception:
+                effect = ToolEffect.UNKNOWN
+        return ToolCallSemantics(
+            effect=effect,
+            audit_allowed=bool(
+                self.audit_visible and effect is ToolEffect.READ
+            ),
+            requires_proof=bool(
+                self.requires_proof and effect.changes_state
+            ),
+            build_action=bool(self.build_action and effect.changes_state),
+        )
 
     def to_anthropic(self) -> dict[str, Any]:
         return {
@@ -199,13 +301,33 @@ class ToolRegistry:
         input_schema: dict[str, Any],
         handler: Callable[..., Any],
         origin: str = "builtin",
+        effect: ToolEffect | str | None = None,
+        effect_resolver: Optional[Callable[[dict[str, Any]], ToolEffect]] = None,
+        audit_visible: bool | None = None,
+        requires_proof: bool | None = None,
+        build_action: bool | None = None,
     ) -> Tool:
+        defaults = default_semantics_for_name(name)
         tool = Tool(
             name=name,
             description=description,
             input_schema=input_schema,
             handler=handler,
             origin=origin,
+            effect=defaults.effect if effect is None else ToolEffect(effect),
+            effect_resolver=effect_resolver,
+            audit_visible=(
+                defaults.audit_visible
+                if audit_visible is None else bool(audit_visible)
+            ),
+            requires_proof=(
+                defaults.requires_proof
+                if requires_proof is None else bool(requires_proof)
+            ),
+            build_action=(
+                defaults.build_action
+                if build_action is None else bool(build_action)
+            ),
         )
         self.register(tool)
         return tool
@@ -216,6 +338,29 @@ class ToolRegistry:
 
     def names(self) -> list[str]:
         return sorted(self.tools.keys())
+
+    def resolve_call_semantics(
+        self, name: str, arguments: Optional[dict] = None,
+    ) -> ToolCallSemantics:
+        tool = self.tools.get(name)
+        if tool is not None:
+            return tool.resolve_semantics(arguments)
+        defaults = default_semantics_for_name(name)
+        return ToolCallSemantics(
+            effect=defaults.effect,
+            audit_allowed=bool(
+                defaults.audit_visible and defaults.effect is ToolEffect.READ
+            ),
+            requires_proof=defaults.requires_proof,
+            build_action=defaults.build_action,
+        )
+
+    def audit_visible_names(self, names: set[str]) -> set[str]:
+        """Filter a schema surface to tools that may receive audit calls."""
+        return {
+            name for name in names
+            if name in self.tools and self.tools[name].audit_visible
+        }
 
     def to_anthropic_list(
         self,
@@ -278,6 +423,24 @@ class ToolRegistry:
         if not tool:
             return f"[tool '{name}' not found in registry]", True
 
+        semantics = tool.resolve_semantics(arguments)
+        try:
+            from .turn_policy import current_policy
+            policy = current_policy()
+        except Exception:
+            policy = None
+        if policy is not None and policy.read_only and not semantics.audit_allowed:
+            return json.dumps({
+                "ok": False,
+                "error": "AUDIT_MODE_BLOCKED",
+                "tool": name,
+                "effect": semantics.effect.value,
+                "detail": (
+                    "read-only audit mode refused this call before the "
+                    "handler ran"
+                ),
+            }, ensure_ascii=False), True
+
         # Per-turn duplicate-call guard. If the exact (name, args)
         # was already issued this turn, short-circuit with the prior
         # result + a "DUPLICATE CALL" hint so the LLM sees the
@@ -321,7 +484,7 @@ class ToolRegistry:
             _per_turn_call_cache.set(cache)
         # No-progress nudge: prepend a banner if we've crossed the
         # inspect-without-execute threshold this turn.
-        banner = _update_nudge_state_and_maybe_banner(name)
+        banner = _update_nudge_state_and_maybe_banner(semantics)
         if banner:
             text = banner + text
         return text, is_error

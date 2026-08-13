@@ -51,6 +51,11 @@ def reset_turn_cache(token) -> None:
         pass
 
 
+def clear_turn_cache() -> None:
+    """Unconditionally close any cache owned by the completed caller turn."""
+    _endpoint_turn_cache.set(None)
+
+
 def _cache_key(prefix: str, task: str, answer: str,
                tool_names: "list[str] | None") -> tuple:
     return (prefix, task or "", answer or "",
