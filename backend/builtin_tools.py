@@ -438,15 +438,65 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
     )
 
 
-def _analyze_image_handler(sha256: str, question: str) -> str:
+_IMAGE_SUFFIX_MIME = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp",
+}
+
+
+def _ingest_image_path(path: str) -> "tuple[str, str]":
+    """Register a file the AGENT produced so vision can see it.
+
+    Returns (sha256, error). Screenshots, CAPTCHAs and rendered pages are
+    written to disk by the tools that make them; the attachment store only
+    ever held what the USER uploaded. So the agent could take a screenshot
+    and then be unable to look at it — which is exactly what happened, in
+    its own words: "скриншоты существуют, но доступная проверка не извлекает
+    из PNG текст". It had a multimodal model and no way to point it at its
+    own output, and spent days building a local OCR model to read CAPTCHAs
+    the vision model could have read directly.
+    """
+    from pathlib import Path as _P
+    p = _P(str(path or "").strip()).expanduser()
+    if not p.is_file():
+        return "", f"no such file: {p}"
+    mime = _IMAGE_SUFFIX_MIME.get(p.suffix.lower())
+    if not mime:
+        return "", (f"{p.suffix or 'file'} is not a recognised image type "
+                    f"({', '.join(sorted(_IMAGE_SUFFIX_MIME))})")
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        return "", f"cannot read {p}: {e}"
+    try:
+        from .attachments import ATTACHMENTS
+        rec = ATTACHMENTS.save(data, mime, filename=p.name, kind="image")
+    except Exception as e:
+        return "", f"could not register the image: {type(e).__name__}: {e}"
+    return rec.sha256, ""
+
+
+def _analyze_image_handler(sha256: str = "", question: str = "",
+                           path: str = "") -> str:
     """Ask the multimodal LLM a question about an image-attachment.
     Returns JSON {ok, answer, sha256, question}. Used by skills that
     need pixel-level inspection — e.g. 'where is the logo in this
     frame'. Costs roughly one LLM call per invocation."""
-    if not sha256 or not isinstance(sha256, str):
-        return json.dumps({"ok": False, "error": "sha256 required"}, ensure_ascii=False)
     if not question or not isinstance(question, str):
-        return json.dumps({"ok": False, "error": "question required"}, ensure_ascii=False)
+        return json.dumps({"ok": False, "error": "question required"},
+                          ensure_ascii=False)
+    if path and not sha256:
+        sha256, err = _ingest_image_path(path)
+        if err:
+            return json.dumps({"ok": False, "error": err, "path": path},
+                              ensure_ascii=False)
+    if not sha256 or not isinstance(sha256, str):
+        return json.dumps(
+            {"ok": False,
+             "error": "pass `path` for a file on disk (a screenshot you took, "
+                      "a CAPTCHA you saved) or `sha256` for something the "
+                      "user attached"},
+            ensure_ascii=False)
     answer = _analyze_image(sha256.strip(), question.strip())
     is_err = answer.startswith("[analyze_image error:") or answer.startswith("[analyze_image: ")
     return json.dumps({
@@ -2876,8 +2926,13 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="analyze_image",
         description=(
-            "Ask the multimodal LLM a specific question about an "
-            "image-attachment (referenced by sha256). Use this when "
+            "Ask the multimodal LLM a specific question about an image — "
+            "one YOU produced (`path`) or one the user attached (`sha256`). "
+            "USE `path` FOR YOUR OWN OUTPUT: a screenshot you just took, a "
+            "CAPTCHA you saved, a page you rendered. You CAN read those. "
+            "Never report that a PNG's contents are unavailable to you, and "
+            "do not reach for OCR before trying this — you have a vision "
+            "model. Use this when "
             "you need to inspect a frame visually — locating a logo "
             "in pixel coordinates, identifying foreground colour, "
             "checking whether an overlay is still present after a "
@@ -2895,14 +2950,25 @@ def register_builtin_tools() -> None:
             "properties": {
                 "sha256": {
                     "type": "string",
-                    "description": "Image attachment sha256 (kind=image).",
+                    "description": "sha256 of an image the USER sent.",
+                },
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to an image YOU produced — a "
+                        "screenshot, a saved CAPTCHA, a rendered page. "
+                        "png/jpg/jpeg/gif/webp/bmp."
+                    ),
                 },
                 "question": {
                     "type": "string",
                     "description": "Free-form question about the image.",
                 },
             },
-            "required": ["sha256", "question"],
+            # Only `question` is mandatory: either `path` or `sha256`
+            # identifies the image. Requiring sha256 is precisely what kept
+            # the agent from looking at its own screenshots.
+            "required": ["question"],
         },
         handler=_analyze_image_handler,
     )

@@ -47,6 +47,7 @@ class ToolCallSemantics:
     audit_allowed: bool = False
     requires_proof: bool = False
     build_action: bool = False
+    proves_delivery: bool = False
 
     @property
     def advances(self) -> bool:
@@ -59,6 +60,14 @@ class DeclaredToolSemantics:
     audit_visible: bool = False
     requires_proof: bool = False
     build_action: bool = False
+    # Does making this call, by itself, PROVE the user's request was
+    # fulfilled? Distinct from `effect.advances`, which asks the narrower
+    # question "did anything outside the agent change". `agent_browser`
+    # advances (it drives a real browser) and proves nothing (32 calls can
+    # end with no data). Keeping both answers on one object is the point of
+    # this module; the completion gate maintained its own frozensets until
+    # 2026-08-14, and they had already drifted apart on three tools.
+    proves_delivery: bool = False
 
 
 # Compatibility defaults for the built-in catalog.  Every registered Tool
@@ -90,24 +99,56 @@ _EXTERNAL_TOOLS = frozenset({
     "start_background_job", "ask_user", "complete_supervisor",
     "kick_supervisor",
 })
+# Tools whose CALL IS the deliverable: making it fulfils the request, so the
+# completion judge need not be paid to confirm it. Everything else — including
+# tools that plainly act on the world — must be judged on the answer.
+#
+# The dividing line is NOT "tool vs action". It is whether the SYSTEM carries
+# the work forward once the turn ends: a background job has a supervisor that
+# retries it, a delegated task is collected by check_subagents. `agent_browser`
+# and `sandbox_exec` return inside the turn — if it ends empty, nothing will
+# produce a result later. `ask_user` was here until 2026-08-12, when a question
+# turned out to be the cheapest way to end a turn successfully without doing
+# the work; it is judged now.
+_DELIVERY_TOOLS = frozenset({
+    "set_setting", "save_user_fact", "define_task_endpoint",
+    "complete_supervisor", "kick_supervisor", "schedule_message",
+    "grant_telegram_access", "revoke_telegram_access", "approve_pairing",
+    "propose_skill", "propose_self_modification", "propose_soul_revision",
+    "propose_immune_signature", "start_background_job", "delegate",
+})
+
 _PROOF_TOOLS = frozenset({"terminal_exec", "run_python", "save_to_workspace"})
 _BUILD_TOOLS = _PROOF_TOOLS
 
 
 def default_semantics_for_name(name: str) -> DeclaredToolSemantics:
+    delivers = name in _DELIVERY_TOOLS
     if name in _READ_TOOLS:
         return DeclaredToolSemantics(ToolEffect.READ, audit_visible=True)
     if name in _CONTROL_TOOLS:
-        return DeclaredToolSemantics(ToolEffect.CONTROL)
+        return DeclaredToolSemantics(ToolEffect.CONTROL,
+                                     proves_delivery=delivers)
     if name in _WRITE_TOOLS:
         return DeclaredToolSemantics(
             ToolEffect.WRITE,
             requires_proof=name in _PROOF_TOOLS,
             build_action=name in _BUILD_TOOLS,
+            proves_delivery=delivers,
         )
     if name in _EXTERNAL_TOOLS:
-        return DeclaredToolSemantics(ToolEffect.EXTERNAL)
+        return DeclaredToolSemantics(ToolEffect.EXTERNAL,
+                                     proves_delivery=delivers)
     return DeclaredToolSemantics()
+
+
+def proves_delivery(name: str) -> bool:
+    """Does calling this tool, on its own, satisfy the user's request?
+
+    Single source of truth for the completion gate. Ask this — never
+    `effect.advances` — when the question is "was it delivered".
+    """
+    return default_semantics_for_name(name).proves_delivery
 
 
 # ─── Per-turn duplicate-call cache ────────────────────────────────

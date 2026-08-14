@@ -89,60 +89,58 @@ def _cache_key(prefix: str, task: str, answer: str,
 # 2026-08-06 — a stand-in for world state — and it was sitting three lines
 # above it. Instruments now go to the judge as EVIDENCE, which was always the
 # stated principle.
-_DELIVERY_TOOLS: frozenset[str] = frozenset({
-    "set_setting",
-    "save_user_fact",
-    "define_task_endpoint",
-    "complete_supervisor",
-    "kick_supervisor",
-    "schedule_message",
-    "grant_telegram_access",
-    "revoke_telegram_access",
-    "approve_pairing",
-    "propose_skill",
-    "propose_self_modification",
-    "propose_soul_revision",
-    "propose_immune_signature",
-    # Launches stay here. The dividing line is not "tool vs action", it is
-    # whether the SYSTEM carries the work forward after the turn ends: a
-    # background job has a supervisor that iterates and retries it, and a
-    # delegated task is collected by check_subagents. Dispatching one is a
-    # completed, recorded act, and the corrective elsewhere in unified_agent
-    # explicitly tells the agent NOT to babysit it in-turn.
-    "start_background_job",
-    "delegate",
-})
+# Delivery classification now lives ONCE, in the typed tool model
+# (`tool_registry.proves_delivery`), next to effect / audit-visibility /
+# proof-requirement. It used to be two hand-maintained frozensets here, and by
+# 2026-08-14 they had already drifted from the typed model on three tools —
+# the exact failure `capability_broker`'s docstring warns about: "prevents the
+# schema filter, audit guard, and loop budget from drifting into independent
+# name lists".
+#
+# The distinction the gate needs is NOT `effect.advances`. `agent_browser`
+# advances — it drives a real browser — and proves nothing: 32 calls ended a
+# turn with no data and the gate passed it. Ask `proves_delivery`.
 
-# In-turn instruments. Nothing carries these forward: `agent_browser` reads a
-# page and `sandbox_exec` runs a binary, both returning inside this turn. If
-# the turn ends without a result, no supervisor will get one later — the turn
-# WAS the chance. So their presence is evidence the judge weighs, never a
-# verdict on its own.
-_INSTRUMENT_TOOLS: frozenset[str] = frozenset({
-    "agent_browser",
-    "sandbox_exec",
-    # `ask_user` moved here from the delivery set on 2026-08-12, reversing a
-    # decision made two days earlier on the reasoning that "asking IS the
-    # terminal act of the turn". Sometimes it is. Measured three times on the
-    # owner's own conversation, it was not:
-    #
-    #   "давай проверим локальную модель"  -> "которую именно?"
-    #   "тестируй Graf-J сейчас"           -> "продолжать в узком scope?"
-    #   "continue"                         -> "продолжать в узком scope?"
-    #
-    # Because asking auto-satisfied the completion gate, a question was the
-    # cheapest way to end a turn successfully: no work, no risk, full marks.
-    # The gate was paying the agent to ask instead of act.
-    #
-    # It is now judged like any other turn, against the same BLOCKED /
-    # UNFINISHED distinction. "I need credentials you have not given me" names
-    # a real external obstacle and still passes. "Shall I proceed?" after being
-    # told to proceed does not — and should not.
-    "ask_user",
-})
 
-# Back-compat alias for importers. Points at the narrow set on purpose: any
-# caller using it as "did the turn deliver" now gets the honest answer.
+def _delivers(tool: str) -> bool:
+    from .tool_registry import proves_delivery
+    return proves_delivery(tool)
+
+
+def delivery_tools() -> "frozenset[str]":
+    """Names whose call IS the deliverable, resolved from the typed model."""
+    from .tool_registry import _DELIVERY_TOOLS as _D
+    return frozenset(_D)
+
+
+class _DeliverySet(frozenset):
+    """Back-compat shim: `x in _DELIVERY_TOOLS` still works, but the answer
+    comes from the typed model rather than a copy that can drift."""
+
+    def __contains__(self, item) -> bool:  # type: ignore[override]
+        return _delivers(str(item))
+
+
+_DELIVERY_TOOLS = _DeliverySet()
+
+class _InstrumentSet(frozenset):
+    """In-turn instruments: they act on the world but nothing carries their
+    work forward once the turn ends. `agent_browser` reads a page,
+    `sandbox_exec` runs a binary, `ask_user` poses a question — if the turn
+    ends empty, no supervisor produces a result later, so their presence is
+    evidence the judge weighs, never a verdict.
+
+    Derived, not listed: EXTERNAL effect minus the delivery set. Writing the
+    three names by hand here is what let this drift from the typed model."""
+
+    def __contains__(self, item) -> bool:  # type: ignore[override]
+        from .tool_registry import ToolEffect, default_semantics_for_name
+        sem = default_semantics_for_name(str(item))
+        return sem.effect is ToolEffect.EXTERNAL and not sem.proves_delivery
+
+
+_INSTRUMENT_TOOLS = _InstrumentSet()
+
 _EXECUTE_TOOLS: frozenset[str] = _DELIVERY_TOOLS
 
 _ENDPOINT_JUDGE_SYSTEM = """You judge whether an assistant's answer DELIVERED what the user's request required.
