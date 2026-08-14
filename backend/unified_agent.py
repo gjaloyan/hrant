@@ -2147,8 +2147,15 @@ def _decide_self_correction(
 # can stop and frame mid-flow. Soft (the agent ignores it on a non-system
 # build), so no false-positive cost; behavioural, so no keyword classification.
 _BUILD_WRITE_TOOLS = frozenset({"save_to_workspace", "terminal_exec", "run_python"})
-_BUILD_FRAME_THRESHOLD = 4   # soft FRAME-CHECK marker fires here
-_BUILD_BLOCK_THRESHOLD = 4   # hard block: refuse build-writes past this w/o a frame
+# Both thresholds were 4, chosen when a turn was capped at 20 iterations. The
+# cap is now 500, and a legitimate data-extraction turn runs dozens of shell
+# commands — so a gate meant for "you are building an app without a plan" fired
+# on ordinary work. Measured 2026-08-14 on a DataLex extraction: the hard block
+# fired TWICE on `terminal_exec`, refusing to execute, and its text ordered the
+# agent to "confirm scope via ask_user". It obeyed. The owner read that as the
+# agent being unable to finish; it was doing what we told it.
+_BUILD_FRAME_THRESHOLD = 12  # soft FRAME-CHECK marker fires here
+_BUILD_BLOCK_THRESHOLD = 12  # hard block: refuse build-writes past this w/o a frame
 
 
 _VERIFY_TOOLS = frozenset({"verify_web"})
@@ -2305,9 +2312,9 @@ def _build_frame_marker(
             "calling `frame_problem`. IF you are building an app / shop / site / "
             "system: STOP now and `frame_problem` the FULL component map "
             "(subsystems — accounts, payments, admin, inventory, search, "
-            "security, a real DB, …), confirm scope with `ask_user`, and be "
-            "honest that an MVP is a slice, not the whole. If this is NOT a "
-            "system build, ignore this."
+            "security, a real DB, …) and be honest that an MVP is a slice, "
+            "not the whole. Then keep going — framing does not require the "
+            "user's permission. If this is NOT a system build, ignore this."
         )
     return ""
 
@@ -3253,9 +3260,14 @@ def run_unified(
                     f"BLOCKED: you've run {_build_frame_state.get('writes', 0)} "
                     "build actions without framing this work. Before ANY more "
                     "building this turn you MUST call `frame_problem` with the "
-                    "FULL component map (real subsystems — not 8 surface items) "
-                    "and confirm scope via `ask_user`. Then continue building "
-                    "the confirmed scope. A frame is one cheap call."
+                    "FULL component map (real subsystems — not 8 surface "
+                    "items). Then CONTINUE — the frame is one cheap call and "
+                    "it does not need the user's approval. "
+                    "Only call `ask_user` if the frame revealed a real fork "
+                    "you cannot decide yourself. Asking permission to do the "
+                    "thing you were already asked to do wastes the turn: this "
+                    "instruction used to demand it, and the result was turns "
+                    "that ended in a question instead of a result."
                 ),
             }, ensure_ascii=False)
             return blocked, True
