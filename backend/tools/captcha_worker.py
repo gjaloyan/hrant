@@ -31,7 +31,9 @@ import sys
 _CONFUSION_GROUPS = (
     "0OQD",   # closed ovals; the tail on Q vanishes into neighbouring ink
     "1IL", "17", "7T",
-    "5S", "2Z", "8B", "6G",
+    "5S", "2Z",
+    "68B",    # measured: a 6 came back as B on a real challenge
+    "6G",
     "UV", "VW", "MN",
 )
 
@@ -116,9 +118,27 @@ def rank_candidates(votes, expected_length=0, limit=6,
     for v in votes:
         push(v)
     base = next((v for v in votes if fits(v)), votes[0] if votes else "")
+
+    singles = []
     for i, ch in enumerate(base):
         for alt in CONFUSIONS.get(ch, ""):
-            push(base[:i] + alt + base[i + 1:])
+            cand = base[:i] + alt + base[i + 1:]
+            singles.append((i, cand))
+            push(cand)
+
+    # Two ambiguous glyphs in one challenge is not rare: a measured sample
+    # read Q7RWD as 01RWD — both substitutions individually plausible, and
+    # neither single-swap candidate reachable the answer. Pairs come strictly
+    # after every single, so they only consume budget the caller left over.
+    if len(out) < limit:
+        for i, first in singles:
+            for j, ch in enumerate(base):
+                if j <= i:
+                    continue
+                for alt in CONFUSIONS.get(ch, ""):
+                    push(first[:j] + alt + first[j + 1:])
+                    if len(out) >= limit:
+                        return out[:limit]
     return out[:limit]
 
 

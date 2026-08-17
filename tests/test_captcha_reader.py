@@ -74,14 +74,33 @@ def test_candidates_are_unique_and_capped():
     assert len(out) <= 4
 
 
-def test_every_candidate_is_one_substitution_from_a_reading():
-    """Ranked guesses must stay plausible. Drifting further than a single
-    glyph turns the list into noise and wastes submissions."""
-    readings = ["EQX0Z"]
-    out = rank_candidates(readings, expected_length=5, limit=6)
-    for cand in out[1:]:
-        diff = sum(1 for a, b in zip(cand, readings[0]) if a != b)
-        assert diff == 1, f"{cand} differs from {readings[0]} in {diff} places"
+def test_singles_are_exhausted_before_any_pair():
+    """Pairs are a fallback, never a way to crowd out the likelier guess."""
+    out = rank_candidates(["EQX0Z"], expected_length=5, limit=6)
+    diffs = [sum(1 for a, b in zip(c, "EQX0Z") if a != b) for c in out[1:]]
+    assert diffs == sorted(diffs), f"pairs jumped ahead of singles: {out}"
+    assert diffs[0] == 1
+
+
+def test_two_ambiguous_glyphs_are_reachable():
+    """Measured: Q7RWD came back as 01RWD. Both swaps are individually
+    plausible and no single-substitution candidate reaches the answer."""
+    out = rank_candidates(["01RWD"], expected_length=5, limit=40)
+    assert "Q7RWD" in out
+
+
+def test_a_six_read_as_b_is_recoverable():
+    """Measured on a real challenge: 56PVH came back as 5BPVH."""
+    out = rank_candidates(["5BPVH"], expected_length=5, limit=20)
+    assert "56PVH" in out
+
+
+def test_candidates_never_drift_beyond_two_substitutions():
+    """Past two, the list stops describing the image and becomes noise."""
+    out = rank_candidates(["EQX0Z"], expected_length=5, limit=40)
+    for cand in out:
+        diff = sum(1 for a, b in zip(cand, "EQX0Z") if a != b)
+        assert diff <= 2, f"{cand} drifts {diff} substitutions away"
 
 
 # ── the tool wrapper ────────────────────────────────────────────────
