@@ -509,6 +509,7 @@ def _analyze_image_handler(sha256: str = "", question: str = "",
 
 
 def _read_captcha_handler(path: str = "", expected_length: int = 0,
+                          min_length: int = 0, max_length: int = 0,
                           max_candidates: int = 6, model: str = "") -> str:
     """Recognise the characters in a CAPTCHA image on disk. Returns JSON
     {ok, best, candidates, readings, agreement}. Loads a 1.3 GB model in
@@ -519,16 +520,24 @@ def _read_captcha_handler(path: str = "", expected_length: int = 0,
             {"ok": False,
              "error": "path required — save the challenge image to disk first"},
             ensure_ascii=False)
-    try:
-        exp = int(expected_length or 0)
-    except (TypeError, ValueError):
-        exp = 0
-    try:
-        cap = int(max_candidates or 6)
-    except (TypeError, ValueError):
-        cap = 6
-    out = _read_captcha(path, expected_length=exp, max_candidates=cap,
-                        model=model or "")
+
+    def _int(v, default=0):
+        # Models routinely pass "5" or "five" where an int is declared.
+        # A bad length must mean "unknown", never a crash and never a
+        # filter that silently discards the right answer.
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return default
+
+    out = _read_captcha(
+        path,
+        expected_length=_int(expected_length),
+        min_length=_int(min_length),
+        max_length=_int(max_length),
+        max_candidates=_int(max_candidates, 6) or 6,
+        model=model or "",
+    )
     return json.dumps(out, ensure_ascii=False)
 
 
@@ -3005,12 +3014,17 @@ def register_builtin_tools() -> None:
             "using a recogniser trained specifically on distorted glyphs. "
             "Save the challenge image to disk first (crop it to just the "
             "image), then pass its path.\n\n"
-            "PASS `expected_length` WHENEVER YOU KNOW IT. Reading the right "
-            "characters but the wrong COUNT is the most common way a code is "
-            "rejected, and the count is usually the easiest property to "
-            "establish — reload the challenge two or three times and see how "
-            "many characters every sample has. Passing it discards readings "
-            "of the wrong length outright.\n\n"
+            "ESTABLISH THE CHARACTER COUNT FIRST, then pass it. Reading the "
+            "right characters but the wrong COUNT is the most common way a "
+            "code is rejected, and the count is usually the easiest property "
+            "to observe: reload the challenge two or three times and compare "
+            "the samples. Generators differ, so pick the case you actually "
+            "saw —\n"
+            "  • every sample the same length -> `expected_length=<n>`\n"
+            "  • lengths vary -> `min_length` / `max_length`\n"
+            "  • you have not looked -> leave all three at 0\n"
+            "Never guess a length. Filtering on the wrong one throws away the "
+            "correct reading, which is worse than no filter at all.\n\n"
             "Returns {best, candidates, readings, agreement}. `candidates` "
             "is ordered and exists because some glyph pairs (O/0/Q, I/1/L, "
             "5/S) are the same shape in a distorted font — no reader, and no "
@@ -3036,9 +3050,24 @@ def register_builtin_tools() -> None:
                 "expected_length": {
                     "type": "integer",
                     "description": (
-                        "Exact number of characters, when known. 0 means "
-                        "unknown — supply it if you can, it filters out the "
-                        "most common failure."
+                        "Exact character count, for a generator you have "
+                        "observed to emit a fixed number. 0 = unknown."
+                    ),
+                    "default": 0,
+                },
+                "min_length": {
+                    "type": "integer",
+                    "description": (
+                        "Shortest plausible count, for a generator whose "
+                        "length varies between challenges. 0 = no bound."
+                    ),
+                    "default": 0,
+                },
+                "max_length": {
+                    "type": "integer",
+                    "description": (
+                        "Longest plausible count, for a generator whose "
+                        "length varies between challenges. 0 = no bound."
                     ),
                     "default": 0,
                 },

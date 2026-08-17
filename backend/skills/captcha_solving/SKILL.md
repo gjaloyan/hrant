@@ -32,33 +32,43 @@ Find the image element's box first (the DOM gives it to you — read the
 `<img>` geometry through the browser rather than guessing coordinates),
 then crop to exactly that box.
 
-## 2. Establish the character count BEFORE you read
+## 2. Observe the character count BEFORE you read
 
 This is the step that is easy to skip and expensive to skip.
 
-Reload the challenge two or three times, saving each image. Look at
-them. Nearly every generator emits a **fixed** number of characters, and
-knowing that number turns a coin-flip into a constraint:
+Reload the challenge two or three times, saving each image, and compare
+them. What you are looking for is whether this generator emits a fixed
+number of characters or a varying one — **both exist, and there is no
+universal count.** Do not carry an expectation over from another site.
 
-- If every sample has 5 characters, the answer has 5 characters.
-- A reading with 4 or 6 is wrong on its face — no need to submit it.
+Then pass what you actually saw:
+
+| what the samples showed | what to pass |
+|---|---|
+| every sample the same length *n* | `expected_length=n` |
+| lengths differ (say 4 to 6) | `min_length=4, max_length=6` |
+| you have not compared samples yet | nothing — leave them at 0 |
+
+Never guess. A wrong length filter discards the correct reading, which
+is worse than no filter.
 
 A measured failure this comes from: an agent submitted a 4-character
 code to a challenge whose every sample had 5. The site rejected it and
-returned to the search page, and the turn concluded the case card was
+returned to the search page, and the turn concluded the record was
 unreachable. The reading was wrong in a way one look at a second sample
 would have caught.
 
-Note anything else the samples agree on — are the glyphs only uppercase,
-only digits, a mix? It narrows what a plausible answer looks like.
+Note anything else the samples agree on — only uppercase, only digits, a
+mix, a fixed prefix? Each observation narrows what a plausible answer
+looks like.
 
 ## 3. Read it
 
 ```
-read_captcha(path="/path/to/challenge.png", expected_length=5)
+read_captcha(path="/path/to/challenge.png", expected_length=5)   # fixed-length generator
+read_captcha(path="/path/to/challenge.png", min_length=4, max_length=6)  # varying
+read_captcha(path="/path/to/challenge.png")                      # length not yet observed
 ```
-
-Always pass `expected_length` once step 2 has established it.
 
 What comes back:
 

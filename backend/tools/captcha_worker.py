@@ -68,28 +68,54 @@ def isolate_ink(img):
     return Image.fromarray(np.where(ink, 0, 255).astype(np.uint8)).convert("RGB")
 
 
-def rank_candidates(votes, expected_length=0, limit=6):
+def length_filter(expected_length=0, min_length=0, max_length=0):
+    """Build the length predicate from whatever the caller could establish.
+
+    Three states, because generators differ and guessing wrong in either
+    direction costs a submission:
+
+      * exact count known (the generator is fixed) -> `expected_length`
+      * only bounds known (the generator varies)   -> min/max
+      * nothing known                              -> everything passes
+
+    Never infer a length from the readings themselves. A reader that drops
+    a character would then "confirm" its own mistake, which is the failure
+    this filter exists to catch.
+    """
+    lo = int(expected_length or min_length or 0)
+    hi = int(expected_length or max_length or 0)
+
+    def ok(s):
+        if lo and len(s) < lo:
+            return False
+        if hi and len(s) > hi:
+            return False
+        return True
+
+    return ok
+
+
+def rank_candidates(votes, expected_length=0, limit=6,
+                    min_length=0, max_length=0):
     """Order plausible strings: agreed readings first, then substitutions.
 
-    `expected_length`, when the caller knows it, is a hard filter and the
-    single most valuable input this function takes — a reader that drops
-    or invents one character is the common failure, and length is the one
-    property a caller can usually establish from a handful of samples.
+    The length constraint, when the caller could establish one, is the
+    single most valuable input here — a reader that drops or invents one
+    character is the common failure, and length is usually the easiest
+    property to observe across a handful of samples.
     """
+    fits = length_filter(expected_length, min_length, max_length)
     seen, out = set(), []
 
     def push(s):
-        if not s or s in seen:
-            return
-        if expected_length and len(s) != expected_length:
+        if not s or s in seen or not fits(s):
             return
         seen.add(s)
         out.append(s)
 
     for v in votes:
         push(v)
-    base = next((v for v in votes if not expected_length
-                 or len(v) == expected_length), votes[0] if votes else "")
+    base = next((v for v in votes if fits(v)), votes[0] if votes else "")
     for i, ch in enumerate(base):
         for alt in CONFUSIONS.get(ch, ""):
             push(base[:i] + alt + base[i + 1:])
@@ -101,6 +127,8 @@ def main():
     path = args.get("path") or ""
     repo = args.get("model") or "hakim77/trocr-captcha-v4-massive-2.4M"
     expected = int(args.get("expected_length") or 0)
+    min_len = int(args.get("min_length") or 0)
+    max_len = int(args.get("max_length") or 0)
     limit = int(args.get("max_candidates") or 6)
 
     from PIL import Image
@@ -118,7 +146,8 @@ def main():
             ids = model.generate(px, max_new_tokens=12)
         votes.append(proc.batch_decode(ids, skip_special_tokens=True)[0].strip().upper())
 
-    cands = rank_candidates(votes, expected, limit)
+    cands = rank_candidates(votes, expected, limit,
+                            min_length=min_len, max_length=max_len)
     json.dump({
         "ok": True,
         "readings": votes,
@@ -128,7 +157,7 @@ def main():
         "agreement": len(set(votes)) == 1,
         "best": cands[0] if cands else "",
         "candidates": cands,
-        "length_filtered": bool(expected),
+        "length_filtered": bool(expected or min_len or max_len),
     }, sys.stdout, ensure_ascii=False)
 
 

@@ -87,6 +87,8 @@ def read_captcha(
     path: str,
     *,
     expected_length: int = 0,
+    min_length: int = 0,
+    max_length: int = 0,
     max_candidates: int = 6,
     model: str = "",
 ) -> dict:
@@ -98,10 +100,18 @@ def read_captcha(
 
     Args:
         path: image file on disk (png/jpg/gif/webp/bmp).
-        expected_length: exact character count, when known. Filters out
-            readings of the wrong length — the most common failure mode.
+        expected_length: exact character count, for generators that emit
+            a fixed number. Filters out readings of the wrong length —
+            the most common failure mode.
+        min_length, max_length: bounds instead of an exact count, for
+            generators whose length varies between challenges.
         max_candidates: how many ranked alternatives to return.
         model: HuggingFace repo id; defaults to DEFAULT_MODEL.
+
+    All three length arguments default to 0, meaning no constraint. That
+    is the honest state when the generator has not been observed, and it
+    is better than a guess: filtering on a wrong length would discard the
+    correct reading outright.
     """
     p = Path(str(path or "").strip()).expanduser()
     if not p.is_file():
@@ -116,6 +126,8 @@ def read_captcha(
     payload = json.dumps({
         "path": str(p),
         "expected_length": int(expected_length or 0),
+        "min_length": int(min_length or 0),
+        "max_length": int(max_length or 0),
         "max_candidates": int(max_candidates or 6),
         "model": (model or "").strip() or DEFAULT_MODEL,
     })

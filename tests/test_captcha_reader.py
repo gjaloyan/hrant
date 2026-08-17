@@ -107,7 +107,8 @@ def test_the_handler_survives_a_non_numeric_length(monkeypatch):
     import backend.builtin_tools as bt
     seen = {}
 
-    def _fake(path, *, expected_length, max_candidates, model):
+    def _fake(path, *, expected_length, min_length, max_length,
+              max_candidates, model):
         seen["len"] = expected_length
         return {"ok": True, "best": "ABCDE", "candidates": ["ABCDE"]}
 
@@ -149,3 +150,70 @@ def test_the_description_names_no_specific_site(banned):
     """Universal tools stay universal — today it is one JS page, tomorrow
     another. Site-specific knowledge belongs in a skill."""
     assert banned not in _registered_tool().description.lower()
+
+
+# ── generators differ: fixed, varying, unobserved ───────────────────
+
+def test_a_varying_generator_is_served_by_bounds():
+    """Not every challenge has a fixed length. A generator emitting 4-6
+    characters must keep all three, or the filter throws away answers."""
+    votes = ["AB4D", "AB4DE", "AB4DEF"]
+    out = rank_candidates(votes, min_length=4, max_length=6)
+    for v in votes:
+        assert v in out, f"{v} is within bounds and must survive"
+
+
+def test_bounds_still_reject_what_falls_outside():
+    out = rank_candidates(["ABC", "ABCDEFGH"], min_length=4, max_length=6)
+    assert "ABC" not in out and "ABCDEFGH" not in out
+
+
+def test_only_a_lower_bound_is_a_valid_state():
+    """A caller may know 'at least 4' and nothing more."""
+    out = rank_candidates(["ABC", "ABCDEFGH"], min_length=4)
+    assert "ABC" not in out
+    assert "ABCDEFGH" in out
+
+
+def test_only_an_upper_bound_is_a_valid_state():
+    out = rank_candidates(["ABC", "ABCDEFGH"], max_length=6)
+    assert "ABC" in out
+    assert "ABCDEFGH" not in out
+
+
+def test_an_exact_count_is_bounds_collapsed_to_one_value():
+    from backend.tools.captcha_worker import length_filter
+    fits = length_filter(expected_length=5)
+    assert fits("ABCDE")
+    assert not fits("ABCD") and not fits("ABCDEF")
+
+
+def test_an_unobserved_generator_constrains_nothing():
+    """The honest default. Nothing is filtered until something was seen."""
+    from backend.tools.captcha_worker import length_filter
+    fits = length_filter()
+    for s in ("A", "ABCD", "ABCDEFGHIJ"):
+        assert fits(s)
+
+
+def test_the_length_is_never_inferred_from_the_readings():
+    """If the reader dropped a character, agreeing with itself must not
+    turn that mistake into the accepted length."""
+    out = rank_candidates(["WNKE", "WNKE"], expected_length=0)
+    assert "WNKE" in out, "with no observed length, nothing may be filtered"
+
+
+def test_the_tool_exposes_all_three_length_states():
+    tool = _registered_tool()
+    props = tool.input_schema["properties"]
+    for field in ("expected_length", "min_length", "max_length"):
+        assert field in props, f"{field} must be reachable by the model"
+    assert "never guess a length" in tool.description.lower()
+
+
+def test_the_description_prescribes_no_universal_count():
+    """Captchas are not all 5 characters. A universal tool must not imply
+    otherwise, or the model will carry one site's shape to the next."""
+    desc = _registered_tool().description
+    assert "5 char" not in desc.lower()
+    assert "lengths vary" in desc.lower()
