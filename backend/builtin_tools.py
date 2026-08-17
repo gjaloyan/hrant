@@ -58,6 +58,7 @@ def _check_owner(tool_name: str) -> tuple[str | None, str | None]:
 
 
 from .tools.analyze_image import analyze_image as _analyze_image
+from .tools.captcha_reader import read_captcha as _read_captcha
 from .tools.code_executor import run_python
 from .tools.file_reader import read_file
 from .tools.locate_symbol import locate_symbol
@@ -505,6 +506,30 @@ def _analyze_image_handler(sha256: str = "", question: str = "",
         "question": question,
         "answer": answer,
     }, ensure_ascii=False)
+
+
+def _read_captcha_handler(path: str = "", expected_length: int = 0,
+                          max_candidates: int = 6, model: str = "") -> str:
+    """Recognise the characters in a CAPTCHA image on disk. Returns JSON
+    {ok, best, candidates, readings, agreement}. Loads a 1.3 GB model in
+    a subprocess, so budget ~13s per call and don't call it in a loop
+    over the same image."""
+    if not path or not isinstance(path, str):
+        return json.dumps(
+            {"ok": False,
+             "error": "path required — save the challenge image to disk first"},
+            ensure_ascii=False)
+    try:
+        exp = int(expected_length or 0)
+    except (TypeError, ValueError):
+        exp = 0
+    try:
+        cap = int(max_candidates or 6)
+    except (TypeError, ValueError):
+        cap = 6
+    out = _read_captcha(path, expected_length=exp, max_candidates=cap,
+                        model=model or "")
+    return json.dumps(out, ensure_ascii=False)
 
 
 def _list_skills_handler(tag: str = "", category: str = "") -> str:
@@ -2971,6 +2996,69 @@ def register_builtin_tools() -> None:
             "required": ["question"],
         },
         handler=_analyze_image_handler,
+    )
+
+    reg.register_func(
+        name="read_captcha",
+        description=(
+            "Read the characters out of a CAPTCHA / verification-code image "
+            "using a recogniser trained specifically on distorted glyphs. "
+            "Save the challenge image to disk first (crop it to just the "
+            "image), then pass its path.\n\n"
+            "PASS `expected_length` WHENEVER YOU KNOW IT. Reading the right "
+            "characters but the wrong COUNT is the most common way a code is "
+            "rejected, and the count is usually the easiest property to "
+            "establish — reload the challenge two or three times and see how "
+            "many characters every sample has. Passing it discards readings "
+            "of the wrong length outright.\n\n"
+            "Returns {best, candidates, readings, agreement}. `candidates` "
+            "is ordered and exists because some glyph pairs (O/0/Q, I/1/L, "
+            "5/S) are the same shape in a distorted font — no reader, and no "
+            "amount of magnifying, can separate them from pixels alone. When "
+            "a submission is rejected, TRY THE NEXT CANDIDATE before "
+            "reloading the challenge. `agreement: true` means two "
+            "independent passes read the same string and the answer is "
+            "likely right; `false` means lean on the candidate list.\n\n"
+            "Costs ~13s (the model is loaded on demand and released after). "
+            "For ordinary text in a normal image use `analyze_image` or an "
+            "OCR engine instead — this model only knows adversarial glyphs."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": (
+                        "Absolute path to the challenge image you saved "
+                        "(png/jpg/jpeg/gif/webp/bmp)."
+                    ),
+                },
+                "expected_length": {
+                    "type": "integer",
+                    "description": (
+                        "Exact number of characters, when known. 0 means "
+                        "unknown — supply it if you can, it filters out the "
+                        "most common failure."
+                    ),
+                    "default": 0,
+                },
+                "max_candidates": {
+                    "type": "integer",
+                    "description": "How many ranked alternatives to return.",
+                    "default": 6,
+                },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "HuggingFace repo id to use instead of the default "
+                        "recogniser. Leave empty unless you have measured a "
+                        "better one on this challenge style."
+                    ),
+                },
+            },
+            "required": ["path"],
+        },
+        handler=_read_captcha_handler,
     )
 
     reg.register_func(

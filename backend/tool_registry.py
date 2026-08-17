@@ -75,7 +75,8 @@ class DeclaredToolSemantics:
 # name lists.  New skill/MCP tools default to UNKNOWN and therefore fail closed
 # in audit mode until their author declares an effect.
 _READ_TOOLS = frozenset({
-    "web_search", "fetch_url", "analyze_image", "read_file", "verify_web",
+    "web_search", "fetch_url", "analyze_image", "read_captcha", "read_file",
+    "verify_web",
     "soul_history", "list_trackers", "get_tracker", "search_knowledge",
     "list_skills", "list_background_jobs",
     "get_background_job", "locate_symbol", "list_telegram_access", "calc",

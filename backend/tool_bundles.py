@@ -91,8 +91,16 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # that he install a headless browser — while one sat behind that bundle.
     # It is owner-gated inside its own handler, so BASE costs no privilege.
     "fetch_url", "web_search", "agent_browser",
-    # Multimodal
-    "analyze_image",
+    # Multimodal. read_captcha joins its vision sibling in BASE (2026-08-17)
+    # for the reason written all over this file: a character challenge appears
+    # in the middle of a browsing turn, on any turn, with no warning. Behind a
+    # bundle the model would not know to reach for it — and the measured
+    # consequence of exactly that gap is on record. Unable to reach a reader,
+    # a turn went off to train a CRNN by hand; the result read three
+    # characters where the challenge had five. Loading is on demand and the
+    # weights are released when the call returns, so BASE costs nothing until
+    # it is used.
+    "analyze_image", "read_captcha",
     # Interaction + reminders. schedule_message moved to BASE 2026-06-18:
     # it was gated behind the `admin` bundle, so reminder turns couldn't reach
     # it and the model hand-rolled scheduling via raw python/terminal (slow,
