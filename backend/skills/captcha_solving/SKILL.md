@@ -21,16 +21,40 @@ part: **a rejected code is information, not a dead end.** Reloading the
 challenge is free, so the loop below is expected to run more than once,
 and a turn that stops after one rejection has stopped too early.
 
-## 1. Capture the challenge — cropped
+## 1. Capture the challenge — through the browser, never around it
 
-Screenshot the page, then crop to the challenge image alone and save it
-to disk. Do not pass a full-page screenshot to the reader: the model was
-trained on isolated challenges, and surrounding chrome measurably
-degrades it.
+**Fetch the image with the browser you are driving, and nothing else.**
+Not `curl`, not `fetch_url`, not `requests` — even against the exact URL
+the page uses. A separate HTTP client carries a separate session, so the
+server answers it with a *different* challenge. You will read that image
+perfectly and submit an answer the page was never asking for.
 
-Find the image element's box first (the DOM gives it to you — read the
-`<img>` geometry through the browser rather than guessing coordinates),
-then crop to exactly that box.
+This is the failure that cost a whole live run: the reader returned the
+correct characters for a `curl`-fetched image, and the site rejected it
+because the browser's session was validating against another one.
+
+The recipe:
+
+```
+# 1. ask the DOM where the image actually is — never guess coordinates
+eval (()=>{const r=document.querySelector('img[src*=captcha]')
+           .getBoundingClientRect();
+           return {x:r.x, y:r.y, w:r.width, h:r.height}})()
+
+# 2. screenshot the page, then crop to EXACTLY that rect
+screenshot /tmp/page_<unique>.png
+# crop (x, y, x+w, y+h) -> /tmp/challenge_<unique>.png
+```
+
+Two details that have each broken a run on their own:
+
+- **Crop to the reported rect, not a rounded-off guess.** A run that had
+  `{x:575, y:125, w:200, h:60}` in hand cropped `(560,110,800,210)`
+  anyway and pulled in the reload button and a strip of page chrome.
+- **Write a fresh, uniquely-named file every time.** A run re-used a
+  path from an earlier session and read a challenge that had expired six
+  days earlier. It read cleanly, and it was hopeless. If the file
+  already exists, you are about to read the wrong thing.
 
 ## 2. Observe the character count BEFORE you read
 
@@ -85,18 +109,29 @@ Type `best`, submit, then **check what actually happened** — did the
 protected content appear, or did the page bounce you back? Do not assume
 success because the form accepted the keystrokes.
 
-On rejection, in this order:
+On rejection, first answer one question: **did the image change?**
+Many sites rotate the challenge on every failed attempt, which quietly
+voids everything you read from the previous one.
 
-1. **Try the next candidate.** Do this before anything else. Some glyph
-   pairs — `O`/`0`/`Q`, `I`/`1`/`L`, `5`/`S`, `2`/`Z` — are genuinely
-   the same shape once a font distorts them. Magnifying does not settle
-   it; the site is the only thing that knows. Working down two or three
-   candidates is normal and cheap.
-2. **Reload for a fresh challenge** and go back to step 1. A different
-   image may simply be easier — some renders are unreadable by anything.
-3. After several fresh challenges have all failed, stop and report:
-   how many attempts, what was read each time, and what the page did.
-   That is a real finding, not a failure to deliver.
+```
+eval (()=>document.querySelector('img[src*=captcha]').src)()
+```
+
+- **Image unchanged → try the next candidate.** Some glyph pairs —
+  `O`/`0`/`Q`, `I`/`1`/`L`, `5`/`S`, `2`/`Z` — are genuinely the same
+  shape once a font distorts them. Magnifying does not settle it; the
+  site is the only thing that knows. Working down two or three
+  candidates is normal and cheap.
+- **Image changed → the candidate list is dead.** Every entry describes
+  a challenge that no longer exists. Go back to step 1 and capture the
+  new one. Submitting a leftover candidate here is the single easiest
+  way to burn attempts while looking busy.
+
+After several freshly-captured challenges have all failed, stop and
+report: how many attempts, what was read each time, and what the page
+did. Suspect the mechanism rather than the reader at that point — an
+expired session, a form field the page fills by script, a token tied to
+the image request. That is a real finding, not a failure to deliver.
 
 ## Cross-check when it matters
 

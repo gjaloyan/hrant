@@ -217,3 +217,44 @@ def test_the_description_prescribes_no_universal_count():
     desc = _registered_tool().description
     assert "5 char" not in desc.lower()
     assert "lengths vary" in desc.lower()
+
+
+# ── the skill's capture rules (each from a measured live failure) ────
+
+def _skill_text():
+    from pathlib import Path
+    import backend
+    p = (Path(backend.__file__).parent / "skills" / "captcha_solving"
+         / "SKILL.md")
+    return p.read_text(encoding="utf-8")
+
+
+def test_the_skill_forbids_fetching_the_image_outside_the_browser():
+    """Measured: a curl-fetched challenge was read correctly and rejected,
+    because curl carries its own session and the server answered it with a
+    different challenge than the page was validating."""
+    t = _skill_text().lower()
+    assert "curl" in t
+    assert "separate session" in t or "separate http client" in t
+
+
+def test_the_skill_says_to_crop_to_the_reported_rect():
+    """Measured: a run held {x:575,y:125,w:200,h:60} and cropped
+    (560,110,800,210) anyway, pulling in the reload button."""
+    t = _skill_text().lower()
+    assert "getboundingclientrect" in t
+    assert "never guess" in t
+
+
+def test_the_skill_demands_a_fresh_filename():
+    """Measured: a run re-used a path and read a six-day-old challenge."""
+    t = _skill_text().lower()
+    assert "unique" in t and "already exists" in t
+
+
+def test_the_skill_voids_candidates_when_the_image_rotates():
+    """Candidates describe ONE image. If the site swapped it on rejection,
+    every remaining candidate is about a challenge that no longer exists."""
+    t = _skill_text().lower()
+    assert "did the image change" in t
+    assert "candidate list is dead" in t
