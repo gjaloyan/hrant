@@ -77,18 +77,36 @@ def test_evidence_includes_what_the_tools_returned():
 
 
 def test_evidence_is_bounded():
+    """The block rides in a per-turn LLM prompt, so it must stay finite no
+    matter how much a turn produced.
+
+    The budget grew on 2026-08-17 (4 results x 300 -> 12 x 400). A turn had
+    retrieved a record and then spent eleven calls tidying up; the old window
+    showed the judge only the tidy-up, it ruled not-delivered, and the agent
+    was talked into retracting data it held. Paying ~1.5k tokens to see the
+    delivering call is cheaper than discarding a completed run.
+    """
     results = [("terminal_exec", "x" * 5000) for _ in range(20)]
     ev = _turn_evidence(["terminal_exec"] * 20, "a", results)
-    assert len(ev) < 2000
+    assert len(ev) < 6000
 
 
-def test_evidence_keeps_the_tail_not_the_head():
-    """A turn works and then reports; its final claim is backed by the last
-    calls, not the first."""
+def test_the_selector_decides_what_is_dropped_not_the_renderer():
+    """This file used to assert the opposite — that evidence keeps the tail
+    and discards the head, "because a turn works and then reports".
+
+    A live turn on 2026-08-17 disproved the premise: it solved a CAPTCHA,
+    opened the record at call 147 of 158, and then corroborated. The
+    delivering call was not last, and cropping to a tail hid it.
+
+    Selection now belongs to `_turn_tool_results`, which keeps the recent
+    calls AND the largest ones. `_turn_evidence` renders what it is handed —
+    re-cropping here would silently undo the choice made upstream.
+    """
     results = [("t", f"result-{i}") for i in range(10)]
     ev = _turn_evidence(["t"] * 10, "a", results)
     assert "result-9" in ev
-    assert "result-0" not in ev
+    assert "result-0" in ev, "the renderer must not second-guess the selection"
 
 
 def test_evidence_survives_missing_results():

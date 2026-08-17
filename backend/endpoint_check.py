@@ -158,6 +158,7 @@ Rules:
 - BOOKKEEPING IS NOT THE WORK. Saving a note, writing a summary to the knowledge base, updating a plan, re-reading a previous result, or filing what was learned are ADJACENT to the request, not the request. If the user asked for X and the evidence shows only that the assistant recorded something about X, endpoint_met = false — even though real tools ran and something real was written. Ask yourself: if the user read only this answer, would they have the thing they asked for, or a report about it?
 - A QUESTION back to the user is delivery only when the answer is genuinely required to continue and the assistant could not obtain it itself: a credential, a choice between options with real consequences, a missing fact only the user has. Asking permission to do the thing the user just asked for — "shall I proceed?", "continue in this scope?" — is NOT delivery; it is the UNFINISHED case wearing a question mark, and the user has already answered it.
 - Starting long-running work counts as delivery when starting it was the request, or when the work genuinely cannot finish inside one turn and the evidence shows the launch. It does NOT count when the user asked for the RESULT and the evidence shows only an attempt.
+- A RESULT ALREADY OBTAINED DOES NOT EXPIRE BECAUSE A LATER CALL FAILED. Tools have different reach: a search provider serving an anti-bot page, or a fetcher returning a script skeleton instead of a rendered page, is a fact about that tool — it says nothing about what a stronger instrument already retrieved earlier in the same turn. If the evidence shows the requested content was obtained at ANY point, the request was satisfied. When the answer then withholds that content, calls it unconfirmed, or retracts it, the answer is the failure and not the retrieval: return endpoint_met = false and say plainly that the turn is holding the result and must hand it over.
 - Judge in the user's own language; the request may be in any language.
 
 Return strictly JSON: {"endpoint_met": true|false, "reason": "short"}"""
@@ -168,8 +169,14 @@ Return strictly JSON: {"endpoint_met": true|false, "reason": "short"}"""
 # reading `agent_browser, terminal_exec`, the judge cannot confirm anything and
 # says not-delivered — a false NOT DONE on a turn that did the work, which is a
 # worse failure than the one the gate exists to catch.
-_EVIDENCE_RESULT_CAP = 300
-_EVIDENCE_MAX_RESULTS = 4
+_EVIDENCE_RESULT_CAP = 400
+# Was 4, and it re-cropped to a TAIL after the caller had deliberately included
+# the turn's largest results — so the retrieved record was assembled upstream
+# and thrown away one function later, which is the very failure the selection
+# exists to prevent. This must stay larger than whatever
+# `_turn_tool_results` can hand over (its own tail + richest); a test pins the
+# two together, because the coupling is invisible from either side alone.
+_EVIDENCE_MAX_RESULTS = 12
 
 
 def _turn_evidence(tool_names: "list[str] | None", answer: str,
@@ -186,8 +193,12 @@ def _turn_evidence(tool_names: "list[str] | None", answer: str,
     import os
     lines = ["tools called this turn (in order): "
              + (", ".join(tool_names or []) or "(none)")]
-    # The tail of what those tools RETURNED. The tail, because a turn works
-    # and then reports: the evidence for its final claim is at the end.
+    if tool_results:
+        lines.append(
+            "results below are the turn's LARGEST outputs together with its "
+            "most recent ones, in call order. A turn often succeeds and then "
+            "tidies up, so the last call is not necessarily the one that "
+            "delivered.")
     for name, result in (tool_results or [])[-_EVIDENCE_MAX_RESULTS:]:
         body = " ".join(str(result or "").split())
         if not body:

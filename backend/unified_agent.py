@@ -912,16 +912,28 @@ def _turn_findings(agent, previous_answer: str = "") -> str:
     return "\n".join(out)
 
 
-def _turn_tool_results(trace, limit: int = 6) -> "list[tuple[str, str]]":
-    """(tool, result-head) for the last few calls, for the endpoint judge.
+def _turn_tool_results(trace, limit: int = 6,
+                       rich: int = 3) -> "list[tuple[str, str]]":
+    """(tool, result-head) for the endpoint judge: the turn's biggest results
+    AND its most recent ones.
 
     Tool NAMES alone could not settle a concrete claim: asked to rule on
     "recognised '6wuf', the case card opened" against a list reading
     `agent_browser, terminal_exec`, the judge has nothing to confirm and says
     not-delivered — a false NOT DONE on a turn that did the work, which is
     worse than the miss the gate exists to catch.
+
+    A pure tail was the next version of that same miss, and it cost a whole
+    live run on 2026-08-17. The turn solved a CAPTCHA, opened the record and
+    pulled 12 KB of case data — then spent its last five calls corroborating,
+    where a search provider answered with an anti-bot page and a fetcher
+    returned a script skeleton. The judge saw only that tail, ruled
+    not-delivered, and the correction round talked the agent into retracting
+    data it was holding. The delivering call is not reliably the last one: a
+    turn succeeds and then tidies up. So the biggest payloads ride along with
+    the recent ones, and the judge sees both.
     """
-    out: list[tuple[str, str]] = []
+    seen: list[tuple[int, str, str]] = []
     steps = trace if isinstance(trace, list) else getattr(trace, "_trace", None)
     for _step in (steps or []):
         tc = getattr(_step, "tool_call", None)
@@ -934,8 +946,17 @@ def _turn_tool_results(trace, limit: int = 6) -> "list[tuple[str, str]]":
         res = getattr(tc, "result", None)
         if res is None and isinstance(tc, dict):
             res = tc.get("result")
-        out.append((str(name), str(res or "")))
-    return out[-limit:]
+        seen.append((len(seen), str(name), str(res or "")))
+
+    tail = seen[-limit:] if limit > 0 else []
+    tail_ids = {i for i, _, _ in tail}
+    # Size is a blunt proxy for "this call is where the work landed", but it is
+    # the one signal available without asking a model. A retrieved record dwarfs
+    # a status line; a failed probe is tiny.
+    richest = sorted((s for s in seen if s[0] not in tail_ids),
+                     key=lambda s: -len(s[2]))[:max(0, rich)]
+    keep = sorted(tail + richest, key=lambda s: s[0])
+    return [(name, res) for _, name, res in keep]
 
 
 def _turn_tool_names(agent) -> list[str]:
