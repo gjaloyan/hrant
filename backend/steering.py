@@ -122,6 +122,21 @@ def take(job_id: str) -> "list[SteeringMessage]":
     return fresh
 
 
+def taken_text(job_id: str) -> str:
+    """What the user said mid-task, once the turn has been shown it.
+
+    The completion gates judge the answer against the request. After a
+    steer, the request is no longer only what the turn started with, and a
+    gate that does not know this marks a turn that obeyed perfectly as
+    NOT DONE for failing to deliver the thing the user cancelled.
+    """
+    if not job_id:
+        return ""
+    with _lock:
+        q = _queues.get(job_id) or []
+        return "\n".join(m.text for m in q if m.delivered)
+
+
 def has_pending(job_id: str) -> bool:
     if not job_id:
         return False

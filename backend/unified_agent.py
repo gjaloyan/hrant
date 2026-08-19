@@ -1974,6 +1974,20 @@ def _decide_self_correction(
                           "write the answer the user is asking for NOW.")
     except Exception:
         pass
+    # Every gate below judges the answer against `task`. After a steer that is
+    # no longer the whole request — measured 2026-08-19: the agent was asked
+    # for a file list, steered onto a line count, delivered the line count
+    # exactly as asked, and was stamped NOT DONE for not producing the list
+    # the user had just cancelled. A gate that cries wolf on an obedient turn
+    # is a gate the next turn learns to ignore.
+    try:
+        from . import steering as _steer2
+        _steered = _steer2.taken_text(job_id or "")
+        if _steered:
+            task = (f"{task}\n\n[the user then said, while the turn was "
+                    f"running]\n{_steered}")
+    except Exception:
+        pass
     try:
         from .turn_policy import current_policy
         if not current_policy().enforce_action_progress:

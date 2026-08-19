@@ -271,3 +271,46 @@ def test_no_steer_means_the_normal_gates_still_decide():
     tag, _ = _decide_self_correction(
         task="what is 2+2", answer="4", turn_tools=[], job_id="job-12")
     assert tag != "user-steer"
+
+
+# ── the gates must judge the request as it now stands ────────────────
+
+def test_the_gates_judge_against_the_steered_request(monkeypatch):
+    """Measured: asked for a file list, steered onto a line count, the agent
+    delivered the line count exactly as asked -- and was stamped NOT DONE for
+    not producing the list the user had just cancelled. A gate that cries
+    wolf on an obedient turn is one the next turn learns to ignore."""
+    import backend.endpoint_check as ec
+    from backend.unified_agent import _decide_self_correction
+    seen = {}
+
+    def _judge(task, answer, evidence=""):
+        seen["task"] = task
+        return True
+
+    monkeypatch.setattr(ec, "_llm_endpoint_met", _judge)
+    monkeypatch.setattr(ec, "unbacked_action_claim", lambda *a, **kw: "")
+    steering.register_turn("job-20", "webui:default")
+    steering.enqueue("job-20", "forget the list, just the total")
+    steering.take("job-20")               # already shown to the turn
+    _decide_self_correction(task="list the ten biggest files",
+                            answer="75115", turn_tools=["terminal_exec"],
+                            job_id="job-20")
+    assert "forget the list" in seen.get("task", ""), (
+        "the judge was handed the request the user had already withdrawn")
+    assert "list the ten biggest files" in seen["task"], (
+        "the original request is context, not something to discard")
+
+
+def test_an_unsteered_turn_is_judged_against_what_was_asked(monkeypatch):
+    import backend.endpoint_check as ec
+    from backend.unified_agent import _decide_self_correction
+    seen = {}
+    monkeypatch.setattr(ec, "_llm_endpoint_met",
+                        lambda task, answer, evidence="": seen.setdefault(
+                            "task", task) and True or True)
+    monkeypatch.setattr(ec, "unbacked_action_claim", lambda *a, **kw: "")
+    steering.register_turn("job-21", "webui:default")
+    _decide_self_correction(task="list the files", answer="ok",
+                            turn_tools=["terminal_exec"], job_id="job-21")
+    assert seen.get("task") == "list the files"
