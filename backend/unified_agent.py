@@ -3507,6 +3507,19 @@ def run_unified(
         except Exception:
             marker_nopr = ""
 
+        # The user talking mid-task. Read here because this is the one place
+        # the turn reliably passes through between model calls, and because a
+        # steer is worth nothing late: the point is to stop work the user has
+        # already moved away from, not to mention it in the final answer.
+        marker_steer = ""
+        try:
+            from . import steering as _steer
+            _pending = _steer.take(job_id or "")
+            if _pending:
+                marker_steer = _steer.render_marker(_pending)
+        except Exception:
+            marker_steer = ""
+
         # Assemble: digest (top, never clipped) + truncated body +
         # markers (bottom, never clipped). The body is the only part
         # that may shrink.
@@ -3526,6 +3539,11 @@ def run_unified(
             out_parts.append(marker_contract.lstrip())
         if marker_self_repair:
             out_parts.append(marker_self_repair.lstrip())
+        # Last, so it is the final thing the model reads before deciding its
+        # next call. The other markers are the machine talking about the turn;
+        # this one is the user talking, and it outranks them.
+        if marker_steer:
+            out_parts.append(marker_steer.lstrip())
         final = "\n\n".join(p for p in out_parts if p)
         return final, is_error
 

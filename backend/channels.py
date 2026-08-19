@@ -1805,6 +1805,28 @@ class TelegramBot:
                     except asyncio.CancelledError:
                         return
 
+                # The user talking while a turn of theirs is already running.
+                # Hand it to that turn instead of opening a second one: two
+                # jobs racing on the same request is how a withdrawn
+                # instruction kept executing while its correction ran beside
+                # it. Nothing is classified here — correction, addition or new
+                # request all go through, and the running turn decides.
+                try:
+                    from . import steering as _steer
+                    _live = _steer.active_job_for(speaker_id)
+                    if _live and _steer.enqueue(
+                        _live, text, speaker_id=speaker_id,
+                        channel="telegram",
+                        attachments=attachment_shas or None,
+                    ):
+                        await update.message.reply_text(
+                            "\U0001f4ac Passed to the task already running.")
+                        return
+                except Exception:
+                    # Steering is an enhancement; if it fails, the message
+                    # must still get a turn the normal way.
+                    pass
+
                 typing_task = asyncio.create_task(
                     _keep_typing(update.message.chat),
                 )
@@ -1885,6 +1907,28 @@ class TelegramBot:
                             ),
                         )
                     answer = result.answer or "(no answer)"
+
+                    # A steer can land after the turn stopped reading — on its
+                    # last iteration, or while it was composing the answer. It
+                    # was acknowledged as "passed to the running task", so
+                    # dropping it would be worse than never accepting it: the
+                    # user is owed a turn for it.
+                    try:
+                        from . import steering as _steer
+                        _missed = _steer.pop_orphans(speaker_id)
+                        if _missed:
+                            answer += (
+                                "\n\n—\n⚠️ Your message"
+                                + ("s " if len(_missed) > 1 else " ")
+                                + "arrived as this task was finishing and "
+                                  "did not reach it. Send "
+                                + ("them " if len(_missed) > 1 else "it ")
+                                + "again and I will start on "
+                                + ("them " if len(_missed) > 1 else "it ")
+                                + "now."
+                            )
+                    except Exception:
+                        pass
 
                     # AskUserQuestion follow-up: if the agent called
                     # the `ask_user` tool, `result.question` is

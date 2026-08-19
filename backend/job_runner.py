@@ -128,6 +128,14 @@ def run_tracked(
     # its (provider, model, ok, error) attempt onto the same Job.
     from . import failover as _fo
     token = _fo.set_current_job_id(job.id)
+    # Announce the turn so a message arriving mid-flight is parked for it
+    # instead of opening a second job. Registered here, next to the job id
+    # it is keyed by, and released in the same `finally` below.
+    try:
+        from . import steering as _steer
+        _steer.register_turn(job.id, speaker_id)
+    except Exception:
+        pass
     # Track whether a terminal status (completed / failed) was
     # written. If we leave the function without writing one, the
     # `finally` block stamps `failed` — pre-fix, a crash AFTER
@@ -206,6 +214,15 @@ def run_tracked(
         try:
             from .tools.agent_browser import close_session as _ab_close
             _ab_close(f"job-{job.id}")
+        except Exception:
+            pass
+        # Stop parking messages against a turn that is over, and keep any it
+        # never read. Here rather than after the return, because a turn that
+        # ends by raising has the same obligation: from the user's side the
+        # message was sent and never answered.
+        try:
+            from . import steering as _steer
+            _steer.close_turn(job.id)
         except Exception:
             pass
         # Always clear the ContextVar — leaking it would mean the
