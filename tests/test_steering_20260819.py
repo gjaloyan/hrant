@@ -207,3 +207,67 @@ def test_the_channel_parks_instead_of_opening_a_second_job():
     from backend import channels
     src = inspect.getsource(channels)
     assert "active_job_for" in src and "pop_orphans" in src
+
+
+# ── the steer that lands after the last tool call ───────────────────
+
+def test_a_steer_after_the_final_tool_call_still_turns_the_turn_around():
+    """Measured on the first live test. The turn made two tool calls, the
+    correction arrived after the second, there was never a third, and the
+    answer the user had just withdrawn was delivered in full.
+
+    The tool-result injection point cannot cover this by construction:
+    nothing else is going to be appended to. The correction round is the
+    last place a turn that has stopped calling tools can be turned around.
+    """
+    from backend.unified_agent import _decide_self_correction
+    steering.register_turn("job-9", "webui:default")
+    steering.enqueue("job-9", "stop, not the file list -- give me the total")
+    tag, corrective = _decide_self_correction(
+        task="list the ten biggest files",
+        answer="| 1 | builtin_tools.py | 206803 |",
+        turn_tools=["terminal_exec"],
+        job_id="job-9",
+    )
+    assert tag == "user-steer"
+    assert "not the file list" in corrective
+    assert "do not send that draft unchanged" in corrective.lower()
+
+
+def test_the_steer_outranks_a_policy_that_disables_correction(monkeypatch):
+    """A turn policy may switch the structural gates off. The user speaking
+    is not one of those gates and must not be switched off with them."""
+    import backend.unified_agent as ua
+    from backend.unified_agent import _decide_self_correction
+
+    class _Policy:
+        enforce_action_progress = False
+
+    monkeypatch.setattr("backend.turn_policy.current_policy",
+                        lambda: _Policy())
+    steering.register_turn("job-10", "webui:default")
+    steering.enqueue("job-10", "actually, do the other thing")
+    tag, corrective = _decide_self_correction(
+        task="t", answer="a", turn_tools=[], job_id="job-10")
+    assert tag == "user-steer"
+    assert "do the other thing" in corrective
+
+
+def test_a_steer_is_consumed_by_the_correction_round():
+    """Otherwise the second round re-fires on the same message and the turn
+    loops on a correction it has already taken."""
+    from backend.unified_agent import _decide_self_correction
+    steering.register_turn("job-11", "webui:default")
+    steering.enqueue("job-11", "change of plan")
+    _decide_self_correction(task="t", answer="a", turn_tools=[],
+                            job_id="job-11")
+    assert steering.has_pending("job-11") is False
+
+
+def test_no_steer_means_the_normal_gates_still_decide():
+    """The new branch must be invisible when nobody wrote anything."""
+    from backend.unified_agent import _decide_self_correction
+    steering.register_turn("job-12", "webui:default")
+    tag, _ = _decide_self_correction(
+        task="what is 2+2", answer="4", turn_tools=[], job_id="job-12")
+    assert tag != "user-steer"

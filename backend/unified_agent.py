@@ -1922,6 +1922,7 @@ def _decide_self_correction(
     turn_tools: list[str],
     trace=None,
     speaker_id: str = "",
+    job_id: str = "",
 ) -> tuple[str, str]:
     """Decide whether the just-finished turn needs a corrective re-prompt.
 
@@ -1950,6 +1951,29 @@ def _decide_self_correction(
     `set_setting`, `complete_supervisor`, etc. is considered to have
     taken action; we don't second-guess it.
     """
+    # The user talking mid-task outranks every gate below — and outranks the
+    # policy switch that can disable them, because a steer has no other way in
+    # once the tool calls have stopped.
+    #
+    # Measured 2026-08-19, first live test of steering: the turn made two tool
+    # calls, the correction landed after the second, there was never a third,
+    # and the answer the user had just withdrawn was delivered in full. The
+    # tool-result injection point cannot cover that case by construction; this
+    # is where a turn that has stopped calling tools can still be turned
+    # around, and it must run before the early returns.
+    try:
+        from . import steering as _steer
+        if job_id and _steer.has_pending(job_id):
+            _msgs = _steer.take(job_id)
+            if _msgs:
+                return ("user-steer", _steer.render_marker(_msgs).strip()
+                        + "\n\nYou have already drafted an answer to the "
+                          "request as it originally stood. Do not send that "
+                          "draft unchanged: work out what the message above "
+                          "means for it, do whatever it now requires, and "
+                          "write the answer the user is asking for NOW.")
+    except Exception:
+        pass
     try:
         from .turn_policy import current_policy
         if not current_policy().enforce_action_progress:
@@ -3734,6 +3758,7 @@ def run_unified(
                 turn_tools=_turn_tools,
                 trace=getattr(agent, "_trace", None),
                 speaker_id=speaker_id,
+                job_id=job_id or "",
             )
             if not _corrective:
                 _last_tag = ""
