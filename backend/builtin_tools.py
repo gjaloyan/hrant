@@ -2137,6 +2137,7 @@ def _schedule_message_handler(
     text: str = "",
     due_at: str = "",
     message: str = "",
+    repeat: str = "",
 ) -> str:
     """Owner + trusted gate. Trusted can only schedule TO the owner;
     owner can schedule to anyone.
@@ -2197,6 +2198,7 @@ def _schedule_message_handler(
             text=text,
             due_at=due_at,
             requested_by=requester,
+            repeat=repeat,
         )
     except Exception as e:
         return json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False)
@@ -2205,6 +2207,11 @@ def _schedule_message_handler(
         "id": row["id"],
         "target_speaker": row["target_speaker"],
         "due_at": row["due_at"],
+        "repeat": row.get("repeat") or "",
+        # Say what was actually created. A model that asked for "daily" and
+        # silently got a one-shot would tell the user their standing digest
+        # is running when it will fire exactly once.
+        "recurring": bool(row.get("repeat")),
     }, ensure_ascii=False)
 
 
@@ -3154,7 +3161,14 @@ def register_builtin_tools() -> None:
             "Target = a speaker_id like `telegram:<id>` OR an alias from "
             "relationships.json (e.g. 'wife'). Convert natural time to "
             "UTC ISO 8601 yourself. Owner/trusted only. Returns `{ok, id, "
-            "target_speaker, due_at}`."
+            "target_speaker, due_at, repeat, recurring}`.\n\n"
+            "STANDING REQUESTS ARE THIS TOOL. 'every day', 'each morning', "
+            "'weekly' — pass `repeat` and it re-arms itself after every "
+            "delivery. Do NOT answer a recurring request by asking what time "
+            "and stopping: pick a sensible hour, SET IT UP, and say which "
+            "hour you chose and that it can be changed. A standing digest "
+            "that exists at the wrong time is worth more to the user than a "
+            "question about the right one."
         ),
         input_schema={
             "type": "object",
@@ -3179,7 +3193,18 @@ def register_builtin_tools() -> None:
                 "due_at": {
                     "type": "string",
                     "description": "UTC ISO 8601 timestamp 'YYYY-MM-DDTHH:MM:SSZ'. "
-                                   "Convert the user's natural-language time first.",
+                                   "Convert the user's natural-language time first. "
+                                   "With `repeat`, this is the FIRST occurrence.",
+                },
+                "repeat": {
+                    "type": "string",
+                    "enum": ["", "daily", "weekly", "monthly"],
+                    "description": (
+                        "Leave empty for a one-off reminder. Set it when the "
+                        "user asked for something standing ('every day', "
+                        "'each morning', 'weekly') — the message then "
+                        "re-arms after each delivery instead of firing once."
+                    ),
                 },
             },
             # `text` used to be the only accepted body field; some tool

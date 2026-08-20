@@ -26,7 +26,7 @@ import json
 import logging
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -91,6 +91,48 @@ def _write_all(rows: list[dict]) -> None:
         tmp.replace(p)
 
 
+# Recurrence intervals, in days. Deliberately a tiny closed set rather
+# than cron: the caller is a language model, and every additional degree
+# of freedom is another way to schedule something nobody asked for. These
+# three cover what has actually been requested.
+REPEAT_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
+
+
+def normalize_repeat(value: str) -> str:
+    """'' for one-shot, or one of REPEAT_DAYS. Unknown words mean one-shot.
+
+    Silently downgrading an unrecognised value is the safe direction: a
+    message that fires once when it should have repeated is a visible
+    disappointment the user can report, while one that repeats when it
+    should not is a bot that will not stop talking to them.
+    """
+    v = str(value or "").strip().lower()
+    return v if v in REPEAT_DAYS else ""
+
+
+def next_due(due_at: str, repeat: str) -> str:
+    """The occurrence after `due_at`, or '' when it does not repeat.
+
+    Counted forward from the DUE time, not from now, so the daily 09:00
+    digest stays at 09:00 even when the tick that delivered it ran late.
+    If the box was off for a week, roll forward past every missed slot
+    rather than firing a backlog at the user.
+    """
+    if not normalize_repeat(repeat):
+        return ""
+    try:
+        base = datetime.strptime(due_at, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return ""
+    step = timedelta(days=REPEAT_DAYS[normalize_repeat(repeat)])
+    now = datetime.now(timezone.utc)
+    nxt = base + step
+    while nxt <= now:
+        nxt += step
+    return nxt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def schedule(
     *,
     target_speaker: str,
@@ -99,12 +141,16 @@ def schedule(
     requested_by: str,
     kind: str = "message",
     meta: dict | None = None,
+    repeat: str = "",
 ) -> dict:
     """Create a new scheduled message. Returns the persisted row.
 
     `due_at` must be ISO 8601 UTC ('YYYY-MM-DDTHH:MM:SSZ'). Caller
     is expected to have already parsed any natural-language time
     reference ('tomorrow 10am') into UTC.
+
+    `repeat` ('daily'/'weekly'/'monthly', or '' for one-shot) makes the
+    row re-arm itself after each successful delivery.
     """
     row = {
         "id": uuid.uuid4().hex[:12],
@@ -122,6 +168,7 @@ def schedule(
         # received the message before the crash).
         "status": "pending",
         "kind": kind,            # message | check_in
+        "repeat": normalize_repeat(repeat),   # "" | daily | weekly | monthly
         "meta": meta or {},      # check_in carries {tracker_id, step_id, check_in_kind}
         "delivered_at": None,
         "last_error": "",
@@ -448,9 +495,44 @@ def deliver_due() -> dict:
         ok, err = deliver(row)
         if ok:
             summary["sent"].append(row["id"])
+            _rearm(row, summary)
         else:
             summary["failed"].append({"id": row["id"], "error": err})
     return summary
+
+
+def _rearm(row: dict, summary: dict) -> None:
+    """Queue the next occurrence of a repeating row, AFTER it delivered.
+
+    After, not before, and only on success: a row that re-arms itself up
+    front would keep firing while its deliveries fail, and the user would
+    receive a daily digest that never arrives while the ledger fills with
+    attempts. A failed delivery stops the series, which is visible and
+    reportable — the failure mode we want.
+
+    The new row is a fresh entry rather than a status reset on this one,
+    so the ledger keeps an honest record of what was actually sent.
+    """
+    repeat = normalize_repeat(row.get("repeat"))
+    if not repeat:
+        return
+    upcoming = next_due(row.get("due_at") or "", repeat)
+    if not upcoming:
+        return
+    try:
+        nxt = schedule(
+            target_speaker=row.get("target_speaker") or "",
+            text=row.get("text") or "",
+            due_at=upcoming,
+            requested_by=row.get("requested_by") or "",
+            kind=row.get("kind") or "message",
+            meta=dict(row.get("meta") or {}),
+            repeat=repeat,
+        )
+        summary.setdefault("rearmed", []).append(nxt["id"])
+    except Exception as e:      # never let re-arming break the sweep
+        log.warning("could not re-arm repeating message %s: %s",
+                    row.get("id"), e)
 
 
 def prune(max_rows: int = 1000) -> int:
