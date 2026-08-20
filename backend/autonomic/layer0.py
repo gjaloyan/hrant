@@ -152,6 +152,31 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=60.0,
         ),
         LayerZeroRule(
+            # Immediately after delivery, and that placement is measured, not
+            # polite. This rule first shipped LAST of 29 on the reasoning that
+            # collecting posts for a digest hours away is housekeeping. Over
+            # 80 consecutive lever fires on prod, first-match selection never
+            # reached past index ~14 — scheduled_messages and error_triage
+            # took 62 of them — so the poll ran exactly zero times and the
+            # daily digest it feeds would have had nothing to read. Last means
+            # never on a busy box.
+            #
+            # It belongs here because it IS user-facing delivery, one step
+            # removed: if it starves, the digest is empty. The footprint is a
+            # single GET every ten minutes, so the rules below give up about
+            # one slot per ten minutes for it.
+            #
+            # The PREDICATE, not just the lever's preconditions, asks whether
+            # any channel is followed — a false precondition still consumes a
+            # slot and files a SKIPPED report, the trap FIRE_GRAPH_REBUILD
+            # documents below.
+            name="channel_watch_tick",
+            predicate=lambda s: _has_watched_channels(),
+            lever="FIRE_CHANNEL_WATCH",
+            params={},
+            cooldown_seconds=600.0,
+        ),
+        LayerZeroRule(
             # 2026-08-09 audit. FIRE_GRAPH_REBUILD has been registered since
             # May with NO rule naming it — zero fires, ever. Wired as a
             # RECOVERY REFLEX, not a periodic tick, for two measured reasons.
@@ -384,27 +409,6 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_EMBEDDING_BACKFILL",
             params={},
             cooldown_seconds=86400.0,  # daily
-        ),
-        LayerZeroRule(
-            # Collect followed channels often enough that a busy one cannot
-            # overflow its page between polls: a public channel page holds
-            # only ~16 posts, and at ten minutes even a lively channel stays
-            # inside that window.
-            #
-            # The predicate — not just the lever's preconditions — asks
-            # whether anything is followed. A false precondition still
-            # consumes a tick slot and files a SKIPPED report, which is the
-            # trap FIRE_GRAPH_REBUILD documents further up: a rule that can
-            # never do anything should not be selected in the first place.
-            #
-            # Last in the periodic block, not near the head. Collecting posts
-            # for a digest hours away is housekeeping, and the 2026-06-12
-            # starvation fix reserved the front for user-facing delivery.
-            name="channel_watch_tick",
-            predicate=lambda s: _has_watched_channels(),
-            lever="FIRE_CHANNEL_WATCH",
-            params={},
-            cooldown_seconds=600.0,
         ),
         # scheduled_messages_tick moved to the head of the list
         # (right after the safety triad) 2026-06-12 — see the
