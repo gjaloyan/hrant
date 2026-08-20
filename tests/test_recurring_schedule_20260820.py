@@ -164,3 +164,47 @@ def test_the_reply_says_whether_it_actually_recurs():
     src = inspect.getsource(bt._schedule_message_handler)
     assert '"recurring"' in src
     assert '"repeat"' in src
+
+
+# ── the kind that actually does work ────────────────────────────────
+
+def test_a_scheduled_task_runs_instead_of_being_mailed():
+    """The two existing kinds could not express "do this every morning":
+    `message` mails the instruction to the user verbatim, and `check_in`
+    silently returns unless meta names a live tracker step. A digest
+    scheduled as a check_in is marked delivered and re-armed while doing
+    nothing at all, every day, in silence — caught before it shipped."""
+    import inspect
+    src = inspect.getsource(sm.deliver_due)
+    assert 'row.get("kind") == "agent_task"' in src
+    assert "run_agent_task(row)" in src
+
+
+def test_a_scheduled_task_re_arms_like_any_other_row():
+    import inspect
+    lines = inspect.getsource(sm.deliver_due).splitlines()
+    task = next(i for i, l in enumerate(lines) if "run_agent_task(row)" in l)
+    rearm = next(i for i, l in enumerate(lines)
+                 if "_rearm(row, summary)" in l and i > task)
+    fail = next(i for i, l in enumerate(lines)
+                if "mark_failed" in l and i > task)
+    assert rearm < fail, "a failed run must stop the series, not continue it"
+
+
+def test_a_task_row_without_a_target_or_text_raises():
+    """Raising, not returning: the caller marks the row failed and the
+    series stops visibly rather than repeating a no-op."""
+    with pytest.raises(ValueError):
+        sm.run_agent_task({"target_speaker": "", "text": "x"})
+    with pytest.raises(ValueError):
+        sm.run_agent_task({"target_speaker": "telegram:1", "text": "  "})
+
+
+def test_the_check_in_kind_still_needs_a_tracker():
+    """The silent-return is correct FOR check_in — it exists to skip a step
+    that was completed before its date. The bug was using that kind for
+    something else, not the behaviour itself."""
+    import inspect
+    from backend.tracker_checkin import run_check_in
+    src = inspect.getsource(run_check_in)
+    assert "tracker_id" in src and "return" in src

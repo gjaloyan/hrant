@@ -482,6 +482,24 @@ def deliver_due() -> dict:
     `recover_stuck_deliveries` at the next service startup."""
     summary: dict = {"sent": [], "failed": []}
     for row in due_now():
+        if row.get("kind") == "agent_task":
+            # Run the row's TEXT as a task, rather than sending it. The two
+            # existing kinds could not express "do this every morning":
+            # `message` mails the instruction to the user verbatim, and
+            # `check_in` silently returns unless meta names a live tracker
+            # step — a daily digest scheduled as a check_in would have been
+            # marked delivered and re-armed while doing nothing at all,
+            # every day, in silence.
+            try:
+                run_agent_task(row)
+                mark_sent(row["id"])
+                summary["sent"].append(row["id"])
+                _rearm(row, summary)
+            except Exception as e:
+                mark_failed(row["id"], str(e)[:200])
+                summary["failed"].append({"id": row["id"],
+                                          "error": str(e)[:200]})
+            continue
         if row.get("kind") == "check_in":
             try:
                 from .tracker_checkin import run_check_in
@@ -499,6 +517,29 @@ def deliver_due() -> dict:
         else:
             summary["failed"].append({"id": row["id"], "error": err})
     return summary
+
+
+def run_agent_task(row: dict) -> None:
+    """Execute a scheduled row's text as an agent turn.
+
+    The answer reaches the user the same way any turn's answer does — the
+    agent is talking to them on their own channel — so nothing is mailed
+    from here. Raises on failure so the caller can mark the row failed and
+    stop the series; a standing task that quietly errors every morning is
+    worse than one that visibly stops.
+    """
+    from .agent import Agent
+    # Validate BEFORE normalising: `normalize_speaker("")` returns
+    # "webui:default", so an empty target would silently become a real
+    # address and the turn would run for someone who never asked for it.
+    raw_target = str(row.get("target_speaker") or "").strip()
+    text = (row.get("text") or "").strip()
+    if not raw_target or not text:
+        raise ValueError("agent_task row needs both target_speaker and text")
+    target = normalize_speaker(raw_target)
+    channel = target.split(":", 1)[0] if ":" in target else "webui"
+    log.info("running scheduled agent task %s for %s", row.get("id"), target)
+    Agent().run(text, channel=channel, speaker_id=target)
 
 
 def _rearm(row: dict, summary: dict) -> None:
