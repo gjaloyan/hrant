@@ -45,6 +45,26 @@ What is NOT a fact:
 - Vague statements without specifics
 - The agent's own reasoning process
 - Questions without answers
+- WHAT THE USER IS CURRENTLY DOING OR LOOKING FOR. This is the one that
+  causes real damage, so it is worth being precise about. A memorable fact
+  is a STANDING property that will still be true in a month: what the user
+  owns, where they live, what they prefer, how a system is configured. The
+  task in front of them right now is not that — it ends when the task ends,
+  and a stored copy of it outlives the task and starts speaking for them.
+    NOT a fact: "user is searching for bankruptcy cases like his own"
+    NOT a fact: "user wants the report by Friday" (unless the deadline is
+                a standing rule rather than this week's)
+    NOT a fact: "user is debugging the payment service"
+    A fact:     "user owns a Subaru with a 4EAT gearbox"
+    A fact:     "user's production box is at 100.124.210.21"
+  Measured harm, 2026-08-19: "user is looking for bankruptcy cases similar
+  to his case" was stored from one session. Days later, mid-conversation
+  about a car gearbox, the user asked "can you find similar cases?" — the
+  stored line matched that question better than anything else, the agent
+  believed it over the live conversation, and spent 1,050,255 tokens
+  searching a court database for bankruptcy filings. Ask yourself whether
+  the sentence will be TRUE and USEFUL in a month. If it is about this
+  week's work, leave it out.
 
 For each fact, extract it as entity-relation-entity triples that can be stored
 in a knowledge graph. Also provide tags/keywords for retrieval.

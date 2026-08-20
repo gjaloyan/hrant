@@ -1823,7 +1823,26 @@ def _auto_recall_block(task: str, *, limit: int = 3,
         fact_hits = []
     if not note_hits and not fact_hits:
         return ""
-    lines = ["# AUTO-RECALL (related notes — read via read_file if relevant)"]
+    # The framing matters as much as the content. These lines were written in
+    # OTHER conversations, at unknown dates, and they are surfaced here only
+    # because they resemble the current message — which is exactly what makes
+    # a stale one dangerous: the closer it matches, the more authoritative it
+    # looks. Measured 2026-08-19: a line stored days earlier, "user is looking
+    # for bankruptcy cases similar to his case", out-argued a live
+    # conversation about a car gearbox when the user asked "can you find
+    # similar cases?", and the turn spent 1,050,255 tokens in a court
+    # database. Recall is a hint about the past; the conversation is what is
+    # happening.
+    lines = [
+        "# AUTO-RECALL (possibly related notes from EARLIER conversations)",
+        "(Retrieved by similarity to your current message, not by relevance "
+        "to what is actually going on. They may be months old, and they may "
+        "belong to a different topic that merely sounds alike. RECENT "
+        "CONVERSATION always outranks anything here: if a line below "
+        "disagrees with what the user is talking about now, the line is "
+        "stale — ignore it. Never let one of these decide what the user "
+        "wants; at most let it remind you of something.)",
+    ]
     for h in note_hits:
         e = h.entry
         # No score here on purpose. `search()` min-max normalises, so the top
