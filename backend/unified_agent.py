@@ -3781,6 +3781,7 @@ def run_unified(
             agent.progress("self_correct", f"{_correction_tag} — re-prompting")
             try:
                 _findings = _turn_findings(agent, previous_answer=answer)
+                _previous_answer = answer
                 answer = router().call_with_tools(
                     TaskType.COMPLEX_SOLVING,
                     system_prompt,
@@ -3802,6 +3803,19 @@ def run_unified(
                     on_tool_call=_on_tool_call,
                 )
                 answer = _rewrite_xml_tool_call_dump(answer, agent)
+                # A correction round that produces nothing is a FAILED
+                # correction, not a new answer. Measured 2026-08-19 on the
+                # owner's own turn: 104 tool calls, 113 LLM calls, 1.05M input
+                # tokens, $5.80 — and the Telegram message was the bare gate
+                # footer, no content at all. The empty-answer guard above had
+                # already put its placeholder in; the placeholder is by
+                # construction a non-delivery, so a gate fired, the re-prompt
+                # came back blank, and `answer` was overwritten with "". The
+                # guard created the condition that erased the guard.
+                if not (answer or "").strip():
+                    answer = _previous_answer
+                    _last_tag = _correction_tag
+                    break
             except LLMError:
                 break  # keep the current answer if the corrective call fails
         # The status line is NOT appended here. It is appended after the
@@ -3814,6 +3828,16 @@ def run_unified(
         # — the agent arguing with the gate's own text. Whatever the model can
         # rewrite, it will.
         _contract_status_tag = _last_tag
+        # Backstop. The in-loop check above should make this unreachable, but
+        # the failure it guards is the worst one the turn can produce — the
+        # user pays for the whole turn and receives a bare gate footer — and
+        # the guard that was supposed to prevent it had itself been undone by
+        # a later stage once already. One `if` is cheap next to that.
+        if not (answer or "").strip():
+            answer = (
+                "I produced no answer for this turn. That is a failure, not a "
+                "result: I ran tools and then returned nothing."
+            )
 
     # 2026-05-21: refusal-rewriter dropped. The previous version
     # ran a ~25-keyword regex over the answer head ("не могу",
