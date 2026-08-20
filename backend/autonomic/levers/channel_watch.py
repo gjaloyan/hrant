@@ -59,7 +59,8 @@ class FIRE_CHANNEL_WATCH(Lever):
                 started_at=started,
                 finished_at=utcnow(),
                 status=LeverStatus.FAILURE,
-                summary=f"channel poll failed: {type(e).__name__}: {e}",
+                outcome={},
+                reason=f"poll_failed:{type(e).__name__}",
             )
 
         new_total = sum(int(r.get("new") or 0) for r in results)
@@ -76,6 +77,10 @@ class FIRE_CHANNEL_WATCH(Lever):
             started_at=started,
             finished_at=utcnow(),
             status=LeverStatus.SUCCESS,
-            summary=(f"polled {len(results)} channel(s), {new_total} new post(s)"
-                     + (f" — {'; '.join(parts)}" if parts else "")),
+            outcome={
+                "channels": len(results),
+                "new_posts": new_total,
+                "detail": parts,
+            },
+            reason=f"polled_{len(results)}_channels_{new_total}_new",
         )

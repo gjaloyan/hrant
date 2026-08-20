@@ -218,3 +218,39 @@ def test_the_poller_costs_no_llm_call():
 def test_the_poller_stays_idle_when_no_channel_is_followed():
     from backend.autonomic.levers.channel_watch import FIRE_CHANNEL_WATCH
     assert FIRE_CHANNEL_WATCH().preconditions(None) is False
+
+
+def test_the_lever_actually_runs_and_returns_a_valid_report(monkeypatch):
+    """Executing it, not just reading its source.
+
+    The first version built its LeverReport with a `summary=` field that
+    does not exist on the dataclass. Every source-level test passed; the
+    lever crashed the first time the scheduler reached it, and the daily
+    digest would have had an empty ledger. Construct the report for real.
+    """
+    from backend.autonomic.levers.channel_watch import FIRE_CHANNEL_WATCH
+    monkeypatch.setattr(cw, "watched", lambda: ["COIN22T"])
+    monkeypatch.setattr(cw, "fetch_page", lambda channel, before=None: PAGE)
+    report = FIRE_CHANNEL_WATCH().run({}, {})
+    assert report.status.value == "success"
+    assert report.outcome["new_posts"] == 3
+    assert report.lever == "FIRE_CHANNEL_WATCH"
+
+
+def test_the_lever_reports_a_failure_without_raising(monkeypatch):
+    from backend.autonomic.levers.channel_watch import FIRE_CHANNEL_WATCH
+    def _boom():
+        raise RuntimeError("store unavailable")
+    monkeypatch.setattr(cw, "poll_all", _boom)
+    report = FIRE_CHANNEL_WATCH().run({}, {})
+    assert report.status.value == "failure"
+    assert "RuntimeError" in report.reason
+
+
+def test_the_report_survives_a_round_trip_to_the_log():
+    """It is written as JSONL and read back by the audit tooling; a field
+    the dataclass rejects only shows up at that boundary."""
+    from backend.autonomic.types import LeverReport
+    from backend.autonomic.levers.channel_watch import FIRE_CHANNEL_WATCH
+    report = FIRE_CHANNEL_WATCH().run({}, {})
+    assert LeverReport.from_jsonl(report.to_jsonl()).lever == "FIRE_CHANNEL_WATCH"
