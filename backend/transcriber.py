@@ -58,6 +58,61 @@ def _config_path() -> Path:
     return Path(CONFIG.knowledge["base_dir"]) / "transcriber_config.json"
 
 
+def expected_languages(cfg: Optional[dict] = None) -> list:
+    """Languages this deployment's speakers actually use, from config.
+
+    Whisper's automatic detection is a guess over ~99 languages, and on a
+    short clip the guess is frequently wrong in a way that destroys the
+    message rather than degrading it. Measured on the owner's own voice
+    notes, 2026-08-19: "Я имею в виду машину" came back as "Eu tenho
+    vídeo-machina" (Portuguese, p=0.585). Across 48 stored notes, 45 were
+    Russian, one Armenian, and two were detected as Latvian and Polish --
+    both wrong, and both transcribed correctly once the choice was
+    restricted.
+
+    Empty means no restriction, which is the old behaviour: a deployment
+    that has not said which languages it hears gets the raw guess.
+    """
+    cfg = load_config() if cfg is None else (cfg or {})
+    raw = cfg.get("languages") or cfg.get("expected_languages") or []
+    if isinstance(raw, str):
+        raw = [p for p in raw.replace(",", " ").split() if p]
+    out, seen = [], set()
+    for code in raw:
+        code = str(code or "").strip().lower()
+        if code and code not in seen:
+            seen.add(code)
+            out.append(code)
+    return out
+
+
+def pick_language(probabilities, allowed) -> Optional[str]:
+    """Most probable language among the ones this deployment expects.
+
+    Deliberately unconditional: no "trust detection when it is confident"
+    escape hatch. The measured counter-example is a note detected as
+    Polish at p=0.78 against Russian at p=0.18 -- a four-fold margin, and
+    restricting still produced the correct Russian text. Confidence in the
+    wrong language is exactly what this is for.
+
+    `probabilities` is faster-whisper's (code, probability) list.
+    """
+    if not allowed:
+        return None
+    allowed_set = {str(a).lower() for a in allowed}
+    best, best_p = None, -1.0
+    for item in probabilities or []:
+        try:
+            code, p = item[0], float(item[1])
+        except (TypeError, IndexError, ValueError):
+            continue
+        if str(code).lower() in allowed_set and p > best_p:
+            best, best_p = str(code).lower(), p
+    # Nothing in the distribution matched: fall back to the caller's first
+    # expectation rather than to a language nobody here speaks.
+    return best or (str(list(allowed)[0]).lower() if allowed else None)
+
+
 def load_config() -> dict:
     p = _config_path()
     if not p.exists():
@@ -201,8 +256,28 @@ class Transcriber:
             tmp.write(audio_bytes)
             path = tmp.name
         try:
+            source = path
+            if not language:
+                # Detect explicitly instead of letting `transcribe` do it.
+                # They are not the same code path and they disagree: on the
+                # measured failure the internal one chose Portuguese at 0.585
+                # while this one ranked Russian first. Restricting the choice
+                # to the configured languages then fixes the rest.
+                allowed = expected_languages()
+                if allowed:
+                    try:
+                        from faster_whisper import decode_audio
+                        source = decode_audio(path, sampling_rate=16000)
+                        _, _, probs = self._fw_model.detect_language(source)
+                        language = pick_language(probs, allowed)
+                    except Exception as e:
+                        # Detection is an improvement, not a dependency: a
+                        # failure here must still leave a working transcript.
+                        log.debug("language detection failed, using auto: %s", e)
+                        source = path
+                        language = None
             segments, _info = self._fw_model.transcribe(
-                path, language=language, vad_filter=True,
+                source, language=language, vad_filter=True,
             )
             text = " ".join(seg.text.strip() for seg in segments).strip()
             return text or None
