@@ -1862,8 +1862,27 @@ def _check_subagents_handler(session_id: str = "") -> str:
     if session_id:
         s = SUBAGENT_STORE.get(session_id.strip())
         if s is None:
-            return json.dumps({"ok": False, "error": "session not found"},
-                              ensure_ascii=False)
+            # "session not found" left the model with nothing to do, so it
+            # kept guessing. Measured 2026-08-19: after a plain (foreground)
+            # delegate that had already returned its answer, the agent called
+            # this with the literal string "unknown" and got a bare error.
+            # Say what actually happened and what to do instead.
+            try:
+                outstanding = SUBAGENT_STORE.active() or []
+            except Exception:
+                outstanding = []
+            return json.dumps({
+                "ok": False,
+                "error": f"no subagent session with id {session_id.strip()!r}",
+                "running_now": len(outstanding),
+                "hint": (
+                    "If you started this with a plain `delegate`, its answer "
+                    "was already in that call's reply — re-read it rather "
+                    "than looking for a session. Sessions exist only for "
+                    "`delegate(background=true)`. To see everything "
+                    "outstanding, call check_subagents with no arguments."
+                ),
+            }, ensure_ascii=False)
         sessions = [s]
     else:
         # 2026-08-08 audit: this was a flat `limit=6` over the whole
@@ -4011,7 +4030,14 @@ def register_builtin_tools() -> None:
             "Use for: web research with citations (researcher), "
             "reading+explaining code (coder), second opinion "
             "(reviewer). DO NOT use for short factual answers, "
-            "chat, or arithmetic. Depth-1, OWNER-only, sequential."
+            "chat, or arithmetic. Depth-1, OWNER-only.\n\n"
+            "BY DEFAULT THIS BLOCKS AND HANDS YOU THE ANSWER. The reply "
+            "contains `answer` — the subagent's finished work — plus "
+            "`tool_summary` and `iterations`. There is nothing to collect "
+            "afterwards and no session to look up: read `answer` and carry "
+            "on. Do NOT call `check_subagents` after a plain delegate; there "
+            "is no session id in this reply because none exists.\n\n"
+            "Only `background=true` creates something to collect."
         ),
         input_schema={
             "type": "object",
@@ -4048,16 +4074,27 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="check_subagents",
         description=(
-            "Status/results of delegated subagents (the collect side of "
-            "background delegation): pass session_id for one, or omit for "
-            "the recent list. Shows status (running/completed/failed) and "
-            "the answer."
+            "Collect the results of subagents you started with "
+            "`delegate(background=true)`. Shows status "
+            "(running/completed/failed) and the answer.\n\n"
+            "ONLY MEANINGFUL AFTER A BACKGROUND DELEGATE. A plain "
+            "`delegate` already returned the answer in its own reply — "
+            "there is no session behind it and nothing here to find.\n\n"
+            "Call it with NO arguments to see everything outstanding. Pass "
+            "`session_id` only when you are holding a real one from a "
+            "background delegate's reply. Never invent a value for it."
         ),
         input_schema={
             "type": "object",
             "properties": {
-                "session_id": {"type": "string",
-                               "description": "Optional specific session."},
+                "session_id": {
+                    "type": "string",
+                    "description": (
+                        "A session id copied from a background delegate's "
+                        "reply. OMIT this to list everything outstanding — "
+                        "that is the normal call. Do not pass a placeholder."
+                    ),
+                },
             },
         },
         handler=_check_subagents_handler,
