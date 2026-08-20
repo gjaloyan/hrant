@@ -312,6 +312,11 @@ _COMMON_OTHER = {
         "auto_promote_threshold": 10,
         "finetune_min_examples": 50,
         "note_max_tokens": 1500,
+        # Public Telegram channels to follow, e.g. ["COIN22T"]. A background
+        # tick collects their posts so a scheduled digest reads a ledger
+        # rather than whatever fits on one page. Empty means the tick is
+        # never even selected — see channel_watch_tick in autonomic/layer0.
+        "watch_channels": [],
     },
     "tts": {
         # Voice output policy. By default the agent replies with a
