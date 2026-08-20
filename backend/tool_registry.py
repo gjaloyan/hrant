@@ -76,6 +76,7 @@ class DeclaredToolSemantics:
 # in audit mode until their author declares an effect.
 _READ_TOOLS = frozenset({
     "web_search", "fetch_url", "analyze_image", "read_captcha", "read_file",
+    "channel_updates",
     "verify_web",
     "soul_history", "list_trackers", "get_tracker", "search_knowledge",
     "list_skills", "list_background_jobs",

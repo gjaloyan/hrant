@@ -97,6 +97,7 @@ def register_default_autonomic_levers() -> None:
     from .stale_proposals import FIRE_STALE_PROPOSALS
     from .tool_install import FIRE_TOOL_INSTALL
     from .scheduled_messages import FIRE_SCHEDULED_MESSAGES
+    from .channel_watch import POLL_WATCHED_CHANNELS
     register_lever(FIRE_INTEGRITY_HEARTBEAT)
     register_lever(FIRE_GOAL_PROPOSE)
     register_lever(FIRE_GOAL_EXECUTOR)
@@ -121,3 +122,4 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_GAP_DETECTION)
     register_lever(FIRE_TOOL_INSTALL)
     register_lever(FIRE_SCHEDULED_MESSAGES)
+    register_lever(POLL_WATCHED_CHANNELS)

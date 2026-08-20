@@ -205,7 +205,9 @@ def test_default_rules_count_after_phase11():
     rules = default_rules()
     # +graph_collapsed +note_embedding_backfill_tick (2026-08-09): two levers
     # that had been registered since May with no rule naming them.
-    assert len(rules) == 28
+    # +channel_watch_tick (2026-08-20): polls followed public channels so a
+    # daily digest reads a ledger rather than whatever fits on one page.
+    assert len(rules) == 29
 
 
 def test_default_rules_d07_scheduled_rules_present():
@@ -225,16 +227,20 @@ def test_default_rules_d07_scheduled_rules_present():
     ]
     # index 5 now: service_failed joined the reactive block at index 3.
     assert names[5] == "scheduled_messages_tick"
-    assert names[-9:-5] == [
+    # channel_watch_tick was appended at the very end on 2026-08-20, so the
+    # D-07 triplet shifted one further from the tail. It sits last on
+    # purpose: collecting posts for a digest hours away is housekeeping, and
+    # the front of the periodic block is reserved for user-facing delivery.
+    assert names[-10:-6] == [
         "self_reflection_tick", "character_reflection_tick",
         "finetune_qc_tick", "gap_detection_tick",
     ]
     # note_embedding_backfill_tick was appended after it on 2026-08-09 —
     # NOTE embeddings had no rule while FACT embeddings did.
     # unconsolidated_sessions_tick was inserted between them on 2026-08-10.
-    assert names[-3] == "fact_embedding_backfill_tick"
-    assert names[-2] == "unconsolidated_sessions_tick"
-    assert names[-1] == "note_embedding_backfill_tick"
+    assert names[-4] == "fact_embedding_backfill_tick"
+    assert names[-3] == "unconsolidated_sessions_tick"
+    assert names[-2] == "note_embedding_backfill_tick"
 
 
 def test_default_rules_d07_cooldowns():

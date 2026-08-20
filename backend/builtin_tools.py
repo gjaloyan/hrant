@@ -541,6 +541,36 @@ def _read_captcha_handler(path: str = "", expected_length: int = 0,
     return json.dumps(out, ensure_ascii=False)
 
 
+def _channel_updates_handler(channel: str = "", mark_reviewed: bool = True,
+                            limit: int = 200) -> str:
+    """Posts collected from a followed channel since the last digest.
+
+    Marks them reviewed by default so the next digest does not repeat
+    them. Nothing is deleted: `since_id` on a later call can reach back
+    if a digest failed after reading."""
+    from .channel_watch import digest_input, mark_reviewed as _mark, watched
+    ch = (channel or "").strip()
+    if not ch:
+        followed = watched()
+        if len(followed) == 1:
+            ch = followed[0]
+        else:
+            return json.dumps({
+                "ok": False,
+                "error": "which channel?",
+                "watched": followed,
+            }, ensure_ascii=False)
+    try:
+        lim = int(limit or 200)
+    except (TypeError, ValueError):
+        lim = 200
+    out = digest_input(ch, limit=lim)
+    if mark_reviewed and out.get("latest_id"):
+        _mark(ch, out["latest_id"])
+    out["ok"] = True
+    return json.dumps(out, ensure_ascii=False)
+
+
 def _list_skills_handler(tag: str = "", category: str = "") -> str:
     """Enumerate every installed skill (name + description + tags +
     category). Useful when the auto-injected AVAILABLE SKILLS catalog
@@ -3031,6 +3061,55 @@ def register_builtin_tools() -> None:
             "required": ["question"],
         },
         handler=_analyze_image_handler,
+    )
+
+    reg.register_func(
+        name="channel_updates",
+        description=(
+            "Posts collected from a followed public channel since the last "
+            "time you reviewed it. This is what a scheduled digest reads.\n\n"
+            "The posts were gathered by a background poll, not fetched now — "
+            "so this covers EVERYTHING published since your last digest, not "
+            "just what happens to be on the channel's page today. Do not "
+            "reach for `fetch_url` on the channel instead: that shows only "
+            "the most recent handful and silently loses the rest.\n\n"
+            "Returns `{channel, count, posts[], latest_id, "
+            "with_media_only}`. Each post has `id`, `ts`, `text`, `link` and "
+            "`has_media`. A post with `has_media` and empty `text` was an "
+            "image or video the collector cannot read — say so in the digest "
+            "rather than pretending the channel was silent.\n\n"
+            "Reading MARKS the posts reviewed, so the next digest starts "
+            "where this one ended. `count: 0` means nothing new was "
+            "published — report that plainly instead of re-summarising old "
+            "posts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "channel": {
+                    "type": "string",
+                    "description": (
+                        "Channel name, e.g. 'COIN22T'. May be omitted when "
+                        "exactly one channel is followed."
+                    ),
+                },
+                "mark_reviewed": {
+                    "type": "boolean",
+                    "description": (
+                        "Leave true. Set false only to look without moving "
+                        "the watermark."
+                    ),
+                    "default": True,
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum posts to return.",
+                    "default": 200,
+                },
+            },
+            "required": [],
+        },
+        handler=_channel_updates_handler,
     )
 
     reg.register_func(

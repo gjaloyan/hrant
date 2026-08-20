@@ -101,6 +101,10 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # weights are released when the call returns, so BASE costs nothing until
     # it is used.
     "analyze_image", "read_captcha",
+    # A scheduled digest turn must be able to reach its own input
+    # without a bundle round-trip; it runs unattended, so a tool it
+    # cannot find is a digest that quietly reports nothing.
+    "channel_updates",
     # Interaction + reminders. schedule_message moved to BASE 2026-06-18:
     # it was gated behind the `admin` bundle, so reminder turns couldn't reach
     # it and the model hand-rolled scheduling via raw python/terminal (slow,

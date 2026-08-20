@@ -65,6 +65,20 @@ class Layer0Engine:
         )
 
 
+def _has_watched_channels() -> bool:
+    """True when this deployment follows at least one channel.
+
+    Read live rather than captured at import: the owner can start
+    following a channel without a restart, and a predicate frozen at boot
+    would ignore them until one.
+    """
+    try:
+        from ..channel_watch import watched
+        return bool(watched())
+    except Exception:
+        return False
+
+
 def default_rules() -> list[LayerZeroRule]:
     return [
         LayerZeroRule(
@@ -370,6 +384,27 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_EMBEDDING_BACKFILL",
             params={},
             cooldown_seconds=86400.0,  # daily
+        ),
+        LayerZeroRule(
+            # Collect followed channels often enough that a busy one cannot
+            # overflow its page between polls: a public channel page holds
+            # only ~16 posts, and at ten minutes even a lively channel stays
+            # inside that window.
+            #
+            # The predicate — not just the lever's preconditions — asks
+            # whether anything is followed. A false precondition still
+            # consumes a tick slot and files a SKIPPED report, which is the
+            # trap FIRE_GRAPH_REBUILD documents further up: a rule that can
+            # never do anything should not be selected in the first place.
+            #
+            # Last in the periodic block, not near the head. Collecting posts
+            # for a digest hours away is housekeeping, and the 2026-06-12
+            # starvation fix reserved the front for user-facing delivery.
+            name="channel_watch_tick",
+            predicate=lambda s: _has_watched_channels(),
+            lever="POLL_WATCHED_CHANNELS",
+            params={},
+            cooldown_seconds=600.0,
         ),
         # scheduled_messages_tick moved to the head of the list
         # (right after the safety triad) 2026-06-12 — see the
