@@ -1,4 +1,4 @@
-"""POLL_WATCHED_CHANNELS — collect new posts from followed channels.
+"""FIRE_CHANNEL_WATCH — collect new posts from followed channels.
 
 A public channel's page shows only its last ~16 posts. A digest that read
 the page once a day would silently miss everything a busier channel
@@ -30,8 +30,8 @@ from ..types import (
 )
 
 
-class POLL_WATCHED_CHANNELS(Lever):
-    name = "POLL_WATCHED_CHANNELS"
+class FIRE_CHANNEL_WATCH(Lever):
+    name = "FIRE_CHANNEL_WATCH"
     category = LeverCategory.AUTONOMIC
     safety = LeverSafety.GREEN
     executor = "python"

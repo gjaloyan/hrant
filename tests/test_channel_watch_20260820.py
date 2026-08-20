@@ -210,11 +210,11 @@ def test_the_tool_description_warns_against_fetching_the_page_instead():
 def test_the_poller_costs_no_llm_call():
     """Polling every ten minutes through a model would be pure waste."""
     import inspect
-    from backend.autonomic.levers.channel_watch import POLL_WATCHED_CHANNELS
-    src = inspect.getsource(POLL_WATCHED_CHANNELS)
+    from backend.autonomic.levers.channel_watch import FIRE_CHANNEL_WATCH
+    src = inspect.getsource(FIRE_CHANNEL_WATCH)
     assert "router" not in src and "llm" not in src.lower()
 
 
 def test_the_poller_stays_idle_when_no_channel_is_followed():
-    from backend.autonomic.levers.channel_watch import POLL_WATCHED_CHANNELS
-    assert POLL_WATCHED_CHANNELS().preconditions(None) is False
+    from backend.autonomic.levers.channel_watch import FIRE_CHANNEL_WATCH
+    assert FIRE_CHANNEL_WATCH().preconditions(None) is False

@@ -402,7 +402,7 @@ def default_rules() -> list[LayerZeroRule]:
             # starvation fix reserved the front for user-facing delivery.
             name="channel_watch_tick",
             predicate=lambda s: _has_watched_channels(),
-            lever="POLL_WATCHED_CHANNELS",
+            lever="FIRE_CHANNEL_WATCH",
             params={},
             cooldown_seconds=600.0,
         ),
