@@ -1831,7 +1831,36 @@ class AnthropicLLM(BaseLLM):
                 final_text = "\n".join(p for p in text_parts if p).strip()
 
             if stop_reason != "tool_use" or not tool_uses:
-                return final_text
+                if final_text:
+                    if final_text:
+                        return final_text
+                    # Empty. The turn's work is still intact in `messages`; falling
+                    # through to the forced synthesis below is the only way it
+                    # reaches the user. Measured 2026-08-19: the model was cut off
+                    # at max_tokens mid tool_use, stop_reason came back
+                    # "max_tokens", the preamble beside it was discarded (rightly),
+                    # and this returned "" after 104 tool calls and 1,050,255
+                    # input tokens. The owner got a bare gate footer.
+                    log.warning("tool loop ended with no text - forcing synthesis")
+                    break
+                # Nothing to return. Falling through to the forced synthesis
+                # below is the only way the turn's work reaches the user.
+                #
+                # Measured 2026-08-19: the model was cut off at max_tokens
+                # while emitting a tool_use block, so `stop_reason` came back
+                # "max_tokens", the text alongside it was discarded as
+                # preamble (correctly — it is), and this line returned "".
+                # The turn had spent 104 tool calls and 1,050,255 input
+                # tokens; the owner received a bare gate footer. Synthesis
+                # already exists for the max_iterations exit and is exactly
+                # what is wanted here: the conversation so far is intact in
+                # `messages`, and one tool-less call turns it into an answer.
+                log.warning(
+                    "tool loop ended with no text (stop_reason=%s, "
+                    "tool_uses=%d) — forcing synthesis",
+                    stop_reason, len(tool_uses),
+                )
+                break
 
             # Put the assistant reply (with all blocks) and tool_result into messages
             messages.append({"role": "assistant", "content": content_blocks})
@@ -2247,7 +2276,17 @@ class OpenAICompatibleLLM(BaseLLM):
                 final_text = msg["content"]
 
             if finish_reason != "tool_calls" and not tool_calls:
-                return final_text
+                if final_text:
+                    return final_text
+                # Empty. The turn's work is still intact in `messages`; falling
+                # through to the forced synthesis below is the only way it
+                # reaches the user. Measured 2026-08-19: the model was cut off
+                # at max_tokens mid tool_use, stop_reason came back
+                # "max_tokens", the preamble beside it was discarded (rightly),
+                # and this returned "" after 104 tool calls and 1,050,255
+                # input tokens. The owner got a bare gate footer.
+                log.warning("tool loop ended with no text - forcing synthesis")
+                break
 
             messages.append(msg)
             for tc in tool_calls:
@@ -2666,7 +2705,17 @@ class CodexLLM(BaseLLM):
                 final_text = text
 
             if not calls:
-                return final_text
+                if final_text:
+                    return final_text
+                # Empty. The turn's work is still intact in `messages`; falling
+                # through to the forced synthesis below is the only way it
+                # reaches the user. Measured 2026-08-19: the model was cut off
+                # at max_tokens mid tool_use, stop_reason came back
+                # "max_tokens", the preamble beside it was discarded (rightly),
+                # and this returned "" after 104 tool calls and 1,050,255
+                # input tokens. The owner got a bare gate footer.
+                log.warning("tool loop ended with no text - forcing synthesis")
+                break
 
             # Re-feed every output item back so the model sees its own state,
             # then add tool results. Strip server-assigned `id` fields so the
@@ -2910,7 +2959,17 @@ class BedrockLLM(BaseLLM):
                 final_text = text_now
 
             if not tool_uses:
-                return final_text
+                if final_text:
+                    return final_text
+                # Empty. The turn's work is still intact in `messages`; falling
+                # through to the forced synthesis below is the only way it
+                # reaches the user. Measured 2026-08-19: the model was cut off
+                # at max_tokens mid tool_use, stop_reason came back
+                # "max_tokens", the preamble beside it was discarded (rightly),
+                # and this returned "" after 104 tool calls and 1,050,255
+                # input tokens. The owner got a bare gate footer.
+                log.warning("tool loop ended with no text - forcing synthesis")
+                break
 
             messages.append({"role": "assistant", "content": content})
             tool_results = []
@@ -3192,7 +3251,17 @@ class CohereLLM(BaseLLM):
             if text_now and not tool_calls:
                 final_text = text_now
             if not tool_calls:
-                return final_text
+                if final_text:
+                    return final_text
+                # Empty. The turn's work is still intact in `messages`; falling
+                # through to the forced synthesis below is the only way it
+                # reaches the user. Measured 2026-08-19: the model was cut off
+                # at max_tokens mid tool_use, stop_reason came back
+                # "max_tokens", the preamble beside it was discarded (rightly),
+                # and this returned "" after 104 tool calls and 1,050,255
+                # input tokens. The owner got a bare gate footer.
+                log.warning("tool loop ended with no text - forcing synthesis")
+                break
             # Append assistant message + tool results, loop.
             messages.append({
                 "role": "assistant",
