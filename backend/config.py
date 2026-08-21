@@ -230,6 +230,27 @@ _COMMON_OTHER = {
         "min_confidence": 70,
         "require_sources": True,
         "always_use_model_a": True,
+        # Does the critic REWRITE the answer, or only measure it?
+        #
+        # Off by default since 2026-08-21, at the owner's instruction:
+        # "we need to more free agent(model). i can say agent what good
+        # and what bed. not verifier(hard code)."
+        #
+        # He is right about the incentive. The critic kept whichever
+        # version scored higher, and the score measures groundedness —
+        # deleting a claim raises it — so the highest-scoring revision of
+        # any answer is the empty one. Measured on his own turns: a
+        # revision replaced an answer about two legal codes with a list of
+        # things it would not claim, gained five points, and was recorded
+        # as an improvement.
+        #
+        # Verification still RUNS: confidence, unverified claims and
+        # contradictions are computed, logged and shown. What stops is the
+        # silent replacement of the agent's answer by a machine the owner
+        # cannot see or argue with. He corrects the agent directly.
+        #
+        # Set true to restore rewriting; `revision_wins` then guards it.
+        "critic_rewrites_answer": False,
         "critic_threshold": 50,
         "critic_max_retries": 2,
         # Stop retrying once the request has already consumed this many

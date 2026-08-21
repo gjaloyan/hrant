@@ -13,6 +13,15 @@ from backend.models import VerificationResult
 from backend import answer_critic as ac
 
 
+# Rewriting is OFF by default since 2026-08-21 — the owner judges the
+# answer, not the verifier. The gate logic below is unchanged and still
+# governs WHEN a rewrite fires; it just runs behind that switch now, so
+# these tests turn it on to exercise what they were written for.
+@pytest.fixture(autouse=True)
+def _critic_rewriting_on(monkeypatch):
+    monkeypatch.setattr(ac, "rewriting_enabled", lambda: True)
+
+
 # ─── should_critique gates ────────────────────────────────────────
 
 

@@ -77,6 +77,16 @@ def content_confidence_bar() -> int:
     return _cfg("critic_threshold", _CONTENT_CONFIDENCE_BAR)
 
 
+def rewriting_enabled() -> bool:
+    """May the critic REPLACE the agent's answer?
+
+    Read live, so the owner can flip it from Settings without a restart —
+    the point of the flag is that HE decides, and a switch needing a
+    redeploy is not a decision he can make.
+    """
+    return bool(_cfg("critic_rewrites_answer", False))
+
+
 # `critic_max_retries` and `critic_retry_token_budget` are deliberately NOT
 # wired here. They name a RETRY LOOP — the legacy pipeline/critic.py mixin —
 # and the unified critic makes exactly ONE revision pass. Mapping them onto
@@ -125,6 +135,50 @@ def blind_retraction(revised: str, *, verify_calls: int) -> bool:
     return bool(revised) and verify_calls == 0 and looks_like_retraction(revised)
 
 
+# A revision must EARN its acceptance. The old rule was "any higher score
+# wins", and the score measures groundedness — how many claims are backed —
+# so deleting a claim raises it mechanically. Under that rule the optimal
+# revision is the empty one: an answer that asserts nothing scores near
+# 100. The critic was structurally paid to strip.
+#
+# Measured on the owner's turns, 2026-08-21: a revision scoring 42 against
+# 37 replaced an answer about the differences between two legal codes with
+# a list of things it would not claim. He asked what changed and received
+# an inventory of doubts, and the machine recorded it as an improvement.
+#
+# A large gain is allowed to shrink the answer — that is a real correction.
+# A small gain must keep the substance, or it is the score being gamed.
+SUBSTANTIAL_GAIN = 15
+MIN_RETENTION = 0.75
+
+
+def revision_wins(
+    *, old_score: int, new_score: int, old_text: str, new_text: str,
+) -> tuple[bool, str]:
+    """Should the revision replace the original? Returns (yes, why).
+
+    Deliberately ignores WHY the text shrank. A revision that grounds the
+    same content scores better without shrinking; one that shrank a lot
+    for a couple of points removed something the user wanted, whatever it
+    tells itself about honesty.
+    """
+    gain = int(new_score) - int(old_score)
+    if gain <= 0:
+        return False, f"no gain ({old_score} -> {new_score})"
+    old_len = len((old_text or "").strip())
+    new_len = len((new_text or "").strip())
+    retention = (new_len / old_len) if old_len else 1.0
+    if gain >= SUBSTANTIAL_GAIN:
+        return True, f"substantial gain (+{gain})"
+    if retention >= MIN_RETENTION:
+        return True, f"+{gain} and kept {retention:.0%} of the answer"
+    return False, (
+        f"+{gain} bought by cutting {1 - retention:.0%} of the answer — "
+        f"the score rises when claims are deleted, so a small gain that "
+        f"costs this much content is not an improvement"
+    )
+
+
 def content_contradictions(vr: VerificationResult) -> list[str]:
     """vr.contradictions minus the delivery-class markers."""
     out: list[str] = []
@@ -154,7 +208,16 @@ def should_critique(
     pending_question: bool = False,
 ) -> tuple[bool, str]:
     """(fire, reason). Content problems only — delivery failures are
-    the self-correction / lessons pipeline's job."""
+    the self-correction / lessons pipeline's job.
+
+    Returns False outright unless `verification.critic_rewrites_answer`
+    is on. Verification itself still runs and still reports; what the
+    flag controls is whether its findings may REPLACE what the agent
+    wrote. Off by default at the owner's instruction — he judges the
+    answer, and he cannot argue with a rewrite he never sees.
+    """
+    if not rewriting_enabled():
+        return False, "critic-rewrite-disabled"
     if supervisor_mode:
         return False, "supervisor-turn"
     if is_chat:
@@ -333,6 +396,12 @@ def revise_and_pick(
         except Exception:
             pass
 
-    if _content_score(new_vr) > _content_score(vr):
+    won, why = revision_wins(
+        old_score=_content_score(vr), new_score=_content_score(new_vr),
+        old_text=answer or "", new_text=revised,
+    )
+    if won:
+        log.info("answer_critic: revision accepted — %s", why)
         return revised, new_vr
+    log.warning("answer_critic: revision rejected — %s", why)
     return None, vr
