@@ -525,6 +525,13 @@ def send_to_speaker(target_speaker: str, text: str) -> tuple[bool, str]:
     The transport half of `deliver()`, split out so a scheduled agent task
     can hand over its ANSWER. Ledger bookkeeping stays in the caller: this
     function knows about chat ids and bots, not about row statuses.
+
+    NOTE FOR TESTING: this only works INSIDE the gateway process. The
+    Telegram bot lives there, and `CHANNELS._bots` is empty anywhere else,
+    so calling this from a standalone script returns "no telegram bot
+    running" no matter how healthy the real path is. Verify by scheduling
+    a row a couple of minutes out and letting the tick deliver it; a
+    separate-process dry run reports a failure that is not real.
     """
     # Validate BEFORE normalising. `normalize_speaker("")` returns
     # "webui:default", so the obvious guard lets an empty target become a
