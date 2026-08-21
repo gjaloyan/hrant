@@ -165,8 +165,22 @@ def proves_delivery(name: str) -> bool:
 # agent issued 17 near-identical `terminal_exec` probes + 2×
 # `load_skill` + 2× `load_tool_bundle` in one turn.
 
-_per_turn_call_cache: ContextVar[dict] = ContextVar(
-    "per_turn_call_cache", default={}
+# default=None, never a dict. A mutable default on a ContextVar is shared by
+# every context that never calls .set(), so a write from such a context lands
+# in the MODULE-LEVEL object and stays there for the life of the process.
+#
+# Measured 2026-08-21: the owner's turn fetched a legal code with
+# max_chars=12000, then asked for 30000 and 100000 and was told
+# "[DUPLICATE CALL] ... these exact arguments this turn" both times. The
+# arguments were not the same and it was not this turn — the entries came
+# from the shared default, written by an earlier turn whose execution path
+# (the critic, running in its own context) had never reset it. The agent was
+# handed a truncated document and told it had already asked.
+#
+# Any path that executes tools outside `run_unified` hits this: the critic,
+# skill reflection, scheduled tasks, autonomic levers, background jobs.
+_per_turn_call_cache: ContextVar[Optional[dict]] = ContextVar(
+    "per_turn_call_cache", default=None
 )
 
 
@@ -185,10 +199,31 @@ _per_turn_call_cache: ContextVar[dict] = ContextVar(
 
 NUDGE_THRESHOLD = 5
 
-_per_turn_nudge_state: ContextVar[dict] = ContextVar(
-    "per_turn_nudge_state",
-    default={"n_inspections": 0, "nudge_fired": False},
+_per_turn_nudge_state: ContextVar[Optional[dict]] = ContextVar(
+    "per_turn_nudge_state", default=None,
 )
+
+
+def _turn_cache() -> dict:
+    """This context's dedup cache, created on first use.
+
+    Binding lazily means a context that never called `reset` still gets its
+    OWN dict rather than writing into a module-level one shared with every
+    other turn in the process.
+    """
+    cache = _per_turn_call_cache.get()
+    if cache is None:
+        cache = {}
+        _per_turn_call_cache.set(cache)
+    return cache
+
+
+def _turn_nudge_state() -> dict:
+    state = _per_turn_nudge_state.get()
+    if state is None:
+        state = {"n_inspections": 0, "nudge_fired": False}
+        _per_turn_nudge_state.set(state)
+    return state
 
 
 def reset_per_turn_call_cache() -> None:
@@ -242,7 +277,7 @@ def _update_nudge_state_and_maybe_banner(
             return ""
     except Exception:
         pass
-    state = _per_turn_nudge_state.get()
+    state = _turn_nudge_state()
     if semantics.advances:
         state["n_inspections"] = 0
         state["nudge_fired"] = False
@@ -489,7 +524,7 @@ class ToolRegistry:
         # result + a "DUPLICATE CALL" hint so the LLM sees the
         # output but doesn't waste tokens / time re-running the
         # handler. The handler is NOT invoked for duplicates.
-        cache = _per_turn_call_cache.get()
+        cache = _turn_cache()
         cache_key = (name, _canonical_args(arguments))
         if name in NEVER_DEDUP:
             cache_key = None
