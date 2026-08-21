@@ -1096,6 +1096,18 @@ class TelegramBot:
         requester = row.get("requested_by") or ""
         if not requester.startswith("telegram:"):
             return
+        # A repeating row re-arms itself after every delivery, so previewing
+        # each occurrence would DM the owner the same card every single
+        # morning for as long as the series runs. He accepted the series
+        # once; the daily reminder of it is noise. Reported live: the card
+        # arrived alongside the digest it had just produced.
+        #
+        # The FIRST occurrence still previews, because that is the one he
+        # can look at and cancel before anything happens. A re-arm is
+        # recognisable by having been created by the delivery of its
+        # predecessor rather than by a turn.
+        if row.get("repeat") and (row.get("meta") or {}).get("rearmed_from"):
+            return
         chat_id = _contacts.chat_id_for_speaker(requester)
         if chat_id is None:
             return
@@ -1104,13 +1116,28 @@ class TelegramBot:
         due = row.get("due_at") or ""
         body = (row.get("text") or "").strip()
         preview = (body[:300] + "…") if len(body) > 300 else body
-        text = (
-            f"📅 <b>Scheduled message queued</b>\n\n"
-            f"To: <code>{_tg.escape_html(target)}</code>\n"
-            f"Due: <code>{_tg.escape_html(due)}</code>\n"
-            f"Body: <i>{_tg.escape_html(preview) or '(empty)'}</i>\n\n"
-            f"<i>Tap Cancel to drop it before delivery.</i>"
-        )
+        if row.get("kind") == "agent_task":
+            # An agent_task's body is an instruction to the agent, not a
+            # message to the owner — quoting it verbatim showed him
+            # `channel_updates(channel="COIN22T")` and told him to expect
+            # that as his morning text. Describe the arrangement instead.
+            every = {"daily": "every day", "weekly": "every week",
+                     "monthly": "every month"}.get(row.get("repeat") or "", "once")
+            text = (
+                f"⏰ <b>Recurring task set</b>\n\n"
+                f"I will do this <b>{_tg.escape_html(every)}</b>, "
+                f"next at <code>{_tg.escape_html(due)}</code>, "
+                f"and send you the result.\n\n"
+                f"<i>Tap Cancel to stop it.</i>"
+            )
+        else:
+            text = (
+                f"📅 <b>Scheduled message queued</b>\n\n"
+                f"To: <code>{_tg.escape_html(target)}</code>\n"
+                f"Due: <code>{_tg.escape_html(due)}</code>\n"
+                f"Body: <i>{_tg.escape_html(preview) or '(empty)'}</i>\n\n"
+                f"<i>Tap Cancel to drop it before delivery.</i>"
+            )
         buttons = (
             _tg.InlineButtonSet()
             .row(

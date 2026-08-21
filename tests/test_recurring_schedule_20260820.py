@@ -208,3 +208,41 @@ def test_the_check_in_kind_still_needs_a_tracker():
     from backend.tracker_checkin import run_check_in
     src = inspect.getsource(run_check_in)
     assert "tracker_id" in src and "return" in src
+
+
+# ── what the owner is shown ─────────────────────────────────────────
+
+def test_a_re_armed_row_records_where_it_came_from():
+    """The Telegram preview needs to tell a fresh series from its own
+    continuation; without it the owner gets the card every morning."""
+    row = {"id": "orig", "target_speaker": "telegram:1", "text": "digest",
+           "due_at": _iso(datetime.now(timezone.utc) - timedelta(days=1)),
+           "requested_by": "telegram:1", "kind": "agent_task",
+           "repeat": "daily", "meta": {}}
+    summary = {"sent": ["orig"], "failed": []}
+    sm._rearm(row, summary)
+    new_id = summary["rearmed"][0]
+    new_row = [r for r in sm.list_all() if r["id"] == new_id][0]
+    assert new_row["meta"]["rearmed_from"] == "orig"
+
+
+def test_the_preview_stays_quiet_for_a_re_armed_row():
+    """Reported live: the card arrived every morning beside the digest it
+    had just produced. The owner accepted the series once."""
+    import inspect
+    from backend import channels
+    src = inspect.getsource(channels)
+    assert 'get("rearmed_from")' in src
+    assert "accepted the series" in src
+
+
+def test_the_preview_does_not_quote_an_agent_task_body():
+    """The body of an agent_task is an instruction to the agent. Quoting it
+    showed the owner `channel_updates(channel="COIN22T")` and implied that
+    was the text he would receive each morning."""
+    import inspect
+    from backend import channels
+    src = inspect.getsource(channels)
+    assert 'row.get("kind") == "agent_task"' in src
+    assert "Recurring task set" in src
+    assert "instruction to the agent" in src

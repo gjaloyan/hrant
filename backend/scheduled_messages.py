@@ -561,13 +561,18 @@ def _rearm(row: dict, summary: dict) -> None:
     if not upcoming:
         return
     try:
+        meta = dict(row.get("meta") or {})
+        # Marks this row as a re-arm rather than something a turn created.
+        # The Telegram preview uses it to stay quiet: the owner accepted the
+        # series once and does not need the card every morning.
+        meta["rearmed_from"] = row.get("id") or ""
         nxt = schedule(
             target_speaker=row.get("target_speaker") or "",
             text=row.get("text") or "",
             due_at=upcoming,
             requested_by=row.get("requested_by") or "",
             kind=row.get("kind") or "message",
-            meta=dict(row.get("meta") or {}),
+            meta=meta,
             repeat=repeat,
         )
         summary.setdefault("rearmed", []).append(nxt["id"])
