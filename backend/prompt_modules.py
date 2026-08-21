@@ -100,6 +100,34 @@ Examples:
 """
 
 
+# ─── M10: Reach ───────────────────────────────────────────────────
+#
+# Two rules the owner dictated on 2026-08-21 after two measured
+# turns. Asked to subscribe to a channel, the agent said it could
+# not and told him to do it himself — instead of naming what it was
+# missing (a user account) and doing the reachable part meanwhile.
+# Asked how a forum thread solved his problem, it answered "there is
+# no solution there" when `fetch_url` had returned "[unreadable:
+# JavaScript shell ... Do NOT report the information as missing — it
+# was not read]". Four turns and $4.70 went into that thread.
+#
+# Always-on: both happened on ordinary turns with no special trigger.
+
+_M10_BODY = """# REACH
+
+## "Impossible" is not an answer
+
+Out of reach is a fact about what you are MISSING, and the missing thing has an owner. Name it and who provides it — an account, a credential, a permission, an install — then do the part you CAN and say so.
+  ✗ "I can't subscribe to that channel."
+  ✓ "I can't as a bot — give me an account or admin rights. Meanwhile I poll the public page every 10 min, losing nothing."
+Before writing that something cannot be done, name what you would need to do it. If you cannot name it, you have not looked hard enough.
+
+## Unread is not absent
+
+Blocked, timed out, a JS shell, an anti-bot page, a login wall — each is a fact about YOUR ACCESS, never about the content. Write "I could not read it, here is what I tried", never "there is nothing there". The tools name the failure; read what they returned.
+"""
+
+
 # ─── M2: Task Solver Policy ───────────────────────────────────────
 #
 # Loads for task + supervisor turns; chat turns skip it. Encodes
@@ -158,8 +186,9 @@ After every tool result, ask: "did this advance the endpoint?"
 
 - 5+ inspect calls with no execute call → STOP, state the blocker
   via `ask_user`. Inspection without execution is procrastination.
-- "I can't / не могу подтвердить" without ≥2 distinct tool attempts
-  → the bridge rewrites it into a "what I tried / needs" status.
+- "I can't" before >=2 distinct tool attempts — try a different
+  tool or different inputs first, then report what you tried and
+  what you would need. See REACH.
 - Same tool + same args in one turn → blocked; reuse the prior result.
 - Lecturing ("you could use ffmpeg") instead of acting — action verbs
   ("run", "send", "запусти") require a tool call BEFORE the answer.
@@ -584,6 +613,11 @@ MODULES: dict[str, Module] = {
         body=_M1_BODY,
         always_on=True,
     ),
+    "m10_reach": Module(
+        name="m10_reach",
+        body=_M10_BODY,
+        always_on=True,
+    ),
     "m2_task_solver": Module(
         name="m2_task_solver",
         body=_M2_BODY,
@@ -648,6 +682,9 @@ MODULES: dict[str, Module] = {
 #     for the rules that govern actual execution.
 DEFAULT_ORDER: list[str] = [
     "m1_core_behavior",
+    # Right after core behaviour: both rules it carries are about what to
+    # do when the work looks blocked, which is decided early in a turn.
+    "m10_reach",
     "m3_tool_use",
     "m5_skill_management",
     "m6_user_interaction",

@@ -29,11 +29,18 @@ import pytest
 def test_re_prompt_resilience_rule_present_in_modules():
     """V2 (2026-05-27): the re-prompt resilience rule lives in M2's
     'meta-cognitive refusal' anti-pattern. The legacy
-    `re_prompt_resilience` section was absorbed during the cutover."""
+    `re_prompt_resilience` section was absorbed during the cutover.
+
+    The assertion used to accept a Russian rendering of the phrase, which
+    contradicted the owner's English-only rule for prompts and made the
+    rule read as a two-language keyword list. The bar itself — two
+    distinct attempts before refusing — is what matters and is checked
+    here; M10 carries what to say instead of refusing."""
     from backend.prompt_modules import MODULES
     body = MODULES["m2_task_solver"].body
     # The forbidden phrase the LLM must self-recognise.
-    assert "не могу подтвердить" in body or "I can't" in body
+    assert "I can't" in body
+    assert "2 distinct tool attempts" in body
     # The acceptable escape hatch.
     assert "ask_user" in body
 

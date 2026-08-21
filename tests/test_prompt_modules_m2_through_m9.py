@@ -406,10 +406,21 @@ def test_default_prompt_under_global_budget():
     legacy 22 KB monolith. Current target ~14-15 KB after audit
     additions: M4 task/supervisor always-on (T2.1), M3 per-role
     delegate table (T2.6), M4 scope-preservation block (2026-05-28),
-    M4 prereq-recovery probe (2026-05-28). Hard cap 16 KB."""
+    M4 prereq-recovery probe (2026-05-28).
+
+    Cap raised 16 -> 17 KB on 2026-08-21 for M10 (838 chars), which the
+    owner dictated after two turns that cost him real money: an agent
+    that answered "I can't" instead of naming what it was missing, and
+    one that reported a thread as having no solution when the page had
+    never been read. Paying ~4% more preamble on every turn is cheap
+    against four turns and $4.70 spent on one unread page.
+
+    Partly funded by deleting M2's refusal-rewriter rule, which
+    described a mechanism removed on 2026-05-21 and carried Russian
+    text in a prompt the owner requires to be English."""
     from backend.prompt_modules import build_prompt
     out = build_prompt()
-    assert len(out) < 16_000, (
+    assert len(out) < 17_000, (
         f"default prompt grew to {len(out)} chars — splits or "
         "trims needed"
     )
