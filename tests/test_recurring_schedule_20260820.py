@@ -246,3 +246,79 @@ def test_the_preview_does_not_quote_an_agent_task_body():
     assert 'row.get("kind") == "agent_task"' in src
     assert "Recurring task set" in src
     assert "instruction to the agent" in src
+
+
+# ── the answer has to actually reach the user ───────────────────────
+
+def test_a_scheduled_task_delivers_its_answer(monkeypatch):
+    """The bug the owner reported: "i dont recive review".
+
+    The digest ran every morning, produced real text, and threw it away.
+    `Agent.run` RETURNS an AgentAnswer — the Telegram send lives in the
+    channel layer, after `run_tracked`. The first version assumed
+    otherwise in a comment and was never checked against a real inbox.
+    """
+    sent = {}
+
+    class _Answer:
+        answer = "Here is your digest."
+
+    class _Agent:
+        def run(self, text, **kw):
+            return _Answer()
+
+    monkeypatch.setattr(sm, "Agent", _Agent, raising=False)
+    import backend.agent as _ag
+    monkeypatch.setattr(_ag, "Agent", _Agent)
+    monkeypatch.setattr(sm, "send_to_speaker",
+                        lambda t, b: (sent.update({"to": t, "body": b}), (True, ""))[1])
+    sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
+                       "text": "do the digest"})
+    assert sent["to"] == "telegram:1"
+    assert sent["body"] == "Here is your digest."
+
+
+def test_a_task_that_produced_nothing_is_a_failure(monkeypatch):
+    """Silently delivering an empty message would look like the bug it
+    replaced. Raising stops the series where the owner can see it."""
+    class _Empty:
+        answer = "   "
+
+    class _Agent:
+        def run(self, text, **kw):
+            return _Empty()
+
+    import backend.agent as _ag
+    monkeypatch.setattr(_ag, "Agent", _Agent)
+    with pytest.raises(RuntimeError, match="no answer"):
+        sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
+                           "text": "t"})
+
+
+def test_a_delivery_failure_is_raised_not_swallowed(monkeypatch):
+    """Running and failing to deliver is indistinguishable from never
+    running, from the owner's side."""
+    class _Answer:
+        answer = "text"
+
+    class _Agent:
+        def run(self, text, **kw):
+            return _Answer()
+
+    import backend.agent as _ag
+    monkeypatch.setattr(_ag, "Agent", _Agent)
+    monkeypatch.setattr(sm, "send_to_speaker",
+                        lambda t, b: (False, "no chat_id"))
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
+                           "text": "t"})
+
+
+def test_the_transport_refuses_an_empty_body():
+    assert sm.send_to_speaker("telegram:1", "")[0] is False
+    assert sm.send_to_speaker("", "hi")[0] is False
+
+
+def test_the_transport_reports_an_unknown_channel():
+    ok, err = sm.send_to_speaker("carrierpigeon:1", "hi")
+    assert ok is False and "unsupported channel" in err

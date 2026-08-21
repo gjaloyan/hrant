@@ -519,14 +519,73 @@ def deliver_due() -> dict:
     return summary
 
 
-def run_agent_task(row: dict) -> None:
-    """Execute a scheduled row's text as an agent turn.
+def send_to_speaker(target_speaker: str, text: str) -> tuple[bool, str]:
+    """Push `text` to a speaker out of band. Returns (ok, error).
 
-    The answer reaches the user the same way any turn's answer does — the
-    agent is talking to them on their own channel — so nothing is mailed
-    from here. Raises on failure so the caller can mark the row failed and
-    stop the series; a standing task that quietly errors every morning is
-    worse than one that visibly stops.
+    The transport half of `deliver()`, split out so a scheduled agent task
+    can hand over its ANSWER. Ledger bookkeeping stays in the caller: this
+    function knows about chat ids and bots, not about row statuses.
+    """
+    # Validate BEFORE normalising. `normalize_speaker("")` returns
+    # "webui:default", so the obvious guard lets an empty target become a
+    # real address and posts the message into someone else's log. Caught
+    # by test once in run_agent_task, and reintroduced here — hence the
+    # comment rather than a second silent fix.
+    raw_target = str(target_speaker or "").strip()
+    text = (text or "").strip()
+    if not raw_target or not text:
+        return False, "empty target or text"
+    target = normalize_speaker(raw_target)
+    channel = target.split(":", 1)[0] if ":" in target else ""
+
+    if channel == "webui":
+        try:
+            from .conversation import CONVERSATION
+            CONVERSATION.add_turn(
+                "[scheduled delivery]", text, intent="scheduled",
+                is_chat=False, confidence=70, topics_used=[],
+                channel="scheduled", speaker_id=target, session_key=target,
+            )
+        except Exception as e:
+            return False, f"webui session-log append failed: {e}"
+        return True, ""
+
+    if channel != "telegram":
+        return False, f"unsupported channel: {channel}"
+
+    from .contacts import chat_id_for_speaker
+    chat_id = chat_id_for_speaker(target)
+    if chat_id is None:
+        return False, "no chat_id (recipient hasn't pinged the bot yet)"
+    try:
+        from .channels import CHANNELS
+        bot = next((b for b in CHANNELS._bots.values()
+                    if getattr(b, "_running", False)), None)
+        if bot is None:
+            return False, "no telegram bot running"
+        if not bot.send_text(text, chat_id=chat_id):
+            return False, "send_text returned False"
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+def run_agent_task(row: dict) -> None:
+    """Execute a scheduled row's text as an agent turn AND deliver its answer.
+
+    Delivering here is the whole point, and the first version got it wrong.
+    It carried a comment claiming "the answer reaches the user the same way
+    any turn's answer does" — it does not. `Agent.run` RETURNS an
+    AgentAnswer; the Telegram send lives in the channel layer, after
+    `run_tracked` returns. So the digest ran every morning, produced real
+    text, and threw it away. The owner received nothing and said so.
+
+    The dry run that "verified" this printed the answer into the operator's
+    own log, which is exactly the trap: the half that was visible worked.
+
+    Raises on failure so the caller marks the row failed and the series
+    stops; a standing task that quietly errors every morning is worse than
+    one that visibly stops.
     """
     from .agent import Agent
     # Validate BEFORE normalising: `normalize_speaker("")` returns
@@ -539,7 +598,13 @@ def run_agent_task(row: dict) -> None:
     target = normalize_speaker(raw_target)
     channel = target.split(":", 1)[0] if ":" in target else "webui"
     log.info("running scheduled agent task %s for %s", row.get("id"), target)
-    Agent().run(text, channel=channel, speaker_id=target)
+    answer = Agent().run(text, channel=channel, speaker_id=target)
+    body = (getattr(answer, "answer", "") or "").strip()
+    if not body:
+        raise RuntimeError("scheduled task produced no answer to deliver")
+    ok, err = send_to_speaker(target, body)
+    if not ok:
+        raise RuntimeError(f"task ran but delivery failed: {err}")
 
 
 def _rearm(row: dict, summary: dict) -> None:
