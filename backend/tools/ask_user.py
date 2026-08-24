@@ -343,6 +343,45 @@ STORE = QuestionStore()
 # ─── Telegram callback dispatcher (q: prefix) ─────────────────────
 
 
+def _resume_message(q, chosen_label: str, choice_id: str) -> str:
+    """The task text for the turn that runs after the user picks.
+
+    Carries the QUESTION, not just the answer. It used to be the bare
+    string "My choice: <label>", which leaves the resumed turn with a
+    reply and no idea what it replied to — and the resume runs with no
+    session_key, so the conversation block is keyed differently from the
+    Telegram thread and may not contain the exchange either.
+
+    Measured 2026-08-23. Asked what bankruptcy meant for his own debts and
+    salary, the agent offered "the same example" / "a different situation".
+    He tapped "the same example", and the next turn asked him what the
+    choice "the same example" referred to, offering "model or design" and
+    "text or wording". Two questions in a row, the second about the first,
+    and the actual request never touched.
+
+    Self-contained on purpose: it holds regardless of what history
+    retrieval returns.
+    """
+    picked = chosen_label or f"option {choice_id}"
+    lines = [
+        f'You asked me: "{(getattr(q, "question", "") or "").strip()}"',
+        f"I answered: {picked}",
+    ]
+    why = (getattr(q, "why", "") or "").strip()
+    if why:
+        lines.append(f"(you needed this because: {why})")
+    for opt in (getattr(q, "options", None) or []):
+        if opt.get("id") == choice_id and (opt.get("description") or "").strip():
+            lines.append(f"That option meant: {opt['description'].strip()}")
+            break
+    lines.append(
+        "Now continue the task this question was blocking. Do NOT ask what "
+        "my answer refers to — it refers to the question above. Do not ask "
+        "the same thing again in different words."
+    )
+    return chr(10).join(lines)
+
+
 def _deliver_resume_dm(chat_id, text: str) -> bool:
     """Send a button-tap resume-turn answer back to the asker's chat.
 
@@ -417,10 +456,7 @@ def _register_telegram_callback() -> None:
             if opt.get("id") == choice:
                 chosen_label = opt.get("label") or ""
                 break
-        user_msg = (
-            f"My choice: {chosen_label}" if chosen_label
-            else f"My choice id: {choice}"
-        )
+        user_msg = _resume_message(marked, chosen_label, choice)
         # Fire the next turn on a background thread so the callback
         # ACK lands in Telegram fast (sub-100ms) — the agent answer
         # arrives as a separate reply_text after the run completes.

@@ -261,12 +261,16 @@ async def answer_question(req: AnswerQuestionRequest, request: Request):
                     labels.append(opt.get("label") or oid)
                     break
         label_for_choice = ", ".join(labels)
+    # Same builder the Telegram callback uses: the resumed turn has to see
+    # the QUESTION, not just the answer. A bare "My choice: X" left the
+    # agent asking what X referred to — measured on Telegram 2026-08-23,
+    # and this path had the identical shape.
+    from ..tools.ask_user import _resume_message
     if text:
-        user_message = f"My answer (free text): {text}"
-    elif label_for_choice:
-        user_message = f"My choice: {label_for_choice}"
+        user_message = _resume_message(q, f"(free text) {text}", "")
     else:
-        user_message = f"My choice: {choice or '(none)'}"
+        user_message = _resume_message(
+            q, label_for_choice, (choice or "").split(",")[0].strip())
     # Run the new turn synchronously and return its result. Same
     # pattern as /api/chat but without SSE streaming — the answer
     # is delivered as a flat JSON response so the UI can render it
