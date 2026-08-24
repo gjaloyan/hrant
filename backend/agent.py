@@ -656,6 +656,11 @@ class Agent(
         from . import roles as _roles
         self._role: str = _roles.role_of(self._speaker_id)
         self._role_token = _roles.set_current_speaker(self._speaker_id)
+        # Same reason as the speaker above: a nested handler (ask_user)
+        # needs to record WHICH conversation thread it is serving, and
+        # threading it through every signature is not worth it.
+        from .sessions import set_current_session_key as _set_skey
+        self._skey_token = _set_skey(self._session_key)
         from .turn_policy import begin_turn as _policy_begin
         from .turn_policy import reset_turn as _policy_reset
         _policy_token = _policy_begin(audit_mode=audit_mode)
@@ -683,6 +688,11 @@ class Agent(
             _policy_reset(_policy_token)
             try:
                 _roles.reset_current_speaker(self._role_token)
+                try:
+                    from .sessions import reset_current_session_key as _rst
+                    _rst(self._skey_token)
+                except Exception:
+                    pass
             except Exception:
                 pass
             # Re-entrancy state restore — same shape the legacy

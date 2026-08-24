@@ -131,6 +131,12 @@ class PendingQuestion:
     asker_speaker_id: str
     asker_chat_id: Optional[int]
     channel: str
+    # The conversation thread the question was asked in. Without it the
+    # resume turn ran with no session_key, so its RECENT CONVERSATION block
+    # was keyed by speaker alone and did not contain the exchange the
+    # question belonged to. Defaulted so questions stored before
+    # 2026-08-24 still load.
+    asker_session_key: str = ""
     # Audit trail. Empty until the user picks.
     answered: bool = False
     answer_at: Optional[float] = None
@@ -343,6 +349,15 @@ STORE = QuestionStore()
 # ─── Telegram callback dispatcher (q: prefix) ─────────────────────
 
 
+def _live_skey() -> str:
+    """The thread this turn is serving, when the caller did not name one."""
+    try:
+        from ..sessions import current_session_key
+        return (current_session_key() or "").strip()
+    except Exception:
+        return ""
+
+
 def _resume_message(q, chosen_label: str, choice_id: str) -> str:
     """The task text for the turn that runs after the user picks.
 
@@ -473,6 +488,11 @@ def _register_telegram_callback() -> None:
                     user_msg,
                     channel="telegram",
                     speaker_id=speaker,
+                    # The thread the question was asked in. Without it the
+                    # resume turn read a different conversation than the one
+                    # it was continuing.
+                    session_key=(getattr(marked, "asker_session_key", "")
+                                 or None),
                 )
                 # Deliver the answer back to the asker's chat. Reuses the
                 # bot's `_send_with_buttons` (same path the supervisor's
@@ -523,6 +543,7 @@ def create_question(
     default_option_id: str = "",
     asker_speaker_id: str = "",
     asker_chat_id: Optional[int] = None,
+    asker_session_key: str = "",
     channel: str = "",
 ) -> PendingQuestion:
     """Build + persist a PendingQuestion. The tool handler calls
@@ -568,6 +589,7 @@ def create_question(
         default_option_id=(default_option_id or "").strip(),
         asker_speaker_id=(asker_speaker_id or "").strip(),
         asker_chat_id=asker_chat_id,
+        asker_session_key=(asker_session_key or "").strip() or _live_skey(),
         channel=(channel or "").strip(),
     )
     STORE.put(q)

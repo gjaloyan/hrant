@@ -142,3 +142,82 @@ def test_the_webui_answer_endpoint_uses_the_builder():
     src = inspect.getsource(chat_api)
     assert "_resume_message(" in src
     assert 'user_message = f"My choice: {label_for_choice}"' not in src
+
+
+# ── the resume continues the SAME conversation thread ───────────────
+
+def test_a_question_records_the_thread_it_was_asked_in(monkeypatch):
+    """Without this the resume had no session_key at all."""
+    from backend.sessions import (
+        reset_current_session_key, set_current_session_key,
+    )
+    from backend.tools import ask_user as au
+    tok = set_current_session_key("telegram:bot:chat:user")
+    try:
+        q = au.create_question(question="Q?", options=[{"label": "A"}, {"label": "B"}],
+                   asker_speaker_id="telegram:1")
+    finally:
+        reset_current_session_key(tok)
+    assert q.asker_session_key == "telegram:bot:chat:user"
+
+
+def test_an_explicit_thread_beats_the_ambient_one(monkeypatch):
+    from backend.sessions import (
+        reset_current_session_key, set_current_session_key,
+    )
+    from backend.tools import ask_user as au
+    tok = set_current_session_key("ambient")
+    try:
+        q = au.create_question(question="Q?", options=[{"label": "A"}, {"label": "B"}],
+                   asker_speaker_id="telegram:1",
+                   asker_session_key="explicit")
+    finally:
+        reset_current_session_key(tok)
+    assert q.asker_session_key == "explicit"
+
+
+def test_a_question_asked_outside_a_turn_simply_has_none():
+    """No ambient thread is a real state — it must not raise or invent."""
+    from backend.tools import ask_user as au
+    q = au.create_question(question="Q?", options=[{"label": "A"}, {"label": "B"}],
+               asker_speaker_id="telegram:1")
+    assert q.asker_session_key == ""
+
+
+def test_questions_stored_before_the_field_existed_still_load():
+    """The store is file-backed; old JSON has no `asker_session_key`."""
+    from backend.tools.ask_user import PendingQuestion
+    q = PendingQuestion.from_dict({
+        "question_id": "q-old", "asked_at": 0.0, "question": "Q?",
+        "why": "", "header": "", "options": [], "multi_select": False,
+        "default_option_id": "", "asker_speaker_id": "telegram:1",
+        "asker_chat_id": None, "channel": "telegram",
+    })
+    assert q.asker_session_key == ""
+
+
+def test_both_resume_paths_pass_the_thread():
+    import inspect
+    from backend.api import chat as chat_api
+    from backend.tools import ask_user as au
+    assert "asker_session_key" in inspect.getsource(au)
+    assert 'session_key=(getattr(marked, "asker_session_key", "")' \
+        in inspect.getsource(au)
+    assert "asker_session_key" in inspect.getsource(chat_api)
+
+
+def test_agent_run_binds_the_real_thread_not_a_placeholder():
+    """`ask_user` reads the thread ambiently, so what matters is that
+    Agent.run binds THIS turn's key.
+
+    Asserting only that the calls appear survived replacing the argument
+    with None — verified by making that change and watching this file stay
+    green. So the assertion names the value.
+    """
+    import inspect
+    from backend import agent as agent_mod
+    src = inspect.getsource(agent_mod)
+    assert "_set_skey(self._session_key)" in src, (
+        "the binding must carry the turn's own session key")
+    assert "reset_current_session_key" in src, (
+        "leaving it bound would attribute the next turn to this thread")

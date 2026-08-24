@@ -286,6 +286,9 @@ async def answer_question(req: AnswerQuestionRequest, request: Request):
             None,
             channel="webui" if q.channel == "webui" else "telegram",
             speaker_id=speaker,
+            # Continue the thread the question was asked in, not a new one
+            # keyed by speaker alone.
+            session_key=(getattr(q, "asker_session_key", "") or None),
         ),
     )
     out = res.model_dump()

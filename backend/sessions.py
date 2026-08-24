@@ -22,6 +22,37 @@ from .paths import write_atomic_json
 DEFAULT_SPEAKER = "webui:default"
 
 
+import contextvars
+
+
+# The conversation thread the current turn belongs to. Mirrors
+# `roles.current_speaker`: bound by `Agent.run` so a deeply nested handler
+# can record which thread it is serving without every signature threading
+# it through.
+#
+# Added 2026-08-24 for `ask_user`. A question stored the asker's speaker
+# but not their thread, so the turn that resumed after the owner tapped an
+# option called `agent.run(...)` with no session_key — the conversation
+# block was then keyed `telegram:<user>` while the exchange lived under
+# `telegram:<bot>:<chat>:<user>`, and the resumed turn could not see the
+# question it had just asked.
+_current_session_key: "contextvars.ContextVar[str | None]" = (
+    contextvars.ContextVar("current_session_key", default=None)
+)
+
+
+def set_current_session_key(session_key: str | None) -> "contextvars.Token":
+    return _current_session_key.set(session_key)
+
+
+def reset_current_session_key(token: "contextvars.Token") -> None:
+    _current_session_key.reset(token)
+
+
+def current_session_key() -> "str | None":
+    return _current_session_key.get()
+
+
 def describe_session_key(session_key: str | None, speaker_id: str | None = None) -> str:
     """Render a short human-readable label for a session_key.
 
