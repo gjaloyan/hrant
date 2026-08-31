@@ -149,11 +149,58 @@ def test_the_specialist_is_consulted_only_for_the_language_it_covers():
     assert tr.SECOND_OPINION_FOR == ("hy",)
 
 
-def test_confidence_decides_between_the_two_readings():
+def test_script_not_confidence_decides_between_the_readings():
+    """Confidence was the first rule and it is measurably wrong here: the
+    base model's Armenian failures are fluent, high-confidence English
+    ("Nice to hide and has gun, miss") and outscore a correct Armenian
+    transcript every time. Script separates them cleanly."""
     import inspect
     src = inspect.getsource(tr.Transcriber._tx_faster_whisper)
     assert "_second_opinion" in src
-    assert "alt_score > _avg_logprob(segments)" in src
+    assert "_prefer_second_opinion(text, alt)" in src
+    assert "alt_score > _avg_logprob" not in src
+
+
+def test_a_russian_note_is_never_overridden_by_the_specialist():
+    """The specialist writes Russian phonetically in Armenian letters, so
+    preferring it on Armenian output alone would wreck every Russian note.
+    Cyrillic from the base model is the guard."""
+    assert tr._prefer_second_opinion(
+        "Нужно добавить армянский язык", "Նուժնը դաբանից արմանսկի") is False
+
+
+def test_armenian_audio_takes_the_specialist():
+    """The measured case: base heard English, specialist heard Armenian."""
+    assert tr._prefer_second_opinion(
+        "Nice to hide and has gun, miss.", "Իս դու հայերեն հասկանում ես") is True
+
+
+def test_agreement_leaves_the_base_reading_alone():
+    assert tr._prefer_second_opinion("Իս դու", "Իս դու հայերեն") is False
+
+
+def test_a_non_armenian_second_opinion_is_ignored():
+    assert tr._prefer_second_opinion("hello", "hello there") is False
+
+
+def test_the_specialist_runs_through_transformers_not_faster_whisper():
+    """It ships transformers weights and no CTranslate2 build; the
+    faster-whisper path raised "Unable to open file model.bin" and the
+    swallow hid it through a whole round of live testing."""
+    import inspect
+    src = inspect.getsource(tr.Transcriber._second_opinion)
+    assert "from transformers import pipeline" in src
+    # An actual construction, not the comment explaining why there isn't
+    # one — the first version of this assertion caught its own docstring.
+    assert "= WhisperModel(" not in src
+    assert "from faster_whisper import WhisperModel" not in src
+
+
+def test_a_broken_specialist_is_logged_loudly():
+    """A capability installed but never running has to be visible."""
+    import inspect
+    src = inspect.getsource(tr.Transcriber._second_opinion)
+    assert "log.warning" in src
 
 
 def test_an_empty_reading_loses_to_anything_real():

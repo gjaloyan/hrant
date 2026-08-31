@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Optional
@@ -148,10 +149,56 @@ def save_config(cfg: dict) -> dict:
 
 def _avg_logprob(segments) -> float:
     """Mean per-segment confidence. -99 for an empty result so anything
-    real beats silence."""
+    real beats silence. Kept for logging; it is NOT how the two readings
+    are compared — see `_prefer_second_opinion`."""
     vals = [getattr(s, "avg_logprob", None) for s in (segments or [])]
     vals = [v for v in vals if isinstance(v, (int, float))]
     return (sum(vals) / len(vals)) if vals else -99.0
+
+
+_ARMENIAN = re.compile(r"[԰-֏]")
+_CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+
+
+def _prefer_second_opinion(base_text: str, alt_text: str) -> bool:
+    """Take the specialist's reading instead of the base model's?
+
+    Decided on SCRIPT, not on confidence. Averaged log-probability was the
+    first rule and it is measurably wrong here: the base model's Armenian
+    failures are not hesitant, they are fluent English sentences with high
+    confidence ("Nice to hide and has gun, miss"), and they outscore a
+    correct Armenian transcript every time.
+
+    Script is unambiguous on this pair. The base model never emits Armenian
+    letters — across every note measured it produced English, Russian,
+    Turkish or German. The specialist emits them always, including when it
+    is wrong (it renders Russian phonetically in Armenian script). So
+    Armenian out of the specialist AND none out of the base means the audio
+    was Armenian and only one of them heard it.
+
+    The specialist alone is not enough to decide, because it renders
+    RUSSIAN phonetically in Armenian letters too -- "Ե՛ ադաբրեու, մոշ
+    պիստուպաց" for "Я одобряю, можешь приступать". Preferring it on
+    Armenian output alone would wreck every Russian note.
+
+    Cyrillic out of the base model is the guard. When the base produces
+    Cyrillic it heard Russian and heard it correctly; that is its strong
+    case and it keeps it. Only when the base produced LATIN -- which on
+    this deployment's Armenian audio has meant English, Turkish or German
+    hallucinations, every time measured -- does the specialist's Armenian
+    win.
+
+    The assumption worth stating: English-only voice notes are rare here.
+    If that changes, a real English note would be overridden, and the
+    discriminator has to become something better than script.
+    """
+    alt = (alt_text or "").strip()
+    if not alt or not _ARMENIAN.search(alt):
+        return False
+    base = base_text or ""
+    if _ARMENIAN.search(base) or _CYRILLIC.search(base):
+        return False
+    return True
 
 
 class Transcriber:
@@ -323,9 +370,9 @@ class Transcriber:
             _covered = [lg for lg in SECOND_OPINION_FOR
                         if lg in (expected_languages() or SECOND_OPINION_FOR)]
             if _covered and SECOND_OPINION_MODEL:
-                alt, alt_score = self._second_opinion(path, _covered[0])
-                if alt and alt_score > _avg_logprob(segments):
-                    log.info("second opinion (%s) won: %.3f", language, alt_score)
+                alt, _ = self._second_opinion(path, _covered[0])
+                if _prefer_second_opinion(text, alt):
+                    log.info("second opinion (%s) taken", _covered[0])
                     return alt
             return text or None
         finally:
@@ -343,21 +390,38 @@ class Transcriber:
         second reading is an improvement, never a dependency.
         """
         try:
-            from faster_whisper import WhisperModel
+            # transformers, not faster-whisper. The model ships plain
+            # transformers weights and no CTranslate2 build, so
+            # `WhisperModel(...)` raises "Unable to open file model.bin" —
+            # which the except below caught silently for a whole round of
+            # live testing while the base model's English nonsense won by
+            # default. Converting was the alternative; it needs torch and
+            # ctranslate2 in one interpreter and this box has them in two.
+            from transformers import pipeline
             with self._lock:
-                if getattr(self, "_fw_alt", None) is None:
-                    self._fw_alt = WhisperModel(
-                        SECOND_OPINION_MODEL, device="cpu",
-                        compute_type=getattr(self, "_fw_compute",
-                                             DEFAULT_FASTER_WHISPER_COMPUTE),
+                if getattr(self, "_alt_asr", None) is None:
+                    self._alt_asr = pipeline(
+                        "automatic-speech-recognition",
+                        model=SECOND_OPINION_MODEL, device=-1,
                     )
-            segs, _ = self._fw_alt.transcribe(
-                path, language=language, vad_filter=True)
-            segs = list(segs)
-            text = " ".join(x.text.strip() for x in segs).strip()
-            return (text or None), _avg_logprob(segs)
+            out = self._alt_asr(
+                path,
+                generate_kwargs={"language": language, "task": "transcribe"},
+            )
+            text = ((out or {}).get("text") or "").strip()
+            # No per-segment score from this path, and none is needed:
+            # the choice is made on script, not confidence.
+            return (text or None), 0.0
         except Exception as e:
-            log.debug("second opinion unavailable: %s", e)
+            # WARNING, not debug. This swallow is correct — a second
+            # reading must never break a transcript — but it hid a
+            # configuration error for a whole round of live testing: the
+            # model ships transformers weights, faster-whisper wants a
+            # CTranslate2 build, and every call failed silently while the
+            # base model's English nonsense won by default. A capability
+            # that is installed but never runs has to be loud.
+            log.warning("second opinion unavailable (%s): %s",
+                        SECOND_OPINION_MODEL, e)
             return None, -99.0
 
     def _try_local_whisper(self, cfg: dict) -> bool:
