@@ -2183,6 +2183,7 @@ def _schedule_message_handler(
     from .contacts import resolve
     from .roles import current_role, current_speaker, is_owner
     from .scheduled_messages import schedule
+    from .sessions import normalize_speaker as _norm_speaker
 
     requester = current_speaker() or ""
     role = current_role()
@@ -2212,13 +2213,32 @@ def _schedule_message_handler(
             ),
         }, ensure_ascii=False)
 
-    # Trusted gate: trusted users can only schedule TO the owner.
-    if role == "trusted" and not is_owner(resolved):
+    # Trusted gate. A trusted user may schedule to the OWNER or to
+    # THEMSELVES; anyone else is refused.
+    #
+    # Self-targeting was missing until 2026-08-31 and it is the whole point
+    # of the permission. The owner granted his brother trusted access with
+    # "дай разрешение чтобы он мог установить напоминание"; the brother then
+    # asked, four times in two languages, to be reminded to call his dentist,
+    # and every attempt came back "trusted users may only schedule messages
+    # to the owner". The grant did the thing it was named for and not the
+    # thing it was asked for.
+    #
+    # The rule this gate exists for is unaffected: what must not happen is a
+    # trusted user sending messages to THIRD parties. A reminder someone sets
+    # for themselves is not outbound traffic to anyone else.
+    _requester_norm = _norm_speaker(requester)
+    if (
+        role == "trusted"
+        and not is_owner(resolved)
+        and _norm_speaker(resolved) != _requester_norm
+    ):
         return json.dumps({
             "ok": False,
             "error": (
-                "refused: trusted users may only schedule messages to "
-                "the owner. Resolved target is not an owner speaker."
+                "refused: trusted users may schedule messages to the owner "
+                "or to themselves, not to other people. Resolved target is "
+                "neither."
             ),
         }, ensure_ascii=False)
 

@@ -213,26 +213,35 @@ def _register_sched_callback() -> None:
     dispatcher. callback_data shapes:
       - sched:cancel:<id>  cancel a pending scheduled message
 
-    The button is owner-only; other clickers get a refusal toast."""
+    A clicker may cancel their OWN reminders; the owner may cancel any.
+    It used to be owner-only, which meant a trusted user received a
+    reminder card with a Cancel button that answered "only the owner can
+    manage scheduled messages" — his own reminder, and not his to stop.
+    """
     from . import tg_interactive as _tg
-    from . import roles as _roles_mod
 
     def _handler(parts, ctx):
         if not parts:
             return _tg.CallbackResult(ok=False, toast="malformed callback")
         clicker_id = ctx.get("clicker_speaker_id") or ""
-        if not _roles_mod.is_owner(clicker_id):
-            return _tg.CallbackResult(
-                ok=False,
-                toast="only the owner can manage scheduled messages",
-                clear_keyboard=False,
-            )
         action = parts[0]
         if action == "cancel":
             if len(parts) < 2:
                 return _tg.CallbackResult(ok=False, toast="malformed cancel")
             mid = parts[1]
-            ok = cancel(mid)
+            # Authorisation lives in `cancel` so every caller shares one
+            # rule: yours, or anyone's if you are the owner.
+            # Distinguish "not yours" from "not there". Collapsing them
+            # tells someone their own reminder vanished when it is simply
+            # someone else's.
+            _row = next((r for r in _read_all() if r.get("id") == mid), None)
+            if _row is not None and not may_manage(_row, clicker_id):
+                return _tg.CallbackResult(
+                    ok=False,
+                    toast="not your reminder — only its owner can cancel it",
+                    clear_keyboard=False,
+                )
+            ok = cancel(mid, by_speaker=clicker_id)
             if not ok:
                 return _tg.CallbackResult(
                     ok=False,
@@ -272,13 +281,46 @@ def list_all() -> list[dict]:
     return _read_all()
 
 
-def cancel(message_id: str) -> bool:
-    """Mark a pending message as cancelled. Returns True if found
-    and was pending."""
+def may_manage(row: dict, speaker_id: str) -> bool:
+    """May this speaker cancel/see that row?
+
+    Owners may manage anything. Everyone else may manage only what they
+    requested or what is addressed to them — reminders are per-person, so
+    one user must neither cancel nor read another's.
+
+    Added 2026-08-31 with the owner's rule in his words: "notifications
+    need to work isolated for each user."
+    """
+    from .roles import is_owner
+    who = normalize_speaker(speaker_id or "")
+    if not who:
+        return False
+    if is_owner(who):
+        return True
+    return who in {
+        normalize_speaker(row.get("requested_by") or ""),
+        normalize_speaker(row.get("target_speaker") or ""),
+    }
+
+
+def cancel(message_id: str, *, by_speaker: Optional[str] = None) -> bool:
+    """Mark a pending message as cancelled. Returns True if found,
+    pending, and `by_speaker` is allowed to manage it.
+
+    `by_speaker=None` means an internal caller with no user behind it
+    (the re-arm path, tests, migrations) and skips the check; a request
+    that came from a person must always pass one.
+    """
     with _LEDGER_LOCK:
         rows = _read_all()
         for r in rows:
             if r.get("id") == message_id and r.get("status") == "pending":
+                if by_speaker is not None and not may_manage(r, by_speaker):
+                    log.info(
+                        "cancel refused: %s may not manage row %s",
+                        by_speaker, message_id,
+                    )
+                    return False
                 r["status"] = "cancelled"
                 _write_all(rows)
                 return True

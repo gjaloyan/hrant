@@ -113,7 +113,10 @@ def test_sched_cancel_refuses_non_owner(isolated_sched):
         ctx={"clicker_speaker_id": "telegram:222"},
     )
     assert res.ok is False
-    assert "owner" in (res.toast or "").lower()
+    # Reworded 2026-08-31. The rule is no longer "only the owner of the bot"
+    # but "only the owner OF THIS REMINDER" — a trusted user may cancel their
+    # own, and telegram:222 is neither requester nor recipient here.
+    assert "not your reminder" in (res.toast or "").lower()
     r = next(x for x in isolated_sched._read_all() if x["id"] == row["id"])
     assert r["status"] == "pending"  # unchanged
 
