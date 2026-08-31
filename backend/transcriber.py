@@ -147,6 +147,37 @@ def save_config(cfg: dict) -> dict:
     return cfg
 
 
+_ASR_TIMEOUT = 240
+_asr_exe: Optional[str] = None
+
+
+def _asr_interpreter() -> str:
+    """An interpreter that has transformers. Probed once per process.
+
+    An explicit override first, so a box with the dependencies somewhere
+    unusual is configuration rather than a code change.
+    """
+    global _asr_exe
+    if _asr_exe:
+        return _asr_exe
+    import shutil
+    import subprocess
+    import sys as _sys
+    candidates = [os.environ.get("HRANT_ASR_PYTHON", "").strip()]
+    candidates += [shutil.which(n) for n in ("python3", "python")]
+    candidates.append(_sys.executable)
+    for exe in [c for c in candidates if c]:
+        try:
+            r = subprocess.run([exe, "-c", "import transformers"],
+                               capture_output=True, timeout=120)
+        except Exception:
+            continue
+        if r.returncode == 0:
+            _asr_exe = exe
+            return exe
+    return ""
+
+
 def _avg_logprob(segments) -> float:
     """Mean per-segment confidence. -99 for an empty result so anything
     real beats silence. Kept for logging; it is NOT how the two readings
@@ -390,25 +421,38 @@ class Transcriber:
         second reading is an improvement, never a dependency.
         """
         try:
-            # transformers, not faster-whisper. The model ships plain
+            # A SUBPROCESS, not an in-process call. The model ships plain
             # transformers weights and no CTranslate2 build, so
-            # `WhisperModel(...)` raises "Unable to open file model.bin" —
-            # which the except below caught silently for a whole round of
-            # live testing while the base model's English nonsense won by
-            # default. Converting was the alternative; it needs torch and
-            # ctranslate2 in one interpreter and this box has them in two.
-            from transformers import pipeline
-            with self._lock:
-                if getattr(self, "_alt_asr", None) is None:
-                    self._alt_asr = pipeline(
-                        "automatic-speech-recognition",
-                        model=SECOND_OPINION_MODEL, device=-1,
-                    )
-            out = self._alt_asr(
-                path,
-                generate_kwargs={"language": language, "task": "transcribe"},
+            # faster-whisper cannot open it; and the agent's venv has
+            # neither transformers nor torch, so importing it here fails
+            # with "No module named 'transformers'". That failure was
+            # invisible until the warning below was raised from debug —
+            # a 1.6 GB model sat unused through a whole round of live
+            # testing while the base model's English nonsense won by
+            # default.
+            #
+            # Same arrangement as the captcha reader, for the same reason:
+            # run it where the dependencies already are, and pay ~800 MB
+            # of residency for nobody.
+            import json as _json
+            import subprocess
+            from pathlib import Path as _P
+            worker = _P(__file__).with_name("asr_worker.py")
+            exe = _asr_interpreter()
+            if not exe or not worker.is_file():
+                raise RuntimeError(
+                    f"no interpreter with transformers (worker={worker})")
+            r = subprocess.run(
+                [exe, str(worker)],
+                input=_json.dumps({"path": path, "model": SECOND_OPINION_MODEL,
+                                   "language": language}),
+                capture_output=True, text=True, timeout=_ASR_TIMEOUT,
             )
-            text = ((out or {}).get("text") or "").strip()
+            payload = _json.loads((r.stdout or "").strip() or "{}")
+            if not payload.get("ok"):
+                raise RuntimeError(payload.get("error")
+                                   or (r.stderr or "")[-200:] or "no output")
+            text = (payload.get("text") or "").strip()
             # No per-segment score from this path, and none is needed:
             # the choice is made on script, not confidence.
             return (text or None), 0.0

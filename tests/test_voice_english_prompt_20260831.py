@@ -183,17 +183,35 @@ def test_a_non_armenian_second_opinion_is_ignored():
     assert tr._prefer_second_opinion("hello", "hello there") is False
 
 
-def test_the_specialist_runs_through_transformers_not_faster_whisper():
-    """It ships transformers weights and no CTranslate2 build; the
-    faster-whisper path raised "Unable to open file model.bin" and the
-    swallow hid it through a whole round of live testing."""
+def test_the_specialist_runs_out_of_process():
+    """Two dependency walls, found one after the other in live runs. The
+    model has no CTranslate2 build, so faster-whisper cannot open it; and
+    the agent's venv has neither transformers nor torch, so importing it
+    in-process fails too. It runs where the dependencies already are —
+    the same arrangement the captcha reader uses."""
     import inspect
     src = inspect.getsource(tr.Transcriber._second_opinion)
-    assert "from transformers import pipeline" in src
-    # An actual construction, not the comment explaining why there isn't
-    # one — the first version of this assertion caught its own docstring.
+    assert "subprocess.run" in src
+    assert "asr_worker.py" in src
     assert "= WhisperModel(" not in src
-    assert "from faster_whisper import WhisperModel" not in src
+
+
+def test_the_worker_is_free_of_backend_imports():
+    """It is executed by a different interpreter; a `backend` import would
+    fail there for reasons that have nothing to do with speech."""
+    from pathlib import Path
+    src = (Path(tr.__file__).with_name("asr_worker.py")
+           .read_text(encoding="utf-8"))
+    assert "from backend" not in src
+    assert "from ." not in src
+
+
+def test_the_interpreter_probe_accepts_an_override():
+    """A box with the dependencies somewhere unusual is configuration,
+    not a code change."""
+    import inspect
+    src = inspect.getsource(tr._asr_interpreter)
+    assert "HRANT_ASR_PYTHON" in src
 
 
 def test_a_broken_specialist_is_logged_loudly():
