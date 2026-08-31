@@ -387,6 +387,44 @@ def _history_dir() -> Path:
     return _self_mods_dir() / "history"
 
 
+def patch_state(patch_path: Path) -> str:
+    """Is this patch already upstream, still applicable, or in conflict?
+
+    Returns "upstream" | "applies" | "conflicts".
+
+    `git apply --check --reverse` succeeding means the content the patch
+    adds is ALREADY in the tree: it could be undone, so it is present.
+    That is the precise question to ask after a pull — did the change get
+    into the repository by other means?
+
+    Used to stop `hrant update` from throwing away work that is not in git
+    yet. An agent fix that survives only until the next deploy is not a fix
+    the agent made; on 2026-08-31 one survived solely because a human
+    noticed and committed it by hand.
+    """
+    if not patch_path.exists():
+        return "conflicts"
+    try:
+        rev = _git("apply", "--check", "--reverse", str(patch_path),
+                   check=False)
+        if rev.returncode == 0:
+            return "upstream"
+        fwd = _git("apply", "--check", str(patch_path), check=False)
+        return "applies" if fwd.returncode == 0 else "conflicts"
+    except Exception as e:
+        log.warning("patch_state failed for %s: %s", patch_path, e)
+        return "conflicts"
+
+
+def reapply_patch(patch_path: Path) -> bool:
+    """Put a still-needed patch back after a pull. False on any failure."""
+    try:
+        return _git("apply", str(patch_path), check=False).returncode == 0
+    except Exception as e:
+        log.warning("reapply failed for %s: %s", patch_path, e)
+        return False
+
+
 def archive_all_active() -> dict:
     """Move every active patch into a timestamped history bundle and
     clear the active manifest. Called by `backend/updater.py` right
@@ -411,7 +449,41 @@ def archive_all_active() -> dict:
     m = load_manifest()
     active = [e for e in m.entries if e.status in ("applied", "needs_review")]
     if not active:
-        return {"archive_id": None, "archived_count": 0, "archive_path": ""}
+        return {"archive_id": None, "archived_count": 0, "archive_path": "",
+                "kept": [], "conflicted": []}
+
+    # Sort the active set by what the pull actually did to it, instead of
+    # archiving everything the way this used to.
+    #
+    #   upstream  — the change is in the repo now, so the patch is spent.
+    #               Archive it: that is the healthy end of a self-mod's life.
+    #   applies   — still needed and still fits. Keep it: throwing it away
+    #               means the agent cannot fix anything that outlives one
+    #               deploy, which is the whole reason its repairs kept
+    #               evaporating.
+    #   conflicts — the pull moved the same code. Archive and say so
+    #               loudly; guessing a merge here would be worse than
+    #               losing the patch.
+    kept: list[str] = []
+    conflicted: list[str] = []
+    still_active: list = []
+    for entry in list(active):
+        state = patch_state(_self_mods_dir() / entry.patch_filename)
+        if state == "upstream":
+            continue
+        if state == "applies" and reapply_patch(
+                _self_mods_dir() / entry.patch_filename):
+            kept.append(entry.id)
+            still_active.append(entry)
+            continue
+        if state == "conflicts":
+            conflicted.append(entry.id)
+    active = [e for e in active if e not in still_active]
+    if not active:
+        # Everything was either superseded or carried forward.
+        save_manifest(Manifest(entries=still_active))
+        return {"archive_id": None, "archived_count": 0, "archive_path": "",
+                "kept": kept, "conflicted": conflicted}
 
     # Timestamp safe for filesystem on every OS (no colons).
     archive_id = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
@@ -438,14 +510,18 @@ def archive_all_active() -> dict:
         encoding="utf-8",
     )
 
-    # Clear the top-level manifest. Reverted entries are also flushed
-    # since they no longer correspond to any patch file on disk.
-    save_manifest(Manifest(entries=[]))
-    log.info("archived %d self-mod(s) to %s", len(active), target)
+    # Keep the patches that were carried forward; everything else is now
+    # in the archive. Reverted entries are flushed either way since they
+    # no longer correspond to a patch file on disk.
+    save_manifest(Manifest(entries=still_active))
+    log.info("archived %d self-mod(s) to %s (kept %d, conflicted %d)",
+             len(active), target, len(kept), len(conflicted))
     return {
         "archive_id": archive_id,
         "archived_count": len(active),
         "archive_path": str(target),
+        "kept": kept,
+        "conflicted": conflicted,
     }
 
 

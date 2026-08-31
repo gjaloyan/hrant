@@ -588,10 +588,28 @@ def do_update(
         archive_report = self_mods.archive_all_active()
         archived_count = archive_report.get("archived_count", 0) or 0
         archive_id = archive_report.get("archive_id")
+        _kept = archive_report.get("kept") or []
+        _conflicted = archive_report.get("conflicted") or []
+        if _kept:
+            # The point of the change: a fix the agent made, which is not
+            # in git yet, is carried across the deploy instead of being
+            # thrown away and quietly re-broken.
+            messages.append(
+                f"kept {len(_kept)} self-mod(s) not yet upstream: "
+                f"{', '.join(_kept)}"
+            )
         if archived_count > 0:
             messages.append(
                 f"archived {archived_count} self-mod(s) → "
                 f"~/.hrant/data/self_mods/history/{archive_id}/"
+            )
+        if _conflicted:
+            # Loud, because this is the one case where work is lost: the
+            # pull moved the same code and no honest merge is available.
+            messages.append(
+                f"WARNING: {len(_conflicted)} self-mod(s) conflicted with "
+                f"the update and were archived unapplied: "
+                f"{', '.join(_conflicted)} — re-propose or re-apply by hand"
             )
     except Exception as e:  # pragma: no cover — defensive
         messages.append(f"self_mods archive skipped due to error: {e}")
