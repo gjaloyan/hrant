@@ -3526,6 +3526,23 @@ def run_unified(
                 _tool_failures[name] = _n
                 if _n == _SELF_REPAIR_AFTER:
                     marker_self_repair = _self_repair_marker(name, _n, raw_result)
+                else:
+                    # The counter above resets every turn, so it only ever
+                    # catches a tool failing three times in ONE turn. The
+                    # failures that matter are not shaped like that: the
+                    # 2026-08-31 reminder refusal hit five times across four
+                    # turns (1, 1, 2, 1) and never tripped it. Recurrence
+                    # across turns is counted persistently instead.
+                    from . import recurring_failures as _rf
+                    # `job_id` identifies the turn everywhere it exists.
+                    # `_run_started_at` is the fallback rather than
+                    # `turn_id`, which is assigned on the fast chat path
+                    # only and would raise NameError on a tool-using turn.
+                    _seen = _rf.note(
+                        name, raw_result,
+                        turn_id=str(job_id or "") or f"t{_run_started_at:.0f}")
+                    if _seen == _rf.RECURRENCE_THRESHOLD:
+                        marker_self_repair = _rf.marker(name, raw_result, _seen)
         except Exception:
             marker_self_repair = ""
 
