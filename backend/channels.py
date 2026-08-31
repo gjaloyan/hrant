@@ -1491,6 +1491,18 @@ class TelegramBot:
                             filename=f"voice.ogg",
                         )
                         if text:
+                            # Store what he actually said, then hand the
+                            # turn an English rendering with the original
+                            # attached. Prompts are English by the owner's
+                            # rule; the verbatim line stays because the
+                            # agent answers him in his own language, and
+                            # because a transcript this channel is known
+                            # to mis-hear needs something to check against.
+                            try:
+                                from .meaning_translate import render_for_prompt
+                                text = render_for_prompt(text)
+                            except Exception as e:
+                                log.debug("meaning translation skipped: %s", e)
                             ATTACHMENTS.set_transcript(rec.sha256, text)
                         shas.append(rec.sha256)
                     except Exception as e:

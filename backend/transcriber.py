@@ -44,6 +44,23 @@ import httpx
 log = logging.getLogger(__name__)
 
 DEFAULT_FASTER_WHISPER_MODEL = "medium"
+
+# A second model consulted when the first one may be out of its depth.
+#
+# Measured 2026-08-31 on the owner's own Armenian notes. The base model
+# heard English and produced "Nice to hide and has gun, miss"; large-v3
+# heard Turkish; large-v3-turbo heard German and scored Armenian at 0.002.
+# This fine-tune read both notes exactly: "Իս դու հայերեն հասկանում ես".
+#
+# It is not a replacement. Given Russian speech it transcribes the sounds
+# in ARMENIAN LETTERS -- "Ե՛ ադաբրեու, մոշ պիստուպաց" for "Я одобряю,
+# можешь приступать" -- and ignores the language argument entirely. So the
+# two are run together and the better result is chosen, rather than one
+# being swapped for the other.
+SECOND_OPINION_MODEL = "Chillarmo/whisper-large-v3-turbo-armenian"
+
+# Which languages the second model is worth paying for. Empty disables it.
+SECOND_OPINION_FOR = ("hy",)
 # int8 on CPU: ~4x faster than float32 with no meaningful accuracy loss on
 # speech, and the box is CPU-only (12 cores, no GPU).
 DEFAULT_FASTER_WHISPER_COMPUTE = "int8"
@@ -127,6 +144,14 @@ def save_config(cfg: dict) -> dict:
     from .paths import write_secret_json
     write_secret_json(_config_path(), cfg)
     return cfg
+
+
+def _avg_logprob(segments) -> float:
+    """Mean per-segment confidence. -99 for an empty result so anything
+    real beats silence."""
+    vals = [getattr(s, "avg_logprob", None) for s in (segments or [])]
+    vals = [v for v in vals if isinstance(v, (int, float))]
+    return (sum(vals) / len(vals)) if vals else -99.0
 
 
 class Transcriber:
@@ -279,13 +304,53 @@ class Transcriber:
             segments, _info = self._fw_model.transcribe(
                 source, language=language, vad_filter=True,
             )
+            segments = list(segments)
             text = " ".join(seg.text.strip() for seg in segments).strip()
+
+            # Ask the specialist when the detected language is one the base
+            # model is known to mangle, and keep whichever transcript the
+            # models themselves are more confident about. Averaged
+            # log-probability is the only quality signal available without
+            # a human, and it is the right one here: the base model's
+            # Armenian failures are not near-misses, they are confident
+            # nonsense in the wrong language, and score accordingly.
+            if language in SECOND_OPINION_FOR and SECOND_OPINION_MODEL:
+                alt, alt_score = self._second_opinion(path, language)
+                if alt and alt_score > _avg_logprob(segments):
+                    log.info("second opinion (%s) won: %.3f", language, alt_score)
+                    return alt
             return text or None
         finally:
             try:
                 os.unlink(path)
             except OSError:
                 pass
+
+    def _second_opinion(self, path: str, language: str):
+        """Run the specialist model. Returns (text, avg_logprob).
+
+        Loaded lazily and cached like the primary: it is ~1.6 GB, and a
+        deployment that never hears the language it covers should never pay
+        for it. Any failure returns no opinion rather than raising -- a
+        second reading is an improvement, never a dependency.
+        """
+        try:
+            from faster_whisper import WhisperModel
+            with self._lock:
+                if getattr(self, "_fw_alt", None) is None:
+                    self._fw_alt = WhisperModel(
+                        SECOND_OPINION_MODEL, device="cpu",
+                        compute_type=getattr(self, "_fw_compute",
+                                             DEFAULT_FASTER_WHISPER_COMPUTE),
+                    )
+            segs, _ = self._fw_alt.transcribe(
+                path, language=language, vad_filter=True)
+            segs = list(segs)
+            text = " ".join(x.text.strip() for x in segs).strip()
+            return (text or None), _avg_logprob(segs)
+        except Exception as e:
+            log.debug("second opinion unavailable: %s", e)
+            return None, -99.0
 
     def _try_local_whisper(self, cfg: dict) -> bool:
         """No-auth FastAPI Whisper wrapper (e.g. user's home server).
