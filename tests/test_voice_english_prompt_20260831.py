@@ -188,3 +188,40 @@ def test_the_voice_channel_renders_before_storing():
     from backend import channels
     src = inspect.getsource(channels)
     assert "render_for_prompt(text)" in src
+
+
+# ── the gate must not be circular ───────────────────────────────────
+
+def test_the_specialist_is_not_gated_on_the_detection_it_exists_to_fix():
+    """Shipped circular and caught in a live run.
+
+    The first version consulted the Armenian model only when detection had
+    already returned "hy" — the very thing that never happens, which is why
+    the specialist exists. The note came back "Nice to hide and has gun,
+    miss" with the specialist sitting unused on disk.
+
+    The gate now asks what this deployment might HEAR, from its configured
+    languages, not what detection just guessed.
+    """
+    import inspect
+    src = inspect.getsource(tr.Transcriber._tx_faster_whisper)
+    assert "if language in SECOND_OPINION_FOR" not in src, (
+        "gating on the detected language is the circular form")
+    assert "expected_languages()" in src
+
+
+def test_the_specialist_is_skipped_where_its_language_is_not_expected(
+        monkeypatch):
+    """A deployment that never hears Armenian must not pay for it."""
+    monkeypatch.setattr(tr, "expected_languages", lambda cfg=None: ["ru", "en"])
+    covered = [lg for lg in tr.SECOND_OPINION_FOR
+               if lg in (tr.expected_languages() or tr.SECOND_OPINION_FOR)]
+    assert covered == []
+
+
+def test_the_specialist_is_used_where_its_language_is_expected(monkeypatch):
+    monkeypatch.setattr(tr, "expected_languages",
+                        lambda cfg=None: ["hy", "ru", "en"])
+    covered = [lg for lg in tr.SECOND_OPINION_FOR
+               if lg in (tr.expected_languages() or tr.SECOND_OPINION_FOR)]
+    assert covered == ["hy"]

@@ -314,8 +314,16 @@ class Transcriber:
             # a human, and it is the right one here: the base model's
             # Armenian failures are not near-misses, they are confident
             # nonsense in the wrong language, and score accordingly.
-            if language in SECOND_OPINION_FOR and SECOND_OPINION_MODEL:
-                alt, alt_score = self._second_opinion(path, language)
+            # Gate on what this deployment MIGHT hear, not on what
+            # detection just said. Keying it on the detected language was
+            # circular and shipped that way: the specialist would only be
+            # consulted once detection had already recognised Armenian,
+            # which is the exact thing that never happens. Measured live —
+            # the note still came back "Nice to hide and has gun, miss".
+            _covered = [lg for lg in SECOND_OPINION_FOR
+                        if lg in (expected_languages() or SECOND_OPINION_FOR)]
+            if _covered and SECOND_OPINION_MODEL:
+                alt, alt_score = self._second_opinion(path, _covered[0])
                 if alt and alt_score > _avg_logprob(segments):
                     log.info("second opinion (%s) won: %.3f", language, alt_score)
                     return alt
