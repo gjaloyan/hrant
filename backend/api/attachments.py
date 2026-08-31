@@ -194,6 +194,12 @@ class TranscriberConfigUpdate(BaseModel):
     blanking the others."""
 
     backend: str | None = None  # "auto" | "local_whisper" | "whisper_cpp" | "openai_whisper" | "disabled"
+    # Recognition languages, e.g. ["hy", "ru", "en"]. Detection is
+    # restricted to these; empty means no restriction. Written by the
+    # agent's own self-modification 995eeda971 on 2026-08-31, applied to
+    # the prod tree with the owner's approval and ported here so
+    # `hrant update` does not archive it away.
+    languages: list[str] | None = None
     local_whisper: dict | None = None    # {url, model} — FastAPI Whisper wrapper
     whisper_cpp: dict | None = None      # {url, model} — whisper.cpp REST server
     openai_whisper: dict | None = None   # {model}
@@ -211,6 +217,12 @@ def transcribe_config_put(body: TranscriberConfigUpdate):
     cfg = load_transcriber_config() or {}
     if body.backend is not None:
         cfg["backend"] = body.backend
+    if body.languages is not None:
+        cfg["languages"] = [
+            language.strip()
+            for language in body.languages
+            if isinstance(language, str) and language.strip()
+        ]
     for nested in ("local_whisper", "whisper_cpp", "openai_whisper"):
         v = getattr(body, nested)
         if v is None:
