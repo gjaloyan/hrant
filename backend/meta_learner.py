@@ -296,30 +296,38 @@ class MetaLearner:
                 source="meta_learner",
             )
         elif action == "improve_prompt" and detail:
-            # Goal stays for visibility, but if severity is high enough
-            # ALSO ask self_modifier to look at the most likely module
-            # and propose an actual patch. The proposal needs explicit
-            # user approval before it ever touches the file (gated by
-            # self_modifier.apply), so this is safe to fire automatically.
             target_module = self._guess_target_module(detail)
-            GOALS.add(
-                description=f"Improve prompt: {detail[:80]}",
-                priority=min(6, severity),
-                goal_type="improvement",
-                context=(
-                    f"Meta-learner: prompt engineering needed — {detail}\n"
-                    f"Target module guess: {target_module or 'unknown'}"
-                ),
-                source="meta_learner",
-                subtasks=(
-                    [
+
+            # "Improve prompt" IS a prompt edit, so propose the actual
+            # line instead of a goal asking someone to think of one.
+            # Without a guessable module this branch used to create a
+            # goal with subtasks=None, which nothing could execute: 88
+            # of 97 active goals were in that state on 2026-09-01, all
+            # heading for the stale sweep. Approval stays explicit — the
+            # proposal carries a diff the owner reads and taps, and
+            # apply() compiles it and runs the tests.
+            from .lesson_proposals import propose_lesson
+            proposed = propose_lesson(
+                detail, evidence=f"meta-learner, severity {severity}")
+
+            # A goal WITH a plan is still worth keeping; a goal without
+            # one is the thing being removed here.
+            if proposed is None and target_module:
+                GOALS.add(
+                    description=f"Improve prompt: {detail[:80]}",
+                    priority=min(6, severity),
+                    goal_type="improvement",
+                    context=(
+                        f"Meta-learner: prompt engineering needed — {detail}"
+                        f" | target module: {target_module}"
+                    ),
+                    source="meta_learner",
+                    subtasks=[
                         f"Run SELF_MODIFIER.analyze_module('{target_module}')",
                         "Review the resulting proposal in the WebUI",
                         "Approve or reject explicitly",
-                    ]
-                    if target_module else None
-                ),
-            )
+                    ],
+                )
             if severity >= 7 and target_module:
                 try:
                     from .self_modifier import SELF_MODIFIER
@@ -392,8 +400,25 @@ class MetaLearner:
                 self._save_patterns()
 
                 # Create goals for high-priority patterns
+                # A recurring behavioural failure is a RULE the agent is
+                # missing, not a project. These used to become goals with no
+                # subtasks — nothing could execute them, so all 372 were
+                # swept after 14 days. Proposing the actual prompt edit puts
+                # them in the queue that has a Telegram approval flow, a
+                # readable diff, and an apply path that runs the tests.
+                from .lesson_proposals import propose_lesson
                 for p in patterns:
                     if p.get("priority", 0) >= 7:
+                        lesson = (p.get("suggested_fix") or "").strip()
+                        made = propose_lesson(
+                            lesson,
+                            evidence=(f"seen {p.get('frequency', 0)}x: "
+                                      f"{p['pattern'][:90]}"),
+                        ) if lesson else None
+                        if made is not None:
+                            continue
+                        # No usable fix text, or a duplicate. Keep the goal
+                        # for visibility rather than losing the observation.
                         GOALS.add(
                             description=f"Fix pattern: {p['pattern'][:80]}",
                             priority=min(9, p["priority"]),

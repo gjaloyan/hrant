@@ -572,6 +572,17 @@ underlying issue.
 # Loads only when `ctx.model_size == "small"`. Compensates for
 # limited reasoning depth with explicit, repetitive scaffolding.
 
+# Deliberately terse. Every approved lesson adds a line to EVERY turn's
+# system prompt, and the default prompt has a hard 17k budget (see
+# tests/test_prompt_modules_m2_through_m9.py). The explanation of what
+# this module is for belongs here, in the source, not in the tokens.
+# `lesson_proposals.MAX_LESSONS` caps how many can accumulate.
+_M11_BODY = """# LESSONS LEARNED
+
+<!-- LESSONS ANCHOR — new lessons are inserted directly above this line -->
+"""
+
+
 _M9_BODY = """\
 # SMALL-MODEL ADAPTATIONS
 
@@ -616,6 +627,17 @@ MODULES: dict[str, Module] = {
     "m10_reach": Module(
         name="m10_reach",
         body=_M10_BODY,
+        always_on=True,
+    ),
+    # Where an approved behavioural lesson lands. The meta-learner used to
+    # file these as goals with no subtasks — 88 of 97 active goals had no
+    # plan at all, so nothing could execute them and they were swept after
+    # 14 days. A lesson is a RULE, not a project: it belongs in the prompt,
+    # and the edit that puts it there is something the owner can read and
+    # approve in one tap.
+    "m11_lessons": Module(
+        name="m11_lessons",
+        body=_M11_BODY,
         always_on=True,
     ),
     "m2_task_solver": Module(
@@ -685,6 +707,10 @@ DEFAULT_ORDER: list[str] = [
     # Right after core behaviour: both rules it carries are about what to
     # do when the work looks blocked, which is decided early in a turn.
     "m10_reach",
+    # Lessons sit right after the reach rules and before the tool rules:
+    # they are corrections to general conduct, so they should be read
+    # before the specifics they modify.
+    "m11_lessons",
     "m3_tool_use",
     "m5_skill_management",
     "m6_user_interaction",
@@ -733,6 +759,21 @@ def _select_modules(ctx: TurnContext) -> list[Module]:
     ]
 
 
+def _is_empty_collector(body: str) -> bool:
+    """True when a body holds a heading and/or HTML comments and nothing else.
+
+    Only meaningful for a module that exists to accumulate lines. Any prose
+    at all makes a module non-empty by this test.
+    """
+    for line in (body or "").splitlines():
+        t = line.strip()
+        if not t or t.startswith("#") or (
+                t.startswith("<!--") and t.endswith("-->")):
+            continue
+        return False
+    return True
+
+
 def build_prompt(
     ctx: Optional[TurnContext] = None,
     overrides: Optional[dict] = None,
@@ -759,7 +800,16 @@ def build_prompt(
             v = module_overrides[mod.name]
             if v is None:
                 continue
-            parts.append(v)
+            body = v
         else:
-            parts.append(mod.body)
+            body = mod.body
+        # A collecting module with nothing collected costs tokens on
+        # every single turn to say nothing. m11_lessons starts empty and
+        # fills as the owner approves rules, so it must not bill the
+        # prompt for a heading and an insertion anchor while it holds
+        # none. Detected structurally, not by name: any body that is
+        # only a heading and comments has nothing to contribute.
+        if _is_empty_collector(body):
+            continue
+        parts.append(body)
     return "\n\n".join(parts)
