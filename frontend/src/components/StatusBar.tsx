@@ -1,10 +1,22 @@
+/** The bottom bar.
+ *
+ * It carried the right facts in an unreadable shape: one run-on line of
+ * bare values — "cloud_only 28 topics core: 13/4000 finetune: 92 project: —
+ * A: gpt-5.6-luna B: (v0) today 543.5kt · ratio 20.7:1 · A:89 / B:0" — where
+ * nothing said which number belonged to what, and a warning looked like
+ * every other item.
+ *
+ * Same data, grouped and labelled: each figure now carries its own caption,
+ * related figures sit in one block, and only a real problem is coloured.
+ */
 import { useEffect, useState } from "react";
-import { StatusPayload, AutonomicStatus, EmbeddingsStatusResponse } from "../api";
+import {
+  StatusPayload,
+  AutonomicStatus,
+  EmbeddingsStatusResponse,
+} from "../api";
+import { Badge, cx } from "../ui";
 
-// Audit follow-up — token-first daily counters. The cost-first
-// view (`api_cost_today`) was based on a $0.01/call estimate that
-// drifted significantly from real cost; tokens are now the source
-// of truth, with cost as a derived secondary.
 type TokensToday = {
   date: string;
   input_tokens: number;
@@ -22,14 +34,41 @@ function fmtTokens(n: number): string {
 }
 
 function Dot({ ok, title }: { ok: boolean | undefined; title: string }) {
-  const color = ok === undefined ? "bg-slate-500" : ok ? "bg-emerald-400" : "bg-rose-500";
   return (
     <span
-      className={`inline-block w-2 h-2 rounded-full ${color}`}
       title={title + (ok === false ? " — unavailable" : "")}
+      className={cx(
+        "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
+        ok === undefined ? "bg-ink-faint" : ok ? "bg-ok" : "bg-danger",
+      )}
     />
   );
 }
+
+/** One figure with its caption. The caption is the fix: a number nobody
+ *  can name is a number nobody can act on. */
+function Stat({
+  label,
+  children,
+  title,
+}: {
+  label: string;
+  children: React.ReactNode;
+  title?: string;
+}) {
+  return (
+    <div className="flex flex-col leading-tight" title={title}>
+      <span className="text-[9px] uppercase tracking-wide text-ink-faint">
+        {label}
+      </span>
+      <span className="text-xs text-ink">{children}</span>
+    </div>
+  );
+}
+
+const Divider = () => (
+  <span className="mx-1 hidden h-6 w-px shrink-0 bg-edge sm:block" />
+);
 
 export default function StatusBar({
   status,
@@ -42,138 +81,160 @@ export default function StatusBar({
   pendingCount?: number;
   embeddings?: EmbeddingsStatusResponse | null;
 }) {
-  // Daily token counters from /api/tokens/today — token-first
-  // display per audit follow-up.
-  const [tokensToday, setTokensToday] = useState<TokensToday | null>(null);
+  const [today, setToday] = useState<TokensToday | null>(null);
   useEffect(() => {
     let cancelled = false;
-    const fetchTokens = () => {
+    const pull = () => {
       fetch("/api/tokens/today")
-        .then((r) => r.ok ? r.json() : null)
-        .then((d) => { if (!cancelled && d) setTokensToday(d as TokensToday); })
-        .catch(() => {/* leave previous value */});
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (!cancelled && d) setToday(d as TokensToday);
+        })
+        .catch(() => {
+          /* keep the previous value rather than blanking the bar */
+        });
     };
-    fetchTokens();
-    const id = setInterval(fetchTokens, 30_000);  // 30s refresh
-    return () => { cancelled = true; clearInterval(id); };
+    pull();
+    const id = setInterval(pull, 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
   }, []);
 
   if (!status) return null;
   const r = status.router as any;
   const hasRouter = r && !("error" in r);
 
-  const modeColors: Record<string, string> = {
-    local_full: "bg-emerald-700",
-    cloud_finetune: "bg-sky-700",
-    local_cpu: "bg-amber-700",
-    cloud_only: "bg-violet-700",
-    // Back-compat: old config.yaml may still report `claude_only`.
-    claude_only: "bg-violet-700",
+  const MODE_TONE: Record<string, "ok" | "accent" | "warn" | "neutral"> = {
+    local_full: "ok",
+    cloud_finetune: "accent",
+    local_cpu: "warn",
+    cloud_only: "accent",
+    claude_only: "accent",
   };
 
+  const embOff =
+    embeddings &&
+    (embeddings.embedder.backend === "disabled" || !embeddings.embedder.backend);
+
   return (
-    <div className="flex items-center gap-4 px-4 py-2 text-xs border-t border-slate-800 bg-slate-900/60 flex-wrap">
-      <span
-        className={`px-2 py-0.5 rounded ${modeColors[status.mode] || "bg-slate-700"}`}
-        title={`training: ${status.training_location}`}
+    <footer className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-edge bg-surface/70 px-3 py-1.5 sm:px-4">
+      <Badge
+        tone={MODE_TONE[status.mode] || "neutral"}
+        title={`training location: ${status.training_location}`}
       >
-        {status.mode}
-      </span>
-      <span>{status.topics_total} topics</span>
-      <span>
-        core: {status.core_tokens}/{status.core_max}
-      </span>
-      <span>finetune: {status.finetune_count}</span>
-      <span>project: {status.current_project || "—"}</span>
+        {status.mode.replace(/_/g, " ")}
+      </Badge>
 
       {hasRouter && (
         <>
-          <span className="border-l border-slate-700 pl-4 flex items-center gap-1">
-            <Dot ok={r.model_a_available} title="Model A" />
-            A: <span className="text-sky-400">{status.model_a}</span>
-          </span>
-          <span className="flex items-center gap-1">
-            <Dot ok={r.model_b_available} title="Model B" />
-            B: <span className="text-emerald-400">{status.model_b}</span>
-            {status.model_version ? ` (${status.model_version})` : ""}
-          </span>
-          <span
-            className="text-slate-400"
-            title={
-              tokensToday
-                ? `today input ${tokensToday.input_tokens.toLocaleString()} | ` +
-                  `output ${tokensToday.output_tokens.toLocaleString()} | ` +
-                  `ratio ${tokensToday.input_output_ratio.toFixed(1)}:1 | ` +
-                  `LLM calls ${tokensToday.llm_calls} | cost $${tokensToday.cost_usd.toFixed(4)}`
-                : "tokens not yet loaded"
-            }
-          >
-            today {tokensToday ? (
-              <>
-                <span className="text-emerald-300">{fmtTokens(tokensToday.total_tokens)}t</span>
-                {" · "}
-                <span className={tokensToday.input_output_ratio > 15 ? "text-amber-400" : "text-slate-400"}>
-                  ratio {tokensToday.input_output_ratio.toFixed(1)}:1
-                </span>
-                {" · "}
-                A:{r.api_calls_today} / B:{r.model_b_calls_today}
-              </>
-            ) : (
-              <>A:{r.api_calls_today} / B:{r.model_b_calls_today}</>
-            )}
-          </span>
+          <Divider />
+          <Stat label="model a" title="Primary model">
+            <span className="inline-flex items-center gap-1">
+              <Dot ok={r.model_a_available} title="Model A" />
+              <span className="text-accent">{status.model_a}</span>
+            </span>
+          </Stat>
+          <Stat label="model b" title="Fallback / local model">
+            <span className="inline-flex items-center gap-1">
+              <Dot ok={r.model_b_available} title="Model B" />
+              <span className="text-ok">
+                {status.model_b}
+                {status.model_version ? ` (${status.model_version})` : ""}
+              </span>
+            </span>
+          </Stat>
         </>
       )}
 
-      {autonomic && (
-        <span className="border-l border-slate-700 pl-4 flex items-center gap-1">
-          <Dot
-            ok={autonomic.enabled && autonomic.scheduler_running}
-            title="Autonomic"
-          />
-          <span className="text-slate-400">
-            autonomic: {autonomic.registered_levers.length} levers
+      <Divider />
+      <Stat
+        label="tokens today"
+        title={
+          today
+            ? `in ${today.input_tokens.toLocaleString()} · out ${today.output_tokens.toLocaleString()} · $${today.cost_usd.toFixed(4)}`
+            : "not loaded yet"
+        }
+      >
+        {today ? `${fmtTokens(today.total_tokens)}t` : "—"}
+      </Stat>
+      {today && (
+        <Stat
+          label="in : out"
+          title="Input-to-output ratio. A high number means the agent is re-reading much more than it writes."
+        >
+          <span className={today.input_output_ratio > 15 ? "text-warn" : ""}>
+            {today.input_output_ratio.toFixed(1)}:1
           </span>
-          {pendingCount !== undefined && pendingCount > 0 && (
-            <span className="text-amber-400 font-bold">⚠ {pendingCount} pending</span>
-          )}
-        </span>
+        </Stat>
+      )}
+      {hasRouter && (
+        <Stat label="calls" title="LLM calls today, model A / model B">
+          {r.api_calls_today} / {r.model_b_calls_today}
+        </Stat>
+      )}
+
+      <Divider />
+      <Stat label="topics">{status.topics_total}</Stat>
+      <Stat label="core memory" title="Tokens used of the core-memory budget">
+        {status.core_tokens}/{status.core_max}
+      </Stat>
+      <Stat label="finetune set">{status.finetune_count}</Stat>
+      <Stat label="project">{status.current_project || "—"}</Stat>
+
+      {autonomic && (
+        <>
+          <Divider />
+          <Stat label="autonomic" title="Background levers">
+            <span className="inline-flex items-center gap-1">
+              <Dot
+                ok={autonomic.enabled && autonomic.scheduler_running}
+                title="Autonomic scheduler"
+              />
+              {autonomic.registered_levers.length} levers
+            </span>
+          </Stat>
+        </>
       )}
 
       {embeddings && (
-        <span
-          className="border-l border-slate-700 pl-4 flex items-center gap-1"
+        <Stat
+          label="memory index"
           title={
             embeddings.embedder.last_error
               ? `embedder: ${embeddings.embedder.last_error}`
               : `${embeddings.coverage.embedded}/${embeddings.coverage.total_notes} notes embedded`
           }
         >
-          <Dot
-            ok={
-              embeddings.embedder.backend === "disabled"
-                ? false
-                : embeddings.embedder.backend
-                ? true
-                : undefined
-            }
-            title="Embeddings"
-          />
-          <span className="text-slate-400">
-            memory: {embeddings.embedder.backend === "disabled" || !embeddings.embedder.backend
-              ? <span className="text-amber-400">text-only</span>
-              : <span className="font-mono">{embeddings.embedder.model}</span>
-            }
+          <span className="inline-flex items-center gap-1">
+            <Dot ok={!embOff} title="Embeddings" />
+            {embOff ? (
+              <span className="text-warn">text-only</span>
+            ) : (
+              <span className="font-mono text-[11px]">
+                {embeddings.embedder.model}
+              </span>
+            )}
           </span>
-          {embeddings.coverage.missing > 0 && embeddings.embedder.backend !== "disabled" && (
-            <span className="text-amber-400 font-bold">
-              ⚠ {embeddings.coverage.missing} unembedded
-            </span>
-          )}
-        </span>
+        </Stat>
       )}
 
-      {!hasRouter && <span className="ml-auto text-rose-400">router: {r?.error || "—"}</span>}
-    </div>
+      {/* Problems last and loud — they were the same weight as everything
+          else, which is how a warning goes unread. */}
+      <div className="ml-auto flex items-center gap-2">
+        {pendingCount ? (
+          <Badge tone="warn" title="Proposals waiting for your review">
+            {pendingCount} pending
+          </Badge>
+        ) : null}
+        {embeddings && embeddings.coverage.missing > 0 && !embOff && (
+          <Badge tone="warn">{embeddings.coverage.missing} unembedded</Badge>
+        )}
+        {!hasRouter && (
+          <Badge tone="danger">router: {r?.error || "unavailable"}</Badge>
+        )}
+      </div>
+    </footer>
   );
 }

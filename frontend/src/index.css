@@ -2,24 +2,155 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root { height: 100%; }
+/* ── Tokens ──────────────────────────────────────────────────────────
+   Named for what a surface IS, not what colour it is. Values sit next to
+   the slate family the app already uses so panels not yet ported blend
+   in rather than clash. See tailwind.config.js for the Tailwind names. */
+:root {
+  --canvas: #0a0e16;
+  --surface: #111726;
+  --surface-2: #182031;
+  --surface-3: #1e2739;
+
+  --border: #1f2a3f;
+  --border-strong: #2b3852;
+
+  --text: #e8ecf3;
+  --text-dim: #98a4bb;
+  --text-faint: #64708a;
+
+  --accent: #3b82f6;
+  --accent-hover: #2f6fe0;
+  --accent-soft: rgba(59, 130, 246, 0.14);
+
+  --ok: #10b981;
+  --warn: #f59e0b;
+  --danger: #f43f5e;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #0b0f17;
-  color: #e6e9ef;
+  font-family:
+    "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 14px;
+  background: var(--canvas);
+  color: var(--text);
   /* respect iPhone notch / home-bar */
   padding-left: env(safe-area-inset-left);
   padding-right: env(safe-area-inset-right);
   padding-bottom: env(safe-area-inset-bottom);
   /* prevent iOS Safari from pinch-zooming on focused inputs */
   -webkit-text-size-adjust: 100%;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* On touch screens textareas with font-size <16px trigger iOS auto-zoom.
-   16px keeps the zoom off without forcing user-scalable=no. */
+/* ── Baseline chrome ─────────────────────────────────────────────────
+   Everything below is wrapped in :where(), which has ZERO specificity.
+   That is the whole trick: an unstyled control picks up the new look,
+   while any existing Tailwind class on the element still wins. It lets
+   the design reach 15k lines of components without rewriting them and
+   without fighting them. */
+
+:where(input[type="text"], input[type="search"], input[type="number"],
+  input[type="password"], input[type="datetime-local"], input[type="date"],
+  input[type="url"], input[type="email"], select, textarea) {
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.6rem;
+  outline: none;
+  transition:
+    border-color 0.13s ease,
+    box-shadow 0.13s ease;
+}
+
+:where(input, select, textarea):focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+:where(input, select, textarea)::placeholder {
+  color: var(--text-faint);
+}
+
+:where(button) {
+  border-radius: 0.5rem;
+  transition:
+    background-color 0.13s ease,
+    color 0.13s ease,
+    border-color 0.13s ease;
+}
+
+/* A visible keyboard path through the app. There was none. */
+:where(button, a, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+:where(button):disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+:where(table) {
+  border-collapse: collapse;
+}
+
+::selection {
+  background: var(--accent-soft);
+}
+
+/* Slim scrollbars — the default ones are wide enough to break the
+   proportions of a dense panel. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 99px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3b4a68;
+}
+
+/* Hide a scrollbar where the design relies on drag/swipe instead. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
 @media (max-width: 640px) {
-  textarea, input[type="text"], input[type="search"] {
+  /* Under 16px iOS Safari auto-zooms a focused field. */
+  textarea,
+  input[type="text"],
+  input[type="search"] {
     font-size: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }

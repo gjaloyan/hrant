@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from "react";
+import SettingsNav, { SETTINGS_NAV } from "./SettingsNav";
 // Audit #26: lazy-load Settings tabs so the initial bundle doesn't
 // pay for the kitchen-sink Settings panel on chat-only sessions.
 // IdentityEditor + UserProfileTab + StatusTab are tiny and used on
@@ -309,30 +310,6 @@ export default function SettingsPanel() {
     }
   };
 
-  const TABS: { id: IdentityTab; label: string }[] = [
-    { id: "soul", label: "Soul" },
-    { id: "identity", label: "Identity" },
-    { id: "user", label: "User Profile" },
-    { id: "providers", label: "Providers" },
-    { id: "reasoning", label: "Reasoning" },
-    { id: "pipeline", label: "Pipeline" },
-    { id: "channels", label: "Channels" },
-    { id: "memory", label: "Memory" },
-    { id: "voice", label: "Voice" },
-    { id: "engine", label: "Engine" },
-    { id: "selfmods", label: "Self-Modifications" },
-    { id: "roles", label: "Roles & Contacts" },
-    { id: "reminders", label: "Reminders" },
-    { id: "skills", label: "Skills" },
-    { id: "jobs", label: "Jobs" },
-    { id: "subagents", label: "Subagents" },
-    { id: "digests", label: "Memory Digests" },
-    { id: "kgraph", label: "Knowledge Graph" },
-    { id: "conversation", label: "Conversation" },
-    { id: "capabilities", label: "Capabilities" },
-    { id: "status", label: "System Status" },
-    { id: "logs", label: "Logs" },
-  ];
 
   const editorProps = (file: string, value: string, setter: (v: string) => void) => ({
     file, value, setter, dirty,
@@ -340,31 +317,40 @@ export default function SettingsPanel() {
   });
 
   return (
-    <div className="flex flex-1 min-h-0">
-      {/* Sidebar */}
-      <aside className="w-48 border-r border-slate-800 bg-slate-950/60 p-3 text-sm space-y-1">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`w-full text-left px-2 py-1.5 rounded transition-colors ${
-              tab === t.id
-                ? "bg-sky-700 text-white"
-                : "bg-slate-800 hover:bg-slate-700 text-slate-300"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
-        {msg && <div className="mt-4 bg-sky-900/50 text-xs rounded p-2">{msg}</div>}
-      </aside>
+    <div className="flex min-h-0 flex-1">
+      <SettingsNav
+        tab={tab}
+        setTab={setTab}
+        footer={
+          msg ? (
+            <div className="rounded-lg bg-accent-soft px-2 py-1.5 text-xs text-accent">
+              {msg}
+            </div>
+          ) : null
+        }
+      />
 
       {/* Content. Lazy-loaded tabs render under a Suspense
           boundary; the fallback shows a tiny placeholder so the
           panel doesn't blank-flash while the chunk fetches. */}
-      <div className="flex-1 p-4 overflow-y-auto flex flex-col">
+      <div className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        {/* Name the screen you are on. The right pane used to open with
+            whatever the tab happened to render, so a page of raw markdown
+            or a bare table arrived with no title and no explanation. */}
+        {(() => {
+          const meta = SETTINGS_NAV.flatMap((g) => g.items).find(
+            (i) => i.id === tab,
+          );
+          return meta ? (
+            <div className="border-b border-edge px-4 py-3 sm:px-6">
+              <h2 className="text-base font-semibold">{meta.label}</h2>
+              <p className="mt-0.5 text-xs text-ink-dim">{meta.hint}</p>
+            </div>
+          ) : null;
+        })()}
+        <div className="flex flex-1 flex-col p-4 sm:p-6">
         <Suspense fallback={
-          <div className="text-slate-500 text-sm italic">Loading…</div>
+          <div className="text-sm italic text-ink-faint">Loading…</div>
         }>
         {tab === "soul" && <IdentityEditor {...editorProps("soul", soul, setSoul)} />}
         {tab === "identity" && <IdentityEditor {...editorProps("identity", identity, setIdentity)} />}
@@ -2046,6 +2032,7 @@ export default function SettingsPanel() {
           <StatusTab status={status} onCompare={handleCompare} onRefresh={loadStatus} />
         )}
         </Suspense>
+        </div>
       </div>
     </div>
   );
