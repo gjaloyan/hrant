@@ -57,9 +57,22 @@ body {
    the design reach 15k lines of components without rewriting them and
    without fighting them. */
 
-:where(input[type="text"], input[type="search"], input[type="number"],
-  input[type="password"], input[type="datetime-local"], input[type="date"],
-  input[type="url"], input[type="email"], select, textarea) {
+/* Plain element selectors, not :where(). :where() scores zero, which loses
+   to Tailwind's own preflight (`input { background-color: transparent }`,
+   specificity 0-0-1) — the first attempt shipped white input boxes on a dark
+   page for exactly that reason. At 0-0-1 and declared after @tailwind base
+   these win against preflight, and still lose to any utility class, which is
+   the behaviour the rest of this file relies on. */
+input[type="text"],
+input[type="search"],
+input[type="number"],
+input[type="password"],
+input[type="datetime-local"],
+input[type="date"],
+input[type="url"],
+input[type="email"],
+select,
+textarea {
   background: var(--surface-3);
   color: var(--text);
   border: 1px solid var(--border-strong);
@@ -71,12 +84,15 @@ body {
     box-shadow 0.13s ease;
 }
 
-:where(input, select, textarea):focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-:where(input, select, textarea)::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: var(--text-faint);
 }
 
