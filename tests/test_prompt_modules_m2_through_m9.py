@@ -433,18 +433,16 @@ def test_default_prompt_under_global_budget():
     module, still read 16862 and passed. That is why the module's own
     cap is in characters and not in a count.
 
-    Raised again 18.7 -> 19.8 KB on 2026-09-02, and this one is NOT a
-    clean ceiling: nine rules are now approved where four ideas exist,
-    2732 characters against the module's own 1800 cap. They were all
-    proposed in one pass against an empty module, so each measured itself
-    against a state that no longer existed by the time it landed — fixed
-    at the source (pending proposals now claim their space, and a
-    paraphrase is caught by meaning rather than by shared characters),
-    but the rules already approved are the owner's and are not deleted
-    without asking. Consolidating them brings this back under 18.7 KB."""
+    Briefly raised to 19.8 KB on 2026-09-02 when nine approved rules —
+    four ideas in nine wordings — took the module to 2732 characters
+    against its own 1800 cap. Consolidated with the owner's agreement to
+    four rules and 1152 characters, so the ceiling is back where it
+    belongs. The duplication itself is fixed at the source: pending
+    proposals now claim their space, and a paraphrase is caught by
+    meaning rather than by shared characters."""
     from backend.prompt_modules import build_prompt
     out = build_prompt()
-    assert len(out) < 19_800, (
+    assert len(out) < 18_700, (
         f"default prompt grew to {len(out)} chars — splits or "
         "trims needed"
     )

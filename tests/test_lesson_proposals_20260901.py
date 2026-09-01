@@ -430,3 +430,18 @@ def test_the_meaning_check_fails_open(monkeypatch):
 
     monkeypatch.setattr("backend.llm.router", boom)
     assert lp._means_the_same("one rule", "another rule") is False
+
+
+def test_the_approved_rules_stay_within_their_own_cap():
+    """After the 2026-09-02 consolidation the live module must sit under
+    the ceiling that governs it. Nine rules had grown to 2732 characters
+    against an 1800 cap, and nothing noticed until the prompt budget did.
+    """
+    body = MODULES["m11_lessons"].body
+    assert len(body) <= lp.MAX_MODULE_CHARS, (
+        f"the lessons module is {len(body)} chars, over its own "
+        f"{lp.MAX_MODULE_CHARS} limit"
+    )
+    for rule in lp.existing_lessons(body):
+        text = rule.split("  <!--")[0]
+        assert len(text) <= lp.MAX_LESSON_CHARS, text[:60]

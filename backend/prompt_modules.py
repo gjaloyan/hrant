@@ -579,23 +579,13 @@ underlying issue.
 # `lesson_proposals.MAX_LESSONS` caps how many can accumulate.
 _M11_BODY = """# LESSONS LEARNED
 
-- Do not claim that an action was completed, permission was granted, or data was received until the corresponding tool has been called and returned a successful result. If the tool is unavailable, be honest about the limitation.  <!-- seen 8x: Заявление о выполнении действий без вызова инструмента или подтвержденного результата -->
+- Action-shaped requests need the tool call. Never say something was done, granted or received before the tool returned it: report only what it says, and say plainly when a tool is unavailable.  <!-- seen 16x, merged from 3: claiming an action without the execute call or a confirmed result -->
 
-- Do not convert “tomorrow” or “on Thursday” into a calendar date without a confirmed current date, time zone, and context. Use the original wording or ask for the missing information.  <!-- seen 4x: Выдумывание конкретных дат и времени для относительных временных указаний -->
+- Convert a relative date only after confirming today's date and time zone. Otherwise keep the user's own wording or ask, and never report a scheduling success you have not verified.  <!-- seen 8x, merged from 2: inventing calendar dates for relative times -->
 
-- Treat requests to create reminders, send messages, and perform other actions as requiring the execute tool. Make the call, verify the result, and report the actual status.  <!-- seen 4x: Пропуск выполнения action-shaped запросов без execute-вызова или доставки результата -->
+- Never infer a recipient, their contact details, or what someone meant. Follow the request as written, and ask one short question when the recipient or the action is unclear.  <!-- seen 5x, merged from 2: inventing recipients, names and intentions -->
 
-- Do not guess the recipient’s name, the intended content, or whether anything was sent. Rephrase the request neutrally, and clarify the recipient and the action only when necessary.  <!-- seen 2x: Выдумывание адресатов, намерений и фактов о коммуникации вместо уточнения запроса -->
-
-- Before answering, retrieve up-to-date information from all relevant lists and clearly distinguish between personal, work, and other sources. Do not say that a list is empty or the only one without checking first.  <!-- seen 2x: Неточное или неполное представление содержимого списков задач -->
-
-- Recognize action-shaped requests and call the corresponding execute tool. After the call, verify the delivery or object-creation result and report the status based only on the tool’s response.  <!-- seen 4x: Пропуск фактического выполнения для запросов, сформулированных как действие -->
-
-- Do not infer names, contact details, or intentions from context without confirmation. Follow the request literally, and if the recipient is unclear, ask a brief clarifying question.  <!-- seen 3x: Выдумывание адресатов, имён и намерений пользователя в коммуникационных запросах -->
-
-- Allow relative dates only when the current date, time zone, and calendar tool have been confirmed. Do not provide a specific date or claim that scheduling was successful without a verified result.  <!-- seen 4x: Выдумывание конкретных календарных дат для относительных дат и времени -->
-
-- Before responding, retrieve data from all relevant lists and sources, distinguish between personal and work tasks, and do not declare a list empty without a result from the retrieval tool.  <!-- seen 2x: Неполное или неподтверждённое описание текущего состояния списков задач пользователя -->
+- Read every relevant list before describing it, keeping personal and work items apart. Never call a list empty, or the only one, without a retrieval result in hand.  <!-- seen 4x, merged from 2: describing task lists without checking them -->
 
 <!-- LESSONS ANCHOR — new lessons are inserted directly above this line -->
 """
