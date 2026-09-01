@@ -95,6 +95,7 @@ def register_default_autonomic_levers() -> None:
     from .self_study import FIRE_SELF_STUDY
     from .session_archive import FIRE_SESSION_ARCHIVE
     from .stale_proposals import FIRE_STALE_PROPOSALS
+    from .proposal_digest import FIRE_PROPOSAL_DIGEST
     from .tool_install import FIRE_TOOL_INSTALL
     from .scheduled_messages import FIRE_SCHEDULED_MESSAGES
     from .channel_watch import FIRE_CHANNEL_WATCH
@@ -114,6 +115,7 @@ def register_default_autonomic_levers() -> None:
     register_lever(FIRE_MODEL_EVAL)
     register_lever(FIRE_SESSION_ARCHIVE)
     register_lever(FIRE_STALE_PROPOSALS)
+    register_lever(FIRE_PROPOSAL_DIGEST)
     register_lever(FIRE_LOG_ROTATION)
     register_lever(FIRE_COST_AUDIT)
     register_lever(FIRE_SELF_REFLECTION)

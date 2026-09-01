@@ -207,7 +207,7 @@ def test_default_rules_count_after_phase11():
     # that had been registered since May with no rule naming them.
     # +channel_watch_tick (2026-08-20): polls followed public channels so a
     # daily digest reads a ledger rather than whatever fits on one page.
-    assert len(rules) == 29
+    assert len(rules) == 30  # +FIRE_PROPOSAL_DIGEST (2026-09-01)
 
 
 def test_default_rules_d07_scheduled_rules_present():

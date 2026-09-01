@@ -898,6 +898,64 @@ class TelegramBot:
             except Exception as e:
                 log.warning("self-mod notify(%s) failed: %s", chat_id, e)
 
+    def send_proposal_digest(self) -> dict:
+        """Raise the pending self-mod backlog again, with the same buttons.
+
+        `_on_self_mod_proposal` above announces a proposal once, at creation.
+        On a busy chat that message scrolls away and nothing mentions it
+        again until it is auto-rejected two weeks later — 25 were sitting in
+        that state on 2026-09-01. This is the second look.
+
+        Returns a small report for the lever; never raises.
+        """
+        from . import contacts as _contacts
+        from . import proposal_digest as _pd
+        from . import roles as _roles
+        from . import tg_interactive as _tg
+        from .self_modifier import SELF_MODIFIER
+
+        pending = _pd.pending_for_digest(list(SELF_MODIFIER._proposals))
+        if not pending:
+            # Silence is the correct output for an empty queue.
+            return {"sent": 0, "pending": 0, "reason": "nothing_pending"}
+
+        try:
+            owner_state = _roles._load()
+        except Exception as e:
+            return {"sent": 0, "pending": len(pending), "reason": f"roles: {e}"}
+        owner_ids = [
+            sid for sid in (owner_state.get("owner_speaker_ids") or [])
+            if isinstance(sid, str) and sid.startswith("telegram:")
+        ]
+        if not owner_ids:
+            return {"sent": 0, "pending": len(pending), "reason": "no_owner"}
+
+        text = _pd.render(pending)
+        buttons = _tg.InlineButtonSet()
+        for prop in pending[:_pd.MAX_WITH_BUTTONS]:
+            pid = getattr(prop, "id", "")
+            if not pid:
+                continue
+            label = (getattr(prop, "title", "") or pid)[:22]
+            buttons = buttons.row(
+                _tg.InlineButton(f"👀 {label}", callback_data=f"prop:diff:{pid}"),
+                _tg.InlineButton("✅", callback_data=f"prop:apply:{pid}"),
+                _tg.InlineButton("❌", callback_data=f"prop:reject:{pid}"),
+            )
+        markup = buttons.to_markup()
+
+        sent = 0
+        for owner_sid in owner_ids:
+            chat_id = _contacts.chat_id_for_speaker(owner_sid)
+            if chat_id is None:
+                continue
+            try:
+                self._send_with_buttons(chat_id, text, markup)
+                sent += 1
+            except Exception as e:
+                log.warning("proposal digest to %s failed: %s", chat_id, e)
+        return {"sent": sent, "pending": len(pending)}
+
     def _on_soul_revision(self, rev) -> None:
         """Subscribed callback: the agent wants to change its own character.
 

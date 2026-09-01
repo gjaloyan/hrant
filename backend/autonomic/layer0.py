@@ -275,6 +275,21 @@ def default_rules() -> list[LayerZeroRule]:
             cooldown_seconds=86400.0,
         ),
         LayerZeroRule(
+            # The other half of stale_proposals: that lever DELETES a
+            # backlog nobody reviewed, this one gives the owner a chance to
+            # review it first. Announcing a proposal once at creation and
+            # never again is why 25 were sitting unread on 2026-09-01.
+            #
+            # Fires hourly; the lever itself holds the real interval (one
+            # digest per ~20h, never at night) so the cadence lives with the
+            # quiet-hours logic rather than being split across two files.
+            name="proposal_digest_tick",
+            predicate=lambda s: True,
+            lever="FIRE_PROPOSAL_DIGEST",
+            params={},
+            cooldown_seconds=3600.0,
+        ),
+        LayerZeroRule(
             # Drive user/learning goals to completion, one subtask per fire
             # (2026-06-25 audit: those goal types were created but never
             # executed by anything). Long cooldown bounds the spend.
