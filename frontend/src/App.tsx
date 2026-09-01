@@ -9,7 +9,6 @@ import ProjectsPanel from "./components/ProjectsPanel";
 import SessionsPanel from "./components/SessionsPanel";
 import IntelligencePanel from "./components/IntelligencePanel";
 import AutonomicPanel from "./components/AutonomicPanel";
-import UsagePage from "./components/UsagePage";
 import SettingsPanel from "./components/SettingsPanel";
 import StatusBar from "./components/StatusBar";
 import NavRail, { labelOf, type Tab } from "./components/NavRail";
@@ -124,7 +123,6 @@ export default function App() {
         {tab === "graph" && <GraphViewer />}
         {tab === "intelligence" && <IntelligencePanel />}
         {tab === "autonomic" && <AutonomicPanel />}
-        {tab === "usage" && <UsagePage />}
         {tab === "projects" && <ProjectsPanel onRefresh={refresh} />}
         {tab === "finetune" && <FinetunePanel />}
         {tab === "settings" && <SettingsPanel />}

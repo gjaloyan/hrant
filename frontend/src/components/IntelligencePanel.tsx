@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import ThinkingTraces from "./intelligence/ThinkingTraces";
 import {
   fetchEvalStats,
   fetchMetaLearner,
@@ -17,6 +18,7 @@ import {
   recallMemory,
   fetchUsageStats,
   fetchUsageCalls,
+  fetchUsageTraces,
   type EvalStats,
   type MetaLearnerStats,
   type FailureEntry,
@@ -28,6 +30,7 @@ import {
   type RecalledFact,
   type UsageStats,
   type UsageCallRecord,
+  type RequestTrace,
 } from "../api";
 
 // ---- Mini bar chart ----
@@ -683,7 +686,7 @@ function Stat({ label, val, warn }: { label: string; val: number; warn?: boolean
 }
 
 // ---- Main Panel ----
-type SubTab = "usage" | "memory" | "evaluator" | "meta" | "analogies" | "modifier";
+type SubTab = "usage" | "thinking" | "memory" | "evaluator" | "meta" | "analogies" | "modifier";
 
 export default function IntelligencePanel() {
   const [subTab, setSubTab] = useState<SubTab>("usage");
@@ -697,6 +700,16 @@ export default function IntelligencePanel() {
   const [analogies, setAnalogies] = useState<AnalogyPattern[]>([]);
   const [modStats, setModStats] = useState<SelfModifierStats | null>(null);
   const [proposals, setProposals] = useState<ModProposal[]>([]);
+
+  const [traces, setTraces] = useState<RequestTrace[]>([]);
+  const loadTraces = useCallback(async () => {
+    try {
+      const r = await fetchUsageTraces(20);
+      setTraces((r as any).traces || []);
+    } catch {
+      /* traces are diagnostic; a failure here must not blank the panel */
+    }
+  }, []);
 
   const loadUsage = useCallback(async () => {
     try {
@@ -743,6 +756,7 @@ export default function IntelligencePanel() {
 
   useEffect(() => {
     loadUsage();
+    loadTraces();
     loadMemory();
     loadEval();
     loadMeta();
@@ -776,6 +790,7 @@ export default function IntelligencePanel() {
 
   const SUB_TABS: { id: SubTab; label: string }[] = [
     { id: "usage", label: "Usage" },
+    { id: "thinking", label: "Thinking" },
     { id: "memory", label: "Memory" },
     { id: "evaluator", label: "Evaluator" },
     { id: "meta", label: "Meta-Learner" },
@@ -805,6 +820,9 @@ export default function IntelligencePanel() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto p-4">
         {subTab === "usage" && <UsagePanel stats={usageStats} calls={usageCalls} onRefresh={loadUsage} />}
+        {subTab === "thinking" && (
+          <ThinkingTraces traces={traces} onRefresh={loadTraces} />
+        )}
         {subTab === "memory" && <MemoryPanel stats={memStats} facts={memFacts} onRefresh={loadMemory} />}
         {subTab === "evaluator" && <EvalPanel stats={evalStats} />}
         {subTab === "meta" && <MetaPanel stats={metaStats} failures={failures} onExtract={handleExtract} />}

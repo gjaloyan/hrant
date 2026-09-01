@@ -22,7 +22,6 @@ export type Tab =
   | "intelligence"
   | "autonomic"
   | "finetune"
-  | "usage"
   | "settings";
 
 type Item = { id: Tab; label: string; icon: string; hint: string };
@@ -47,7 +46,7 @@ export const NAV: { group: string; items: Item[] }[] = [
   {
     group: "Agent",
     items: [
-      { id: "intelligence", label: "Intelligence", icon: "🧠", hint: "Evaluator, meta-learner, self-modifier" },
+      { id: "intelligence", label: "Intelligence", icon: "🧠", hint: "Tokens, cost, thinking traces, self-modifier" },
       { id: "autonomic", label: "Autonomic", icon: "🦾", hint: "Background levers" },
       { id: "finetune", label: "Fine-Tune", icon: "🎓", hint: "Training runs" },
     ],
@@ -55,7 +54,6 @@ export const NAV: { group: string; items: Item[] }[] = [
   {
     group: "System",
     items: [
-      { id: "usage", label: "Usage", icon: "📈", hint: "Tokens and cost" },
       { id: "settings", label: "Settings", icon: "⚙️", hint: "Everything configurable" },
     ],
   },
