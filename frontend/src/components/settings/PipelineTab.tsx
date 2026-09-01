@@ -1,3 +1,4 @@
+import { FIELD_NAMES } from "./fieldNames";
 import { useEffect, useState } from "react";
 import {
   createPipelineProfile,
@@ -135,6 +136,15 @@ export default function PipelineTab({ flash }: Props) {
 
   return (
     <div className="flex flex-col h-full">
+      {/* The most conceptually opaque screen in Settings: it opened on a
+          profile selector with no statement of what a profile IS. */}
+      <p className="border-b border-edge px-3 py-2 text-xs text-ink-dim">
+        A <b className="text-ink">profile</b> is a named set of overrides
+        applied on top of the defaults for a whole turn — a way to run the
+        agent cheaply, or exhaustively, without editing settings each time.
+        Only the <b className="text-ink">active</b> one has any effect;
+        blank fields fall through to the default.
+      </p>
       {/* Top selector strip */}
       <div className="flex flex-wrap gap-2 items-center px-3 py-2 border-b border-slate-700/40 bg-slate-900/40">
         <span className="text-xs text-slate-400">Active:</span>
@@ -256,7 +266,12 @@ function EngineEditor({
       <div>
         <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Router</div>
         <label className="flex items-center gap-2">
-          <span className="w-56">tool_loop_input_budget</span>
+          <span className="w-56">
+            <span className="block">{FIELD_NAMES.tool_loop_input_budget}</span>
+            <span className="block font-mono text-[10px] text-ink-faint">
+              tool_loop_input_budget
+            </span>
+          </span>
           <input
             type="number"
             value={String(routerSec.tool_loop_input_budget ?? "")}
@@ -277,7 +292,12 @@ function EngineEditor({
           Verification
         </div>
         <label className="flex items-center gap-2">
-          <span className="w-56">min_confidence (0-100)</span>
+          <span className="w-56">
+            <span className="block">{FIELD_NAMES.min_confidence}</span>
+            <span className="block font-mono text-[10px] text-ink-faint">
+              min_confidence · 0–100
+            </span>
+          </span>
           <input
             type="number"
             value={String(verifySec.min_confidence ?? "")}
