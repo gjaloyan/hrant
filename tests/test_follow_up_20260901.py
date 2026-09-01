@@ -90,16 +90,20 @@ def test_the_first_follow_up_uses_the_first_interval(tmp_path, monkeypatch):
                      steps=[{"title": "x", "due_at": "2026-09-01T09:00:00Z"}])
     sid = t["steps"][0]["id"]
 
-    gaps = []
-    for _ in range(len(fu.BACKOFF_HOURS)):
+    # Compare against next_nudge_at called with an EXPLICIT index at the
+    # same instant, rather than against raw hour gaps. Raw gaps made this
+    # test depend on the time of day: run it in the evening and the 3h and
+    # 8h steps land in quiet hours, get pushed to 08:00, and read as 12h.
+    # This form still catches the bug it was written for — an off-by-one
+    # in which interval `arm_follow_up` picks — because the expectation is
+    # pinned to the index.
+    for i in range(len(fu.BACKOFF_HOURS)):
         before = datetime.now(timezone.utc)
         step = store.arm_follow_up(t["id"], sid)
-        if step is None or not step["next_check_at"]:
-            break
-        nxt = datetime.strptime(step["next_check_at"], fu.ISO).replace(
-            tzinfo=timezone.utc)
-        gaps.append(round((nxt - before).total_seconds() / 3600))
-
-    assert gaps[0] == fu.BACKOFF_HOURS[0], (
-        "the first interval is unreachable; got %sh" % gaps[0])
-    assert gaps[:2] == list(fu.BACKOFF_HOURS[:2]), gaps
+        assert step is not None and step["next_check_at"], (
+            "ran out of follow-ups at index %d" % i)
+        want = datetime.strptime(fu.next_nudge_at(i, before), fu.ISO)
+        got = datetime.strptime(step["next_check_at"], fu.ISO)
+        assert abs((got - want).total_seconds()) <= 5, (
+            "call %d used the wrong interval: got %s, expected %s"
+            % (i + 1, got, want))
