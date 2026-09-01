@@ -183,13 +183,7 @@ export default function FinetunePanel() {
             </div>
           </div>
         )}
-        {appStatus && (
-          <div className="mt-2 text-xs opacity-80">
-            mode: <b>{appStatus.mode}</b> · training:{" "}
-            <b>{appStatus.training_location}</b> · finetune:{" "}
-            {appStatus.finetune_enabled ? "yes" : "no"}
-          </div>
-        )}
+
 
         {/* The model cascade moved to Settings -> Model Routing on
             2026-09-01: it is a question about which model does what, which
@@ -223,7 +217,7 @@ export default function FinetunePanel() {
 
           <button
             onClick={refresh}
-            className="bg-slate-800 hover:bg-slate-700 rounded px-3 py-1 text-sm"
+            className="rounded-lg border border-edge-strong px-3 py-1 text-sm text-ink-dim hover:bg-surface-hover hover:text-ink"
           >
             Refresh
           </button>
@@ -295,11 +289,22 @@ export default function FinetunePanel() {
               </button>
             ))}
             <button
-              onClick={() => rollbackModel().then(refresh)}
+              onClick={() => {
+                if (
+                  !confirm(
+                    "Roll the model back to the previous version?\n\n" +
+                      "Every answer from now on comes from that version " +
+                      "until you switch again.",
+                  )
+                )
+                  return;
+                rollbackModel().then(refresh);
+              }}
               disabled={!versions.rollback_enabled}
-              className="bg-slate-800 hover:bg-slate-700 px-2 py-0.5 rounded disabled:opacity-40"
+              title="Switch back to the previous fine-tuned version"
+              className="rounded-md border border-edge-strong px-2 py-0.5 text-ink-dim hover:bg-surface-hover hover:text-ink disabled:opacity-40"
             >
-              rollback
+              Roll back
             </button>
           </div>
         </div>
