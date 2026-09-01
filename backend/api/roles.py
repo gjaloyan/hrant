@@ -76,6 +76,24 @@ def roles_set(speaker_id: str, body: RoleUpdate):
     return {"ok": True, "speaker_id": sid, "entry": entry}
 
 
+@router.delete("/api/roles/{speaker_id:path}")
+def roles_forget(speaker_id: str):
+    """Remove a speaker from the roles table.
+
+    Owner-only, same gate as PUT. Demoting to guest was the only way to
+    deal with a stale entry, so the table only ever grew.
+    """
+    require_owner_for_writes(action="removing a speaker")
+    sid = normalize_speaker(speaker_id)
+    try:
+        removed = _roles.forget_speaker(sid)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not removed:
+        raise HTTPException(404, "no such speaker")
+    return {"ok": True, "speaker_id": sid}
+
+
 # --- Relationships ------------------------------------------------------
 
 

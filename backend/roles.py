@@ -234,6 +234,41 @@ def set_role(
     return entry
 
 
+def forget_speaker(speaker_id: str) -> bool:
+    """Remove a speaker entirely. Returns False if there was nothing to
+    remove.
+
+    Demoting to `guest` leaves the row on the list forever, which is right
+    for someone you still talk to and wrong for a stale entry — the roles
+    table on prod carried five one-off audit identities that could only be
+    demoted, never cleared.
+
+    `webui:default` is refused: it is how the person at the keyboard owns
+    their own box, and `_load` re-adds it on every read anyway, so removing
+    it would silently do nothing.
+
+    There is deliberately NO "last owner" check. `_load` guarantees
+    `webui:default` is in the owner list on every read, so an ownerless
+    state cannot occur and such a guard would be unreachable code.
+
+    Forgetting a speaker is not a ban: if they speak again they come back
+    as a guest, which is what anyone unknown gets.
+    """
+    sid = normalize_speaker(speaker_id)
+    if sid == DEFAULT_SPEAKER:
+        raise ValueError(
+            "webui:default is the local owner and cannot be removed")
+    state = _load()
+    owners = list(state.get("owner_speaker_ids") or [])
+    speakers = state.setdefault("speakers", {})
+    had = sid in speakers or sid in owners
+    speakers.pop(sid, None)
+    state["owner_speaker_ids"] = [o for o in owners if o != sid]
+    if had:
+        _save(state)
+    return had
+
+
 def list_roles() -> dict:
     """Full state for the WebUI Roles panel."""
     return _load()

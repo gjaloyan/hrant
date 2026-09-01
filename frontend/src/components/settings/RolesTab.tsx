@@ -5,6 +5,7 @@ import {
   ScheduledMessage,
   cancelScheduledMessage,
   fetchRoles,
+  forgetSpeaker,
   fetchRelationships,
   fetchScheduledMessages,
   fetchTelegramContacts,
@@ -19,6 +20,9 @@ const ROLE_COLOUR: Record<Role, string> = {
   trusted: "bg-sky-700/60 text-sky-100",
   guest: "bg-slate-700/60 text-slate-200",
 };
+
+const CONFIRM_TAIL =
+  "\n\nThey keep no special access. If they message again they come back as a guest, which is what anyone unknown gets.";
 
 const ROLE_ORDER: Role[] = ["owner", "trusted", "guest"];
 
@@ -55,6 +59,26 @@ export default function RolesTab({ flash }: Props) {
   useEffect(() => {
     refresh();
   }, []);
+
+  const handleForget = async (sid: string, label: string) => {
+    const who = label ? `${label} (${sid})` : sid;
+    if (
+      !confirm(
+        `Remove ${who} from the list?` + CONFIRM_TAIL
+      )
+    )
+      return;
+    setBusy(true);
+    try {
+      await forgetSpeaker(sid);
+      flash("Removed " + who);
+      await refresh();
+    } catch (e: any) {
+      flash("Error: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const handleRoleChange = async (speaker_id: string, role: Role, label?: string) => {
     setBusy(true);
@@ -200,7 +224,7 @@ export default function RolesTab({ flash }: Props) {
                     className="w-full bg-slate-900 rounded px-2 py-1 text-xs outline-none focus:ring-1 focus:ring-sky-600"
                   />
                 </div>
-                <div className="flex gap-1">
+                <div className="flex items-center gap-1">
                   {ROLE_ORDER.map((r) => (
                     <button
                       key={r}
@@ -215,6 +239,22 @@ export default function RolesTab({ flash }: Props) {
                       {r}
                     </button>
                   ))}
+                  {/* Demoting to guest left the row on the list forever,
+                      which is right for someone you still talk to and
+                      wrong for a stale entry. Removing is not a ban: an
+                      unknown speaker is a guest, so they return as one. */}
+                  <button
+                    onClick={() => handleForget(sid, label)}
+                    disabled={busy || sid === "webui:default"}
+                    title={
+                      sid === "webui:default"
+                        ? "This is you — the local owner cannot be removed"
+                        : "Remove from the list"
+                    }
+                    className="ml-1 rounded px-1.5 py-0.5 text-[10px] text-ink-faint hover:bg-danger hover:text-white disabled:opacity-25 disabled:hover:bg-transparent disabled:hover:text-ink-faint"
+                  >
+                    ✕
+                  </button>
                 </div>
               </div>
             );

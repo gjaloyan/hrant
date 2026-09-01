@@ -1691,6 +1691,17 @@ export type RolesState = {
 
 export const fetchRoles = () => json_get<RolesState>("/api/roles");
 
+/** Remove a speaker from the roles table.
+ *
+ * Demoting to `guest` was the only way to deal with a stale entry, so the
+ * table only ever grew. Not a ban: an unknown speaker is a guest, so
+ * anyone removed comes back as one if they speak again.
+ */
+export const forgetSpeaker = (speaker_id: string) =>
+  json_delete<{ ok: boolean; speaker_id: string }>(
+    `/api/roles/${encodeURIComponent(speaker_id)}`,
+  );
+
 export const setRole = (speaker_id: string, role: Role, label?: string) =>
   json_put<{ ok: boolean; speaker_id: string; entry: RoleEntry }>(
     `/api/roles/${encodeURIComponent(speaker_id)}`,
