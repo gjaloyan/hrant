@@ -15,9 +15,12 @@
  */
 import { useEffect, useState } from "react";
 import {
+  fetchCascade,
   fetchModelRouting,
   fetchProviders,
   putModelRouting,
+  saveCascade,
+  type CascadeConfig,
   type ModelRoutingEntry,
   type ProviderConfig,
 } from "../../api";
@@ -53,14 +56,25 @@ export default function ModelRoutingTab({
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  // The cascade lived on the Fine-Tune data screen, between an example
+  // browser and a JSONL export — a different question entirely. It is the
+  // same decision as the table below (which model does what), so it lives
+  // with it, and it picks a model from a list instead of asking the reader
+  // to type a provider id from memory.
+  const [cascade, setCascade] = useState<CascadeConfig | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        const [cfg, pr] = await Promise.all([fetchModelRouting(), fetchProviders()]);
+        const [cfg, pr, cas] = await Promise.all([
+          fetchModelRouting(),
+          fetchProviders(),
+          fetchCascade().catch(() => null),
+        ]);
         setEnabled(!!cfg.enabled);
         setRouting(cfg.routing || {});
         setProviders((pr as any).providers || []);
+        if (cas) setCascade(cas as CascadeConfig);
       } catch (e: any) {
         flash("Error: " + e.message);
       } finally {
@@ -185,6 +199,92 @@ export default function ModelRoutingTab({
           })}
         </ul>
       </Card>
+
+      {cascade && (
+        <Card
+          title="Try a small model first"
+          subtitle="A cheap model answers, a strong one checks it, and only weak answers are redone by the main model. Separate from the table above, which never re-runs anything."
+        >
+          <Toggle
+            checked={cascade.enabled}
+            onChange={(v) => {
+              const next = { ...cascade, enabled: v };
+              setCascade(next);
+              saveCascade(next).then(
+                () => flash(v ? "Cascade on" : "Cascade off"),
+                (e) => flash("Error: " + e.message),
+              );
+            }}
+            label="Answer with a small model first"
+            hint="Costs a verifier call on every turn, and saves the main model's price on the ones that pass."
+          />
+
+          {cascade.enabled && (
+            <div className="mt-3 space-y-3 border-t border-edge pt-3">
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">
+                  Small model
+                </span>
+                <select
+                  value={`${cascade.provider_id}::${cascade.model}`}
+                  onChange={(e) => {
+                    const o = options.find((x) => x.key === e.target.value);
+                    if (!o) return;
+                    const next = {
+                      ...cascade,
+                      provider_id: o.provider_id,
+                      model: o.model,
+                    };
+                    setCascade(next);
+                    saveCascade(next).then(() => flash("Saved"));
+                  }}
+                  className="w-full max-w-md text-sm"
+                >
+                  <option value={`${cascade.provider_id}::${cascade.model}`}>
+                    {cascade.provider_id
+                      ? `${cascade.provider_id} · ${cascade.model}`
+                      : "(none chosen)"}
+                  </option>
+                  {options
+                    .filter(
+                      (o) => o.key !== `${cascade.provider_id}::${cascade.model}`,
+                    )
+                    .map((o) => (
+                      <option key={o.key} value={o.key}>
+                        {o.label}
+                      </option>
+                    ))}
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">
+                  Escalate below {cascade.confidence_gate}% confidence
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  step={5}
+                  value={cascade.confidence_gate}
+                  onChange={(e) =>
+                    setCascade({
+                      ...cascade,
+                      confidence_gate: Number(e.target.value),
+                    })
+                  }
+                  onMouseUp={() => saveCascade(cascade).then(() => flash("Saved"))}
+                  className="w-full max-w-md"
+                />
+                <span className="block text-xs text-ink-dim">
+                  Higher sends more work to the main model. Lower saves more
+                  and risks shipping a weaker answer.
+                </span>
+              </label>
+            </div>
+          )}
+        </Card>
+      )}
 
       <div className="flex items-center gap-3">
         <Button kind="primary" onClick={save} disabled={!dirty || saving}>
