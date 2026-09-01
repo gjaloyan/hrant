@@ -97,24 +97,54 @@ def add_project_issue(name: str, body: ProjectIssueRequest):
     return {"message": PROJECTS.add_issue(body.problem, body.fix)}
 
 
+# The WebUI acts as `webui:default`, which holds the owner role, so
+# scoping these costs the owner nothing today. It closes the same leak
+# that was closed in the tools on 2026-09-01: without it a non-owner
+# console would list, read and edit everyone's tasks.
+WEBUI = "webui:default"
+
+
 @router.get("/api/trackers")
 def list_trackers_api(status: str = "active"):
     from ..tracker import TRACKERS
-    return {"trackers": TRACKERS.list(status=status)}
+    return {"trackers": TRACKERS.list(status=status, requested_by=WEBUI)}
 
 
 @router.get("/api/trackers/{tracker_id}")
 def get_tracker_api(tracker_id: str):
-    from ..tracker import TRACKERS
+    from ..tracker import TRACKERS, may_access
     t = TRACKERS.get(tracker_id)
-    if not t:
+    # "Not found" rather than "not yours": the id's existence is itself
+    # information the caller is not entitled to.
+    if not t or not may_access(t, WEBUI):
         raise HTTPException(404, "tracker not found")
     return t
 
 
+class TodoCreate(BaseModel):
+    title: str
+    due_at: str = ""
+    check_in_kind: str = "remind"
+
+
+@router.post("/api/todos")
+def create_todo_api(body: TodoCreate):
+    """Quick-add from the task list. Until now only the agent could put
+    something on the list, so the owner had to ask for a note to himself."""
+    from ..tracker import add_todo
+    if not body.title.strip():
+        raise HTTPException(400, "title required")
+    return {"ok": True, "tracker": add_todo(
+        body.title, due_at=body.due_at,
+        check_in_kind=body.check_in_kind or "remind", requested_by=WEBUI)}
+
+
 @router.put("/api/trackers/{tracker_id}/steps/{step_id}")
 def update_step_api(tracker_id: str, step_id: str, body: dict):
-    from ..tracker import TRACKERS
+    from ..tracker import TRACKERS, may_access
+    _t = TRACKERS.get(tracker_id)
+    if not _t or not may_access(_t, WEBUI):
+        raise HTTPException(404, "tracker/step not found")
     s = TRACKERS.update_step(
         tracker_id, step_id,
         status=body.get("status"), note=body.get("note"),

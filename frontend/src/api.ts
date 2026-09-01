@@ -2465,11 +2465,17 @@ export async function fetchSystemPromptSections(): Promise<SystemPromptSectionsP
 export interface TrackerStep {
   id: string;
   title: string;
-  status: string; // pending | active | done | blocked
+  status: string; // pending | active | done | blocked | stalled
   due_at: string;
   check_in_kind: string; // ask_status | remind | none
   note: string;
   last_checked_at: string | null;
+  // Follow-up state (2026-09-01). A step with a date is raised again on a
+  // growing gap until it is closed; `next_check_at` is when, `nudges` is
+  // how many reminders have actually gone out.
+  nudges?: number;
+  last_nudge_at?: string | null;
+  next_check_at?: string;
 }
 
 export interface Tracker {
@@ -2478,6 +2484,7 @@ export interface Tracker {
   domain: string;
   status: string; // active | archived | done | cancelled
   created_at: string;
+  owner?: string;
   steps: TrackerStep[];
   notes: string;
 }
@@ -2521,6 +2528,17 @@ export const updateTrackerStep = (
     `/api/trackers/${encodeURIComponent(trackerId)}/steps/${encodeURIComponent(stepId)}`,
     patch,
   );
+
+export const createTodo = (
+  title: string,
+  due_at = "",
+  check_in_kind = "remind",
+) =>
+  json_post<{ ok: boolean; tracker: Tracker }>("/api/todos", {
+    title,
+    due_at,
+    check_in_kind,
+  });
 
 export const completeTracker = (trackerId: string) =>
   json_post<{ ok: boolean; tracker: Tracker }>(

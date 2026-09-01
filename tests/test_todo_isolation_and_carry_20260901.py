@@ -163,3 +163,25 @@ def test_the_next_one_is_armed_even_if_the_turn_explodes(store, monkeypatch):
     step = store.get(t["id"])["steps"][0]
     assert step["nudges"] == 1, "the follow-up was lost when the turn failed"
     assert step["next_check_at"]
+
+
+def test_reopening_a_stalled_task_gives_it_its_voice_back(store, monkeypatch):
+    """"Yes, still relevant" must restart the follow-ups.
+
+    A stalled step gave up because its budget ran out. Setting it back to
+    pending without clearing the count would put it on the list and never
+    mention it again -- a task that looks tracked and is not.
+    """
+    _no_scheduling(monkeypatch)
+    t = store.create(title="todo", requested_by="telegram:1",
+                     steps=[{"title": "x", "due_at": "2099-01-01T09:00:00Z"}])
+    sid = t["steps"][0]["id"]
+    while store.arm_follow_up(t["id"], sid) is not None:
+        pass
+    store.park_stalled(t["id"], sid)
+    assert store.get(t["id"])["steps"][0]["nudges"] == len(fu.BACKOFF_HOURS)
+
+    store.update_step(t["id"], sid, status="pending")
+    step = store.get(t["id"])["steps"][0]
+    assert step["nudges"] == 0, "reopened but still out of follow-ups"
+    assert store.arm_follow_up(t["id"], sid) is not None, "it stayed mute"

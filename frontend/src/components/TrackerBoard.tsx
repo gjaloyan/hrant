@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   completeTracker,
+  createTodo,
   fetchTrackers,
   updateTrackerStep,
   type Tracker,
+  type TrackerStep,
 } from "../api";
 
 const STATUS_COLORS: Record<string, string> = {
@@ -11,14 +13,17 @@ const STATUS_COLORS: Record<string, string> = {
   active: "bg-sky-700 text-white",
   done: "bg-emerald-700 text-white",
   blocked: "bg-rose-700 text-white",
+  stalled: "bg-amber-700 text-white",
 };
-const STEP_STATUSES = ["pending", "active", "done", "blocked"];
+const STEP_STATUSES = ["pending", "active", "done", "blocked", "stalled"];
+const OPEN = (s: string) => s === "pending" || s === "active";
 
 function fmtDue(due: string): string {
   if (!due) return "—";
   const d = new Date(due);
   if (isNaN(d.getTime())) return due;
   return d.toLocaleString(undefined, {
+    weekday: "short",
     month: "short",
     day: "numeric",
     hour: "2-digit",
@@ -26,9 +31,49 @@ function fmtDue(due: string): string {
   });
 }
 
+// The agent schedules in UTC; the user thinks in their own zone, so every
+// stamp on this board is rendered by the browser's locale.
+function fmtShort(when: string): string {
+  const d = new Date(when);
+  if (isNaN(d.getTime())) return when;
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return d.toLocaleString(undefined, {
+    ...(sameDay ? {} : { weekday: "short" }),
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// The follow-up state, in words. This is what the old board was blind to: a
+// task with a date raises itself again on a growing gap until it is closed,
+// and the user should watch that happen rather than be surprised by it.
+function FollowUp({ step }: { step: TrackerStep }) {
+  const sent = step.nudges || 0;
+  if (step.status === "stalled")
+    return (
+      <span className="text-amber-400">
+        gave up after {sent} reminder{sent === 1 ? "" : "s"}
+      </span>
+    );
+  if (!OPEN(step.status)) return <span className="opacity-30">—</span>;
+  if (!step.next_check_at)
+    return (
+      <span className="opacity-30">{step.due_at ? "armed" : "no date"}</span>
+    );
+  return (
+    <span className="opacity-70">
+      {sent > 0 && <>asked {sent}× · </>}
+      next {fmtShort(step.next_check_at)}
+    </span>
+  );
+}
+
 export default function TrackerBoard() {
   const [trackers, setTrackers] = useState<Tracker[]>([]);
   const [err, setErr] = useState("");
+  const [draft, setDraft] = useState("");
+  const [draftDue, setDraftDue] = useState("");
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -46,12 +91,8 @@ export default function TrackerBoard() {
     return () => clearInterval(t);
   }, [load]);
 
-  const onStepStatus = async (
-    trackerId: string,
-    stepId: string,
-    status: string,
-  ) => {
-    await updateTrackerStep(trackerId, stepId, { status });
+  const setStatus = async (tId: string, sId: string, status: string) => {
+    await updateTrackerStep(tId, sId, { status });
     load();
   };
 
@@ -62,88 +103,222 @@ export default function TrackerBoard() {
     load();
   };
 
-  if (err)
-    return <div className="p-4 text-rose-400 text-sm">Error: {err}</div>;
-  if (trackers.length === 0)
-    return (
-      <div className="p-6 opacity-50 text-sm text-center">
-        No active projects. The agent creates them with its create_tracker tool.
-      </div>
-    );
+  const onAdd = async () => {
+    const title = draft.trim();
+    if (!title || busy) return;
+    setBusy(true);
+    try {
+      // datetime-local yields wall-clock with no zone; the Date ctor reads
+      // it as local, which is the time the user actually meant.
+      const due = draftDue
+        ? new Date(draftDue).toISOString().slice(0, 19) + "Z"
+        : "";
+      await createTodo(title, due);
+      setDraft("");
+      setDraftDue("");
+      load();
+    } catch (e: any) {
+      setErr(e.message || "could not add");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (err) return <div className="p-4 text-rose-400 text-sm">Error: {err}</div>;
+
+  // A one-step inbox entry is a task; anything else is work with structure.
+  // Same store, two shapes — rendering "buy medicine" as a project table is
+  // what made the simple case feel wrong.
+  const todos = trackers.filter((t) => t.domain === "inbox");
+  const projects = trackers.filter((t) => t.domain !== "inbox");
+  const isOpen = (t: Tracker) => t.steps.some((s) => OPEN(s.status));
+  const ordered = [...todos.filter(isOpen), ...todos.filter((t) => !isOpen(t))];
 
   return (
-    <div className="flex-1 overflow-y-auto p-4 space-y-6">
-      {trackers.map((t) => (
-        <section
-          key={t.id}
-          className="bg-slate-900 rounded-lg border border-slate-800"
-        >
-          <header className="flex items-center justify-between px-4 py-2 border-b border-slate-800">
-            <h3 className="font-bold">
-              {t.title}
-              <span className="ml-2 text-xs opacity-50">{t.domain}</span>
-            </h3>
-            <button
-              onClick={() => onComplete(t.id, t.title)}
-              className="text-xs bg-slate-800 hover:bg-emerald-700 rounded px-2 py-1"
-            >
-              complete
-            </button>
-          </header>
-          <table className="w-full text-xs">
-            <thead className="text-slate-400">
-              <tr className="text-left">
-                <th className="px-4 py-1 font-medium">Step</th>
-                <th className="px-2 py-1 font-medium">Due</th>
-                <th className="px-2 py-1 font-medium">Status</th>
-                <th className="px-2 py-1 font-medium">Last check-in</th>
-              </tr>
-            </thead>
-            <tbody>
-              {t.steps.length === 0 && (
-                <tr>
-                  <td colSpan={4} className="px-4 py-2 opacity-40">
-                    (no steps yet)
-                  </td>
-                </tr>
-              )}
-              {t.steps.map((s) => (
-                <tr key={s.id} className="border-t border-slate-800/60">
-                  <td className="px-4 py-1.5">
+    <div className="flex-1 overflow-y-auto p-4 space-y-8">
+      {/* ---- Task list ---- */}
+      <section>
+        <h2 className="text-sm font-bold uppercase tracking-wide opacity-60 mb-2">
+          Task list
+        </h2>
+
+        <div className="flex flex-wrap gap-2 mb-3">
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && onAdd()}
+            placeholder="Add a task…"
+            className="flex-1 min-w-[12rem] bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-sm outline-none focus:border-sky-600"
+          />
+          <input
+            type="datetime-local"
+            value={draftDue}
+            onChange={(e) => setDraftDue(e.target.value)}
+            title="Optional. With a time, the task follows up until you close it."
+            className="bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-sm outline-none focus:border-sky-600"
+          />
+          <button
+            onClick={onAdd}
+            disabled={busy || !draft.trim()}
+            className="bg-sky-700 hover:bg-sky-600 disabled:opacity-40 rounded px-3 py-1.5 text-sm"
+          >
+            Add
+          </button>
+        </div>
+
+        {todos.length === 0 ? (
+          <p className="opacity-40 text-sm py-3">
+            Nothing on the list. Add one above, or tell the agent “remind me
+            to …”.
+          </p>
+        ) : (
+          <ul className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden">
+            {ordered.map((t) => {
+              const s = t.steps[0];
+              if (!s) return null;
+              const done = s.status === "done";
+              return (
+                <li
+                  key={t.id}
+                  className={`flex items-center gap-3 px-3 py-2 bg-slate-900 ${
+                    s.status === "stalled" ? "border-l-2 border-amber-600" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={done}
+                    onChange={() =>
+                      setStatus(t.id, s.id, done ? "pending" : "done")
+                    }
+                    className="w-4 h-4 accent-emerald-600 shrink-0"
+                  />
+                  <span
+                    className={`flex-1 min-w-0 truncate text-sm ${
+                      done ? "line-through opacity-40" : ""
+                    }`}
+                    title={s.title}
+                  >
                     {s.title}
-                    {s.note && (
-                      <span className="block opacity-50">{s.note}</span>
-                    )}
-                  </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">
-                    {fmtDue(s.due_at)}
-                  </td>
-                  <td className="px-2 py-1.5">
-                    <select
-                      value={s.status}
-                      onChange={(e) =>
-                        onStepStatus(t.id, s.id, e.target.value)
-                      }
-                      className={`rounded px-1 py-0.5 outline-none ${
-                        STATUS_COLORS[s.status] || "bg-slate-700"
-                      }`}
+                  </span>
+                  <span className="text-xs opacity-60 whitespace-nowrap hidden sm:inline">
+                    {s.due_at ? fmtShort(s.due_at) : ""}
+                  </span>
+                  <span className="text-xs whitespace-nowrap hidden md:inline">
+                    <FollowUp step={s} />
+                  </span>
+                  {s.status === "stalled" && (
+                    <button
+                      onClick={() => setStatus(t.id, s.id, "pending")}
+                      className="text-xs bg-slate-800 hover:bg-amber-700 rounded px-2 py-0.5 whitespace-nowrap"
+                      title="Restarts the reminders from the beginning"
                     >
-                      {STEP_STATUSES.map((st) => (
-                        <option key={st} value={st}>
-                          {st}
-                        </option>
+                      still relevant
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </section>
+
+      {/* ---- Projects ---- */}
+      <section>
+        <h2 className="text-sm font-bold uppercase tracking-wide opacity-60 mb-2">
+          Projects
+        </h2>
+        {projects.length === 0 ? (
+          <p className="opacity-40 text-sm py-3">
+            No active projects. The agent opens one with create_tracker when
+            the work has real internal structure.
+          </p>
+        ) : (
+          <div className="space-y-6">
+            {projects.map((t) => (
+              <div
+                key={t.id}
+                className="bg-slate-900 rounded-lg border border-slate-800"
+              >
+                <header className="flex items-center justify-between px-4 py-2 border-b border-slate-800">
+                  <h3 className="font-bold">
+                    {t.title}
+                    <span className="ml-2 text-xs opacity-50">{t.domain}</span>
+                    <span className="ml-2 text-xs opacity-40">
+                      {t.steps.filter((s) => s.status === "done").length}/
+                      {t.steps.length}
+                    </span>
+                  </h3>
+                  <button
+                    onClick={() => onComplete(t.id, t.title)}
+                    className="text-xs bg-slate-800 hover:bg-emerald-700 rounded px-2 py-1"
+                  >
+                    complete
+                  </button>
+                </header>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="text-slate-400">
+                      <tr className="text-left">
+                        <th className="px-4 py-1 font-medium">Step</th>
+                        <th className="px-2 py-1 font-medium">Due</th>
+                        <th className="px-2 py-1 font-medium">Status</th>
+                        <th className="px-2 py-1 font-medium">Follow-up</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {t.steps.length === 0 && (
+                        <tr>
+                          <td colSpan={4} className="px-4 py-2 opacity-40">
+                            (no steps yet)
+                          </td>
+                        </tr>
+                      )}
+                      {t.steps.map((s) => (
+                        <tr
+                          key={s.id}
+                          className={`border-t border-slate-800/60 ${
+                            s.status === "stalled" ? "bg-amber-950/30" : ""
+                          }`}
+                        >
+                          <td className="px-4 py-1.5">
+                            {s.title}
+                            {s.note && (
+                              <span className="block opacity-50">{s.note}</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 whitespace-nowrap">
+                            {fmtDue(s.due_at)}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <select
+                              value={s.status}
+                              onChange={(e) =>
+                                setStatus(t.id, s.id, e.target.value)
+                              }
+                              className={`rounded px-1 py-0.5 outline-none ${
+                                STATUS_COLORS[s.status] || "bg-slate-700"
+                              }`}
+                            >
+                              {STEP_STATUSES.map((st) => (
+                                <option key={st} value={st}>
+                                  {st}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+                          <td className="px-2 py-1.5 whitespace-nowrap">
+                            <FollowUp step={s} />
+                          </td>
+                        </tr>
                       ))}
-                    </select>
-                  </td>
-                  <td className="px-2 py-1.5 opacity-60 whitespace-nowrap">
-                    {s.last_checked_at ? fmtDue(s.last_checked_at) : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
-      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </div>
   );
 }

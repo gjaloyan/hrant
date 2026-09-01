@@ -41,6 +41,25 @@ def _new_step(title: str, *, due_at: str = "", check_in_kind: str = "ask_status"
     }
 
 
+def add_todo(title: str, *, due_at: str = "", check_in_kind: str = "remind",
+             requested_by: str = "webui:default") -> dict:
+    """One simple task: a one-step inbox tracker, armed if it has a date.
+
+    Shared by the `add_todo` tool and the WebUI's quick-add so the two
+    cannot drift -- the scheduling call is easy to forget, and a todo
+    without it is a todo that never speaks up.
+    """
+    t = TRACKERS.create(
+        title=(title or "").strip(), domain="inbox", requested_by=requested_by,
+        steps=[{"title": (title or "").strip(), "due_at": due_at or "",
+                "check_in_kind": check_in_kind or "remind"}],
+    )
+    step = (t.get("steps") or [{}])[0]
+    if due_at:
+        TRACKERS._schedule_check_in(t, step, requested_by)
+    return t
+
+
 def may_access(tracker: dict, speaker_id: str) -> bool:
     """May this speaker see/modify this tracker?
 
@@ -263,11 +282,19 @@ class TrackerStore:
         for step in t["steps"]:
             if step["id"] == step_id:
                 if status is not None:
+                    was = step.get("status")
                     step["status"] = status
                     # Closing a step must silence it: leaving next_check_at
                     # set would re-arm a nudge for something already done.
                     if status in ("done", "blocked", "stalled"):
                         step["next_check_at"] = ""
+                    # Reopening a stalled step gives it its voice back. It
+                    # gave up because its follow-ups ran out, so without
+                    # resetting the count "yes, still relevant" would put it
+                    # back on the list and never mention it again.
+                    elif was == "stalled":
+                        step["nudges"] = 0
+                        step["next_check_at"] = "" 
                 if note is not None:
                     step["note"] = note
                 if due_at is not None:

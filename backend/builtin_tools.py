@@ -2923,15 +2923,10 @@ def _add_todo_handler(title: str, due_at: str = "",
         return json.dumps({"ok": False, "error": "title required"},
                           ensure_ascii=False)
     from .follow_up import BACKOFF_HOURS
-    from .tracker import TRACKERS
-    t = TRACKERS.create(
-        title=title.strip(), domain="inbox", requested_by=speaker,
-        steps=[{"title": title.strip(), "due_at": due_at or "",
-                "check_in_kind": check_in_kind or "remind"}],
-    )
+    from .tracker import add_todo
+    t = add_todo(title, due_at=due_at, check_in_kind=check_in_kind,
+                 requested_by=speaker)
     step = (t.get("steps") or [{}])[0]
-    if due_at:
-        TRACKERS._schedule_check_in(t, step, speaker)
     return json.dumps({
         "ok": True,
         "todo_id": t["id"],
