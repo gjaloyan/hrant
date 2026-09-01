@@ -845,6 +845,33 @@ export type FullGraph = {
 export const fetchFullGraph = () =>
   json_get<FullGraph>("/api/graph/full");
 
+
+// ---- Per-task model routing ----
+//
+// Cheap task types on a cheap model. The agent fires 1-3 classification
+// calls per turn plus keyword extraction and memory work, and without this
+// they all go to the expensive pinned model. The backend has shipped this
+// since 2026-06-11; nothing in the UI could reach it, so it sat disabled
+// with an empty table.
+
+export type ModelRoutingEntry = { provider_id: string; model: string };
+
+export type ModelRoutingConfig = {
+  enabled: boolean;
+  routing: Record<string, ModelRoutingEntry>;
+};
+
+export const fetchModelRouting = () =>
+  json_get<ModelRoutingConfig>("/api/model-routing");
+
+export const putModelRouting = (
+  enabled: boolean,
+  routing: Record<string, ModelRoutingEntry>,
+) => json_put<{ ok: boolean; config: ModelRoutingConfig }>("/api/model-routing", {
+  enabled,
+  routing,
+});
+
 // ---- Finetune ----
 
 export const fetchFinetuneStatus = () =>

@@ -37,6 +37,7 @@ export const SETTINGS_NAV: SettingsGroup[] = [
     items: [
       { id: "providers", label: "Providers", hint: "Which models it can call, and failover", keywords: "llm model api key openai anthropic router fallback quota" },
       { id: "reasoning", label: "Reasoning", hint: "Depth, effort, when to think harder", keywords: "effort depth critical thinking levels" },
+      { id: "modelrouting", label: "Model Routing", hint: "Send cheap work to a cheaper model", keywords: "cost cheap small model per task classification keyword routing price save money" },
       { id: "pipeline", label: "Pipeline", hint: "Stages of a turn, and their profiles", keywords: "stages profile turn flow" },
       { id: "engine", label: "Engine", hint: "Temperature, context, token budgets", keywords: "temperature context window tokens budget sampling" },
       { id: "capabilities", label: "Capabilities", hint: "Tools the agent is allowed to use", keywords: "tools permissions allow terminal browser" },
