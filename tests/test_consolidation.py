@@ -416,7 +416,10 @@ def test_scheduler_should_not_fire_when_not_idle(home, monkeypatch):
     _mk_job(home, prompt="recent", response="r", created_at_offset=-10)
     should, reason = _sched._should_fire()
     assert should is False
-    assert "not idle" in reason
+    # The wording changed 2026-09-01 when gate_reason stopped printing raw
+    # seconds ("not idle (active 1721s ago)") — it goes straight onto the
+    # WebUI, where a five-digit number is not a duration anyone reads.
+    assert "still active" in reason
 
 
 def test_scheduler_fires_when_cooldown_done_and_idle(home, monkeypatch):
@@ -581,3 +584,16 @@ def test_api_digest_get_rejects_path_traversal(home, api_client):
     # FastAPI normalises the URL, so this either becomes a 404 or
     # 400 — both are acceptable, never 200.
     assert r.status_code in (400, 404)
+
+
+def test_gate_reason_reads_as_a_duration():
+    """`gate_reason` goes straight onto the WebUI, where "cooldown (63198s
+    remaining)" is a five-digit number nobody reads as seventeen and a half
+    hours. Short gaps stay in seconds, because there they are readable."""
+    from backend.consolidation.scheduler import _human_seconds
+
+    assert _human_seconds(12) == "12s"
+    assert _human_seconds(95) == "1m"
+    assert _human_seconds(63198) == "17h 33m"
+    assert _human_seconds(90000) == "1d 1h"
+    assert _human_seconds(-5) == "0s"

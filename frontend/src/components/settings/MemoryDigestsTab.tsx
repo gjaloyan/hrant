@@ -28,10 +28,17 @@ function fmtAge(ts: number): string {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+/** "17h 33m" rather than "63198s". Raw seconds are how the API speaks;
+ *  nobody reads a five-digit number as a duration. */
 function fmtDuration(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
-  if (seconds < 3600) return `${(seconds / 60).toFixed(1)}m`;
-  return `${(seconds / 3600).toFixed(1)}h`;
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  const h = Math.floor(s / 3600);
+  const m = Math.round((s % 3600) / 60);
+  if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
 }
 
 export default function MemoryDigestsTab({ flash }: Props) {
@@ -166,7 +173,8 @@ export default function MemoryDigestsTab({ flash }: Props) {
               {status.idle_for_seconds !== null && (
                 <div>
                   <span className="text-slate-500">Idle for:</span>{" "}
-                  {Math.floor(status.idle_for_seconds)}s / {status.config.idle_threshold_seconds}s
+                  {fmtDuration(status.idle_for_seconds)} of{" "}
+                  {fmtDuration(status.config.idle_threshold_seconds)} needed
                 </div>
               )}
               {status.cooldown_remaining_seconds > 0 && (
@@ -237,7 +245,7 @@ export default function MemoryDigestsTab({ flash }: Props) {
       </div>
 
       {/* Right: details */}
-      <div className="w-[480px] shrink-0 border-l border-slate-800 pl-4 flex flex-col min-h-0">
+      <div className="flex w-[min(30rem,50%)] min-w-0 shrink-0 flex-col border-l border-edge pl-4 min-h-0">
         {selected ? (
           <>
             <div className="flex items-center justify-between mb-3">

@@ -169,6 +169,21 @@ async def _fire_one(*, force: bool = False, dry_run: bool = False):
             return None
 
 
+def _human_seconds(seconds: float) -> str:
+    """A duration a person can read. `gate_reason` goes straight onto the
+    WebUI, where "63198s remaining" is a five-digit number nobody parses
+    as seventeen and a half hours."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    h, m = s // 3600, (s % 3600) // 60
+    if h < 24:
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{h // 24}d {h % 24}h"
+
+
 def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
     """Return (should_fire, reason). `reason` always populated so
     the WebUI / log can show 'waiting because X'."""
@@ -177,12 +192,12 @@ def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
     st = state.load()
     cooldown_left = state.cooldown_remaining_seconds(st)
     if cooldown_left > 0:
-        return False, f"cooldown ({int(cooldown_left)}s remaining)"
+        return False, f"cooldown, {_human_seconds(cooldown_left)} left"
     last_active = gather.last_activity_ts()
     if last_active is not None:
         idle_for = now - last_active
         if idle_for < config.IDLE_THRESHOLD_SECONDS:
-            return False, f"not idle (active {int(idle_for)}s ago)"
+            return False, f"still active, last used {_human_seconds(idle_for)} ago"
     # `MIN_JOBS_FOR_RUN` defaults to 1: skip truly empty days
     # (the LLM pipeline would short-circuit anyway, but skipping
     # here avoids a useless state.save round-trip).
