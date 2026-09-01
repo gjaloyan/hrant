@@ -217,7 +217,7 @@ export default function JobsTab({ flash }: Props) {
               onClick={() => setStatusFilter("")}
               className={`text-xs px-2 py-1 rounded ${
                 statusFilter === ""
-                  ? "bg-sky-700 text-white"
+                  ? "bg-accent-soft text-accent font-medium"
                   : "bg-slate-800 text-slate-300 hover:bg-slate-700"
               }`}
             >

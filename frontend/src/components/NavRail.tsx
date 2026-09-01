@@ -86,7 +86,7 @@ export default function NavRail({
   return (
     <>
       {/* Desktop rail */}
-      <nav className="hidden md:flex w-52 shrink-0 flex-col gap-4 overflow-y-auto border-r border-edge bg-surface/60 px-2 pb-8 pt-3">
+      <nav className="hidden md:flex w-52 shrink-0 flex-col gap-2.5 overflow-y-auto border-r border-edge bg-surface/60 px-2 pb-4 pt-3">
         {NAV.map((g) => (
           <div key={g.group}>
             <p className="px-2 pb-1 text-micro font-semibold uppercase text-ink-faint">
@@ -100,7 +100,7 @@ export default function NavRail({
                     title={it.hint}
                     aria-current={tab === it.id ? "page" : undefined}
                     className={cx(
-                      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm",
+                      "flex w-full items-center gap-2 rounded-lg px-2 py-1 text-left text-sm",
                       tab === it.id
                         ? "bg-accent-soft text-accent font-medium"
                         : "text-ink-dim hover:bg-surface-hover hover:text-ink",

@@ -129,7 +129,7 @@ export default function KnowledgeGraphTab({ flash }: Props) {
               onClick={() => setView("explorer")}
               className={`text-xs px-2.5 py-1 rounded ${
                 view === "explorer"
-                  ? "bg-sky-700 text-white"
+                  ? "bg-accent-soft text-accent font-medium"
                   : "bg-slate-700 hover:bg-slate-600 text-slate-300"
               }`}
             >
@@ -139,7 +139,7 @@ export default function KnowledgeGraphTab({ flash }: Props) {
               onClick={handleSwitchToGraph}
               className={`text-xs px-2.5 py-1 rounded ${
                 view === "graph"
-                  ? "bg-sky-700 text-white"
+                  ? "bg-accent-soft text-accent font-medium"
                   : "bg-slate-700 hover:bg-slate-600 text-slate-300"
               }`}
             >

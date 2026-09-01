@@ -8,12 +8,13 @@ import {
   type TrackerStep,
 } from "../api";
 
+// One family, so the set reads as a scale rather than five loose colours.
 const STATUS_COLORS: Record<string, string> = {
-  pending: "bg-slate-700 text-slate-200",
-  active: "bg-sky-700 text-white",
-  done: "bg-emerald-700 text-white",
-  blocked: "bg-rose-700 text-white",
-  stalled: "bg-amber-700 text-white",
+  pending: "bg-surface-hover text-ink-dim border border-edge-strong",
+  active: "bg-accent-soft text-accent border border-accent/30",
+  done: "bg-ok/15 text-ok border border-ok/30",
+  blocked: "bg-danger/15 text-danger border border-danger/30",
+  stalled: "bg-warn/15 text-warn border border-warn/30",
 };
 const STEP_STATUSES = ["pending", "active", "done", "blocked", "stalled"];
 const OPEN = (s: string) => s === "pending" || s === "active";
@@ -53,7 +54,7 @@ function FollowUp({ step }: { step: TrackerStep }) {
   // parked for other reasons — "gave up after 0 reminders" reads as a bug.
   if (step.status === "stalled")
     return (
-      <span className="text-amber-400">
+      <span className="text-warn">
         {sent > 0
           ? `no answer after ${sent} reminder${sent === 1 ? "" : "s"}`
           : "parked, not asked"}
@@ -128,7 +129,7 @@ export default function TrackerBoard() {
     }
   };
 
-  if (err) return <div className="p-4 text-rose-400 text-sm">Error: {err}</div>;
+  if (err) return <div className="p-4 text-sm text-danger">Error: {err}</div>;
 
   // A one-step inbox entry is a task; anything else is work with structure.
   // Same store, two shapes — rendering "buy medicine" as a project table is
@@ -142,7 +143,7 @@ export default function TrackerBoard() {
     <div className="flex-1 overflow-y-auto p-4 space-y-8">
       {/* ---- Task list ---- */}
       <section>
-        <h2 className="text-sm font-bold uppercase tracking-wide opacity-60 mb-2">
+        <h2 className="mb-2 text-micro font-semibold uppercase text-ink-dim">
           Task list
         </h2>
 
@@ -152,31 +153,31 @@ export default function TrackerBoard() {
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && onAdd()}
             placeholder="Add a task…"
-            className="flex-1 min-w-[12rem] bg-slate-900 border border-slate-700 rounded px-3 py-1.5 text-sm outline-none focus:border-sky-600"
+            className="min-w-[12rem] flex-1 text-sm"
           />
           <input
             type="datetime-local"
             value={draftDue}
             onChange={(e) => setDraftDue(e.target.value)}
             title="Optional. With a time, the task follows up until you close it."
-            className="bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-sm outline-none focus:border-sky-600"
+            className="text-sm text-ink-dim"
           />
           <button
             onClick={onAdd}
             disabled={busy || !draft.trim()}
-            className="bg-sky-700 hover:bg-sky-600 disabled:opacity-40 rounded px-3 py-1.5 text-sm"
+            className="rounded-lg bg-accent px-4 py-1.5 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-40"
           >
             Add
           </button>
         </div>
 
         {todos.length === 0 ? (
-          <p className="opacity-40 text-sm py-3">
+          <p className="py-3 text-sm text-ink-faint">
             Nothing on the list. Add one above, or tell the agent “remind me
             to …”.
           </p>
         ) : (
-          <ul className="divide-y divide-slate-800 border border-slate-800 rounded-lg overflow-hidden">
+          <ul className="divide-y divide-edge overflow-hidden rounded-xl2 border border-edge">
             {ordered.map((t) => {
               const s = t.steps[0];
               if (!s) return null;
@@ -184,8 +185,8 @@ export default function TrackerBoard() {
               return (
                 <li
                   key={t.id}
-                  className={`flex items-center gap-3 px-3 py-2 bg-slate-900 ${
-                    s.status === "stalled" ? "border-l-2 border-amber-600" : ""
+                  className={`flex items-center gap-3 bg-surface px-3 py-2 ${
+                    s.status === "stalled" ? "border-l-2 border-warn" : ""
                   }`}
                 >
                   <input
@@ -213,7 +214,7 @@ export default function TrackerBoard() {
                   {s.status === "stalled" && (
                     <button
                       onClick={() => setStatus(t.id, s.id, "pending")}
-                      className="text-xs bg-slate-800 hover:bg-amber-700 rounded px-2 py-0.5 whitespace-nowrap"
+                      className="text-xs border border-edge-strong text-warn hover:bg-warn hover:text-white rounded px-2 py-0.5 whitespace-nowrap"
                       title="Restarts the reminders from the beginning"
                     >
                       still relevant
@@ -228,11 +229,11 @@ export default function TrackerBoard() {
 
       {/* ---- Projects ---- */}
       <section>
-        <h2 className="text-sm font-bold uppercase tracking-wide opacity-60 mb-2">
+        <h2 className="mb-2 text-micro font-semibold uppercase text-ink-dim">
           Projects
         </h2>
         {projects.length === 0 ? (
-          <p className="opacity-40 text-sm py-3">
+          <p className="py-3 text-sm text-ink-faint">
             No active projects. The agent opens one with create_tracker when
             the work has real internal structure.
           </p>
@@ -241,9 +242,9 @@ export default function TrackerBoard() {
             {projects.map((t) => (
               <div
                 key={t.id}
-                className="bg-slate-900 rounded-lg border border-slate-800"
+                className="rounded-xl2 border border-edge bg-surface"
               >
-                <header className="flex items-center justify-between px-4 py-2 border-b border-slate-800">
+                <header className="flex items-center justify-between px-4 py-2 border-b border-edge">
                   <h3 className="font-bold">
                     {t.title}
                     <span className="ml-2 text-xs opacity-50">{t.domain}</span>
@@ -254,14 +255,14 @@ export default function TrackerBoard() {
                   </h3>
                   <button
                     onClick={() => onComplete(t.id, t.title)}
-                    className="text-xs bg-slate-800 hover:bg-emerald-700 rounded px-2 py-1"
+                    className="text-xs border border-edge-strong text-ink-dim hover:bg-ok hover:text-white rounded px-2 py-1"
                   >
                     complete
                   </button>
                 </header>
                 <div className="overflow-x-auto">
                   <table className="w-full text-xs">
-                    <thead className="text-slate-400">
+                    <thead className="text-ink-dim">
                       <tr className="text-left">
                         <th className="px-4 py-1 font-medium">Step</th>
                         <th className="px-2 py-1 font-medium">Due</th>
@@ -280,8 +281,8 @@ export default function TrackerBoard() {
                       {t.steps.map((s) => (
                         <tr
                           key={s.id}
-                          className={`border-t border-slate-800/60 ${
-                            s.status === "stalled" ? "bg-amber-950/30" : ""
+                          className={`border-t border-edge/60 ${
+                            s.status === "stalled" ? "bg-warn/5" : ""
                           }`}
                         >
                           <td className="px-4 py-1.5">

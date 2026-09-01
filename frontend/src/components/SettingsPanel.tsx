@@ -603,7 +603,7 @@ export default function SettingsPanel() {
                                   onClick={() => setNewProv({ ...newProv, authMethod: at })}
                                   className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
                                     newProv.authMethod === at
-                                      ? "bg-sky-700 text-white"
+                                      ? "bg-accent-soft text-accent font-medium"
                                       : "bg-slate-800 text-slate-400 hover:bg-slate-700"
                                   }`}
                                 >
@@ -1023,7 +1023,7 @@ export default function SettingsPanel() {
                                       title={m.description || m.display_name}
                                       className={`text-[10px] rounded px-1.5 py-0.5 ${
                                         newProv.model === m.slug
-                                          ? "bg-sky-700 text-white"
+                                          ? "bg-accent-soft text-accent font-medium"
                                           : "bg-slate-700 hover:bg-slate-600"
                                       }`}
                                     >
@@ -1051,7 +1051,7 @@ export default function SettingsPanel() {
                                     onClick={() => setNewProv({ ...newProv, model: m })}
                                     className={`text-[10px] rounded px-1.5 py-0.5 ${
                                       newProv.model === m
-                                        ? "bg-sky-700 text-white"
+                                        ? "bg-accent-soft text-accent font-medium"
                                         : "bg-slate-700 hover:bg-slate-600"
                                     }`}
                                   >

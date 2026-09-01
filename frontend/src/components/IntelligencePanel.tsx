@@ -793,8 +793,8 @@ export default function IntelligencePanel() {
             onClick={() => setSubTab(t.id)}
             className={`px-3 py-1 rounded text-xs transition-colors ${
               subTab === t.id
-                ? "bg-sky-700 text-white"
-                : "bg-slate-800 hover:bg-slate-700 text-slate-300"
+                ? "bg-accent-soft text-accent font-medium"
+                : "text-ink-dim hover:bg-surface-hover hover:text-ink"
             }`}
           >
             {t.label}

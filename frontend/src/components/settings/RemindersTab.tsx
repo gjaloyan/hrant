@@ -117,7 +117,7 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
               onClick={() => setWhen(q.id)}
               className={`rounded px-3 py-1 ${
                 when === q.id
-                  ? "bg-sky-700 text-white"
+                  ? "bg-accent-soft text-accent font-medium"
                   : "bg-slate-700 hover:bg-slate-600"
               }`}
             >

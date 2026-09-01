@@ -1,4 +1,5 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
+import { Badge } from "../ui";
 import {
   AgentAnswer, chatStream, StreamEvent, addFromChat, addCorrection, fetchCurrentSession,
   fetchActiveModel, setActiveModel, clearActiveModel,
@@ -44,12 +45,17 @@ export type ChatHandle = {
 };
 
 function ConfidenceBadge({ c }: { c: number }) {
-  const color =
-    c >= 90 ? "bg-emerald-600" : c >= 70 ? "bg-amber-600" : "bg-rose-600";
+  const tone = c >= 90 ? "ok" : c >= 70 ? "warn" : "danger";
   return (
-    <span className={`inline-block px-2 py-0.5 rounded text-xs ${color}`}>
-      {c}%
-    </span>
+    <Badge
+      tone={tone}
+      title={
+        "How sure the agent is that it verified its own answer. " +
+        "Low means it could not check its claims, not that the answer is wrong."
+      }
+    >
+      self-check {c}%
+    </Badge>
   );
 }
 
@@ -570,7 +576,7 @@ function ReasoningQuickPick({ busy }: { busy: boolean }) {
   const colorFor = (lv: string) => (
     lv === "high" ? "bg-rose-700 text-white"
       : lv === "medium" ? "bg-amber-700 text-white"
-        : lv === "low" ? "bg-sky-700 text-white"
+        : lv === "low" ? "bg-accent-soft text-accent font-medium"
           : "bg-slate-700 text-slate-300"
   );
   const labelFor = (lv: string) => (
@@ -1552,20 +1558,20 @@ const Chat = forwardRef<ChatHandle, {
                 <div className="mt-2 pt-2 border-t border-slate-700 flex gap-2 text-xs">
                   <button
                     onClick={() => handleAddToFinetune(i)}
-                    className="bg-amber-800 hover:bg-amber-700 rounded px-2 py-0.5"
-                    title="Add this Q&A to finetune queue"
+                    className="rounded-md border border-edge-strong px-2 py-0.5 text-ink-dim hover:bg-surface-hover hover:text-ink"
+                    title="Add this Q&A to the fine-tuning set"
                   >
-                    + finetune
+                    Teach
                   </button>
                   <button
                     onClick={() => {
                       setCorrecting(correcting === i ? null : i);
                       setCorrectionText("");
                     }}
-                    className="bg-rose-800 hover:bg-rose-700 rounded px-2 py-0.5"
-                    title="Submit a correction for this answer"
+                    className="rounded-md border border-edge-strong px-2 py-0.5 text-ink-dim hover:bg-surface-hover hover:text-ink"
+                    title="Tell the agent what it got wrong"
                   >
-                    correction
+                    Correct
                   </button>
                 </div>
               )}
@@ -1663,7 +1669,7 @@ const Chat = forwardRef<ChatHandle, {
                     setShowModelPicker(false);
                   }}
                   className={`w-full text-left px-3 py-1.5 rounded text-xs transition-colors ${
-                    !activeModel ? "bg-sky-700 text-white" : "hover:bg-slate-700 text-slate-300"
+                    !activeModel ? "bg-accent-soft text-accent font-medium" : "hover:bg-slate-700 text-slate-300"
                   }`}
                 >
                   Default (from config)
@@ -1693,7 +1699,7 @@ const Chat = forwardRef<ChatHandle, {
                               setShowModelPicker(false);
                             }}
                             className={`w-full text-left px-3 py-1.5 rounded text-xs transition-colors ${
-                              isActive ? "bg-sky-700 text-white" : "hover:bg-slate-700 text-slate-300"
+                              isActive ? "bg-accent-soft text-accent font-medium" : "hover:bg-slate-700 text-slate-300"
                             }`}
                           >
                             {m.model}
