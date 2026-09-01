@@ -98,7 +98,11 @@ def test_it_gives_up_instead_of_nagging_forever(store, monkeypatch):
                      steps=[{"title": "x", "due_at": "2026-09-01T09:00:00Z"}])
     sid = t["steps"][0]["id"]
 
-    armed = [store.arm_follow_up(t["id"], sid) for _ in range(len(fu.BACKOFF_HOURS))]
+    # Every interval is used exactly once, and the call after the last one
+    # gives up rather than arming a sixth.
+    armed = [store.arm_follow_up(t["id"], sid)
+             for _ in range(len(fu.BACKOFF_HOURS) + 1)]
+    assert all(a is not None for a in armed[:-1]), "an interval was skipped"
     assert armed[-1] is None, "follow-ups never run out"
     store.park_stalled(t["id"], sid)
     step = store.get(t["id"])["steps"][0]

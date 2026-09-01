@@ -67,3 +67,39 @@ def test_a_daytime_nudge_is_left_exactly_where_it_falls():
 def test_the_night_boundary(local_hour, quiet):
     when = datetime(2026, 9, 1, local_hour, tzinfo=YEREVAN).astimezone(timezone.utc)
     assert fu.in_quiet_hours(when, YEREVAN) is quiet
+
+
+def test_the_first_follow_up_uses_the_first_interval(tmp_path, monkeypatch):
+    """The 1h gap must actually be reachable.
+
+    Live run 2026-09-01 armed +3h, +8h, +24h, +48h -- BACKOFF_HOURS[0] was
+    dead code, because arm_follow_up incremented the counter before looking
+    the interval up. The 1h nudge is the valuable one: it catches the task
+    the same day.
+    """
+    from datetime import datetime, timezone
+    from backend import tracker as tk
+
+    monkeypatch.setattr(tk, "data_dir", lambda: tmp_path)
+    (tmp_path / "knowledge" / "projects").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(tk.TrackerStore, "_schedule_check_in", lambda *a, **k: None)
+    monkeypatch.setattr("backend.settings.user_timezone", lambda: "Asia/Yerevan")
+
+    store = tk.TrackerStore()
+    t = store.create(title="probe", requested_by="telegram:1",
+                     steps=[{"title": "x", "due_at": "2026-09-01T09:00:00Z"}])
+    sid = t["steps"][0]["id"]
+
+    gaps = []
+    for _ in range(len(fu.BACKOFF_HOURS)):
+        before = datetime.now(timezone.utc)
+        step = store.arm_follow_up(t["id"], sid)
+        if step is None or not step["next_check_at"]:
+            break
+        nxt = datetime.strptime(step["next_check_at"], fu.ISO).replace(
+            tzinfo=timezone.utc)
+        gaps.append(round((nxt - before).total_seconds() / 3600))
+
+    assert gaps[0] == fu.BACKOFF_HOURS[0], (
+        "the first interval is unreachable; got %sh" % gaps[0])
+    assert gaps[:2] == list(fu.BACKOFF_HOURS[:2]), gaps

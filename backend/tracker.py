@@ -205,10 +205,15 @@ class TrackerStore:
         for step in t["steps"]:
             if step["id"] != step_id:
                 continue
-            n = int(step.get("nudges") or 0) + 1
-            step["nudges"] = n
+            # Count FIRST, then space off that count -- incrementing before
+            # the lookup skipped BACKOFF_HOURS[0] entirely, so the 1h gap
+            # was unreachable and the first follow-up landed 3h out. Found
+            # on a live run 2026-09-01, not by reading: the armed stamps
+            # came back +3h, +8h, +24h, +48h.
+            sent = int(step.get("nudges") or 0)
+            when = next_nudge_at(sent)
+            step["nudges"] = sent + 1
             step["last_nudge_at"] = _now()
-            when = next_nudge_at(n)
             step["next_check_at"] = when or ""
             self._save(t)
             if not when:
