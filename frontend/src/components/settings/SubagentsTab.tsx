@@ -293,25 +293,58 @@ export default function SubagentsTab({ flash }: Props) {
 
   const rows = view === "active" ? active : history;
 
+  /** When the last failure actually happened, and how many runs have
+   *  succeeded since.
+   *
+   *  The strip used to read "74 completed · 54 failed" with no time in it.
+   *  Those 54 are a five-day incident in July that ended on 2026-08-07;
+   *  32 runs have succeeded since. An all-time counter with no recency
+   *  turns a resolved outage into an apparent 42% failure rate — it misled
+   *  the reader of this screen into opening an investigation into a
+   *  problem that had been fixed for a month.
+   */
+  const health = useMemo(() => {
+    const at = (r: any) => Number(r.created_at || r.started_at || 0);
+    const failures = history.filter((r: any) => r.status === "failed");
+    if (failures.length === 0) return null;
+    const last = Math.max(...failures.map(at));
+    const since = history.filter((r: any) => at(r) > last);
+    const ok = since.filter((r: any) => r.status === "completed").length;
+    const days = Math.floor((Date.now() / 1000 - last) / 86400);
+    return { last, ok, days };
+  }, [history]);
+
   const headerStats = useMemo(() => {
     if (!stats) return null;
+    const quiet = health && health.days >= 3 && health.ok > 0;
     return (
-      <div className="flex items-center gap-3 text-xs text-slate-300">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-dim">
         <span>
-          <span className="text-amber-400">{stats.running}</span> running
-        </span>
-        <span>
-          <span className="text-emerald-400">{stats.completed}</span> completed
+          <span className="text-warn">{stats.running}</span> running
         </span>
         <span>
-          <span className="text-red-400">{stats.failed}</span> failed
+          <span className="text-ok">{stats.completed}</span> completed
         </span>
-        <span className="text-slate-500">
-          ({stats.total_persisted} persisted)
+        <span>
+          <span className={quiet ? "text-ink-dim" : "text-danger"}>
+            {stats.failed}
+          </span>{" "}
+          failed
         </span>
+        <span className="text-ink-faint">
+          ({stats.total_persisted} kept, all time)
+        </span>
+        {quiet && (
+          <span
+            className="text-ok"
+            title={`Last failure ${new Date(health!.last * 1000).toLocaleString()}`}
+          >
+            · none in {health!.days} days ({health!.ok} runs since)
+          </span>
+        )}
       </div>
     );
-  }, [stats]);
+  }, [stats, health]);
 
   return (
     <div className="flex flex-col h-full">
