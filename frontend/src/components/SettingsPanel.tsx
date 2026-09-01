@@ -279,7 +279,7 @@ export default function SettingsPanel() {
   };
 
   const handleClearConversation = async () => {
-    if (!confirm("Clear all conversation history?")) return;
+    if (!confirm("Forget the recent conversation?\n\nThe agent loses the short-term context it carries into the next reply. Saved sessions and notes are untouched.")) return;
     try {
       await clearConversation();
       setConversation([]);

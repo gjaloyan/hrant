@@ -11,7 +11,18 @@ export default function ConversationTab({ conversation, convCount, onRefresh, on
   return (
     <div className="space-y-3">
       <div className="flex justify-between items-center">
-        <h3 className="font-bold">Conversation History ({convCount} turns)</h3>
+        <div>
+          <p className="text-sm font-medium">
+            Last {convCount} turns, across every channel
+          </p>
+          {/* This looks like Sessions and is a different store: the rolling
+              buffer carried into the next reply. Saying so is the fix for
+              the apparent duplication. */}
+          <p className="text-xs text-ink-dim">
+            What the agent still remembers without looking anything up.
+            Saved conversations live under Sessions.
+          </p>
+        </div>
         <div className="flex gap-2">
           <button
             onClick={onRefresh}
@@ -21,7 +32,7 @@ export default function ConversationTab({ conversation, convCount, onRefresh, on
           </button>
           <button
             onClick={onClear}
-            className="bg-rose-700 hover:bg-rose-600 rounded px-3 py-1 text-xs"
+            className="rounded-lg border border-edge-strong px-3 py-1 text-xs text-ink-dim hover:bg-danger hover:text-white"
           >
             Clear all
           </button>

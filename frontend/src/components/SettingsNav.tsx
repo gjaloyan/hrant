@@ -28,7 +28,7 @@ export const SETTINGS_NAV: SettingsGroup[] = [
       { id: "identity", label: "Identity", hint: "Name, role, how it introduces itself", keywords: "name role bio" },
       { id: "user", label: "User Profile", hint: "What it knows about you", keywords: "about me owner profile facts preferences" },
       { id: "core", label: "Core Memory", hint: "Facts carried into every turn", keywords: "core memory always context standing facts budget tokens" },
-      { id: "conversation", label: "Conversation", hint: "History, tone, reply style", keywords: "history clear transcript style tone" },
+      { id: "conversation", label: "Recent Context", hint: "The last turns the agent still carries", keywords: "conversation history recent context short term memory clear forget buffer" },
       { id: "voice", label: "Voice", hint: "Speech in and out — models, language", keywords: "tts stt whisper speech audio armenian transcribe" },
     ],
   },
