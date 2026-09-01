@@ -67,6 +67,13 @@ class StateSnapshot:
     pending_approvals: int
     kb_notes_count: int
     kb_graph_nodes: int
+    # Edges, counted separately from nodes on purpose. `nodes` is filled by
+    # memory consolidation and `edges` by the note indexer -- two subsystems
+    # writing one file. On prod 2026-09-01 that file held 6968 nodes and an
+    # EMPTY edge map: the note graph had never been built, and the collapse
+    # check, which looked only at nodes, read it as healthy for months. A
+    # graph with no edges is not a graph.
+    kb_graph_edges: int = 0
     # Units systemd has GIVEN UP on (2026-08-09 audit). Nothing in the
     # snapshot could observe service health, so the only predicate a repair
     # rule could be written with was `True` — restart something on a timer,

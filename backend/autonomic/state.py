@@ -42,6 +42,7 @@ class StateSnapshotBuilder:
             pending_approvals=self._pending_count(),
             kb_notes_count=self._count_notes(),
             kb_graph_nodes=self._count_graph_nodes(),
+            kb_graph_edges=self._count_graph_edges(),
             failed_services=self._failed_services(),
             unconsolidated_sessions=self._unconsolidated_sessions(),
         )
@@ -164,6 +165,23 @@ class StateSnapshotBuilder:
         if not self._knowledge_root.exists():
             return 0
         return sum(1 for p in self._knowledge_root.rglob("*.md"))
+
+    def _count_graph_edges(self) -> int:
+        """Entities carrying at least one link.
+
+        Same file as the node count, different key, because the two halves
+        are written by different subsystems and can be healthy or empty
+        independently.
+        """
+        graph_path = self._knowledge_root / "graph.json"
+        if not graph_path.exists():
+            return 0
+        try:
+            data = json.loads(graph_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return 0
+        edges = data.get("edges") if isinstance(data, dict) else None
+        return len(edges) if hasattr(edges, "__len__") else 0
 
     def _count_graph_nodes(self) -> int:
         graph_path = self._knowledge_root / "graph.json"

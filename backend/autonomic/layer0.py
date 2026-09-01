@@ -210,7 +210,13 @@ def default_rules() -> list[LayerZeroRule]:
             # a wipe: 15 notes, 0 nodes). Caught by an integration test that
             # builds a real snapshot over an empty knowledge root.
             name="graph_collapsed",
-            predicate=lambda s: s.kb_graph_nodes < 500 and s.kb_notes_count > 0,
+            # Nodes OR edges. Checking nodes alone made this rule blind to
+            # the case that actually happened: 6968 nodes, zero edges, notes
+            # present — a note graph that had never been built, reported as
+            # healthy for months because a different subsystem had filled
+            # the other half of the same file.
+            predicate=lambda s: s.kb_notes_count > 0 and (
+                s.kb_graph_nodes < 500 or getattr(s, "kb_graph_edges", 0) == 0),
             lever="FIRE_GRAPH_REBUILD",
             params={},
             cooldown_seconds=3600.0,
