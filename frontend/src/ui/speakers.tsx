@@ -71,7 +71,11 @@ export function nameOf(id: string, map: Map): string {
   const [head, ...rest] = (id || "").split(":");
   const tail = rest.join(":");
   if (!tail) return id || "—";
-  return `${channelOf(head)} ${tail.length > 8 ? "…" + tail.slice(-4) : tail}`;
+  // Only a long ACCOUNT NUMBER is worth eliding. `webui:ctxtest2` is a
+  // name someone chose and reads fine; truncating it to "…est2" made the
+  // list less readable, not more.
+  const numeric = /^\d{6,}$/.test(tail);
+  return `${channelOf(head)} ${numeric ? "…" + tail.slice(-4) : tail}`;
 }
 
 /** Name plus role, for a list row. The full id stays in the tooltip so

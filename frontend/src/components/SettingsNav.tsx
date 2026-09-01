@@ -27,6 +27,7 @@ export const SETTINGS_NAV: SettingsGroup[] = [
       { id: "soul", label: "Soul", hint: "Who the agent is, in its own words", keywords: "personality values identity soul.md character" },
       { id: "identity", label: "Identity", hint: "Name, role, how it introduces itself", keywords: "name role bio" },
       { id: "user", label: "User Profile", hint: "What it knows about you", keywords: "about me owner profile facts preferences" },
+      { id: "core", label: "Core Memory", hint: "Facts carried into every turn", keywords: "core memory always context standing facts budget tokens" },
       { id: "conversation", label: "Conversation", hint: "History, tone, reply style", keywords: "history clear transcript style tone" },
       { id: "voice", label: "Voice", hint: "Speech in and out — models, language", keywords: "tts stt whisper speech audio armenian transcribe" },
     ],
@@ -44,7 +45,7 @@ export const SETTINGS_NAV: SettingsGroup[] = [
   {
     group: "Memory",
     items: [
-      { id: "memory", label: "Memory", hint: "Core memory and what gets kept", keywords: "core memory retention embeddings notes" },
+      { id: "memory", label: "Search Index", hint: "How notes are embedded for semantic search", keywords: "embedding embeddings ollama openai cohere vector semantic search backfill index" },
       { id: "digests", label: "Memory Digests", hint: "Nightly consolidation of what it learned", keywords: "consolidation nightly summary sleep replay" },
       { id: "kgraph", label: "Knowledge Graph", hint: "How notes link to each other", keywords: "graph links entities relations" },
     ],

@@ -1,488 +1,397 @@
-import { useEffect, useState } from "react";
+/** What the agent knows.
+ *
+ * The old screen stacked five unrelated workflows down a 320px column —
+ * a core-memory editor, remember/forget inputs, a topic-research form, a
+ * quick-note box, a gap counter and a graph counter — with a "Save note"
+ * button rendered as the loudest thing on the page. Cards showed "x67"
+ * with nothing to say what 67 counted, and the filter box sat in the far
+ * corner from the list it filtered.
+ *
+ * This screen now answers one question: what does it know, and how do I
+ * add to it. Core memory moved to Settings → Character (it is a standing
+ * configuration, edited rarely). Graph statistics moved to the Graph tab,
+ * which is where someone looking for them would go. Knowledge gaps became
+ * something you can act on instead of a number in a corner.
+ */
+import { useEffect, useMemo, useState } from "react";
 import {
-  addCoreFact,
-  deleteCoreFact,
   deleteNote,
-  fetchCore,
   fetchGaps,
-  fetchGraphEntities,
-  fetchGraphNeighbors,
-  fetchGraphStats,
   fetchKnowledge,
   forceLearn,
-  GapEntry,
-  GraphEntity,
-  GraphNeighbor,
-  GraphStats,
-  IndexEntry,
   quickNote,
-  reindexGraph,
+  type GapEntry,
+  type IndexEntry,
 } from "../api";
+import { Badge, Button, EmptyState, Flash, Spinner, cx } from "../ui";
+
+function TeachDialog({
+  open,
+  onClose,
+  onDone,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onDone: (msg: string) => void;
+}) {
+  // Two ways to add knowledge that used to be two separate forms competing
+  // for space. They are the same intent — "learn this" — so they are one
+  // dialog with a choice, shown only when asked for.
+  const [mode, setMode] = useState<"research" | "note">("research");
+  const [topic, setTopic] = useState("");
+  const [depth, setDepth] = useState<"quick" | "deep">("quick");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  if (!open) return null;
+
+  const submit = async () => {
+    setBusy(true);
+    try {
+      if (mode === "research") {
+        if (!topic.trim()) return;
+        await forceLearn(topic.trim(), depth);
+        onDone(`Researching “${topic.trim()}” (${depth})`);
+      } else {
+        if (!note.trim()) return;
+        const r = await quickNote(note.trim());
+        onDone(`Saved as “${r.topic}”`);
+      }
+      setTopic("");
+      setNote("");
+      onClose();
+    } catch (e: any) {
+      onDone("Error: " + e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-24"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-xl2 border border-edge bg-surface shadow-pop"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="border-b border-edge px-4 py-3">
+          <h3 className="font-semibold">Teach the agent</h3>
+        </header>
+        <div className="space-y-4 p-4">
+          <div className="inline-flex rounded-lg border border-edge bg-canvas p-0.5 text-xs">
+            {(["research", "note"] as const).map((m) => (
+              <button
+                key={m}
+                onClick={() => setMode(m)}
+                className={cx(
+                  "rounded-md px-3 py-1",
+                  mode === m
+                    ? "bg-accent-soft font-medium text-accent"
+                    : "text-ink-dim hover:text-ink",
+                )}
+              >
+                {m === "research" ? "Research a topic" : "Save a note"}
+              </button>
+            ))}
+          </div>
+
+          {mode === "research" ? (
+            <>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">Topic</span>
+                <input
+                  autoFocus
+                  value={topic}
+                  onChange={(e) => setTopic(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && submit()}
+                  placeholder="e.g. Armenian bankruptcy procedure"
+                  className="w-full"
+                />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-sm font-medium">Depth</span>
+                <select
+                  value={depth}
+                  onChange={(e) => setDepth(e.target.value as any)}
+                  className="w-full"
+                >
+                  <option value="quick">Quick — one pass, a few minutes</option>
+                  <option value="deep">Deep — follows sources, slower and costs more</option>
+                </select>
+              </label>
+            </>
+          ) : (
+            <label className="block">
+              <span className="mb-1 block text-sm font-medium">Note</span>
+              <textarea
+                autoFocus
+                rows={5}
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Something the agent should remember. It picks the topic name."
+                className="w-full resize-none"
+              />
+            </label>
+          )}
+        </div>
+        <footer className="flex justify-end gap-2 border-t border-edge px-4 py-3">
+          <Button kind="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            kind="primary"
+            onClick={submit}
+            disabled={busy || (mode === "research" ? !topic.trim() : !note.trim())}
+          >
+            {busy ? <Spinner /> : mode === "research" ? "Research" : "Save"}
+          </Button>
+        </footer>
+      </div>
+    </div>
+  );
+}
 
 export default function KnowledgePanel({
   onSelectTopic,
 }: {
   onSelectTopic: (topic: string) => void;
 }) {
-  const [byCat, setByCat] = useState<Record<string, IndexEntry[]>>({});
-  const [core, setCore] = useState<string>("");
-  const [coreTokens, setCoreTokens] = useState(0);
-  const [coreMax, setCoreMax] = useState(0);
-  const [fact, setFact] = useState("");
-  const [forgetText, setForgetText] = useState("");
-  const [learnTopic, setLearnTopic] = useState("");
-  const [learnDepth, setLearnDepth] = useState<"quick" | "deep">("quick");
-  const [quickNoteText, setQuickNoteText] = useState("");
-  const [filter, setFilter] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [gaps, setGaps] = useState<{ open: GapEntry[]; closed: GapEntry[] }>({
-    open: [],
-    closed: [],
-  });
+  const [index, setIndex] = useState<IndexEntry[]>([]);
+  const [gaps, setGaps] = useState<GapEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [q, setQ] = useState("");
+  const [category, setCategory] = useState("");
   const [showGaps, setShowGaps] = useState(false);
+  const [teaching, setTeaching] = useState(false);
   const [msg, setMsg] = useState("");
 
-  // Knowledge Graph state
-  const [graphStats, setGraphStats] = useState<GraphStats | null>(null);
-  const [showGraph, setShowGraph] = useState(false);
-  const [graphEntities, setGraphEntities] = useState<GraphEntity[]>([]);
-  const [selectedEntity, setSelectedEntity] = useState<string | null>(null);
-  const [neighbors, setNeighbors] = useState<GraphNeighbor[]>([]);
-  const [entityFilter, setEntityFilter] = useState("");
-  const [reindexing, setReindexing] = useState(false);
+  const flash = (t: string) => {
+    setMsg(t);
+    setTimeout(() => setMsg(""), 3500);
+  };
 
-  const refresh = async () => {
+  const load = async () => {
+    setLoading(true);
     try {
-      const [k, c, g, gs] = await Promise.all([
-        fetchKnowledge(),
-        fetchCore(),
-        fetchGaps(),
-        fetchGraphStats().catch(() => null),
-      ]);
-      setByCat(k.by_category || {});
-      setCore(c.content || "");
-      setCoreTokens(c.tokens || 0);
-      setCoreMax(c.max || 0);
-      setGaps({ open: g.open, closed: g.closed });
-      if (gs) setGraphStats(gs);
+      const [k, g] = await Promise.all([fetchKnowledge(), fetchGaps()]);
+      setIndex((k as any).index || (k as any).topics || []);
+      setGaps(((g as any).gaps || []).filter((x: GapEntry) => !x.has_note_now));
     } catch (e: any) {
-      setMsg("Error loading: " + e.message);
+      flash("Error: " + e.message);
+    } finally {
+      setLoading(false);
     }
   };
 
   useEffect(() => {
-    refresh();
+    load();
   }, []);
 
-  const flash = (text: string) => {
-    setMsg(text);
-    setTimeout(() => setMsg(""), 3000);
-  };
-
-  const handleAddFact = async () => {
-    if (!fact.trim()) return;
-    const res = await addCoreFact(fact.trim());
-    setFact("");
-    flash(res.message);
-    refresh();
-  };
-
-  const handleForget = async () => {
-    if (!forgetText.trim()) return;
-    const res = await deleteCoreFact(forgetText.trim());
-    setForgetText("");
-    flash(res.message);
-    refresh();
-  };
-
-  const handleLearn = async () => {
-    if (!learnTopic.trim()) return;
-    setBusy(true);
+  const remove = async (topic: string) => {
+    if (!confirm(`Delete everything the agent knows about “${topic}”?`)) return;
     try {
-      await forceLearn(learnTopic.trim(), learnDepth);
-      setLearnTopic("");
-      flash("Note created");
-      await refresh();
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleQuickNote = async () => {
-    if (!quickNoteText.trim()) return;
-    try {
-      const res = await quickNote(quickNoteText.trim());
-      setQuickNoteText("");
-      flash(`Note saved: ${res.topic}`);
-      await refresh();
+      await deleteNote(topic);
+      flash(`Deleted “${topic}”`);
+      load();
     } catch (e: any) {
       flash("Error: " + e.message);
     }
   };
 
-  const handleDelete = async (topic: string) => {
-    if (!confirm(`Delete note "${topic}"?`)) return;
-    await deleteNote(topic);
-    flash("Deleted");
-    refresh();
+  const learnGap = async (topic: string) => {
+    try {
+      await forceLearn(topic, "quick");
+      flash(`Researching “${topic}”`);
+    } catch (e: any) {
+      flash("Error: " + e.message);
+    }
   };
 
-  const filterFn = (t: IndexEntry) =>
-    !filter.trim() ||
-    t.topic.toLowerCase().includes(filter.toLowerCase()) ||
-    t.keywords.some((k) => k.toLowerCase().includes(filter.toLowerCase()));
+  const categories = useMemo(
+    () => [...new Set(index.map((e) => e.category))].sort(),
+    [index],
+  );
 
-  const totalTopics = Object.values(byCat).reduce((s, arr) => s + arr.length, 0);
+  const grouped = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    const rows = index.filter((e) => {
+      if (category && e.category !== category) return false;
+      if (!needle) return true;
+      return `${e.topic} ${e.keywords.join(" ")}`.toLowerCase().includes(needle);
+    });
+    const out = new Map<string, IndexEntry[]>();
+    for (const e of rows) {
+      const list = out.get(e.category) || [];
+      list.push(e);
+      out.set(e.category, list);
+    }
+    for (const list of out.values())
+      list.sort((a, b) => b.access_count - a.access_count);
+    return [...out.entries()].sort((a, b) => b[1].length - a[1].length);
+  }, [index, q, category]);
+
+  const shown = grouped.reduce((n, [, l]) => n + l.length, 0);
 
   return (
-    <div className="flex flex-1 min-h-0">
-      {/* Left: Core Memory + Actions */}
-      <aside className="w-80 border-r border-slate-800 bg-slate-950/60 p-3 overflow-y-auto text-sm space-y-4">
-        {/* Core Memory */}
-        <section>
-          <h2 className="font-bold mb-2">Core Memory</h2>
-          <div className="text-xs opacity-60 mb-1">
-            {coreTokens}/{coreMax} tokens
-          </div>
-          <pre className="bg-slate-900 rounded p-2 whitespace-pre-wrap max-h-48 overflow-y-auto text-xs">
-            {core || "(empty)"}
-          </pre>
-          <div className="flex gap-1 mt-2">
-            <input
-              className="flex-1 bg-slate-900 rounded px-2 py-1 text-xs outline-none"
-              placeholder="remember fact..."
-              value={fact}
-              onChange={(e) => setFact(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAddFact()}
-            />
-            <button
-              onClick={handleAddFact}
-              className="bg-emerald-700 hover:bg-emerald-600 rounded px-2 text-xs"
-            >
-              +
-            </button>
-          </div>
-          <div className="flex gap-1 mt-1">
-            <input
-              className="flex-1 bg-slate-900 rounded px-2 py-1 text-xs outline-none"
-              placeholder="forget about..."
-              value={forgetText}
-              onChange={(e) => setForgetText(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleForget()}
-            />
-            <button
-              onClick={handleForget}
-              className="bg-rose-700 hover:bg-rose-600 rounded px-2 text-xs"
-            >
-              -
-            </button>
-          </div>
-        </section>
-
-        {/* Learn Topic */}
-        <section>
-          <h2 className="font-bold mb-2">Learn Topic</h2>
-          <div className="flex gap-1">
-            <input
-              className="flex-1 bg-slate-900 rounded px-2 py-1 text-xs outline-none"
-              placeholder="topic to learn..."
-              value={learnTopic}
-              onChange={(e) => setLearnTopic(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleLearn()}
-            />
-            <select
-              className="bg-slate-900 rounded px-1 text-xs"
-              value={learnDepth}
-              onChange={(e) => setLearnDepth(e.target.value as "quick" | "deep")}
-            >
-              <option value="quick">quick</option>
-              <option value="deep">deep</option>
-            </select>
-            <button
-              onClick={handleLearn}
-              disabled={busy}
-              className="bg-sky-700 hover:bg-sky-600 rounded px-2 text-xs disabled:opacity-50"
-            >
-              {busy ? "..." : "learn"}
-            </button>
-          </div>
-        </section>
-
-        {/* Quick Note */}
-        <section>
-          <h2 className="font-bold mb-2">Quick Note</h2>
-          <textarea
-            className="w-full bg-slate-900 rounded px-2 py-1 text-xs outline-none resize-none"
-            rows={2}
-            placeholder="save a quick note without research..."
-            value={quickNoteText}
-            onChange={(e) => setQuickNoteText(e.target.value)}
-          />
-          <button
-            onClick={handleQuickNote}
-            className="mt-1 bg-emerald-700 hover:bg-emerald-600 rounded px-3 py-1 text-xs w-full"
-          >
-            Save note
-          </button>
-        </section>
-
-        {/* Gaps */}
-        <section>
-          <button
-            onClick={() => setShowGaps(!showGaps)}
-            className="font-bold text-left w-full flex justify-between items-center"
-          >
-            <span>Knowledge Gaps</span>
-            <span className="text-xs opacity-60">
-              {gaps.open.length} open / {gaps.closed.length} closed
-            </span>
-          </button>
-          {showGaps && (
-            <div className="mt-2 space-y-1 text-xs max-h-48 overflow-y-auto">
-              {gaps.open.length === 0 && gaps.closed.length === 0 && (
-                <div className="opacity-50">(no gaps recorded)</div>
-              )}
-              {gaps.open.map((g) => (
-                <div key={g.topic} className="flex justify-between bg-rose-900/30 rounded px-2 py-1">
-                  <span>{g.topic}</span>
-                  <span className="opacity-60">x{g.count}</span>
-                </div>
-              ))}
-              {gaps.closed.slice(0, 10).map((g) => (
-                <div key={g.topic} className="flex justify-between bg-slate-800 rounded px-2 py-1 opacity-60">
-                  <span>{g.topic}</span>
-                  <span>x{g.count} (closed)</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </section>
-
-        {/* Knowledge Graph */}
-        <section>
-          <button
-            onClick={async () => {
-              if (!showGraph) {
-                try {
-                  const ents = await fetchGraphEntities();
-                  setGraphEntities(ents.entities || []);
-                } catch { /* ignore */ }
-              }
-              setShowGraph(!showGraph);
-            }}
-            className="font-bold text-left w-full flex justify-between items-center"
-          >
-            <span>Knowledge Graph</span>
-            <span className="text-xs opacity-60">
-              {graphStats
-                ? `${graphStats.entities} entities / ${graphStats.edges} edges`
-                : "..."}
-            </span>
-          </button>
-          {showGraph && (
-            <div className="mt-2 space-y-2">
-              {/* Stats */}
-              {graphStats && (
-                <div className="grid grid-cols-3 gap-1 text-xs">
-                  <div className="bg-slate-800 rounded p-1.5 text-center">
-                    <div className="text-emerald-400 font-bold">{graphStats.entities}</div>
-                    <div className="opacity-50">entities</div>
-                  </div>
-                  <div className="bg-slate-800 rounded p-1.5 text-center">
-                    <div className="text-sky-400 font-bold">{graphStats.edges}</div>
-                    <div className="opacity-50">edges</div>
-                  </div>
-                  <div className="bg-slate-800 rounded p-1.5 text-center">
-                    <div className="text-amber-400 font-bold">{graphStats.notes_indexed}</div>
-                    <div className="opacity-50">notes</div>
-                  </div>
-                </div>
-              )}
-
-              {/* Reindex */}
-              <button
-                onClick={async () => {
-                  setReindexing(true);
-                  try {
-                    const res = await reindexGraph();
-                    flash(`Reindexed: ${res.notes} notes, ${res.triples} triples`);
-                    const [gs, ents] = await Promise.all([
-                      fetchGraphStats(),
-                      fetchGraphEntities(),
-                    ]);
-                    setGraphStats(gs);
-                    setGraphEntities(ents.entities || []);
-                  } catch (e: any) {
-                    flash("Reindex error: " + e.message);
-                  } finally {
-                    setReindexing(false);
-                  }
-                }}
-                disabled={reindexing}
-                className="w-full bg-violet-800 hover:bg-violet-700 rounded py-1 text-xs disabled:opacity-50"
-              >
-                {reindexing ? "Reindexing..." : "Reindex all notes"}
-              </button>
-
-              {/* Entity filter */}
-              <input
-                className="w-full bg-slate-900 rounded px-2 py-1 text-xs outline-none"
-                placeholder="filter entities..."
-                value={entityFilter}
-                onChange={(e) => setEntityFilter(e.target.value)}
-              />
-
-              {/* Entity list */}
-              <div className="max-h-60 overflow-y-auto space-y-0.5">
-                {graphEntities
-                  .filter((e) =>
-                    !entityFilter.trim() ||
-                    e.name.toLowerCase().includes(entityFilter.toLowerCase())
-                  )
-                  .slice(0, 50)
-                  .map((e) => (
-                    <button
-                      key={e.name}
-                      onClick={async () => {
-                        setSelectedEntity(e.name);
-                        try {
-                          const res = await fetchGraphNeighbors(e.name);
-                          setNeighbors(res.neighbors || []);
-                        } catch {
-                          setNeighbors([]);
-                        }
-                      }}
-                      className={`w-full text-left flex justify-between rounded px-2 py-0.5 text-xs hover:bg-slate-700 transition-colors ${
-                        selectedEntity === e.name ? "bg-slate-700" : "bg-slate-800/50"
-                      }`}
-                    >
-                      <span className="truncate">{e.name}</span>
-                      <span className="opacity-50 shrink-0 ml-1">{e.edges}</span>
-                    </button>
-                  ))}
-                {graphEntities.length === 0 && (
-                  <div className="opacity-50 text-xs text-center py-2">
-                    No entities. Click "Reindex" to build the graph.
-                  </div>
-                )}
-              </div>
-
-              {/* Neighbors */}
-              {selectedEntity && (
-                <div className="border-t border-slate-700 pt-2">
-                  <div className="text-xs font-bold mb-1 text-emerald-400">
-                    {selectedEntity} ({neighbors.length} connections)
-                  </div>
-                  <div className="max-h-40 overflow-y-auto space-y-0.5">
-                    {neighbors.map((n, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center gap-1 text-xs bg-slate-800/50 rounded px-2 py-0.5"
-                      >
-                        <span className="text-sky-400 opacity-70 shrink-0">
-                          {n.relation}
-                        </span>
-                        <span className="mx-1 opacity-30">→</span>
-                        <button
-                          onClick={async () => {
-                            setSelectedEntity(n.target);
-                            try {
-                              const res = await fetchGraphNeighbors(n.target);
-                              setNeighbors(res.neighbors || []);
-                            } catch {
-                              setNeighbors([]);
-                            }
-                          }}
-                          className="text-emerald-300 hover:underline truncate"
-                        >
-                          {n.target}
-                        </button>
-                        <span className="opacity-30 shrink-0 ml-auto text-[10px]">
-                          [{n.note}]
-                        </span>
-                      </div>
-                    ))}
-                    {neighbors.length === 0 && (
-                      <div className="opacity-50 text-xs">(no connections)</div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-
-        <button
-          onClick={refresh}
-          className="w-full bg-slate-800 hover:bg-slate-700 rounded py-1 text-xs"
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* Search sits WITH the list it filters, not in the opposite corner. */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-edge px-3 py-2">
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search topics and keywords…"
+          className="min-w-[10rem] flex-1 text-sm"
+          aria-label="Search knowledge"
+        />
+        <select
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          className="text-sm"
+          aria-label="Filter by category"
         >
-          Refresh
-        </button>
-
-        {msg && (
-          <div className="bg-sky-900/50 text-xs rounded p-2">{msg}</div>
+          <option value="">All categories</option>
+          {categories.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        {gaps.length > 0 && (
+          <Button
+            kind={showGaps ? "default" : "ghost"}
+            size="sm"
+            onClick={() => setShowGaps((v) => !v)}
+            title="Questions the agent could not answer from what it knows"
+          >
+            {gaps.length} gap{gaps.length === 1 ? "" : "s"}
+          </Button>
         )}
-      </aside>
+        <Button kind="primary" size="sm" onClick={() => setTeaching(true)}>
+          ＋ Teach
+        </Button>
+      </div>
 
-      {/* Right: Knowledge Base */}
-      <div className="flex-1 overflow-y-auto p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-bold">Knowledge Base ({totalTopics} topics)</h2>
-          <input
-            className="bg-slate-900 rounded px-3 py-1.5 text-sm w-64 outline-none focus:ring-1 focus:ring-sky-600"
-            placeholder="filter topics..."
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-          />
-        </div>
-
-        {Object.entries(byCat).map(([cat, items]) => {
-          const filtered = items.filter(filterFn);
-          if (!filtered.length) return null;
-          return (
-            <div key={cat} className="mb-4">
-              <div className="text-xs uppercase opacity-60 mb-2 font-semibold">
-                {cat} ({filtered.length})
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
-                {filtered
-                  .sort((a, b) => b.access_count - a.access_count)
-                  .map((t) => (
-                    <div
-                      key={t.path}
-                      className="bg-slate-800 rounded p-2 text-sm flex items-center justify-between group hover:bg-slate-700 transition-colors"
-                    >
-                      <button
-                        onClick={() => onSelectTopic(t.topic)}
-                        className="text-left flex-1 min-w-0"
-                      >
-                        <div className="truncate">{t.topic}</div>
-                        <div className="text-xs opacity-50">
-                          x{t.access_count} · {t.keywords.slice(0, 3).join(", ")}
-                        </div>
-                      </button>
-                      <button
-                        onClick={() => handleDelete(t.topic)}
-                        className="opacity-0 group-hover:opacity-60 hover:opacity-100 text-rose-400 px-2 ml-2 shrink-0"
-                        title="Delete note"
-                      >
-                        x
-                      </button>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          );
-        })}
-
-        {totalTopics === 0 && (
-          <div className="opacity-50 text-sm text-center mt-8">
-            Knowledge base is empty. Use "Learn Topic" or chat with the agent to build it up.
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        {/* Gaps are actionable here — each one can be researched on the
+            spot. As a bare counter in a corner it was information nobody
+            could do anything with. */}
+        {showGaps && gaps.length > 0 && (
+          <div className="border-b border-edge bg-warn/5 px-4 py-3">
+            <h3 className="mb-2 text-micro font-semibold uppercase text-warn">
+              Asked about, not known
+            </h3>
+            <ul className="space-y-1">
+              {gaps.slice(0, 12).map((g) => (
+                <li
+                  key={g.topic}
+                  className="flex items-center gap-2 text-sm"
+                >
+                  <span className="truncate">{g.topic}</span>
+                  <span className="text-xs text-ink-faint">
+                    asked {g.count}×
+                  </span>
+                  <Button
+                    kind="ghost"
+                    size="sm"
+                    className="ml-auto"
+                    onClick={() => learnGap(g.topic)}
+                  >
+                    Research
+                  </Button>
+                </li>
+              ))}
+            </ul>
           </div>
         )}
+
+        <div className="mx-auto max-w-6xl px-4 py-4 sm:px-6">
+          {loading && (
+            <div className="flex items-center gap-2 text-sm text-ink-dim">
+              <Spinner /> Loading…
+            </div>
+          )}
+
+          {!loading && shown === 0 && (
+            <EmptyState
+              icon="📚"
+              title={index.length === 0 ? "Nothing learned yet" : "No match"}
+              action={
+                index.length === 0 ? (
+                  <Button kind="primary" onClick={() => setTeaching(true)}>
+                    Teach the agent something
+                  </Button>
+                ) : undefined
+              }
+            >
+              {index.length === 0
+                ? "Everything the agent researches or is told to remember lands here."
+                : "Try a different word, or clear the category filter."}
+            </EmptyState>
+          )}
+
+          {grouped.map(([cat, entries]) => (
+            <section key={cat} className="mb-6">
+              <h3 className="mb-2 text-micro font-semibold uppercase text-ink-dim">
+                {cat} <span className="text-ink-faint">({entries.length})</span>
+              </h3>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                {entries.map((e) => (
+                  <div
+                    key={e.topic}
+                    className="group flex flex-col rounded-xl2 border border-edge bg-surface p-3 text-left transition-colors hover:border-edge-strong"
+                  >
+                    <button
+                      onClick={() => onSelectTopic(e.topic)}
+                      className="min-w-0 text-left"
+                      title={e.topic}
+                    >
+                      <span className="line-clamp-2 text-sm font-medium">
+                        {e.topic}
+                      </span>
+                    </button>
+                    {e.keywords.length > 0 && (
+                      <p className="mt-1 line-clamp-2 text-xs text-ink-faint">
+                        {e.keywords.slice(0, 5).join(" · ")}
+                      </p>
+                    )}
+                    <div className="mt-2 flex items-center gap-2">
+                      {/* "x67" said nothing. This says what 67 counts. */}
+                      <Badge
+                        tone="neutral"
+                        title="How many times the agent has consulted this note"
+                      >
+                        used {e.access_count}×
+                      </Badge>
+                      <Button
+                        kind="danger"
+                        size="sm"
+                        className="ml-auto opacity-0 transition-opacity group-hover:opacity-100 focus:opacity-100"
+                        onClick={() => remove(e.topic)}
+                        title={`Delete “${e.topic}”`}
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
       </div>
+
+      <TeachDialog
+        open={teaching}
+        onClose={() => setTeaching(false)}
+        onDone={(m) => {
+          flash(m);
+          load();
+        }}
+      />
+      <Flash text={msg} />
     </div>
   );
 }

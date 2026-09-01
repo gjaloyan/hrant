@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import SettingsNav, { SETTINGS_NAV } from "./SettingsNav";
+import CoreMemoryTab from "./settings/CoreMemoryTab";
 // Audit #26: lazy-load Settings tabs so the initial bundle doesn't
 // pay for the kitchen-sink Settings panel on chat-only sessions.
 // IdentityEditor + UserProfileTab + StatusTab are tiny and used on
@@ -81,7 +82,7 @@ import {
   type AvailableModel,
 } from "../api";
 
-type IdentityTab = "soul" | "identity" | "user" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "reminders" | "skills" | "jobs" | "subagents" | "digests" | "kgraph" | "conversation" | "capabilities" | "status" | "reasoning" | "logs" | "pipeline";
+type IdentityTab = "soul" | "identity" | "user" | "core" | "providers" | "channels" | "memory" | "voice" | "engine" | "selfmods" | "roles" | "reminders" | "skills" | "jobs" | "subagents" | "digests" | "kgraph" | "conversation" | "capabilities" | "status" | "reasoning" | "logs" | "pipeline";
 
 export default function SettingsPanel() {
   const [tab, setTab] = useState<IdentityTab>("soul");
@@ -380,6 +381,7 @@ export default function SettingsPanel() {
         )}
 
         {tab === "memory" && <MemoryTab flash={flash} />}
+        {tab === "core" && <CoreMemoryTab flash={flash} />}
 
         {tab === "voice" && <VoiceTab flash={flash} />}
 
