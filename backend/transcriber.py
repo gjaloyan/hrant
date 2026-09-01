@@ -53,12 +53,24 @@ DEFAULT_FASTER_WHISPER_MODEL = "medium"
 # heard Turkish; large-v3-turbo heard German and scored Armenian at 0.002.
 # This fine-tune read both notes exactly: "Իս դու հայերեն հասկանում ես".
 #
+# Chosen over three other Armenian fine-tunes on the owner's own notes,
+# 2026-09-01. It reads his name -- "Բարև հրանդ" where the previous pick
+# gave "հրվերանդ" -- and turns a reminder request into something legible:
+# "ինձ վաղը ժամը տասին հիշացում ... դիզայներին". EmreAkgul's build reads
+# comparably but is slower and heard the name as "Ֆրանտ";
+# TartarusXXX's raises a shape error on every clip.
+#
+# The CTranslate2 build matters as much as the accuracy. The previous
+# model shipped transformers weights only, which cost a subprocess and
+# 20-40s per note; this one loads straight into faster-whisper and
+# transcribes in 7.
+#
 # It is not a replacement. Given Russian speech it transcribes the sounds
-# in ARMENIAN LETTERS -- "Ե՛ ադաբրեու, մոշ պիստուպաց" for "Я одобряю,
+# in ARMENIAN LETTERS -- "Ե՛ ադաբրեու, մոշ պրիստուպաց" for "Я одобряю,
 # можешь приступать" -- and ignores the language argument entirely. So the
 # two are run together and the better result is chosen, rather than one
 # being swapped for the other.
-SECOND_OPINION_MODEL = "Chillarmo/whisper-large-v3-turbo-armenian"
+SECOND_OPINION_MODEL = "hurricup/whisper-large-v3-turbo-armenian-ct2"
 
 # Which languages the second model is worth paying for. Empty disables it.
 SECOND_OPINION_FOR = ("hy",)
@@ -147,37 +159,6 @@ def save_config(cfg: dict) -> dict:
     return cfg
 
 
-_ASR_TIMEOUT = 240
-_asr_exe: Optional[str] = None
-
-
-def _asr_interpreter() -> str:
-    """An interpreter that has transformers. Probed once per process.
-
-    An explicit override first, so a box with the dependencies somewhere
-    unusual is configuration rather than a code change.
-    """
-    global _asr_exe
-    if _asr_exe:
-        return _asr_exe
-    import shutil
-    import subprocess
-    import sys as _sys
-    candidates = [os.environ.get("HRANT_ASR_PYTHON", "").strip()]
-    candidates += [shutil.which(n) for n in ("python3", "python")]
-    candidates.append(_sys.executable)
-    for exe in [c for c in candidates if c]:
-        try:
-            r = subprocess.run([exe, "-c", "import transformers"],
-                               capture_output=True, timeout=120)
-        except Exception:
-            continue
-        if r.returncode == 0:
-            _asr_exe = exe
-            return exe
-    return ""
-
-
 def _avg_logprob(segments) -> float:
     """Mean per-segment confidence. -99 for an empty result so anything
     real beats silence. Kept for logging; it is NOT how the two readings
@@ -189,6 +170,12 @@ def _avg_logprob(segments) -> float:
 
 _ARMENIAN = re.compile(r"[԰-֏]")
 _CYRILLIC = re.compile(r"[Ѐ-ӿ]")
+
+# Neither reading is obviously right, so the choice moves downstream to
+# the layer that reads text with a model. Truthy on purpose: a caller that
+# ignores it and treats this as "take the specialist" is wrong less often
+# than one that silently keeps a Cyrillic mis-hearing.
+UNDECIDED = "undecided"
 
 
 def _prefer_second_opinion(base_text: str, alt_text: str) -> bool:
@@ -227,8 +214,19 @@ def _prefer_second_opinion(base_text: str, alt_text: str) -> bool:
     if not alt or not _ARMENIAN.search(alt):
         return False
     base = base_text or ""
-    if _ARMENIAN.search(base) or _CYRILLIC.search(base):
+    if _ARMENIAN.search(base):
         return False
+    if _CYRILLIC.search(base):
+        # Cyrillic used to end the matter: "the base heard Russian, so it
+        # heard right". It does not. Measured 2026-09-01 -- Armenian audio
+        # came back as "Ба референт, ищь качка", Cyrillic and meaningless,
+        # and this rule handed it the win over the specialist's reading.
+        #
+        # Deciding which of two readings is real is a judgement about
+        # language, not about character ranges, and there is already a
+        # layer that makes it with a model. UNDECIDED sends both on so it
+        # can choose.
+        return UNDECIDED
     return True
 
 
@@ -243,6 +241,10 @@ class Transcriber:
         self._whisper_cpp_base: Optional[str] = None
         self._local_whisper_base: Optional[str] = None
         self._last_error: Optional[str] = None
+        # The other reading, when two models disagreed and neither was
+        # obviously right. Consumed by the caller immediately after
+        # `transcribe`; not state anyone should hold on to.
+        self._last_alternative: str = ""
 
     def reset(self) -> None:
         with self._lock:
@@ -402,9 +404,19 @@ class Transcriber:
                         if lg in (expected_languages() or SECOND_OPINION_FOR)]
             if _covered and SECOND_OPINION_MODEL:
                 alt, _ = self._second_opinion(path, _covered[0])
-                if _prefer_second_opinion(text, alt):
+                verdict = _prefer_second_opinion(text, alt)
+                if verdict is UNDECIDED:
+                    # Both readings travel on. `render_for_prompt` reads
+                    # them with a model and keeps whichever is real speech,
+                    # which is a judgement about language rather than one
+                    # about character ranges.
+                    log.info("two candidate readings, deferring the choice")
+                    self._last_alternative = alt
+                elif verdict:
                     log.info("second opinion (%s) taken", _covered[0])
                     return alt
+                else:
+                    self._last_alternative = ""
             return text or None
         finally:
             try:
@@ -413,57 +425,40 @@ class Transcriber:
                 pass
 
     def _second_opinion(self, path: str, language: str):
-        """Run the specialist model. Returns (text, avg_logprob).
+        """Run the specialist model. Returns (text, unused_score).
 
-        Loaded lazily and cached like the primary: it is ~1.6 GB, and a
-        deployment that never hears the language it covers should never pay
-        for it. Any failure returns no opinion rather than raising -- a
-        second reading is an improvement, never a dependency.
+        In-process again since 2026-09-01: the chosen model ships a
+        CTranslate2 build, so faster-whisper opens it directly. The
+        previous pick had transformers weights only and needed a
+        subprocess with its own interpreter -- 20-40s a note against 7,
+        for worse Armenian.
+
+        Cached like the primary: ~1.6 GB, and a deployment that never
+        hears the language it covers should never pay for it. Any
+        failure returns no opinion rather than raising -- a second
+        reading is an improvement, never a dependency.
         """
         try:
-            # A SUBPROCESS, not an in-process call. The model ships plain
-            # transformers weights and no CTranslate2 build, so
-            # faster-whisper cannot open it; and the agent's venv has
-            # neither transformers nor torch, so importing it here fails
-            # with "No module named 'transformers'". That failure was
-            # invisible until the warning below was raised from debug —
-            # a 1.6 GB model sat unused through a whole round of live
-            # testing while the base model's English nonsense won by
-            # default.
-            #
-            # Same arrangement as the captcha reader, for the same reason:
-            # run it where the dependencies already are, and pay ~800 MB
-            # of residency for nobody.
-            import json as _json
-            import subprocess
-            from pathlib import Path as _P
-            worker = _P(__file__).with_name("asr_worker.py")
-            exe = _asr_interpreter()
-            if not exe or not worker.is_file():
-                raise RuntimeError(
-                    f"no interpreter with transformers (worker={worker})")
-            r = subprocess.run(
-                [exe, str(worker)],
-                input=_json.dumps({"path": path, "model": SECOND_OPINION_MODEL,
-                                   "language": language}),
-                capture_output=True, text=True, timeout=_ASR_TIMEOUT,
-            )
-            payload = _json.loads((r.stdout or "").strip() or "{}")
-            if not payload.get("ok"):
-                raise RuntimeError(payload.get("error")
-                                   or (r.stderr or "")[-200:] or "no output")
-            text = (payload.get("text") or "").strip()
-            # No per-segment score from this path, and none is needed:
-            # the choice is made on script, not confidence.
+            from faster_whisper import WhisperModel
+            with self._lock:
+                if getattr(self, "_fw_alt", None) is None:
+                    self._fw_alt = WhisperModel(
+                        SECOND_OPINION_MODEL, device="cpu",
+                        compute_type=getattr(self, "_fw_compute",
+                                             DEFAULT_FASTER_WHISPER_COMPUTE),
+                    )
+            segs, _ = self._fw_alt.transcribe(
+                path, language=language, vad_filter=True)
+            text = " ".join(x.text.strip() for x in segs).strip()
+            # The score is unused: the choice is made on script and, when
+            # that is inconclusive, by the layer that reads with a model.
             return (text or None), 0.0
         except Exception as e:
-            # WARNING, not debug. This swallow is correct — a second
-            # reading must never break a transcript — but it hid a
-            # configuration error for a whole round of live testing: the
-            # model ships transformers weights, faster-whisper wants a
-            # CTranslate2 build, and every call failed silently while the
-            # base model's English nonsense won by default. A capability
-            # that is installed but never runs has to be loud.
+            # WARNING, not debug. This swallow is correct -- a second
+            # reading must never break a transcript -- but it hid a
+            # configuration error through a whole round of live testing,
+            # while the base model's English nonsense won by default. A
+            # capability that is installed but never runs has to be loud.
             log.warning("second opinion unavailable (%s): %s",
                         SECOND_OPINION_MODEL, e)
             return None, -99.0

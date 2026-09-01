@@ -161,12 +161,32 @@ def test_script_not_confidence_decides_between_the_readings():
     assert "alt_score > _avg_logprob" not in src
 
 
-def test_a_russian_note_is_never_overridden_by_the_specialist():
-    """The specialist writes Russian phonetically in Armenian letters, so
-    preferring it on Armenian output alone would wreck every Russian note.
-    Cyrillic from the base model is the guard."""
-    assert tr._prefer_second_opinion(
-        "Нужно добавить армянский язык", "Նուժնը դաբանից արմանսկի") is False
+def test_a_cyrillic_base_reading_is_no_longer_decided_here():
+    """Cyrillic used to end the matter — "the base heard Russian, so it
+    heard right". It does not. Measured 2026-09-01: Armenian audio came
+    back as "Ба референт, ищь качка", Cyrillic and meaningless, and that
+    rule handed it the win over the specialist.
+
+    Which of two readings is real is a judgement about language, not about
+    character ranges, and there is already a layer that makes it with a
+    model. So this returns UNDECIDED and both readings travel on.
+    """
+    out = tr._prefer_second_opinion(
+        "Нужно добавить армянский язык", "Նուժնը դաբանից արմանսկի")
+    assert out is tr.UNDECIDED
+
+
+def test_undecided_is_truthy_on_purpose():
+    """A caller that ignores it and treats it as "take the specialist" is
+    wrong less often than one that silently keeps a Cyrillic mis-hearing."""
+    assert bool(tr.UNDECIDED) is True
+
+
+def test_the_undecided_case_carries_both_readings_forward():
+    import inspect
+    src = inspect.getsource(tr.Transcriber._tx_faster_whisper)
+    assert "verdict is UNDECIDED" in src
+    assert "_last_alternative" in src
 
 
 def test_armenian_audio_takes_the_specialist():
@@ -183,35 +203,26 @@ def test_a_non_armenian_second_opinion_is_ignored():
     assert tr._prefer_second_opinion("hello", "hello there") is False
 
 
-def test_the_specialist_runs_out_of_process():
-    """Two dependency walls, found one after the other in live runs. The
-    model has no CTranslate2 build, so faster-whisper cannot open it; and
-    the agent's venv has neither transformers nor torch, so importing it
-    in-process fails too. It runs where the dependencies already are —
-    the same arrangement the captcha reader uses."""
+def test_the_specialist_loads_in_process():
+    """The subprocess existed only because the previous model shipped
+    transformers weights with no CTranslate2 build. The model chosen on
+    2026-09-01 has one, so faster-whisper opens it directly — 7s a note
+    against 20-40, for better Armenian. The worker and its interpreter
+    probe are deleted rather than left as a capability nobody uses."""
     import inspect
-    src = inspect.getsource(tr.Transcriber._second_opinion)
-    assert "subprocess.run" in src
-    assert "asr_worker.py" in src
-    assert "= WhisperModel(" not in src
-
-
-def test_the_worker_is_free_of_backend_imports():
-    """It is executed by a different interpreter; a `backend` import would
-    fail there for reasons that have nothing to do with speech."""
     from pathlib import Path
-    src = (Path(tr.__file__).with_name("asr_worker.py")
-           .read_text(encoding="utf-8"))
-    assert "from backend" not in src
-    assert "from ." not in src
+    src = inspect.getsource(tr.Transcriber._second_opinion)
+    assert "= WhisperModel(" in src
+    # An actual call, not the docstring explaining why there is no longer
+    # one — the first version of this assertion caught its own prose.
+    assert "subprocess.run" not in src
+    assert not Path(tr.__file__).with_name("asr_worker.py").exists()
+    assert not hasattr(tr, "_asr_interpreter")
 
 
-def test_the_interpreter_probe_accepts_an_override():
-    """A box with the dependencies somewhere unusual is configuration,
-    not a code change."""
-    import inspect
-    src = inspect.getsource(tr._asr_interpreter)
-    assert "HRANT_ASR_PYTHON" in src
+def test_the_chosen_model_is_a_ctranslate2_build():
+    """Anything else costs the subprocess back."""
+    assert tr.SECOND_OPINION_MODEL.endswith("-ct2")
 
 
 def test_a_broken_specialist_is_logged_loudly():
