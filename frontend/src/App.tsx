@@ -14,6 +14,7 @@ import SettingsPanel from "./components/SettingsPanel";
 import StatusBar from "./components/StatusBar";
 import NavRail, { labelOf, type Tab } from "./components/NavRail";
 import { Button } from "./ui";
+import { SpeakerProvider } from "./ui/speakers";
 import {
   fetchStatus,
   newSession,
@@ -68,6 +69,7 @@ export default function App() {
   }, []);
 
   return (
+    <SpeakerProvider>
     <div className="flex h-screen flex-col">
       <header className="sticky top-0 z-30 border-b border-edge bg-surface/80 backdrop-blur">
         <div className="flex items-center justify-between gap-3 px-3 py-2 sm:px-4">
@@ -139,5 +141,6 @@ export default function App() {
         onClose={() => setSelectedTopic(null)}
       />
     </div>
+    </SpeakerProvider>
   );
 }

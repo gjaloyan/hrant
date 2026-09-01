@@ -1,539 +1,378 @@
-import { useCallback, useEffect, useState } from "react";
+/** Past conversations.
+ *
+ * The old panel put a 320px list beside a 950px pane that said "Select a
+ * session", stacked two full-width filter rows above the list so the list
+ * itself overflowed sideways, and printed `telegram:1358056500` where a
+ * name belongs. Every card said "active" twice — once as a badge, once as
+ * text — and showed a bare "30%" that named nothing.
+ *
+ * Rebuilt around the two questions this screen actually answers: which
+ * conversation was that, and what was said in it.
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  fetchSessions,
+  archiveSessions,
+  deleteSession,
   fetchSession,
+  fetchSessions,
   fetchSessionStats,
   fetchSpeakers,
   fetchThreads,
-  archiveSessions,
-  deleteSession,
-  newSession,
-  SessionSummary,
-  SessionDetail,
-  SessionStats,
-  SpeakerSummary,
-  ThreadSummary,
+  type SessionDetail,
+  type SessionStats,
+  type SessionSummary,
+  type SpeakerSummary,
+  type ThreadSummary,
 } from "../api";
+import { Badge, Button, EmptyState, Flash, Spinner, cx } from "../ui";
+import { Speaker, nameOf, useSpeakers } from "../ui/speakers";
 
-/** Simple bar chart drawn with CSS — no external chart library needed. */
-function MiniBarChart({
-  data,
-  color = "#38bdf8",
-  height = 120,
-}: {
-  data: { label: string; value: number }[];
-  color?: string;
-  height?: number;
-}) {
-  const max = Math.max(...data.map((d) => d.value), 1);
-  return (
-    <div className="flex items-end gap-1" style={{ height }}>
-      {data.map((d, i) => (
-        <div key={i} className="flex flex-col items-center flex-1 min-w-0">
-          <div
-            className="w-full rounded-t"
-            style={{
-              height: `${(d.value / max) * (height - 20)}px`,
-              backgroundColor: color,
-              minHeight: d.value > 0 ? 2 : 0,
-            }}
-            title={`${d.label}: ${d.value}`}
-          />
-          <div className="text-[8px] opacity-50 truncate w-full text-center mt-0.5">
-            {d.label}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
+/** "2h ago" beats a UTC stamp for scanning; the exact time is one hover
+ *  away, and the browser renders it in the reader's own zone. */
+function ago(iso: string): string {
+  const d = new Date((iso || "").replace(" ", "T"));
+  if (isNaN(d.getTime())) return iso || "—";
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 60 * 24) return `${Math.round(mins / 60)}h ago`;
+  const days = Math.round(mins / 1440);
+  if (days < 30) return `${days}d ago`;
+  return d.toLocaleDateString();
 }
 
-function ConfidenceTimeline({
-  data,
-}: {
-  data: { session_id: string; date: string; avg_confidence: number; turns: number }[];
-}) {
-  if (data.length === 0) return <div className="text-xs opacity-40">No data yet</div>;
-  const maxTurns = Math.max(...data.map((d) => d.turns), 1);
-  return (
-    <div className="flex items-end gap-1 h-24">
-      {data.slice(-30).map((d, i) => {
-        const conf = d.avg_confidence;
-        const color =
-          conf >= 90 ? "#34d399" : conf >= 70 ? "#fbbf24" : conf >= 50 ? "#fb923c" : "#f87171";
-        return (
-          <div key={i} className="flex flex-col items-center flex-1 min-w-0">
-            <div
-              className="w-full rounded-t"
-              style={{
-                height: `${(d.turns / maxTurns) * 80}px`,
-                backgroundColor: color,
-                minHeight: 2,
-              }}
-              title={`${d.date.slice(0, 10)}: ${conf}% avg, ${d.turns} turns`}
-            />
-            <div className="text-[7px] opacity-40 truncate w-full text-center">
-              {d.date.slice(5, 10)}
-            </div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
+const exact = (iso: string) => {
+  const d = new Date((iso || "").replace(" ", "T"));
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
+};
 
-function formatDuration(seconds: number | null): string {
-  if (seconds === null) return "active";
-  if (seconds < 60) return `${Math.round(seconds)}s`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)}m`;
-  return `${(seconds / 3600).toFixed(1)}h`;
+function ConfidenceTag({ value }: { value: number }) {
+  if (!value) return null;
+  return (
+    <Badge
+      tone={value >= 90 ? "ok" : value >= 70 ? "warn" : "danger"}
+      title="How sure the agent was that it had verified its own answers in this conversation."
+    >
+      self-check {Math.round(value)}%
+    </Badge>
+  );
 }
 
 export default function SessionsPanel() {
+  const speakerMap = useSpeakers();
+
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
-  const [currentBySpeaker, setCurrentBySpeaker] = useState<Record<string, string>>({});
-  const [currentByThread, setCurrentByThread] = useState<Record<string, string>>({});
   const [speakers, setSpeakers] = useState<SpeakerSummary[]>([]);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
-  const [filterSpeaker, setFilterSpeaker] = useState<string>("");  // "" = all
-  const [filterThread, setFilterThread] = useState<string>("");    // "" = all
   const [stats, setStats] = useState<SessionStats | null>(null);
   const [selected, setSelected] = useState<SessionDetail | null>(null);
-  const [showArchived, setShowArchived] = useState(false);
-  const [archiveDays, setArchiveDays] = useState(90);
-  const [msg, setMsg] = useState("");
-  const [view, setView] = useState<"list" | "stats">("list");
 
-  const flash = (text: string) => {
-    setMsg(text);
-    setTimeout(() => setMsg(""), 4000);
+  const [loading, setLoading] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [q, setQ] = useState("");
+  const [speaker, setSpeaker] = useState("");
+  const [thread, setThread] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+
+  const flash = (t: string) => {
+    setMsg(t);
+    setTimeout(() => setMsg(""), 3000);
   };
 
   const load = useCallback(async () => {
+    setLoading(true);
     try {
-      const [sessData, statsData, speakersData, threadsData] = await Promise.all([
-        fetchSessions(
-          showArchived,
-          filterSpeaker || undefined,
-          filterThread || undefined,
-        ),
-        fetchSessionStats(),
+      const [s, sp, th, st] = await Promise.all([
+        fetchSessions(showArchived, speaker || undefined, thread || undefined),
         fetchSpeakers(),
         fetchThreads(),
+        fetchSessionStats(),
       ]);
-      setSessions(sessData.sessions);
-      setCurrentBySpeaker(sessData.current_by_speaker);
-      setCurrentByThread(sessData.current_by_session_key || {});
-      setStats(statsData);
-      setSpeakers(speakersData.speakers);
-      setThreads(threadsData.threads);
+      setSessions((s as any).sessions || []);
+      setSpeakers((sp as any).speakers || []);
+      setThreads((th as any).threads || []);
+      setStats(st);
     } catch (e: any) {
-      flash("Error: " + e.message);
+      flash("Error: " + (e.message || "could not load sessions"));
+    } finally {
+      setLoading(false);
     }
-  }, [showArchived, filterSpeaker, filterThread]);
+  }, [speaker, thread, showArchived]);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const handleSelect = async (id: string) => {
+  const open = async (id: string) => {
+    setLoadingDetail(true);
     try {
-      const data = await fetchSession(id);
-      setSelected(data.session);
+      const r = await fetchSession(id);
+      setSelected((r as any).session || (r as any));
     } catch (e: any) {
       flash("Error: " + e.message);
+    } finally {
+      setLoadingDetail(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this session?")) return;
+  const remove = async (s: SessionSummary) => {
+    // Name what is about to go. "Delete this session?" tells the reader
+    // nothing about which one they clicked.
+    const label = s.title || `${nameOf(s.speaker_id, speakerMap)}, ${ago(s.started)}`;
+    if (!confirm(`Delete "${label}"?\n\nThe transcript is removed permanently.`))
+      return;
     try {
-      await deleteSession(id);
-      if (selected?.id === id) setSelected(null);
-      load();
+      await deleteSession(s.id);
+      if (selected?.id === s.id) setSelected(null);
       flash("Session deleted");
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    }
-  };
-
-  const handleArchive = async () => {
-    try {
-      const res = await archiveSessions(archiveDays);
-      flash(`Archived ${res.archived} sessions`);
       load();
     } catch (e: any) {
       flash("Error: " + e.message);
     }
   };
 
-  const handleNewSession = async () => {
+  const cleanUp = async () => {
+    const days = 30;
+    if (
+      !confirm(
+        `Archive every session older than ${days} days?\n\n` +
+          "Archived sessions stay readable — they are hidden from this list " +
+          "unless you tick “Include archived”.",
+      )
+    )
+      return;
     try {
-      await newSession();
+      const r = await archiveSessions(days);
+      flash(`Archived ${(r as any).archived} session(s)`);
       load();
-      setSelected(null);
-      flash("New session started");
     } catch (e: any) {
       flash("Error: " + e.message);
     }
   };
 
-  // Prepare daily chart data
-  const dailyData = stats
-    ? Object.entries(stats.daily_counts)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .slice(-14)
-        .map(([label, value]) => ({ label: label.slice(5), value }))
-    : [];
-
-  const intentData = stats
-    ? Object.entries(stats.intents).map(([label, value]) => ({ label, value }))
-    : [];
+  const visible = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return sessions;
+    return sessions.filter((s) =>
+      `${s.title} ${nameOf(s.speaker_id, speakerMap)} ${s.thread_label}`
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [sessions, q, speakerMap]);
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-hidden">
-      {/* Left: session list */}
-      <div className="w-80 shrink-0 border-r border-slate-800 bg-slate-950/60 flex flex-col overflow-hidden">
-        {/* Header */}
-        <div className="p-3 border-b border-slate-800 space-y-2">
-          <div className="flex items-center justify-between">
-            <h2 className="font-bold text-sm">Sessions</h2>
-            <div className="flex gap-1">
-              <button
-                onClick={() => setView(view === "list" ? "stats" : "list")}
-                className="bg-slate-800 hover:bg-slate-700 rounded px-2 py-0.5 text-xs"
-              >
-                {view === "list" ? "Stats" : "List"}
-              </button>
-              <button
-                onClick={handleNewSession}
-                className="bg-sky-800 hover:bg-sky-700 rounded px-2 py-0.5 text-xs"
-              >
-                + New
-              </button>
-            </div>
-          </div>
-
+    <div className="flex min-h-0 flex-1 flex-col">
+      {/* One toolbar instead of two stacked filter rows inside the list. */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-edge px-3 py-2">
+        <input
+          type="search"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="Search conversations…"
+          className="min-w-[10rem] flex-1 text-sm"
+          aria-label="Search conversations"
+        />
+        <select
+          value={speaker}
+          onChange={(e) => setSpeaker(e.target.value)}
+          className="text-sm"
+          aria-label="Filter by person"
+        >
+          <option value="">Everyone</option>
+          {speakers.map((s) => (
+            <option key={s.speaker_id} value={s.speaker_id}>
+              {nameOf(s.speaker_id, speakerMap)} ({s.session_count})
+            </option>
+          ))}
+        </select>
+        <select
+          value={thread}
+          onChange={(e) => setThread(e.target.value)}
+          className="text-sm"
+          aria-label="Filter by chat"
+        >
+          <option value="">All chats</option>
+          {threads.map((t) => (
+            <option key={t.session_key} value={t.session_key}>
+              {t.thread_label} ({t.session_count})
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-1.5 text-xs text-ink-dim">
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => setShowArchived(e.target.checked)}
+            className="h-3.5 w-3.5 accent-accent"
+          />
+          Include archived
+        </label>
+        <span className="ml-auto flex items-center gap-2 text-xs text-ink-faint">
           {stats && (
-            <div className="flex gap-2 text-xs">
-              <span className="text-emerald-400">{stats.total_sessions} sessions</span>
-              <span className="text-sky-400">{stats.total_turns} turns</span>
-              {stats.archived_count > 0 && (
-                <span className="text-amber-400">{stats.archived_count} archived</span>
-              )}
-            </div>
+            <span title="Total across every speaker">
+              {stats.total_sessions} conversations · {stats.total_turns} turns
+            </span>
           )}
-
-          <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={showArchived}
-                onChange={(e) => setShowArchived(e.target.checked)}
-              />
-              Show archived
-            </label>
-          </div>
-        </div>
-
-        {/* Session list or stats */}
-        <div className="flex-1 overflow-y-auto">
-          {view === "stats" && stats ? (
-            <div className="p-3 space-y-4">
-              {/* Daily sessions chart */}
-              <div>
-                <div className="text-[10px] font-semibold opacity-50 mb-1 uppercase tracking-wider">
-                  Sessions per day (last 14d)
-                </div>
-                {dailyData.length > 0 ? (
-                  <MiniBarChart data={dailyData} color="#38bdf8" height={100} />
-                ) : (
-                  <div className="text-xs opacity-40">No data</div>
-                )}
-              </div>
-
-              {/* Confidence timeline */}
-              <div>
-                <div className="text-[10px] font-semibold opacity-50 mb-1 uppercase tracking-wider">
-                  Confidence over time (last 30 sessions)
-                </div>
-                <ConfidenceTimeline data={stats.confidence_over_time} />
-                <div className="flex gap-2 mt-1 text-[8px] opacity-40">
-                  <span className="text-emerald-400">90%+</span>
-                  <span className="text-amber-400">70-89%</span>
-                  <span className="text-orange-400">50-69%</span>
-                  <span className="text-red-400">&lt;50%</span>
-                </div>
-              </div>
-
-              {/* Intent breakdown */}
-              <div>
-                <div className="text-[10px] font-semibold opacity-50 mb-1 uppercase tracking-wider">
-                  Intent distribution
-                </div>
-                {intentData.length > 0 ? (
-                  <MiniBarChart data={intentData} color="#a78bfa" height={80} />
-                ) : (
-                  <div className="text-xs opacity-40">No data</div>
-                )}
-              </div>
-
-              {/* Archive controls */}
-              <div className="border-t border-slate-700 pt-3">
-                <div className="text-[10px] font-semibold opacity-50 mb-2 uppercase tracking-wider">
-                  Archive
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <span>Older than</span>
-                  <input
-                    type="number"
-                    value={archiveDays}
-                    onChange={(e) => setArchiveDays(Number(e.target.value))}
-                    className="bg-slate-900 rounded px-2 py-0.5 w-16 text-center outline-none"
-                    min={1}
-                  />
-                  <span>days</span>
-                  <button
-                    onClick={handleArchive}
-                    className="bg-amber-800 hover:bg-amber-700 rounded px-2 py-0.5"
-                  >
-                    Archive
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="p-2 space-y-1">
-              {/* Identity filter (Phase 10) — which user's sessions. */}
-              <div className="flex items-center gap-2 bg-slate-900/60 rounded p-2 text-[11px]">
-                <span className="opacity-60 w-12 shrink-0">Speaker:</span>
-                <select
-                  value={filterSpeaker}
-                  onChange={(e) => {
-                    setFilterSpeaker(e.target.value);
-                    // Changing speaker invalidates thread filter — different
-                    // speakers don't share threads.
-                    setFilterThread("");
-                  }}
-                  className="flex-1 bg-slate-800 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600"
-                >
-                  <option value="">All speakers</option>
-                  {speakers.map((sp) => (
-                    <option key={sp.speaker_id} value={sp.speaker_id}>
-                      {sp.speaker_id} ({sp.session_count})
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {/* Thread filter — within a speaker, pick a specific chat
-                  (DM vs group, vs different bots). Wife in a DM and
-                  Wife in a group share speaker_id but get distinct
-                  session_keys so each renders as its own row here. */}
-              <div className="flex items-center gap-2 bg-slate-900/60 rounded p-2 text-[11px]">
-                <span className="opacity-60 w-12 shrink-0">Thread:</span>
-                <select
-                  value={filterThread}
-                  onChange={(e) => setFilterThread(e.target.value)}
-                  className="flex-1 bg-slate-800 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600"
-                >
-                  <option value="">All threads</option>
-                  {threads
-                    .filter(
-                      (t) =>
-                        !filterSpeaker || t.speaker_id === filterSpeaker,
-                    )
-                    .map((t) => (
-                      <option key={t.session_key} value={t.session_key}>
-                        {t.thread_label} — {t.speaker_id} ({t.session_count})
-                      </option>
-                    ))}
-                </select>
-              </div>
-              {sessions.length === 0 && (
-                <div className="text-xs opacity-40 p-2">
-                  {filterThread
-                    ? `No sessions in ${filterThread}`
-                    : filterSpeaker
-                    ? `No sessions for ${filterSpeaker}`
-                    : "No sessions yet"}
-                </div>
-              )}
-              {sessions.map((s) => {
-                // Active = this session is the current open thread.
-                // Now keyed by session_key so the same speaker across
-                // multiple chats can have multiple "active" rows.
-                const isActiveThread =
-                  currentByThread[s.session_key] === s.id ||
-                  // Back-compat for legacy rows that pre-date session_key.
-                  (!s.session_key && currentBySpeaker[s.speaker_id] === s.id);
-                return (
-                  <button
-                    key={s.id}
-                    onClick={() => handleSelect(s.id)}
-                    className={`w-full text-left rounded p-2 transition-colors text-xs ${
-                      selected?.id === s.id
-                        ? "bg-sky-800"
-                        : isActiveThread
-                        ? "bg-emerald-900/40 hover:bg-emerald-900/60"
-                        : s.archived
-                        ? "bg-slate-800/40 hover:bg-slate-800/60 opacity-60"
-                        : "bg-slate-800/60 hover:bg-slate-700"
-                    }`}
-                  >
-                    <div className="flex justify-between items-start gap-1">
-                      <span className="font-medium truncate">
-                        {s.title || "(untitled)"}
-                      </span>
-                      <div className="flex items-center gap-1 shrink-0">
-                        {isActiveThread && (
-                          <span className="text-[9px] bg-emerald-700 rounded px-1">active</span>
-                        )}
-                        {s.archived && (
-                          <span className="text-[9px] bg-slate-600 rounded px-1">archived</span>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex gap-2 mt-0.5 opacity-60 text-[10px] flex-wrap">
-                      <span className="text-violet-300" title="speaker">
-                        {s.speaker_id || "—"}
-                      </span>
-                      {s.thread_label && (
-                        <span
-                          className="text-amber-300"
-                          title={`session_key: ${s.session_key}`}
-                        >
-                          {s.thread_label}
-                        </span>
-                      )}
-                      <span>{s.started.slice(0, 16)}</span>
-                      <span>{s.turn_count} turns</span>
-                      {s.avg_confidence > 0 && <span>{s.avg_confidence}%</span>}
-                      <span>{formatDuration(s.duration_seconds)}</span>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {msg && (
-          <div className="p-2 text-xs text-sky-400 border-t border-slate-800">{msg}</div>
-        )}
+          <Button
+            kind="ghost"
+            size="sm"
+            onClick={cleanUp}
+            title="Hide conversations older than 30 days from this list"
+          >
+            Clean up
+          </Button>
+        </span>
       </div>
 
-      {/* Right: session detail */}
-      <div className="flex-1 overflow-y-auto p-4">
-        {!selected ? (
-          <div className="flex items-center justify-center h-full opacity-40 text-sm">
-            Select a session to view its conversation log
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {/* Header */}
-            <div className="flex justify-between items-start gap-4">
-              <div>
-                <h3 className="font-bold text-lg">{selected.title || "(untitled)"}</h3>
-                <div className="flex gap-3 text-xs opacity-60 mt-1 flex-wrap">
-                  <span className="text-violet-300">{selected.speaker_id}</span>
-                  {selected.thread_label && (
+      <div className="flex min-h-0 flex-1">
+        {/* List — wider than before, and it no longer scrolls sideways. */}
+        <div className="w-[22rem] shrink-0 overflow-y-auto border-r border-edge">
+          {loading && (
+            <div className="flex items-center gap-2 p-4 text-sm text-ink-dim">
+              <Spinner /> Loading…
+            </div>
+          )}
+          {!loading && visible.length === 0 && (
+            <EmptyState title="Nothing here">
+              {q || speaker || thread
+                ? "No conversation matches these filters."
+                : "Conversations appear here once you have talked to the agent."}
+            </EmptyState>
+          )}
+          <ul className="divide-y divide-edge">
+            {visible.map((s) => (
+              <li key={s.id}>
+                <button
+                  onClick={() => open(s.id)}
+                  className={cx(
+                    "w-full px-3 py-2.5 text-left",
+                    selected?.id === s.id
+                      ? "bg-accent-soft"
+                      : "hover:bg-surface-hover",
+                  )}
+                >
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="truncate text-sm font-medium">
+                      {s.title || "(untitled)"}
+                    </span>
                     <span
-                      className="text-amber-300"
-                      title={`session_key: ${selected.session_key}`}
+                      className="shrink-0 text-[11px] text-ink-faint"
+                      title={exact(s.started)}
                     >
+                      {ago(s.started)}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-dim">
+                    <Speaker id={s.speaker_id} />
+                    <span className="text-ink-faint">·</span>
+                    <span className="truncate">{s.thread_label}</span>
+                    <span className="text-ink-faint">·</span>
+                    <span>
+                      {s.turn_count} turn{s.turn_count === 1 ? "" : "s"}
+                    </span>
+                    {/* One status, not two. Archived is the exception worth
+                        marking; "active" on every row is noise. */}
+                    {s.archived && <Badge>archived</Badge>}
+                  </div>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        {/* Detail */}
+        <div className="min-w-0 flex-1 overflow-y-auto">
+          {loadingDetail && (
+            <div className="flex items-center gap-2 p-6 text-sm text-ink-dim">
+              <Spinner /> Opening…
+            </div>
+          )}
+          {!loadingDetail && !selected && (
+            <EmptyState
+              icon="🗂"
+              title="Pick a conversation"
+            >
+              Every turn is kept: what was asked, what the agent answered, and
+              how sure it was.
+            </EmptyState>
+          )}
+          {!loadingDetail && selected && (
+            <div className="mx-auto max-w-3xl px-4 py-5 sm:px-6">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <h2 className="text-lg font-semibold">
+                    {selected.title || "(untitled)"}
+                  </h2>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-dim">
+                    <Speaker id={selected.speaker_id} showRole />
+                    <span className="text-ink-faint">·</span>
+                    <span title={`session_key: ${selected.session_key}`}>
                       {selected.thread_label}
                     </span>
-                  )}
-                  <span>Started: {selected.started}</span>
-                  {selected.ended && <span>Ended: {selected.ended}</span>}
-                  <span>Duration: {formatDuration(selected.duration_seconds)}</span>
+                    <span className="text-ink-faint">·</span>
+                    <span title={exact(selected.started)}>
+                      {ago(selected.started)}
+                    </span>
+                    <ConfidenceTag value={selected.avg_confidence} />
+                  </div>
                 </div>
+                <Button
+                  kind="danger"
+                  size="sm"
+                  onClick={() =>
+                    remove(selected as unknown as SessionSummary)
+                  }
+                >
+                  Delete
+                </Button>
               </div>
-              <button
-                onClick={() => handleDelete(selected.id)}
-                className="bg-rose-800 hover:bg-rose-700 rounded px-2 py-1 text-xs shrink-0"
-              >
-                Delete
-              </button>
-            </div>
 
-            {/* Stats bar */}
-            <div className="flex gap-3 text-xs">
-              <div className="bg-slate-800 rounded px-3 py-1.5">
-                <span className="opacity-50">Turns: </span>
-                <span className="font-bold">{selected.turn_count}</span>
-              </div>
-              <div className="bg-slate-800 rounded px-3 py-1.5">
-                <span className="opacity-50">Avg confidence: </span>
-                <span className={`font-bold ${
-                  selected.avg_confidence >= 90
-                    ? "text-emerald-400"
-                    : selected.avg_confidence >= 70
-                    ? "text-amber-400"
-                    : "text-rose-400"
-                }`}>
-                  {selected.avg_confidence}%
-                </span>
-              </div>
-              {Object.entries(selected.intents).map(([intent, count]) => (
-                <div key={intent} className="bg-slate-800 rounded px-3 py-1.5">
-                  <span className="opacity-50">{intent}: </span>
-                  <span className="font-bold">{count}</span>
-                </div>
-              ))}
-              {selected.topics_used.length > 0 && (
-                <div className="bg-slate-800 rounded px-3 py-1.5">
-                  <span className="opacity-50">Topics: </span>
-                  <span>{selected.topics_used.join(", ")}</span>
+              {selected.topics_used?.length > 0 && (
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {selected.topics_used.map((t) => (
+                    <Badge key={t} tone="neutral" title="Knowledge topic used">
+                      {t}
+                    </Badge>
+                  ))}
                 </div>
               )}
-            </div>
 
-            {/* Conversation log */}
-            <div className="space-y-3">
-              <div className="text-[10px] font-semibold opacity-50 uppercase tracking-wider">
-                Conversation Log
+              <div className="mt-5 space-y-4">
+                {selected.turns.length === 0 && (
+                  <p className="text-sm text-ink-faint">
+                    This conversation has no turns recorded.
+                  </p>
+                )}
+                {selected.turns.map((turn: any, i: number) => (
+                  <div key={i} className="space-y-2">
+                    <div className="flex justify-end">
+                      <div className="max-w-[85%] rounded-xl2 rounded-br-sm bg-accent-soft px-3 py-2 text-sm whitespace-pre-wrap">
+                        {turn.user}
+                      </div>
+                    </div>
+                    <div className="flex justify-start">
+                      <div className="max-w-[90%] rounded-xl2 rounded-bl-sm border border-edge bg-surface px-3 py-2 text-sm whitespace-pre-wrap">
+                        {turn.answer}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2 pl-1 text-[11px] text-ink-faint">
+                      <span title={exact(turn.ts)}>{ago(turn.ts)}</span>
+                      {turn.intent && <Badge>{turn.intent}</Badge>}
+                      <ConfidenceTag value={turn.confidence} />
+                      {turn.topics?.length > 0 && (
+                        <span>used: {turn.topics.join(", ")}</span>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-              {selected.turns.length === 0 && (
-                <div className="text-xs opacity-40">(empty session)</div>
-              )}
-              {selected.turns.map((turn: any, i: number) => (
-                <div key={i} className="bg-slate-800/60 rounded p-3 space-y-2 text-sm">
-                  {/* Turn header */}
-                  <div className="flex gap-2 text-[10px] opacity-50">
-                    <span>{turn.ts}</span>
-                    <span className="bg-slate-700 px-1 rounded">{turn.intent}</span>
-                    {turn.confidence > 0 && (
-                      <span className={
-                        turn.confidence >= 90
-                          ? "text-emerald-400"
-                          : turn.confidence >= 70
-                          ? "text-amber-400"
-                          : "text-rose-400"
-                      }>
-                        {turn.confidence}%
-                      </span>
-                    )}
-                    {turn.topics?.length > 0 && (
-                      <span>topics: {turn.topics.join(", ")}</span>
-                    )}
-                  </div>
-                  {/* User message */}
-                  <div>
-                    <span className="text-sky-400 font-semibold text-xs">User: </span>
-                    <span className="whitespace-pre-wrap">{turn.user}</span>
-                  </div>
-                  {/* Agent response */}
-                  <div>
-                    <span className="text-emerald-400 font-semibold text-xs">Agent: </span>
-                    <span className="whitespace-pre-wrap">{turn.answer}</span>
-                  </div>
-                </div>
-              ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
+
+      <Flash text={msg} />
     </div>
   );
 }
