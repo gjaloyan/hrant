@@ -625,10 +625,24 @@ Available topics: {', '.join(used_topics)}"""
             unverified_claims=[f"verifier error: {e}"],
             notes_used=used_topics,
         )
-    verified = list(data.get("verified_claims", []))
-    unverified = list(data.get("unverified_claims", []))
-    contradictions = list(data.get("contradictions", []))
-    projections = list(data.get("projections", []))
+    if not isinstance(data, dict):
+        return VerificationResult(
+            confidence=50,
+            unverified_claims=["verifier returned invalid JSON shape"],
+            notes_used=used_topics,
+        )
+
+    def _string_list(value: object) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, str)]
+
+    verified = _string_list(data.get("verified_claims"))
+    unverified = _string_list(data.get("unverified_claims"))
+    contradictions = _string_list(data.get("contradictions"))
+    projections = _string_list(data.get("projections"))
+    raw_notes = data.get("notes_used")
+    notes_used = _string_list(raw_notes) if isinstance(raw_notes, list) else list(used_topics)
 
     # False-absence detection ("agent proposes adding X that already
     # exists") is handled by the VERIFIER_SYSTEM prompt itself (the
