@@ -1761,6 +1761,12 @@ export type ScheduledMessage = {
   status: "pending" | "delivering" | "sent" | "failed" | "cancelled";
   delivered_at: string | null;
   last_error: string;
+  /** message | check_in | agent_task | reminder.
+   *  `check_in` and `agent_task` are the agent's own plumbing — a tracker
+   *  step waiting to be raised, a scheduled analysis — not something the
+   *  owner asked to be sent. They carry no text; the agent writes it when
+   *  the row fires. */
+  kind?: string;
 };
 
 export const fetchScheduledMessages = (status?: string) => {

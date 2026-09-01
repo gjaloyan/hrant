@@ -3,6 +3,7 @@
 // schedule_message tool; this tab gives the owner a Settings surface
 // to see the ledger, create reminders with an explicit picker, and
 // cancel pending ones.
+import { Speaker } from "../../ui/speakers";
 import { useEffect, useMemo, useState } from "react";
 import {
   ScheduledMessage,
@@ -37,7 +38,7 @@ function toUtcZ(local: string): string {
 export default function RemindersTab({ flash }: { flash: (m: string) => void }) {
   const [rows, setRows] = useState<ScheduledMessage[]>([]);
   const [loading, setLoading] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<string>("pending");
 
   const [text, setText] = useState("");
   const [when, setWhen] = useState<string>("custom");
@@ -88,16 +89,32 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
     }
   };
 
-  const pendingFirst = useMemo(() => {
+  // `check_in` and `agent_task` rows are the agent's own plumbing: a
+  // tracker step waiting to be raised, a scheduled analysis. They are not
+  // messages the owner asked for, and 46 of the 97 rows in the ledger were
+  // one of those — 33 of them with no text at all, rendering as blank
+  // lines. They stay reachable behind a toggle rather than being deleted
+  // from view, because when a check-in misfires this is where you look.
+  const isInternal = (m: any) =>
+    m.kind === "check_in" || m.kind === "agent_task";
+  const internalCount = useMemo(
+    () => rows.filter(isInternal).length,
+    [rows],
+  );
+  const [showInternal, setShowInternal] = useState(false);
+
+  const visible = useMemo(() => {
     const order: Record<string, number> = {
       pending: 0, delivering: 1, failed: 2, sent: 3, cancelled: 4,
     };
-    return [...rows].sort((a, b) => {
-      const so = (order[a.status] ?? 9) - (order[b.status] ?? 9);
-      if (so !== 0) return so;
-      return (b.due_at || "").localeCompare(a.due_at || "");
-    });
-  }, [rows]);
+    return [...rows]
+      .filter((m) => showInternal || !isInternal(m))
+      .sort((a, b) => {
+        const so = (order[a.status] ?? 9) - (order[b.status] ?? 9);
+        if (so !== 0) return so;
+        return (b.due_at || "").localeCompare(a.due_at || "");
+      });
+  }, [rows, showInternal]);
 
   return (
     <div className="space-y-4">
@@ -150,7 +167,22 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
       {/* Ledger */}
       <div className="bg-slate-800 rounded p-4 space-y-2">
         <div className="flex items-center justify-between">
-          <div className="font-semibold text-sm">Scheduled ({rows.length})</div>
+          <div>
+            <div className="text-sm font-semibold">
+              {statusFilter === "pending"
+                ? `Waiting to send (${visible.length})`
+                : `${visible.length} shown`}
+            </div>
+            {internalCount > 0 && (
+              <button
+                onClick={() => setShowInternal((v) => !v)}
+                className="text-[11px] text-ink-faint hover:text-ink"
+                title="Project check-ins and scheduled agent tasks — the agent's own plumbing, not messages you asked for"
+              >
+                {showInternal ? "hide" : "show"} {internalCount} internal
+              </button>
+            )}
+          </div>
           <div className="flex gap-2 text-xs items-center">
             <select
               value={statusFilter}
@@ -172,11 +204,11 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
           </div>
         </div>
         {loading && <div className="text-xs text-slate-500">loading…</div>}
-        {!loading && pendingFirst.length === 0 && (
+        {!loading && visible.length === 0 && (
           <div className="text-xs text-slate-500">No reminders yet.</div>
         )}
         <div className="space-y-1">
-          {pendingFirst.map((m) => (
+          {visible.map((m) => (
             <div
               key={m.id}
               className="flex items-center gap-3 bg-slate-900 rounded px-3 py-2 text-xs"
@@ -189,7 +221,22 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
                 {m.status}
               </span>
               <div className="flex-1 min-w-0">
-                <div className="truncate text-slate-200">{m.text}</div>
+                <div className="truncate text-ink">
+                  {m.text?.trim() ? (
+                    m.text
+                  ) : (
+                    // check_in rows carry no text by design: the agent
+                    // writes the message when the row fires. Rendering them
+                    // as blank lines made a third of this list look broken.
+                    <span className="italic text-ink-faint">
+                      {m.kind === "check_in"
+                        ? "Project check-in — the agent writes this when it fires"
+                        : m.kind === "agent_task"
+                        ? "Scheduled task for the agent"
+                        : "(no message)"}
+                    </span>
+                  )}
+                </div>
                 <div className="text-slate-500">
                   due {localTime(m.due_at)}
                   {m.status === "sent" && m.delivered_at && (
@@ -198,7 +245,7 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
                   {m.status === "failed" && m.last_error && (
                     <> · <span className="text-rose-400">{m.last_error.slice(0, 80)}</span></>
                   )}
-                  {" "}· to {m.target_speaker}
+                  {" "}· to <Speaker id={m.target_speaker} />
                 </div>
               </div>
               {m.status === "pending" && (
@@ -212,7 +259,7 @@ export default function RemindersTab({ flash }: { flash: (m: string) => void }) 
                       flash("Error: " + e.message);
                     }
                   }}
-                  className="bg-rose-900 hover:bg-rose-800 rounded px-2 py-1 shrink-0"
+                  className="shrink-0 rounded-md border border-edge-strong px-2 py-1 text-ink-dim hover:bg-danger hover:text-white"
                 >
                   Cancel
                 </button>
