@@ -23,6 +23,41 @@ const overrideBadge = (
     </span>
   ) : null;
 
+/** Human names for the raw config keys.
+ *
+ * Every row on this screen was labelled with its key —
+ * `daily_api_budget_usd`, `api_ping_cache_seconds` — in monospace, so the
+ * screen read like a JSON file. The keys still matter (they are what
+ * lands in knowledge/runtime_overrides.json, which this panel names), so
+ * they stay visible as the secondary line rather than disappearing.
+ */
+const FIELD_NAMES: Record<string, string> = {
+  daily_api_budget_usd: "Daily spending limit",
+  estimated_cost_per_call_usd: "Assumed cost per call",
+  api_ping_cache_seconds: "Trust a liveness check for",
+  fallback_to_local: "Fall back to the local model",
+  tool_synth_max_tokens: "Tool-result summary length",
+  tool_loop_input_budget: "Tool loop input budget",
+  tool_loop_max_tool_calls: "Tool calls per turn",
+  audit_loop_input_budget: "Audit loop input budget",
+  audit_loop_max_iterations: "Audit loop iterations",
+  audit_loop_max_tool_calls: "Audit loop tool calls",
+  enabled: "Enabled",
+  min_confidence: "Minimum confidence to answer",
+  require_sources: "Require a source for every claim",
+  critic_threshold: "Send for revision below",
+  critic_max_retries: "Revision attempts",
+  critic_retry_token_budget: "Revision token budget",
+  core_memory_max_tokens: "Core memory size limit",
+  note_max_tokens: "Note size limit",
+  auto_promote_threshold: "Auto-promote a note at",
+  finetune_min_examples: "Examples needed to train",
+  inbox_retention_days: "Keep incoming files for",
+  outbox_retention_days: "Keep outgoing files for",
+  notes_retention_days: "Keep notes for",
+  turns_retention_days: "Keep conversation turns for",
+};
+
 export default function EngineTab({ flash }: Props) {
   const [envelope, setEnvelope] = useState<EngineConfigEnvelope | null>(null);
   const [busy, setBusy] = useState(false);
@@ -69,7 +104,7 @@ export default function EngineTab({ flash }: Props) {
   };
 
   const handleReset = async () => {
-    if (!confirm("Reset router + verification to defaults? This wipes runtime_overrides.json.")) {
+    if (!confirm("Reset every setting on this page to its default?\n\nThis discards all your overrides and restores the values that come with the current mode.")) {
       return;
     }
     setBusy(true);
@@ -145,10 +180,13 @@ export default function EngineTab({ flash }: Props) {
     <div className="flex items-center gap-3 py-1.5">
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
-          <span className="text-sm font-mono text-slate-300">{label}</span>
+          <span className="text-sm">{FIELD_NAMES[label] || label}</span>
           {overrideBadge(field, envelope?.overrides[section] as any)}
         </div>
-        {hint && <div className="text-[11px] text-slate-500">{hint}</div>}
+        {hint && <div className="text-[11px] text-ink-dim">{hint}</div>}
+        {FIELD_NAMES[label] && (
+          <div className="font-mono text-[10px] text-ink-faint">{label}</div>
+        )}
       </div>
       {children}
     </div>
@@ -161,21 +199,22 @@ export default function EngineTab({ flash }: Props) {
           <button
             onClick={refresh}
             disabled={busy}
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 rounded px-3 py-1.5 text-xs"
+            className="rounded-lg border border-edge-strong px-3 py-1.5 text-xs text-ink-dim hover:bg-surface-hover hover:text-ink disabled:opacity-40"
           >
             Refresh
           </button>
           <button
             onClick={handleReset}
             disabled={busy}
-            className="bg-rose-800/70 hover:bg-rose-700 disabled:opacity-40 rounded px-3 py-1.5 text-xs"
+            title="Discard every change on this page and go back to the mode preset"
+            className="rounded-lg border border-edge-strong px-3 py-1.5 text-xs text-ink-dim hover:bg-danger hover:text-white disabled:opacity-40"
           >
-            Reset to defaults
+            Reset all
           </button>
           <button
             onClick={handleSave}
             disabled={busy}
-            className="bg-sky-700 hover:bg-sky-600 disabled:opacity-40 rounded px-3 py-1.5 text-xs"
+            className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-40"
           >
             Save (applies live)
           </button>
@@ -229,7 +268,7 @@ export default function EngineTab({ flash }: Props) {
           label="fallback_to_local"
           field="fallback_to_local"
           section="router"
-          hint="On Claude failure / budget exhaustion, retry with Model B (local Qwen)."
+          hint="When the main model fails or the budget runs out, retry on the fallback model."
         >
           {boolInput(router.fallback_to_local, (v) => updateRouter("fallback_to_local", v))}
         </Row>
