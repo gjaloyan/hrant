@@ -3417,8 +3417,14 @@ def register_builtin_tools() -> None:
         name="add_todo",
         description=(
             "Put ONE simple task on the user's list -- 'buy the medicine', "
-            "'call the dentist'. Use this, not `create_tracker`, whenever "
-            "the thing has no internal structure.\n\n"
+            "'call the dentist', 'pay the bill'.\n\n"
+            "THIS is where 'remind me to ...' belongs, in any language. "
+            "If the user could later say 'done', it is a task and it "
+            "goes here -- `schedule_message` fires once and forgets, so "
+            "a task sent there is one nobody follows up on. Use "
+            "`schedule_message` only to deliver a message to SOMEONE "
+            "ELSE or as a standing digest, and `create_tracker` only "
+            "when the work has real internal structure.\n\n"
             "Give it `due_at` and it becomes self-carrying: the user is "
             "reminded then, and if nothing comes back the task is raised "
             "again with a growing gap until they close it or it runs out "
@@ -3486,12 +3492,11 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="schedule_message",
         description=(
-            "Schedule a message to be delivered at a future time. The "
-            "recipient can be ANYONE — including the user you are talking "
-            "to. To remind the user THEMSELVES (the most common case: "
-            "'remind me at 10am' — in any language), pass their own "
-            "speaker_id (shown in the NAMES block) as `target`. To reach "
-            "someone else: 'remind wife at 10am', 'tell Mom in an hour'. "
+            "Deliver a MESSAGE at a future time. Use it when something has to be SAID -- to someone else, or as a standing digest.\n\n"
+            "NOT for a task of the user's own that has to get DONE. "
+            "'Remind me to buy the medicine' is a task: it can be finished, so it belongs in `add_todo`, which keeps raising it until the user closes it. This tool fires once and forgets, so a task sent here is a task nobody ever follows up on. The test is simple -- if the user could later say 'done', it is a todo.\n\n"
+            "Right here: 'remind wife at 10am', 'tell Mom in an hour', "
+            "'send me the news every morning'. "
             "Target = a speaker_id like `telegram:<id>` OR an alias from "
             "relationships.json (e.g. 'wife'). Convert natural time to "
             "UTC ISO 8601 yourself. Owner/trusted only. Returns `{ok, id, "
