@@ -188,7 +188,10 @@ export default function GraphViewer() {
     (node: NodeObj, ctx: CanvasRenderingContext2D, globalScale: number) => {
       const label = node.name;
       const conn = node.connections || 0;
-      const size = Math.max(4, Math.min(12, 3 + conn * 1.0));
+      // Most entities have exactly one link, so the old floor of 4px in
+      // slate-500 rendered them as near-invisible specks on the dark
+      // canvas — the graph looked empty even when it was not.
+      const size = Math.max(5.5, Math.min(14, 4 + conn * 1.1));
       const isSelected = selected?.id === node.id;
       const isNeighbor = highlightSet.has(node.id) && !isSelected;
       const isHovered = hovered === node.id;
@@ -214,7 +217,7 @@ export default function GraphViewer() {
         ? "#34d399"
         : conn > 3
         ? "#818cf8"
-        : "#64748b";
+        : "#8b98b4";   // leaf nodes: readable against the canvas, still quiet
       ctx.fill();
 
       if (isSelected || isHovered) {
@@ -228,8 +231,8 @@ export default function GraphViewer() {
         isSelected || isHovered || isNeighbor ||
         (showLabels && (
           globalScale > 1.5 ||                          // zoomed in — show all
-          (globalScale > 0.8 && conn > 5) ||            // medium — show hubs
-          conn > 12                                     // far — only big hubs
+          (globalScale > 0.8 && conn > 3) ||            // medium — show hubs
+          conn > 6                                      // far — only big hubs
         ));
       if (showThisLabel) {
         // Font: fixed screen-space size so it's readable at any zoom
@@ -303,20 +306,23 @@ export default function GraphViewer() {
   return (
     <div className="flex flex-col h-full w-full overflow-hidden">
       {/* Toolbar */}
-      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-slate-800 bg-slate-950/90 shrink-0 flex-wrap">
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-edge bg-surface/60 shrink-0 flex-wrap">
         <h2 className="font-bold text-sm whitespace-nowrap">Knowledge Graph</h2>
 
         {stats && (
-          <div className="flex gap-2 text-xs">
-            <span className="text-emerald-400">{stats.entities} entities</span>
-            <span className="text-sky-400">{stats.edges} edges</span>
-            <span className="text-amber-400">{stats.notes_indexed} notes</span>
+          <div className="flex gap-2 text-xs text-ink-dim">
+            <span>{stats.entities} entities</span>
+            <span className="text-ink-faint">·</span>
+            <span>{stats.edges} links</span>
+            <span className="text-ink-faint">·</span>
+            <span>from {stats.notes_indexed} notes</span>
           </div>
         )}
 
         <input
-          className="bg-slate-900 rounded px-2 py-1 text-xs outline-none w-40 focus:ring-1 focus:ring-sky-600"
-          placeholder="filter entities..."
+          type="search"
+          className="w-48 text-xs"
+          placeholder="Highlight an entity…"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
@@ -341,8 +347,8 @@ export default function GraphViewer() {
 
         <button
           onClick={() => graphRef.current?.zoomToFit(400, 40)}
-          className="bg-slate-800 hover:bg-slate-700 rounded px-2 py-1 text-xs"
-          title="Fit graph to screen"
+          className="rounded-md border border-edge-strong px-2 py-1 text-xs text-ink-dim hover:bg-surface-hover hover:text-ink"
+          title="Fit the whole graph on screen"
         >
           Fit
         </button>
@@ -350,14 +356,15 @@ export default function GraphViewer() {
         <button
           onClick={handleReindex}
           disabled={reindexing}
-          className="bg-violet-800 hover:bg-violet-700 rounded px-2 py-1 text-xs disabled:opacity-50"
+          className="rounded-md border border-edge-strong px-2 py-1 text-xs text-ink-dim hover:bg-surface-hover hover:text-ink disabled:opacity-50"
+          title="Re-derive every link from the notes. Takes a while."
         >
-          {reindexing ? "..." : "Reindex"}
+          {reindexing ? "Rebuilding…" : "Rebuild"}
         </button>
 
         <button
           onClick={loadGraph}
-          className="bg-slate-800 hover:bg-slate-700 rounded px-2 py-1 text-xs"
+          className="rounded-md border border-edge-strong px-2 py-1 text-xs text-ink-dim hover:bg-surface-hover hover:text-ink"
         >
           Refresh
         </button>
@@ -368,7 +375,7 @@ export default function GraphViewer() {
       {/* Main area */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Graph canvas */}
-        <div ref={containerRef} className="flex-1 min-w-0 relative bg-slate-950">
+        <div ref={containerRef} className="relative min-w-0 flex-1 bg-canvas">
           {loading ? (
             <div className="absolute inset-0 flex items-center justify-center text-sm opacity-50">
               Loading graph...
