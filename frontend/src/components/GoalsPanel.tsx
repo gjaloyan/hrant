@@ -26,25 +26,28 @@ const STATUS_COLORS: Record<string, string> = {
   failed: "#f87171",
 };
 
+/** Priority 1-10.
+ *
+ * Ten bars painted red at the high end made an ordinary high-priority goal
+ * look like a failure, and every row on the board carried one. Priority is
+ * a magnitude, not an alarm: one bar, filled proportionally, in the accent
+ * colour, with the number beside it so it can be read exactly. */
 function PriorityBar({ priority }: { priority: number }) {
+  const pct = Math.max(0, Math.min(10, priority)) * 10;
   return (
-    <div className="flex gap-0.5 items-center" title={`Priority: ${priority}/10`}>
-      {Array.from({ length: 10 }, (_, i) => (
+    <div
+      className="flex items-center gap-1.5"
+      title={`Priority ${priority} of 10`}
+    >
+      <div className="h-1 w-16 overflow-hidden rounded-full bg-surface-hover">
         <div
-          key={i}
-          className="w-1.5 h-3 rounded-sm"
-          style={{
-            backgroundColor:
-              i < priority
-                ? priority >= 8
-                  ? "#f87171"
-                  : priority >= 5
-                  ? "#fbbf24"
-                  : "#64748b"
-                : "rgba(100,116,139,0.2)",
-          }}
+          className="h-full rounded-full bg-accent"
+          style={{ width: `${pct}%` }}
         />
-      ))}
+      </div>
+      <span className="text-[10px] tabular-nums text-ink-faint">
+        {priority}
+      </span>
     </div>
   );
 }
