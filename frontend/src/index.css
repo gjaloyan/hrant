@@ -51,11 +51,10 @@ body {
 }
 
 /* ── Baseline chrome ─────────────────────────────────────────────────
-   Everything below is wrapped in :where(), which has ZERO specificity.
-   That is the whole trick: an unstyled control picks up the new look,
-   while any existing Tailwind class on the element still wins. It lets
-   the design reach 15k lines of components without rewriting them and
-   without fighting them. */
+   These rules give an unstyled control the new look while losing to any
+   utility class already on the element, so the design reaches 15k lines of
+   components without rewriting them and without fighting them. Specificity
+   is the whole mechanism — see the note on the control rules below. */
 
 /* Plain element selectors, not :where(). :where() scores zero, which loses
    to Tailwind's own preflight (`input { background-color: transparent }`,
