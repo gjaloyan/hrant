@@ -76,7 +76,7 @@ class DeclaredToolSemantics:
 # in audit mode until their author declares an effect.
 _READ_TOOLS = frozenset({
     "web_search", "fetch_url", "analyze_image", "read_captcha", "read_file",
-    "channel_updates",
+    "channel_updates", "list_scheduled",
     "verify_web",
     "soul_history", "list_trackers", "get_tracker", "search_knowledge",
     "list_skills", "list_background_jobs",
@@ -94,6 +94,7 @@ _WRITE_TOOLS = frozenset({
     "define_task_endpoint", "acknowledge_provider_issue",
     "save_to_workspace", "grant_telegram_access", "revoke_telegram_access",
     "approve_pairing", "prove_change", "check_subagents",
+    "cancel_scheduled",
     "list_pending_pairings",
 })
 _EXTERNAL_TOOLS = frozenset({

@@ -571,6 +571,91 @@ def _channel_updates_handler(channel: str = "", mark_reviewed: bool = True,
     return json.dumps(out, ensure_ascii=False)
 
 
+def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
+    """What is already on the calendar, in the USER'S LOCAL TIME.
+
+    The agent could create reminders and not see them: `schedule_message`
+    was the only scheduling tool registered, so it could not answer "what
+    do I have tomorrow", could not notice a collision, and could not move
+    or drop anything it had set. A calendar you can only write to is not
+    a calendar.
+
+    Local time, not UTC, because that is what the question is asked in and
+    what the answer has to be given in. The agent already converts one way
+    for `due_at`; making it convert back to read its own entries would be
+    arithmetic for nothing.
+    """
+    from datetime import datetime, timedelta, timezone
+    from zoneinfo import ZoneInfo
+    from .roles import current_speaker, is_owner
+    from .scheduled_messages import list_pending
+    from .settings import user_timezone
+
+    me = current_speaker() or ""
+    everyone = str(scope or "mine").strip().lower() == "all"
+    if everyone and not is_owner(me):
+        return json.dumps({
+            "ok": False,
+            "error": "only the owner may list everyone's reminders",
+        }, ensure_ascii=False)
+    try:
+        days = max(1, int(horizon_days or 7))
+    except (TypeError, ValueError):
+        days = 7
+
+    rows = list_pending() if everyone else list_pending(requested_by=me)
+    try:
+        tz = ZoneInfo(user_timezone())
+    except Exception:
+        tz = timezone.utc
+    now = datetime.now(timezone.utc)
+    cutoff = now + timedelta(days=days)
+
+    out = []
+    for r in rows:
+        try:
+            due = datetime.strptime(r.get("due_at") or "", "%Y-%m-%dT%H:%M:%SZ")
+            due = due.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if due > cutoff:
+            continue
+        local = due.astimezone(tz)
+        out.append({
+            "id": r.get("id"),
+            "when": local.strftime("%A %Y-%m-%d %H:%M"),
+            "in_hours": round((due - now).total_seconds() / 3600, 1),
+            "text": (r.get("text") or "")[:160],
+            "repeat": r.get("repeat") or "",
+            "target": r.get("target_speaker"),
+        })
+    out.sort(key=lambda x: x["in_hours"])
+    return json.dumps({
+        "ok": True,
+        "timezone": str(getattr(tz, "key", tz)),
+        "horizon_days": days,
+        "count": len(out),
+        "reminders": out,
+    }, ensure_ascii=False)
+
+
+def _cancel_scheduled_handler(message_id: str = "") -> str:
+    """Drop one pending reminder. Yours, or anyone's if you are the owner."""
+    from .roles import current_speaker
+    from .scheduled_messages import cancel
+    mid = (message_id or "").strip()
+    if not mid:
+        return json.dumps({"ok": False, "error": "message_id required"},
+                          ensure_ascii=False)
+    if cancel(mid, by_speaker=current_speaker() or ""):
+        return json.dumps({"ok": True, "cancelled": mid}, ensure_ascii=False)
+    return json.dumps({
+        "ok": False,
+        "error": ("no pending reminder with that id, or it is not yours. "
+                  "Call list_scheduled first to see the ids you own."),
+    }, ensure_ascii=False)
+
+
 def _list_skills_handler(tag: str = "", category: str = "") -> str:
     """Enumerate every installed skill (name + description + tags +
     category). Useful when the auto-injected AVAILABLE SKILLS catalog
@@ -3213,6 +3298,65 @@ def register_builtin_tools() -> None:
             "required": ["path"],
         },
         handler=_read_captcha_handler,
+    )
+
+    reg.register_func(
+        name="list_scheduled",
+        description=(
+            "What reminders are already set, in the USER'S LOCAL TIME. "
+            "Read this before promising a time, so you can see a clash, "
+            "and whenever the user asks what is planned.\n\n"
+            "`schedule_message` was the only scheduling tool for a long "
+            "time, which made the calendar write-only: reminders could be "
+            "created and never seen again, so a collision was invisible "
+            "and nothing could be moved or dropped.\n\n"
+            "Times come back already converted — do not convert them "
+            "again. Each entry has `id` (pass it to `cancel_scheduled`), "
+            "`when`, `in_hours`, `text` and `repeat`. You see your own by "
+            "default; the owner may pass scope='all'."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "scope": {
+                    "type": "string",
+                    "enum": ["mine", "all"],
+                    "description": (
+                        "'mine' = reminders this speaker set. 'all' = "
+                        "everyone's, owner only."
+                    ),
+                    "default": "mine",
+                },
+                "horizon_days": {
+                    "type": "integer",
+                    "description": "How far ahead to look. Default 7.",
+                    "default": 7,
+                },
+            },
+            "required": [],
+        },
+        handler=_list_scheduled_handler,
+    )
+
+    reg.register_func(
+        name="cancel_scheduled",
+        description=(
+            "Drop one pending reminder by id. Get ids from "
+            "`list_scheduled`. You may cancel your own; the owner may "
+            "cancel anyone's. To MOVE a reminder, cancel it and schedule "
+            "the new time — there is no edit."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The `id` from list_scheduled.",
+                },
+            },
+            "required": ["message_id"],
+        },
+        handler=_cancel_scheduled_handler,
     )
 
     reg.register_func(

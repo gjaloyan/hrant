@@ -481,6 +481,27 @@ def run_agent_browser(
         # supplied in `command`, nor depend on argument order.
         env = dict(os.environ)
         env.setdefault("AGENT_BROWSER_SESSION", session or _session_name())
+        # Present the OWNER'S timezone to websites, not the server's.
+        #
+        # The box runs on UTC, which is right for a server: logs, stored
+        # timestamps and git all stay unambiguous. But Chromium hands the
+        # system zone straight to every page, so `new Date()` and
+        # `Intl.DateTimeFormat().resolvedOptions().timeZone` reported UTC.
+        # Measured 2026-09-01: a page saw "GMT+0000" while it was 13:00 in
+        # Yerevan, so anything rendering "today" — a schedule, a booking
+        # form, a news feed — was four hours behind, and wrong about the
+        # DAY itself every evening after 20:00 local.
+        #
+        # The owner's diagnosis, in his words: "utc in armenia is not good
+        # variant for web surfing." Correct, and the fix belongs here
+        # rather than on the system clock: one process presenting a
+        # different zone costs nothing, while moving the server's clock
+        # would reinterpret every naive timestamp in the codebase.
+        try:
+            from ..settings import user_timezone
+            env.setdefault("TZ", user_timezone())
+        except Exception:
+            pass
         # Headless-service hardening, kept from a fix the agent wrote itself
         # on prod 2026-08-11 while its browser was failing. Its DIAGNOSIS was
         # wrong — it concluded the system Chrome's SUID sandbox was unusable

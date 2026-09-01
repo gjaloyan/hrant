@@ -111,6 +111,10 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # fragile, sometimes a useless outbox file). A self-reminder is a core,
     # common, owner-gated action — it belongs always-on.
     "ask_user", "save_user_fact", "schedule_message",
+    # Reading and cancelling belong beside creating: a calendar the
+    # agent can only write to cannot avoid a clash, answer "what do I
+    # have tomorrow", or move anything it set.
+    "list_scheduled", "cancel_scheduled",
     # Project tracker (the living-projects feature). Added to BASE 2026-06-19:
     # these were registered as builtins but never placed in BASE or any
     # bundle, so the per-turn schema filter (BASE | loaded-bundles) dropped
