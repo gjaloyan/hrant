@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .knowledge_manager import _slug
 from .paths import data_dir, write_atomic_json
+from .sessions import normalize_speaker
 
 log = logging.getLogger(__name__)
 
@@ -32,7 +33,31 @@ def _new_step(title: str, *, due_at: str = "", check_in_kind: str = "ask_status"
         "check_in_kind": check_in_kind,  # ask_status | remind | none
         "note": "",
         "last_checked_at": None,
+        # Follow-up state (2026-09-01). A check-in used to fire once and the
+        # step stayed pending forever if nobody answered.
+        "nudges": 0,             # follow-ups already sent
+        "last_nudge_at": None,
+        "next_check_at": "",     # when the next one fires; may differ from due_at
     }
+
+
+def may_access(tracker: dict, speaker_id: str) -> bool:
+    """May this speaker see/modify this tracker?
+
+    Owners may reach anything. Everyone else reaches only what they created.
+
+    A tracker written before 2026-09-01 carries no `owner` field. Those are
+    treated as the owner's rather than as everyone's: the alternative --
+    "unowned means public" -- is the very leak this function exists to
+    close, and the two that existed on prod were in fact his.
+    """
+    from .roles import is_owner
+    who = normalize_speaker(speaker_id or "")
+    if not who:
+        return False
+    if is_owner(who):
+        return True
+    return who == normalize_speaker(tracker.get("owner") or "")
 
 
 class TrackerStore:
@@ -58,7 +83,8 @@ class TrackerStore:
         return None
 
     def create(self, *, title: str, domain: str = "work",
-               steps: list[dict] | None = None) -> dict:
+               steps: list[dict] | None = None,
+               requested_by: str = "webui:default") -> dict:
         tid = "trk_" + uuid.uuid4().hex[:10]
         # Dir = slug (readable, coexists with the markdown journal). On a slug
         # COLLISION with an existing tracker, suffix the id so two same-titled
@@ -75,6 +101,7 @@ class TrackerStore:
             "domain": domain,
             "status": "active",
             "created_at": _now(),
+            "owner": normalize_speaker(requested_by or ""),
             "slug": dirname,
             "steps": [
                 _new_step(
@@ -101,7 +128,17 @@ class TrackerStore:
             return None
         return json.loads(p.read_text(encoding="utf-8"))
 
-    def list(self, status: str = "active") -> list[dict]:
+    def list(self, status: str = "active", *,
+             requested_by: str | None = None) -> list[dict]:
+        """Trackers, newest first. With `requested_by`, only the ones that
+        speaker may see.
+
+        The filter was missing until 2026-09-01: `create` recorded no owner
+        and this method returned every tracker on disk, so a second user
+        would have been shown the owner's whole task list. The owner's rule
+        for reminders -- "notifications need to work isolated for each
+        user" -- applies to the list they hang off just as much.
+        """
         out = []
         for d in self._base.iterdir():
             p = d / "tracker.json" if d.is_dir() else None
@@ -111,8 +148,11 @@ class TrackerStore:
                 except Exception as e:
                     log.warning("tracker: unreadable %s (%s); skipping", p, e)
                     continue
-                if status in ("", "all") or t.get("status") == status:
-                    out.append(t)
+                if status not in ("", "all") and t.get("status") != status:
+                    continue
+                if requested_by is not None and not may_access(t, requested_by):
+                    continue
+                out.append(t)
         return sorted(out, key=lambda t: t.get("created_at", ""), reverse=True)
 
     def _save(self, tracker: dict) -> None:
@@ -138,14 +178,58 @@ class TrackerStore:
             if (r.get("kind") == "check_in" and r["status"] == "pending"
                     and (r.get("meta") or {}).get("step_id") == step["id"]):
                 cancel(r["id"])
-        if step.get("due_at") and step.get("check_in_kind") != "none" \
-                and step.get("status") not in ("done", "blocked"):
+        # A follow-up overrides the deadline for SCHEDULING only: `due_at`
+        # stays the real date so it still reads correctly to the user.
+        fire_at = step.get("next_check_at") or step.get("due_at")
+        if fire_at and step.get("check_in_kind") != "none" \
+                and step.get("status") not in ("done", "blocked", "stalled"):
             schedule(
-                target_speaker=requested_by, text="", due_at=step["due_at"],
+                target_speaker=requested_by, text="", due_at=fire_at,
                 requested_by=requested_by, kind="check_in",
                 meta={"tracker_id": tracker["id"], "step_id": step["id"],
                       "check_in_kind": step.get("check_in_kind", "ask_status")},
             )
+
+    def arm_follow_up(self, tracker_id: str, step_id: str, *,
+                      requested_by: str = "webui:default") -> dict | None:
+        """Record that we just nudged, and schedule the next one.
+
+        Returns the updated step, or None when the step has spent every
+        follow-up it is allowed -- the caller then parks it as stalled and
+        asks once whether it still matters.
+        """
+        from .follow_up import next_nudge_at
+        t = self.get(tracker_id)
+        if not t:
+            return None
+        for step in t["steps"]:
+            if step["id"] != step_id:
+                continue
+            n = int(step.get("nudges") or 0) + 1
+            step["nudges"] = n
+            step["last_nudge_at"] = _now()
+            when = next_nudge_at(n)
+            step["next_check_at"] = when or ""
+            self._save(t)
+            if not when:
+                return None
+            self._schedule_check_in(t, step, requested_by)
+            return step
+        return None
+
+    def park_stalled(self, tracker_id: str, step_id: str) -> dict | None:
+        """Stop asking. The step is not done and not refused -- it is simply
+        unanswered, which is a distinct state worth being able to see."""
+        t = self.get(tracker_id)
+        if not t:
+            return None
+        for step in t["steps"]:
+            if step["id"] == step_id:
+                step["status"] = "stalled"
+                step["next_check_at"] = ""
+                self._save(t)
+                return step
+        return None
 
     def add_step(self, tracker_id: str, title: str, *, due_at: str = "",
                  check_in_kind: str = "ask_status",
@@ -170,6 +254,10 @@ class TrackerStore:
             if step["id"] == step_id:
                 if status is not None:
                     step["status"] = status
+                    # Closing a step must silence it: leaving next_check_at
+                    # set would re-arm a nudge for something already done.
+                    if status in ("done", "blocked", "stalled"):
+                        step["next_check_at"] = ""
                 if note is not None:
                     step["note"] = note
                 if due_at is not None:

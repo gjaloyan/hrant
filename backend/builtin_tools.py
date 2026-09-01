@@ -2902,9 +2902,50 @@ def _frame_problem_handler(
     }, ensure_ascii=False)
 
 
+def _add_todo_handler(title: str, due_at: str = "",
+                      check_in_kind: str = "remind") -> str:
+    """A single task, not a project.
+
+    `create_tracker` is built for work with structure -- it even refuses a
+    frame whose components collapsed into too few steps. Routing "buy the
+    medicine" through it produced a one-item "project", which is why the
+    simple path (`create_inbox_reminder`, written 2026-06-17) was never
+    called from anywhere. This is that path, reachable.
+
+    With a `due_at` the task follows up on its own until it is closed; with
+    none it just sits on the list.
+    """
+    refuse, speaker = _check_owner("add_todo")
+    if refuse:
+        return json.dumps({"ok": False, "error": "owner/trusted only"},
+                          ensure_ascii=False)
+    if not (title or "").strip():
+        return json.dumps({"ok": False, "error": "title required"},
+                          ensure_ascii=False)
+    from .follow_up import BACKOFF_HOURS
+    from .tracker import TRACKERS
+    t = TRACKERS.create(
+        title=title.strip(), domain="inbox", requested_by=speaker,
+        steps=[{"title": title.strip(), "due_at": due_at or "",
+                "check_in_kind": check_in_kind or "remind"}],
+    )
+    step = (t.get("steps") or [{}])[0]
+    if due_at:
+        TRACKERS._schedule_check_in(t, step, speaker)
+    return json.dumps({
+        "ok": True,
+        "todo_id": t["id"],
+        "step_id": step.get("id"),
+        "due_at": due_at or "",
+        "follow_ups": len(BACKOFF_HOURS) if due_at else 0,
+        "note": ("I will keep raising this until you mark it done"
+                 if due_at else "no date set — it will sit on the list"),
+    }, ensure_ascii=False)
+
+
 def _create_tracker_handler(title: str, domain: str = "work",
                             steps: list | None = None) -> str:
-    refuse, _sp = _check_owner("create_tracker")
+    refuse, speaker = _check_owner("create_tracker")
     if refuse:
         return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
     from .tracker import TRACKERS
@@ -2921,7 +2962,7 @@ def _create_tracker_handler(title: str, domain: str = "work",
     # conversation moving without polluting the store with clones.
     norm = " ".join((title or "").split()).lower()
     if norm:
-        for t in TRACKERS.list(status="active"):
+        for t in TRACKERS.list(status="active", requested_by=speaker):
             if " ".join((t.get("title") or "").split()).lower() == norm:
                 return json.dumps(
                     {"ok": True, "tracker": t, "steps_recalled": False,
@@ -2930,7 +2971,8 @@ def _create_tracker_handler(title: str, domain: str = "work",
                     ensure_ascii=False)
     use_steps = steps if steps else _propose_steps_from_experience(title)
     recalled = bool(not steps and use_steps)
-    t = TRACKERS.create(title=title, domain=domain, steps=use_steps or [])
+    t = TRACKERS.create(title=title, domain=domain, steps=use_steps or [],
+                        requested_by=speaker)
     return json.dumps({"ok": True, "tracker": t, "steps_recalled": recalled,
                        "note": ("proposed steps from past experience — confirm "
                                 "or edit them" if recalled else "")},
@@ -2938,16 +2980,22 @@ def _create_tracker_handler(title: str, domain: str = "work",
 
 
 def _list_trackers_handler(status: str = "active") -> str:
+    from .roles import current_speaker
     from .tracker import TRACKERS
-    items = TRACKERS.list(status=status)
+    # Scoped since 2026-09-01: this returned every tracker on disk, so a
+    # second user was shown the owner's whole task list.
+    items = TRACKERS.list(status=status, requested_by=current_speaker() or "")
     return json.dumps({"ok": True, "count": len(items), "trackers": items},
                       ensure_ascii=False)
 
 
 def _get_tracker_handler(tracker_id: str) -> str:
-    from .tracker import TRACKERS
+    from .roles import current_speaker
+    from .tracker import TRACKERS, may_access
     t = TRACKERS.get(tracker_id)
-    if not t:
+    # "Not found" rather than "not yours": knowing that a tracker with this
+    # id exists is itself information the caller is not entitled to.
+    if not t or not may_access(t, current_speaker() or ""):
         return json.dumps({"ok": False, "error": "tracker not found"}, ensure_ascii=False)
     return json.dumps({"ok": True, "tracker": t}, ensure_ascii=False)
 
@@ -2957,7 +3005,10 @@ def _add_step_handler(tracker_id: str, title: str, due_at: str = "",
     refuse, speaker = _check_owner("add_step")
     if refuse:
         return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
-    from .tracker import TRACKERS
+    from .tracker import TRACKERS, may_access
+    _t = TRACKERS.get(tracker_id)
+    if not _t or not may_access(_t, speaker):
+        return json.dumps({"ok": False, "error": "tracker not found"}, ensure_ascii=False)
     s = TRACKERS.add_step(tracker_id, title, due_at=due_at,
                           check_in_kind=check_in_kind, requested_by=speaker)
     if s is None:
@@ -2970,7 +3021,10 @@ def _update_step_handler(tracker_id: str, step_id: str, status: str = "",
     refuse, speaker = _check_owner("update_step")
     if refuse:
         return json.dumps({"ok": False, "error": "owner/trusted only"}, ensure_ascii=False)
-    from .tracker import TRACKERS
+    from .tracker import TRACKERS, may_access
+    _t = TRACKERS.get(tracker_id)
+    if not _t or not may_access(_t, speaker):
+        return json.dumps({"ok": False, "error": "tracker not found"}, ensure_ascii=False)
     s = TRACKERS.update_step(
         tracker_id, step_id,
         status=status or None, note=note or None,
@@ -3357,6 +3411,43 @@ def register_builtin_tools() -> None:
             "required": ["message_id"],
         },
         handler=_cancel_scheduled_handler,
+    )
+
+    reg.register_func(
+        name="add_todo",
+        description=(
+            "Put ONE simple task on the user's list -- 'buy the medicine', "
+            "'call the dentist'. Use this, not `create_tracker`, whenever "
+            "the thing has no internal structure.\n\n"
+            "Give it `due_at` and it becomes self-carrying: the user is "
+            "reminded then, and if nothing comes back the task is raised "
+            "again with a growing gap until they close it or it runs out "
+            "of follow-ups. Never at night. Close it with `update_step` "
+            "(status='done') -- that is what stops the reminders.\n\n"
+            "Leave `due_at` empty for something with no date."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string",
+                          "description": "The task, in the user's own words."},
+                "due_at": {
+                    "type": "string",
+                    "description": ("When to raise it, UTC "
+                                    "'YYYY-MM-DDTHH:MM:SSZ'. Convert from "
+                                    "the user's local time. Empty = no date."),
+                },
+                "check_in_kind": {
+                    "type": "string",
+                    "enum": ["remind", "ask_status"],
+                    "description": ("'remind' = tell them to do it. "
+                                    "'ask_status' = ask whether it is done."),
+                    "default": "remind",
+                },
+            },
+            "required": ["title"],
+        },
+        handler=_add_todo_handler,
     )
 
     reg.register_func(

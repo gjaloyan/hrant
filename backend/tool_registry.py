@@ -94,7 +94,7 @@ _WRITE_TOOLS = frozenset({
     "define_task_endpoint", "acknowledge_provider_issue",
     "save_to_workspace", "grant_telegram_access", "revoke_telegram_access",
     "approve_pairing", "prove_change", "check_subagents",
-    "cancel_scheduled",
+    "cancel_scheduled", "add_todo",
     "list_pending_pairings",
 })
 _EXTERNAL_TOOLS = frozenset({

@@ -124,7 +124,7 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # check-ins + due-date scheduling + WebUI board). Same gating-induced
     # hand-roll class as schedule_message. Managing a project is a core,
     # conversational, owner-gated action — it belongs always-on.
-    "create_tracker", "list_trackers", "get_tracker",
+    "add_todo", "create_tracker", "list_trackers", "get_tracker",
     "add_step", "update_step",
     # Critical-thinking framing — reachable always so the agent can frame a
     # big task into its real components and confirm scope before building
