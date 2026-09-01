@@ -78,8 +78,7 @@ def test_evidence_rides_along_as_a_comment():
 
 
 def test_a_rule_already_present_is_not_proposed_again():
-    body = MODULES["m11_lessons"].body.replace(
-        lp.ANCHOR, "- Always verify a claim before stating it.\n\n" + lp.ANCHOR)
+    body = body_with("Always verify a claim before stating it")
     why = lp.already_known("always verify a claim before stating it", body, [])
     assert why and "already a rule" in why
 
@@ -229,8 +228,7 @@ def test_an_empty_lessons_module_costs_nothing():
 def test_a_module_with_a_lesson_is_included():
     from backend.prompt_modules import _is_empty_collector
 
-    body = MODULES["m11_lessons"].body.replace(
-        lp.ANCHOR, "- Verify before you claim.\n\n" + lp.ANCHOR)
+    body = body_with("Always verify a claim before stating it")
     assert not _is_empty_collector(body)
 
 
@@ -296,6 +294,13 @@ def test_a_russian_lesson_is_translated_before_it_reaches_the_prompt(
     seen = {}
     monkeypatch.setattr("backend.meaning_translate.to_english",
                         lambda t, **k: "Check every case against an official source")
+    # Against an empty module: this test is about translation, not about
+    # how many rules the owner happens to have approved.
+    from backend.prompt_modules import Module
+    monkeypatch.setitem(MODULES, "m11_lessons",
+                        Module(name="m11_lessons", body=EMPTY_BODY,
+                               always_on=True))
+    monkeypatch.setattr(lp, "_means_the_same", lambda a, b: False)
 
     class Store:
         _LOCK = __import__("threading").RLock()
@@ -349,3 +354,79 @@ def test_the_module_refuses_a_rule_it_has_no_room_for():
     full = body_with(*(["y" * 190] * 9))
     why = lp.already_known("a short new rule about timing", full, [])
     assert why and "no room" in why
+
+
+# ── the ceiling has to hold across a whole batch ───────────────────────
+
+class Pend:
+    """A pending lesson proposal, as the store shapes it."""
+
+    def __init__(self, text: str, status: str = "pending"):
+        self.status = status
+        self.title = "Lesson: " + text[:70]
+        self.new_code = f"- {text}.\n\n" + lp.ANCHOR
+
+
+def test_pending_proposals_claim_their_space(monkeypatch):
+    """Nine proposals generated in one pass all measured themselves against
+    an EMPTY module, all passed, and all applied — 2732 characters in an
+    1800-character module. A ceiling checked against a state that no longer
+    exists when the change lands is not a ceiling."""
+    monkeypatch.setattr(lp, "_means_the_same", lambda a, b: False)
+    pending = [Pend("x" * 190 + f" number {i}") for i in range(9)]
+    why = lp.already_known("a short new rule about timing", EMPTY_BODY, pending)
+    assert why and "no room" in why
+
+
+def test_one_pending_proposal_does_not_block_the_next(monkeypatch):
+    monkeypatch.setattr(lp, "_means_the_same", lambda a, b: False)
+    assert lp.already_known(
+        "a short new rule about timing", EMPTY_BODY,
+        [Pend("one earlier rule about something else")]) is None
+
+
+def test_a_decided_proposal_stops_claiming_space(monkeypatch):
+    monkeypatch.setattr(lp, "_means_the_same", lambda a, b: False)
+    spent = [Pend("y" * 190 + f" number {i}", status="rejected")
+             for i in range(9)]
+    assert lp.already_known("a short new rule", EMPTY_BODY, spent) is None
+
+
+def test_the_full_text_is_compared_not_the_clipped_title():
+    """Titles are clipped to 70 characters, so comparing against them made
+    every long lesson look unlike its own duplicate."""
+    # Long enough for the clipping to matter — the real ones ran 200-330
+    # characters, and against a 70-character title they score well under
+    # the similarity threshold, so a duplicate stops looking like one.
+    text = ("Do not claim that an action was completed or data received "
+            "until the corresponding tool has been called and returned a "
+            "successful result for it")
+    # build_edit appends a full stop; the point is that the whole sentence
+    # comes back, not the 70-character title.
+    assert lp.lesson_in(Pend(text).new_code).rstrip(".") == text
+    why = lp.already_known(text + ".", EMPTY_BODY, [Pend(text)])
+    assert why and "already proposed" in why
+
+
+def test_a_paraphrase_is_caught_by_meaning(monkeypatch):
+    """Character similarity cannot see a paraphrase: of the nine rules
+    approved on 2026-09-01, not one PAIR scored above the threshold, and
+    four of them said what another already said."""
+    seen = {}
+    monkeypatch.setattr(
+        lp, "_means_the_same",
+        lambda a, b: seen.setdefault("asked", True) or True)
+    why = lp.already_known(
+        "Recognize action-shaped requests and call the execute tool",
+        EMPTY_BODY,
+        [Pend("Treat requests to send messages as requiring the execute tool")])
+    assert why and "same meaning" in why
+
+
+def test_the_meaning_check_fails_open(monkeypatch):
+    """A provider outage must not silently swallow a real rule."""
+    def boom(*a, **k):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr("backend.llm.router", boom)
+    assert lp._means_the_same("one rule", "another rule") is False

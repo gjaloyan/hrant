@@ -589,6 +589,14 @@ _M11_BODY = """# LESSONS LEARNED
 
 - Before answering, retrieve up-to-date information from all relevant lists and clearly distinguish between personal, work, and other sources. Do not say that a list is empty or the only one without checking first.  <!-- seen 2x: Неточное или неполное представление содержимого списков задач -->
 
+- Recognize action-shaped requests and call the corresponding execute tool. After the call, verify the delivery or object-creation result and report the status based only on the tool’s response.  <!-- seen 4x: Пропуск фактического выполнения для запросов, сформулированных как действие -->
+
+- Do not infer names, contact details, or intentions from context without confirmation. Follow the request literally, and if the recipient is unclear, ask a brief clarifying question.  <!-- seen 3x: Выдумывание адресатов, имён и намерений пользователя в коммуникационных запросах -->
+
+- Allow relative dates only when the current date, time zone, and calendar tool have been confirmed. Do not provide a specific date or claim that scheduling was successful without a verified result.  <!-- seen 4x: Выдумывание конкретных календарных дат для относительных дат и времени -->
+
+- Before responding, retrieve data from all relevant lists and sources, distinguish between personal and work tasks, and do not declare a list empty without a result from the retrieval tool.  <!-- seen 2x: Неполное или неподтверждённое описание текущего состояния списков задач пользователя -->
+
 <!-- LESSONS ANCHOR — new lessons are inserted directly above this line -->
 """
 

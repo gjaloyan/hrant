@@ -142,7 +142,15 @@ class _Chan:
 def _lever(tmp_path, monkeypatch, sent_result, bot=True):
     from backend.autonomic.levers import proposal_digest as lev
     import backend.channels as ch
+    from backend import follow_up as fu
 
+    # Pin the clock. These assert the lever's OWN gating — interval, stamp,
+    # failure handling — and without this they inherit the wall clock, so
+    # the whole file went red at midnight when quiet hours legitimately
+    # suppressed the send. Quiet hours have their own tests above, with an
+    # explicit time.
+    # `due_for_digest` imports it from follow_up at call time.
+    monkeypatch.setattr(fu, "in_quiet_hours", lambda *a, **k: False)
     _Bot.calls = 0
     monkeypatch.setattr(ch, "CHANNELS",
                         _Chan(_Bot(sent_result) if bot else None))
@@ -193,7 +201,10 @@ def test_an_undelivered_digest_does_not(tmp_path, monkeypatch):
 
 def test_a_send_failure_is_reported_not_swallowed(tmp_path, monkeypatch):
     from backend.autonomic.levers import proposal_digest as lev
+    from backend import follow_up as fu
     import backend.channels as ch
+
+    monkeypatch.setattr(fu, "in_quiet_hours", lambda *a, **k: False)
 
     class _Boom:
         _running = True

@@ -91,19 +91,85 @@ def already_known(lesson: str, body: str, pending: list) -> Optional[str]:
         return (f"the lessons module is full ({len(current)}/{MAX_LESSONS}); "
                 "prune one before adding another")
     # The real ceiling: what this module costs on every turn.
-    if len(body) + len(lesson) + 8 > MAX_MODULE_CHARS:
-        return (f"no room left ({len(body)}/{MAX_MODULE_CHARS} chars); "
-                "prune a rule before adding another")
+    #
+    # Counted against the module PLUS everything already proposed and not
+    # yet decided. The first version checked the module alone, so nine
+    # proposals generated in one pass all measured themselves against an
+    # empty module, all passed, and all applied — leaving 2732 characters
+    # in a 1800-character module and a prompt 900 over budget. A ceiling
+    # checked against a state that no longer exists by the time the change
+    # lands is not a ceiling.
+    claimed = sum(
+        len(lesson_in(getattr(p, "new_code", "")) or "") + 8
+        for p in (pending or [])
+        if getattr(p, "status", "") == "pending"
+        and (getattr(p, "title", "") or "").startswith("Lesson:")
+    )
+    if len(body) + claimed + len(lesson) + 8 > MAX_MODULE_CHARS:
+        return (f"no room left ({len(body)} in the module, {claimed} already "
+                f"proposed, limit {MAX_MODULE_CHARS}); decide on the pending "
+                "ones or prune a rule first")
     for known in current:
         if _too_similar(lesson, known):
             return f"already a rule: {known[:60]}"
     for p in pending or []:
         if getattr(p, "status", "") != "pending":
             continue
-        title = getattr(p, "title", "") or getattr(p, "description", "")
-        if title.startswith("Lesson:") and _too_similar(lesson, title[7:]):
-            return f"already proposed: {title[:60]}"
+        title = getattr(p, "title", "") or ""
+        if not title.startswith("Lesson:"):
+            continue
+        # The title is clipped to 70 characters; comparing against THAT
+        # made every long lesson look unlike its own duplicate. The full
+        # text is in new_code, which is what actually lands in the module.
+        other = lesson_in(getattr(p, "new_code", "")) or title[7:]
+        if _too_similar(lesson, other):
+            return f"already proposed: {other[:60]}"
+        # Character similarity cannot see a paraphrase. Nine rules were
+        # approved on 2026-09-01 where four ideas existed, and not one
+        # pair scored above the threshold: "treat requests ... as
+        # requiring the execute tool" against "recognize action-shaped
+        # requests and call the corresponding execute tool". Same rule,
+        # almost no shared words. Meaning needs a model.
+        if _means_the_same(lesson, other):
+            return f"already proposed (same meaning): {other[:50]}"
     return None
+
+
+def lesson_in(new_code: str) -> str:
+    """The lesson text out of a proposal's diff body."""
+    for line in (new_code or "").splitlines():
+        t = line.strip()
+        if t.startswith("- "):
+            return t[2:].split("  <!--")[0].strip()
+    return ""
+
+
+def _means_the_same(a: str, b: str) -> bool:
+    """Does one rule already say what the other says?
+
+    One cheap call on a rare path, and the only thing that catches a
+    paraphrase. Fails OPEN — if the model is unavailable the lesson is
+    proposed and the owner decides, which is better than silently dropping
+    a real rule because a provider was down.
+    """
+    if not a or not b:
+        return False
+    try:
+        from .llm import TaskType, router
+        out = router().call(
+            TaskType.CLASSIFICATION,
+            "You compare two behavioural rules for an AI agent. Answer with "
+            "one word: SAME if the second already covers what the first "
+            "says, DIFFERENT otherwise. Wording does not matter, meaning "
+            "does.",
+            f"FIRST:{chr(10)}{a}{chr(10)}{chr(10)}SECOND:{chr(10)}{b}",
+            max_tokens=5,
+            temperature=0.0,
+        )
+        return (out or "").strip().upper().startswith("SAME")
+    except Exception as exc:
+        log.info("meaning check unavailable (%s); proposing anyway", exc)
+        return False
 
 
 def build_edit(lesson: str, evidence: str = "") -> dict:
