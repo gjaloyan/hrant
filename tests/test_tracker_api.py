@@ -97,3 +97,24 @@ def test_the_api_does_not_serve_another_users_tasks(client, monkeypatch):
         "/api/trackers/%s/steps/%s" % (theirs["id"], their_step),
         json={"status": "done"}).status_code == 404
     assert tracker.TRACKERS.get(theirs["id"])["steps"][0]["status"] != "done"
+
+
+def test_a_todo_is_not_a_project(client):
+    """The tracker store writes every entry as a directory under the same
+    knowledge/projects/ tree, so one-line todos were showing up in the
+    journal's project list beside real work."""
+    c, tracker = client
+    # project_mode holds a module-level PROJECTS bound to the data dir at
+    # import time; reload it so it sees the fixture's tmp tree instead of
+    # the developer's real one.
+    import importlib
+    from backend import project_mode
+    importlib.reload(project_mode)
+    PROJECTS = project_mode.PROJECTS
+    c.post("/api/todos", json={"title": "buy milk"})
+    tracker.TRACKERS.create(title="Real Project", domain="work",
+                            requested_by="webui:default")
+    names = PROJECTS.list_projects()
+    assert any("real" in n.lower() for n in names), names
+    assert not any("milk" in n.lower() for n in names), (
+        "a one-line task was listed as a project")

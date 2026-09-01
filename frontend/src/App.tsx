@@ -112,7 +112,6 @@ export default function App() {
             ref={chatRef}
             onRefreshStatus={refresh}
             project={status?.current_project ?? null}
-            onNewSession={handleNewSession}
           />
         </div>
         {tab === "goals" && <GoalsPanel />}

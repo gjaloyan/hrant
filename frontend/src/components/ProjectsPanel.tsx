@@ -132,8 +132,11 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
 
   return (
     <div className="flex flex-1 min-h-0">
-      {/* Left: project list + actions */}
-      <aside className="w-80 border-r border-slate-800 bg-slate-950/60 p-3 overflow-y-auto text-sm space-y-4">
+      {/* Left: journal project list + actions. Shown only for the Journal
+          view — the trackers board, calendar and frames do not use it, and
+          it was taking a fifth of the window on every one of them. */}
+      {view === "journal" && (
+      <aside className="w-72 shrink-0 overflow-y-auto border-r border-edge bg-canvas/60 p-3 text-sm space-y-4">
         {/* Create project */}
         <section>
           <h2 className="font-bold mb-2">Create Project</h2>
@@ -264,15 +267,20 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
         {msg && <div className="bg-sky-900/50 text-xs rounded p-2">{msg}</div>}
       </aside>
 
+      )}
+
       {/* Right: view switch (Trackers board / Calendar / Journal) */}
       <div className="flex flex-1 min-w-0 flex-col">
-        <div className="flex gap-1 border-b border-slate-800 px-3 py-2 text-xs">
+        <div className="border-b border-edge px-3 py-2">
+          <div className="inline-flex rounded-lg border border-edge bg-surface p-0.5 text-xs">
           {(["trackers", "calendar", "frames", "journal"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
-              className={`rounded px-3 py-1 ${
-                view === v ? "bg-sky-700 text-white" : "bg-slate-800"
+              className={`rounded-md px-3 py-1 transition-colors ${
+                view === v
+                  ? "bg-accent-soft text-accent font-medium"
+                  : "text-ink-dim hover:text-ink"
               }`}
             >
               {v === "trackers"
@@ -284,6 +292,7 @@ export default function ProjectsPanel({ onRefresh }: { onRefresh: () => void }) 
                 : "Journal"}
             </button>
           ))}
+          </div>
         </div>
         {view === "trackers" && <TrackerBoard />}
         {view === "calendar" && <TrackerCalendar />}

@@ -391,16 +391,61 @@ function UsagePanel({
   onRefresh: () => void;
 }) {
   const [expandedCall, setExpandedCall] = useState<number | null>(null);
+  // `/api/usage` aggregates an IN-MEMORY log that empties on every service
+  // restart, so this panel read "Total Calls 0" while the agent had made 85
+  // calls that day and the status bar said so. The persisted daily counter
+  // is the honest headline; the in-memory log still drives the breakdowns
+  // below, now labelled for what it actually covers.
+  const [today, setToday] = useState<{
+    total_tokens: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+    llm_calls: number;
+  } | null>(null);
+  useEffect(() => {
+    fetch("/api/tokens/today")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => d && setToday(d))
+      .catch(() => {});
+  }, [stats]);
 
-  if (!stats) return <div className="text-slate-500 p-4">Loading usage...</div>;
+  if (!stats) return <div className="p-4 text-ink-faint">Loading usage…</div>;
+
+  const restartOnly = stats.total_calls === 0 && !!today?.llm_calls;
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-4 gap-3">
-        <Card label="Total Calls" value={stats.total_calls} />
+      <p className="text-micro font-semibold uppercase text-ink-faint">Today</p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Card label="Calls" value={today ? today.llm_calls : "—"} />
+        <Card
+          label="Input Tokens"
+          value={today ? today.input_tokens.toLocaleString() : "—"}
+        />
+        <Card
+          label="Output Tokens"
+          value={today ? today.output_tokens.toLocaleString() : "—"}
+        />
+        <Card
+          label="Cost"
+          value={today ? `$${today.cost_usd.toFixed(4)}` : "—"}
+        />
+      </div>
+
+      <p className="text-micro font-semibold uppercase text-ink-faint">
+        Since last restart
+        {restartOnly && (
+          <span className="ml-2 normal-case font-normal text-ink-faint">
+            — nothing recorded yet in this process
+          </span>
+        )}
+      </p>
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Card label="Calls" value={stats.total_calls} />
         <Card label="Input Tokens" value={stats.total_input_tokens.toLocaleString()} />
         <Card label="Output Tokens" value={stats.total_output_tokens.toLocaleString()} />
-        <Card label="Total Cost" value={`$${stats.total_cost_usd.toFixed(4)}`} />
+        <Card label="Cost" value={`$${stats.total_cost_usd.toFixed(4)}`} />
       </div>
 
       {/* By task type */}

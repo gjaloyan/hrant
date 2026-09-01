@@ -86,7 +86,7 @@ export default function NavRail({
   return (
     <>
       {/* Desktop rail */}
-      <nav className="hidden md:flex w-52 shrink-0 flex-col gap-4 overflow-y-auto border-r border-edge bg-surface/60 px-2 py-3">
+      <nav className="hidden md:flex w-52 shrink-0 flex-col gap-4 overflow-y-auto border-r border-edge bg-surface/60 px-2 pb-8 pt-3">
         {NAV.map((g) => (
           <div key={g.group}>
             <p className="px-2 pb-1 text-micro font-semibold uppercase text-ink-faint">

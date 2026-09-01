@@ -1,5 +1,6 @@
 """Project management: overview / decisions / issues / hardware."""
 from __future__ import annotations
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -88,7 +89,29 @@ class ProjectManager:
         return "✓ issue recorded"
 
     def list_projects(self) -> list[str]:
-        return [p.name for p in self.base.iterdir() if p.is_dir() and not p.name.startswith(".")]
+        """Journal projects — NOT one-line todos.
+
+        The tracker store writes every entry as a directory under the same
+        knowledge/projects/ tree, including the single-step inbox todos
+        `add_todo` creates. That meant "buy the medicine" showed up in the
+        journal's project list beside real work, and the list filled with
+        one-liners. A tracker.json carrying domain="inbox" is a task, and
+        tasks belong on the task list, not here.
+        """
+        out = []
+        for d in self.base.iterdir():
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            meta = d / "tracker.json"
+            if meta.exists():
+                try:
+                    if json.loads(meta.read_text(encoding="utf-8")).get(
+                            "domain") == "inbox":
+                        continue
+                except Exception:
+                    pass  # unreadable metadata: show it rather than hide it
+            out.append(d.name)
+        return out
 
     def read_overview(self, name: str) -> str:
         p = self._dir(name) / "overview.md"

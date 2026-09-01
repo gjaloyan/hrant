@@ -749,11 +749,14 @@ function AskUserCard({
   );
 }
 
+// `onNewSession` used to live here as a button stacked under Send. It moved
+// to the app header on 2026-09-01: starting a fresh conversation is one of
+// the two things anyone does most, and it should not be a small grey square
+// competing with the primary action.
 const Chat = forwardRef<ChatHandle, {
   onRefreshStatus: () => void;
   project: string | null;
-  onNewSession?: () => void;
-}>(function Chat({ onRefreshStatus, project, onNewSession }, ref) {
+}>(function Chat({ onRefreshStatus, project }, ref) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -1235,7 +1238,8 @@ const Chat = forwardRef<ChatHandle, {
 
   return (
     <div className="flex flex-col flex-1 min-w-0">
-      <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3 sm:space-y-4">
+      <div className="flex-1 overflow-y-auto px-3 py-4 sm:px-4">
+        <div className="mx-auto w-full max-w-3xl space-y-3 sm:space-y-4">
         {msgs.length === 0 && (
           <div className="opacity-50 text-sm text-center mt-8">
             Ask a question. The agent will analyze the task, load knowledge,
@@ -1596,9 +1600,11 @@ const Chat = forwardRef<ChatHandle, {
           </div>
         ))}
         <div ref={endRef} />
+        </div>
       </div>
 
-      <div className="border-t border-slate-800 p-3 space-y-2">
+      <div className="border-t border-edge bg-surface/40 p-3">
+        <div className="mx-auto w-full max-w-3xl space-y-2">
         {/* Model selector + dev-mode toggle */}
         <div className="flex items-center gap-2 relative">
           <button
@@ -1769,9 +1775,9 @@ const Chat = forwardRef<ChatHandle, {
           </button>
           <ReasoningQuickPick busy={busy} />
           <textarea
-            className="flex-1 bg-slate-900 rounded p-2 text-sm resize-none outline-none focus:ring-1 focus:ring-sky-600"
+            className="flex-1 resize-none rounded-lg border border-edge-strong bg-canvas p-2.5 text-sm outline-none focus:border-accent"
             rows={2}
-            placeholder="Ask something... (drag/paste files, 🎤 to record)"
+            placeholder="Ask anything…  Enter sends, Shift+Enter for a new line"
             value={input}
             disabled={busy}
             onChange={(e) => setInput(e.target.value)}
@@ -1783,25 +1789,15 @@ const Chat = forwardRef<ChatHandle, {
               }
             }}
           />
-          <div className="flex flex-col gap-1">
-            <button
-              onClick={send}
-              disabled={busy}
-              className="bg-sky-700 hover:bg-sky-600 rounded px-4 disabled:opacity-50 transition-colors text-sm min-h-[44px] sm:min-h-0 sm:py-1"
-            >
-              {busy ? "..." : "Send"}
-            </button>
-            {onNewSession && (
-              <button
-                onClick={onNewSession}
-                disabled={busy}
-                className="bg-slate-700 hover:bg-slate-600 rounded px-3 text-xs disabled:opacity-50 min-h-[36px] sm:min-h-0 sm:py-1"
-                title="Start a new session"
-              >
-                New
-              </button>
-            )}
-          </div>
+          <button
+            onClick={send}
+            disabled={busy}
+            title="Send  (Enter)"
+            className="self-stretch rounded-lg bg-accent px-5 text-sm font-medium text-white transition-colors hover:bg-accent-hover disabled:opacity-50"
+          >
+            {busy ? "…" : "Send"}
+          </button>
+        </div>
         </div>
       </div>
     </div>
