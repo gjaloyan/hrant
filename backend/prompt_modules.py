@@ -579,6 +579,16 @@ underlying issue.
 # `lesson_proposals.MAX_LESSONS` caps how many can accumulate.
 _M11_BODY = """# LESSONS LEARNED
 
+- Do not claim that an action was completed, permission was granted, or data was received until the corresponding tool has been called and returned a successful result. If the tool is unavailable, be honest about the limitation.  <!-- seen 8x: Заявление о выполнении действий без вызова инструмента или подтвержденного результата -->
+
+- Do not convert “tomorrow” or “on Thursday” into a calendar date without a confirmed current date, time zone, and context. Use the original wording or ask for the missing information.  <!-- seen 4x: Выдумывание конкретных дат и времени для относительных временных указаний -->
+
+- Treat requests to create reminders, send messages, and perform other actions as requiring the execute tool. Make the call, verify the result, and report the actual status.  <!-- seen 4x: Пропуск выполнения action-shaped запросов без execute-вызова или доставки результата -->
+
+- Do not guess the recipient’s name, the intended content, or whether anything was sent. Rephrase the request neutrally, and clarify the recipient and the action only when necessary.  <!-- seen 2x: Выдумывание адресатов, намерений и фактов о коммуникации вместо уточнения запроса -->
+
+- Before answering, retrieve up-to-date information from all relevant lists and clearly distinguish between personal, work, and other sources. Do not say that a list is empty or the only one without checking first.  <!-- seen 2x: Неточное или неполное представление содержимого списков задач -->
+
 <!-- LESSONS ANCHOR — new lessons are inserted directly above this line -->
 """
 

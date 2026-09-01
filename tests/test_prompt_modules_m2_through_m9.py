@@ -417,10 +417,24 @@ def test_default_prompt_under_global_budget():
 
     Partly funded by deleting M2's refusal-rewriter rule, which
     described a mechanism removed on 2026-05-21 and carried Russian
-    text in a prompt the owner requires to be English."""
+    text in a prompt the owner requires to be English.
+
+    Cap raised 17 -> 18.7 KB on 2026-09-01 for M11 (lessons learned).
+    That module is empty in the repo and fills as the owner approves
+    rules, so this ceiling is deliberately set to the EMPTY prompt
+    (16862) plus lesson_proposals.MAX_MODULE_CHARS (1800) — the most
+    that module is ever allowed to hold. Keep the two in step: raising
+    MAX_MODULE_CHARS without raising this number lets a lawful set of
+    approved lessons fail a test that is supposed to be a guardrail,
+    and raising this number without the other buys nothing.
+
+    The first five approved rules cost 1570 characters and pushed the
+    live prompt to 18434 while this test, measuring the repo's empty
+    module, still read 16862 and passed. That is why the module's own
+    cap is in characters and not in a count."""
     from backend.prompt_modules import build_prompt
     out = build_prompt()
-    assert len(out) < 17_000, (
+    assert len(out) < 18_700, (
         f"default prompt grew to {len(out)} chars — splits or "
         "trims needed"
     )

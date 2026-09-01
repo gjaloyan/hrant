@@ -22,6 +22,20 @@ class FakeProp:
         self.status = status
 
 
+
+# The live module fills as the owner approves rules, so tests that care
+# about "empty" or "full" build the body they mean rather than reading it.
+EMPTY_BODY = "# LESSONS LEARNED" + chr(10) + chr(10) + lp.ANCHOR + chr(10)
+
+
+def body_with(*lessons: str) -> str:
+    return EMPTY_BODY.replace(
+        lp.ANCHOR,
+        "".join("- " + t.rstrip(".") + "." + chr(10) for t in lessons)
+        + chr(10) + lp.ANCHOR,
+    )
+
+
 def test_the_anchor_is_really_in_the_module():
     """The whole edit hinges on this literal string existing. If the module
     body is reworded and the anchor goes, every proposal fails to apply with
@@ -45,7 +59,7 @@ def test_the_edit_inserts_above_the_anchor_and_keeps_it():
 
 def test_applying_twice_keeps_both_lessons():
     """Simulate the apply engine's literal replace, twice."""
-    body = MODULES["m11_lessons"].body
+    body = EMPTY_BODY
     first = lp.build_edit("always verify a claim before stating it")
     body = body.replace(first["old_code"], first["new_code"], 1)
     second = lp.build_edit("never promise an action you did not take")
@@ -75,21 +89,20 @@ def test_a_rule_already_waiting_is_not_proposed_again():
     509 archived goals still counted as 447 'distinct' ones."""
     pending = [FakeProp("Lesson: always verify a claim before stating it")]
     why = lp.already_known("Always verify a claim before stating it.",
-                           MODULES["m11_lessons"].body, pending)
+                           EMPTY_BODY, pending)
     assert why and "already proposed" in why
 
 
 def test_a_rejected_proposal_does_not_block_a_new_one():
     pending = [FakeProp("Lesson: always verify a claim", status="rejected")]
-    assert lp.already_known("always verify a claim",
-                            MODULES["m11_lessons"].body, pending) is None
+    assert lp.already_known("always verify a claim", EMPTY_BODY, pending) is None
 
 
 def test_a_genuinely_different_lesson_gets_through():
     pending = [FakeProp("Lesson: always verify a claim before stating it")]
     assert lp.already_known(
         "prefer running the command over describing it",
-        MODULES["m11_lessons"].body, pending) is None
+        EMPTY_BODY, pending) is None
 
 
 @pytest.mark.parametrize("junk", ["", "   ", "too short"])
@@ -205,13 +218,12 @@ def test_no_module_and_no_proposal_files_nothing_planless(
 # ── the prompt must not grow without bound ─────────────────────────────
 
 def test_an_empty_lessons_module_costs_nothing():
-    """It starts empty and fills only as the owner approves. A heading and
-    an insertion anchor billed on every turn to say nothing is exactly the
-    bloat the 20:1 input ratio complains about."""
-    from backend.prompt_modules import build_prompt, _is_empty_collector
+    """Before the owner approves anything, the module must not be billed on
+    every turn for a heading and an insertion anchor."""
+    from backend.prompt_modules import _is_empty_collector
 
-    assert _is_empty_collector(MODULES["m11_lessons"].body)
-    assert "LESSONS LEARNED" not in build_prompt()
+    assert _is_empty_collector(EMPTY_BODY)
+    assert not _is_empty_collector(body_with("verify before you claim"))
 
 
 def test_a_module_with_a_lesson_is_included():
@@ -233,21 +245,25 @@ def test_a_real_module_is_never_dropped():
 
 def test_the_module_has_a_ceiling():
     """Unbounded growth here would recreate the runaway queue in the prompt
-    instead of in goals.json."""
-    full = MODULES["m11_lessons"].body.replace(
-        lp.ANCHOR,
-        "".join(f"- lesson number {i} about something.\n"
-                for i in range(lp.MAX_LESSONS)) + "\n" + lp.ANCHOR)
+    instead of in goals.json. Nine long rules hit the CHARACTER ceiling
+    before the count ceiling, which is the point: characters are what get
+    billed on every turn."""
+    full = body_with(*(["y" * 190] * 9))
     why = lp.already_known("an entirely unrelated new rule about timing",
                            full, [])
+    assert why and ("no room" in why or "full" in why)
+
+
+def test_many_short_rules_still_hit_the_count_ceiling():
+    """The count cap remains as a backstop: a pile of very short rules is
+    still a wall of text at the top of every prompt."""
+    full = body_with(*[f"short rule {i}" for i in range(lp.MAX_LESSONS)])
+    why = lp.already_known("an entirely unrelated new rule", full, [])
     assert why and "full" in why
 
 
 def test_below_the_ceiling_still_accepts():
-    nearly = MODULES["m11_lessons"].body.replace(
-        lp.ANCHOR,
-        "".join(f"- lesson number {i} about something.\n"
-                for i in range(lp.MAX_LESSONS - 1)) + "\n" + lp.ANCHOR)
+    nearly = body_with("one earlier rule about something")
     assert lp.already_known("an entirely unrelated new rule about timing",
                             nearly, []) is None
 
@@ -303,3 +319,33 @@ def test_an_untranslatable_lesson_is_dropped_not_written_raw(monkeypatch):
     monkeypatch.setattr("backend.meaning_translate.to_english",
                         lambda t, **k: t)          # translation failed
     assert lp.propose_lesson("Требовать проверять каждое дело") is None
+
+
+def test_the_module_cap_and_the_prompt_budget_stay_in_step():
+    """The two numbers are one decision and must not drift apart.
+
+    The count cap was the wrong unit: five approved lessons averaged 290
+    chars, took the live prompt to 18434 against a 17000 budget, and this
+    test — reading the repo's empty module — still passed. The ceiling is
+    now in characters, and the prompt budget is that ceiling plus the
+    prompt without any lessons.
+    """
+    from backend.prompt_modules import MODULES, build_prompt
+
+    body = MODULES["m11_lessons"].body
+    without = len(build_prompt()) - len(body) - 2   # minus the joiner
+    assert without + lp.MAX_MODULE_CHARS < 18_700, (
+        "a full lessons module would breach the prompt budget: "
+        f"{without} + {lp.MAX_MODULE_CHARS}"
+    )
+
+
+def test_a_rule_longer_than_a_sentence_is_refused():
+    why = lp.already_known("x" * (lp.MAX_LESSON_CHARS + 1), EMPTY_BODY, [])
+    assert why and "too long" in why
+
+
+def test_the_module_refuses_a_rule_it_has_no_room_for():
+    full = body_with(*(["y" * 190] * 9))
+    why = lp.already_known("a short new rule about timing", full, [])
+    assert why and "no room" in why

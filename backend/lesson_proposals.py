@@ -39,11 +39,23 @@ ANCHOR = (
 # fills with paraphrases of one idea.
 SIMILARITY = 0.72
 
-# Every approved lesson costs tokens on EVERY turn, and the default prompt
-# has a hard 17k budget. Without a ceiling this path would reproduce the
-# problem it was built to fix — an unbounded queue — just in the prompt
-# instead of in goals.json. At the cap the agent stops proposing and says
-# so, which is the owner's cue to prune what no longer earns its place.
+# Every approved lesson costs tokens on EVERY turn, so this module needs a
+# ceiling or it reproduces the unbounded queue it was built to replace,
+# just in the prompt instead of in goals.json.
+#
+# The first version capped the COUNT at twelve, which was the wrong unit.
+# Five approved lessons averaged 290 characters each and pushed the
+# default prompt from 16862 to 18434 against a 17000 budget — a count cap
+# cannot see that coming. Characters are what get billed, so characters
+# are what is capped.
+MAX_MODULE_CHARS = 1800
+
+# One rule, one sentence. The model writes paragraphs when left alone —
+# the longest of the first five ran to 331 characters for something
+# sayable in eighty — and a rule nobody finishes reading is not a rule.
+MAX_LESSON_CHARS = 200
+
+# Kept as a backstop so a pile of very short lessons cannot become a wall.
 MAX_LESSONS = 12
 
 
@@ -71,10 +83,17 @@ def already_known(lesson: str, body: str, pending: list) -> Optional[str]:
     is already waiting for approval is the duplication that made the old
     queue unreadable.
     """
+    if len(lesson) > MAX_LESSON_CHARS:
+        return (f"too long ({len(lesson)} chars, limit {MAX_LESSON_CHARS}); "
+                "state the rule in one sentence")
     current = existing_lessons(body)
     if len(current) >= MAX_LESSONS:
         return (f"the lessons module is full ({len(current)}/{MAX_LESSONS}); "
                 "prune one before adding another")
+    # The real ceiling: what this module costs on every turn.
+    if len(body) + len(lesson) + 8 > MAX_MODULE_CHARS:
+        return (f"no room left ({len(body)}/{MAX_MODULE_CHARS} chars); "
+                "prune a rule before adding another")
     for known in current:
         if _too_similar(lesson, known):
             return f"already a rule: {known[:60]}"
