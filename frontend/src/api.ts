@@ -641,6 +641,8 @@ export type GoalStats = {
   paused: number;
   completed: number;
   failed: number;
+  /** Proposed, never reviewed, aged out. Not attempted — not a failure. */
+  expired?: number;
   by_type: Record<string, number>;
   interaction_count: number;
   next_proactive_check_in: number;

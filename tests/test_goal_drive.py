@@ -96,6 +96,9 @@ def test_archive_stale_sweeps_old_improvement_goals(env):
 
     n = goals_mod.GOALS.archive_stale(goal_type="improvement", days=14)
     assert n == 1
-    assert goals_mod.GOALS.get(g_old.id).status == "failed"
+    # "expired", not "failed", since 2026-09-01: the sweep retires goals
+    # that were never executed, and counting those as failures put 509
+    # untouched suggestions in the same bucket as real breakage.
+    assert goals_mod.GOALS.get(g_old.id).status == "expired"
     assert goals_mod.GOALS.get(g_new.id).status == "active"
     assert goals_mod.GOALS.get(g_user.id).status == "active"   # untouched

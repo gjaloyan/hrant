@@ -173,7 +173,9 @@ def test_archives_old_goals_stuck_on_approval(monkeypatch):
     lever = FIRE_GOAL_EXECUTOR()
     lever.run({}, {})
 
-    assert old_goal.status == "failed"
+    # Never attempted, so "expired" rather than "failed" — see
+    # tests/test_goal_expiry_20260901.py for why the two are separate.
+    assert old_goal.status == "expired"
     assert "stale" in (old_goal.progress_notes[-1] if old_goal.progress_notes
                        else "").lower() or old_goal.completed is not None
 

@@ -5,13 +5,14 @@ The agent maintains a stack of goals with priorities. Goals can be:
   - Auto-generated: from knowledge gaps, error patterns, or session analysis
   - Proactive learning: topics the user asked about but agent didn't know
 
-Each goal has a status (active/paused/completed/failed), priority (1-10),
+Each goal has a status (active/paused/completed/failed/expired), priority (1-10),
 and optional subtasks. The manager suggests next actions and tracks progress.
 
 Persistence: goals are saved to goals.json in the knowledge directory.
 """
 from __future__ import annotations
 
+import logging
 import json
 import re
 import threading
@@ -22,6 +23,8 @@ from typing import Optional
 
 from .config import CONFIG
 from .paths import write_atomic_json
+
+log = logging.getLogger(__name__)
 
 
 class Goal:
@@ -45,7 +48,15 @@ class Goal:
         self.description = description
         self.priority = max(1, min(10, priority))
         self.goal_type = goal_type  # user, learning, improvement, proactive
-        self.status = status  # active, paused, completed, failed
+        # active | paused | completed | failed | expired
+        #
+        # `expired` exists because `failed` was being used for two opposite
+        # things. A goal that was TRIED and did not work is failed. A goal
+        # that was never tried at all -- an improvement the agent proposed
+        # and the owner never got to -- is expired. Filing the second under
+        # the first made the board read "509 failed" when the true statement
+        # was "509 suggestions nobody answered".
+        self.status = status
         self.subtasks = subtasks or []  # [{description, status, result}]
         self.created = created or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.completed = completed
@@ -95,6 +106,14 @@ class Goal:
         self.completed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         if reason:
             self.progress_notes.append(f"[failed] {reason}")
+
+    def expire(self, reason: str = "") -> None:
+        """Never attempted -- it aged out waiting for a human. Not a failure
+        of the agent, and it must not be counted as one."""
+        self.status = "expired"
+        self.completed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if reason:
+            self.progress_notes.append(f"[expired] {reason}")
 
     def add_progress(self, note: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
@@ -176,8 +195,50 @@ class GoalManager:
                     data = json.loads(self.path.read_text(encoding="utf-8"))
                     self._goals = [Goal.from_dict(g) for g in data.get("goals", [])]
                     self._interaction_count = data.get("interaction_count", 0)
+                    if self._migrate_expired():
+                        self._save_unlocked()
                 except Exception:
                     self._goals = []
+
+    # Both archivers' own sentences. Keyed on the exact text they write so
+    # the migration can never touch a goal that genuinely ran and failed.
+    _NEVER_ATTEMPTED = (
+        "Auto-archived as stale: pending human approval",   # goal_executor
+        "(hygiene sweep)",                                  # archive_stale
+    )
+
+    def _migrate_expired(self) -> bool:
+        """Reclassify goals that were filed as failures but never attempted.
+
+        Until 2026-09-01 two separate archivers marked untouched goals
+        `failed`, so 509 suggestions nobody got to were counted as breakage:
+        437 from the hygiene sweep and 72 from the approval archiver. They
+        are identifiable exactly, by the sentence each archiver writes.
+        Anything else stays failed -- this must not sweep a real failure
+        into the quiet bucket.
+        """
+        changed = 0
+        for g in self._goals:
+            if g.status != "failed":
+                continue
+            notes = " ".join(n or "" for n in g.progress_notes)
+            if any(marker in notes for marker in self._NEVER_ATTEMPTED):
+                g.status = "expired"
+                changed += 1
+        if changed:
+            log.info("goals: reclassified %d unreviewed goals failed -> expired",
+                     changed)
+        return bool(changed)
+
+    def _save_unlocked(self) -> None:
+        """_save without taking the lock — for callers already holding it."""
+        try:
+            write_atomic_json(self.path, {
+                "goals": [g.to_dict() for g in self._goals],
+                "interaction_count": self._interaction_count,
+            })
+        except Exception:
+            pass
 
     def _save(self) -> None:
         with self._LOCK:
@@ -289,11 +350,19 @@ class GoalManager:
 
     def archive_stale(self, *, goal_type: str = "improvement",
                       days: int = 14) -> int:
-        """Auto-fail ACTIVE goals of an auto-generated type older than
-        `days`. Re-audit 2026-07-06 found 254 active improvement goals (248
-        older than 10 days) — the same clogged-queue zombie pattern as the
-        385 pending proposals: auto-generators outpace review, and a stale
-        auto-goal is regenerable, not precious. Returns count archived."""
+        """Retire ACTIVE auto-generated goals older than `days`.
+
+        Re-audit 2026-07-06 found 254 active improvement goals (248 older
+        than 10 days) — the same clogged-queue zombie pattern as the 385
+        pending proposals: auto-generators outpace review, and a stale
+        auto-goal is regenerable, not precious.
+
+        These become `expired`, not `failed`. They were never executed, so
+        counting them as failures said the agent tried 509 things and could
+        not do them, when what actually happened is that it suggested 509
+        things and nobody had time to look. 437 of the 509 on prod came
+        from this sweep. Returns count archived.
+        """
         from datetime import datetime, timedelta
         cutoff = (datetime.now() - timedelta(days=days)).strftime(
             "%Y-%m-%d %H:%M:%S")
@@ -302,8 +371,9 @@ class GoalManager:
             for g in self._goals:
                 if (g.status == "active" and g.goal_type == goal_type
                         and (g.created or "9999") < cutoff):
-                    g.fail(f"auto-archived: stale >{days}d without execution "
-                           "(hygiene sweep); regenerate if still relevant")
+                    g.expire(f"auto-archived: stale >{days}d without "
+                             "execution (hygiene sweep); regenerate if "
+                             "still relevant")
                     n += 1
             if n:
                 self._save()
@@ -473,6 +543,7 @@ class GoalManager:
         paused = [g for g in goals if g.status == "paused"]
         completed = [g for g in goals if g.status == "completed"]
         failed = [g for g in goals if g.status == "failed"]
+        expired = [g for g in goals if g.status == "expired"]
 
         by_type: dict[str, int] = {}
         for g in goals:
@@ -484,6 +555,7 @@ class GoalManager:
             "paused": len(paused),
             "completed": len(completed),
             "failed": len(failed),
+            "expired": len(expired),
             "by_type": by_type,
             "interaction_count": interaction_count,
             "next_proactive_check_in": self._proactive_interval - (interaction_count % self._proactive_interval),

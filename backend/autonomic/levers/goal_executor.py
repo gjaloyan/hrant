@@ -165,33 +165,17 @@ class FIRE_GOAL_EXECUTOR(Lever):
                             reviewed.append(g.id)
                             any_changes = True
 
-            # Step 3: stale-archive check
-            pending_subtasks = [
-                st for st in g.subtasks if st.get("status") == "pending"
-            ]
-            only_approval_pending = (
-                len(pending_subtasks) == 1
-                and _is_approval_subtask(pending_subtasks[0]
-                                         .get("description", ""))
-            )
-            created_dt = _parse_created(g.created)
-            if (
-                only_approval_pending
-                and created_dt is not None
-                and created_dt < cutoff
-            ):
-                g.status = "failed"
-                g.completed = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                try:
-                    g.progress_notes.append(
-                        f"Auto-archived as stale: pending human approval "
-                        f">{stale_days} days. Re-propose via "
-                        f"meta_learner if still relevant."
-                    )
-                except Exception:
-                    pass
-                archived.append(g.id)
-                any_changes = True
+            # Step 3 (stale-archive) used to live here and was DEAD CODE.
+            # `archive_stale` above runs first, over the same goal_type and
+            # with the SAME cutoff, so by the time this loop ran every goal
+            # old enough to archive had already been archived and was no
+            # longer in `active`. The condition could not be true.
+            #
+            # The prod split proves it: of 509 archived goals, 437 carry the
+            # hygiene sweep's note and 72 carry this branch's — and those 72
+            # all predate 2026-07-06, when the sweep was added ahead of it.
+            # Two archivers writing two different sentences for one outcome
+            # is also why the first pass at reclassifying them only found 72.
 
         if any_changes:
             try:

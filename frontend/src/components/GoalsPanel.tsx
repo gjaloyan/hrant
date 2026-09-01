@@ -24,6 +24,8 @@ const STATUS_COLORS: Record<string, string> = {
   paused: "#fbbf24",
   completed: "#64748b",
   failed: "#f87171",
+  // Never attempted — aged out of the review queue. Not breakage, so not red.
+  expired: "#64708a",
 };
 
 /** Priority 1-10.
@@ -62,7 +64,8 @@ export default function GoalsPanel() {
   const [formPriority, setFormPriority] = useState(5);
   const [formType, setFormType] = useState("user");
   const [formContext, setFormContext] = useState("");
-  const [filter, setFilter] = useState<"all" | "active" | "completed">("all");
+  const [filter, setFilter] =
+    useState<"all" | "active" | "completed" | "expired">("all");
 
   const flash = (text: string) => {
     setMsg(text);
@@ -132,7 +135,9 @@ export default function GoalsPanel() {
 
   const filtered = goals.filter((g) => {
     if (filter === "active") return g.status === "active" || g.status === "paused";
-    if (filter === "completed") return g.status === "completed" || g.status === "failed";
+    if (filter === "completed")
+      return g.status === "completed" || g.status === "failed";
+    if (filter === "expired") return g.status === "expired";
     return true;
   });
 
@@ -158,7 +163,21 @@ export default function GoalsPanel() {
               <span className="text-emerald-400">{stats.active} active</span>
               <span className="text-amber-400">{stats.paused} paused</span>
               <span className="text-slate-400">{stats.completed} done</span>
-              <span className="text-rose-400">{stats.failed} failed</span>
+              {stats.failed > 0 && (
+                <span className="text-rose-400">{stats.failed} failed</span>
+              )}
+              {/* These were never attempted — they aged out of a review
+                  queue nobody had time for. Counting them as failures made
+                  the board read "509 failed" when the true statement was
+                  "509 suggestions nobody answered". */}
+              {(stats.expired ?? 0) > 0 && (
+                <span
+                  className="text-ink-dim"
+                  title="Proposed, never reviewed, aged out. Not attempted, so not a failure."
+                >
+                  {stats.expired} expired unreviewed
+                </span>
+              )}
               <span className="opacity-40">|</span>
               <span className="opacity-50">{stats.interaction_count} interactions</span>
               <span className="opacity-50">next check in {stats.next_proactive_check_in}</span>
@@ -167,7 +186,7 @@ export default function GoalsPanel() {
 
           {/* Filter tabs */}
           <div className="flex gap-1">
-            {(["all", "active", "completed"] as const).map((f) => (
+            {(["all", "active", "completed", "expired"] as const).map((f) => (
               <button
                 key={f}
                 onClick={() => setFilter(f)}
