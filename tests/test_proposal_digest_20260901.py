@@ -113,21 +113,64 @@ def test_the_lever_is_registered_and_has_a_rule():
         "the lever would never fire")
 
 
-def _lever(tmp_path, monkeypatch, sent_result, pending_created=1):
+class _Bot:
+    """Stands in for TelegramBot, which is what owns the digest.
+
+    The fake CHANNELS below deliberately has NO `send_proposal_digest`: the
+    method lives on TelegramBot, beside `_send_with_buttons`, and the first
+    version of the lever called `CHANNELS.send_proposal_digest()` — an
+    AttributeError swallowed into its own error branch. A stub that answers
+    to everything would have hidden that.
+    """
+
+    calls = 0
+
+    def __init__(self, result):
+        self._running = True
+        self._result = result
+
+    def send_proposal_digest(self):
+        _Bot.calls += 1
+        return self._result
+
+
+class _Chan:
+    def __init__(self, bot):
+        self._bots = {"tg": bot} if bot else {}
+
+
+def _lever(tmp_path, monkeypatch, sent_result, bot=True):
     from backend.autonomic.levers import proposal_digest as lev
     import backend.channels as ch
 
-    class _Chan:
-        calls = 0
-
-        def send_proposal_digest(self):
-            _Chan.calls += 1
-            return sent_result
-
-    monkeypatch.setattr(ch, "CHANNELS", _Chan())
+    _Bot.calls = 0
+    monkeypatch.setattr(ch, "CHANNELS",
+                        _Chan(_Bot(sent_result) if bot else None))
     monkeypatch.setattr(lev, "resolve_knowledge_path",
                         lambda p: tmp_path / "digest.json")
-    return lev.FIRE_PROPOSAL_DIGEST(), _Chan
+    return lev.FIRE_PROPOSAL_DIGEST(), _Bot
+
+
+def test_the_digest_lives_on_the_bot_not_the_manager():
+    """Pin the object that owns it. ChannelManager is what `CHANNELS` is;
+    the send path (`_send_with_buttons`) is on TelegramBot."""
+    from backend.channels import ChannelManager, TelegramBot
+
+    assert hasattr(TelegramBot, "send_proposal_digest")
+    assert hasattr(TelegramBot, "_send_with_buttons")
+    assert not hasattr(ChannelManager, "send_proposal_digest")
+
+
+def test_no_running_bot_is_a_skip_not_a_failure(tmp_path, monkeypatch):
+    """No bot yet is ordinary — during startup, or outside the gateway. It
+    must read as SKIPPED, not fill the lever log with FAILUREs."""
+    from backend.autonomic.types import LeverStatus
+
+    lever, _ = _lever(tmp_path, monkeypatch, {"sent": 1}, bot=False)
+    rep = lever.run({}, {})
+    assert rep.status == LeverStatus.SKIPPED, rep.reason
+    assert "bot" in (rep.reason or "")
+    assert not (tmp_path / "digest.json").exists()
 
 
 def test_a_delivered_digest_starts_the_clock(tmp_path, monkeypatch):
@@ -153,10 +196,12 @@ def test_a_send_failure_is_reported_not_swallowed(tmp_path, monkeypatch):
     import backend.channels as ch
 
     class _Boom:
+        _running = True
+
         def send_proposal_digest(self):
             raise RuntimeError("telegram down")
 
-    monkeypatch.setattr(ch, "CHANNELS", _Boom())
+    monkeypatch.setattr(ch, "CHANNELS", _Chan(_Boom()))
     monkeypatch.setattr(lev, "resolve_knowledge_path",
                         lambda p: tmp_path / "digest.json")
     rep = lev.FIRE_PROPOSAL_DIGEST().run({}, {})

@@ -76,13 +76,22 @@ class FIRE_PROPOSAL_DIGEST(Lever):
         if not pd.due_for_digest(last_sent, min_interval_hours=interval):
             return self._skip(params, started, "not_due")
 
-        # The Telegram bot lives in the gateway process; CHANNELS._bots is
+        # The digest lives on TelegramBot, next to `_on_self_mod_proposal`
+        # and `_send_with_buttons` — NOT on ChannelManager, which is what
+        # `CHANNELS` is. Calling CHANNELS.send_proposal_digest() raised
+        # AttributeError, silently, into the lever's own error branch.
+        #
+        # The bot only exists inside the gateway process; CHANNELS._bots is
         # empty anywhere else, so a standalone run reports a failure that is
         # not real. The autonomic scheduler runs in-process, which is why
-        # this works from here.
+        # this works from here. Same lookup `send_to_speaker` uses.
         from backend.channels import CHANNELS
+        bot = next((b for b in CHANNELS._bots.values()
+                    if getattr(b, "_running", False)), None)
+        if bot is None:
+            return self._skip(params, started, "no_telegram_bot_running")
         try:
-            result = CHANNELS.send_proposal_digest()
+            result = bot.send_proposal_digest()
         except Exception as exc:
             log.warning("proposal_digest: send failed: %s", exc)
             return LeverReport(
