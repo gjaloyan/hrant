@@ -34,7 +34,6 @@ import {
   clearConversation,
   compareModels,
   ConversationTurn,
-  fetchCapabilities,
   fetchConversation,
   fetchIdentity,
   fetchIdentityHistory,
@@ -94,7 +93,6 @@ export default function SettingsPanel() {
   const [msg, setMsg] = useState("");
   const [conversation, setConversation] = useState<ConversationTurn[]>([]);
   const [convCount, setConvCount] = useState(0);
-  const [capabilities, setCapabilities] = useState("");
   const [status, setStatus] = useState<StatusPayload | null>(null);
   const [history, setHistory] = useState<{ timestamp: string; path: string; size: number }[]>([]);
   const [channels, setChannels] = useState<ChannelConfig[]>([]);
@@ -192,14 +190,6 @@ export default function SettingsPanel() {
     }
   };
 
-  const loadCapabilities = async () => {
-    try {
-      const data = await fetchCapabilities();
-      setCapabilities(data.block);
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    }
-  };
 
   const loadStatus = async () => {
     try {
@@ -271,7 +261,6 @@ export default function SettingsPanel() {
   useEffect(() => {
     loadIdentity();
     loadConversation();
-    loadCapabilities();
     loadStatus();
     loadHistory();
     loadChannels();
@@ -378,7 +367,7 @@ export default function SettingsPanel() {
         )}
 
         {tab === "capabilities" && (
-          <CapabilitiesTab capabilities={capabilities} onRefresh={loadCapabilities} />
+          <CapabilitiesTab flash={flash} />
         )}
 
         {tab === "memory" && <MemoryTab flash={flash} />}

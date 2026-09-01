@@ -544,6 +544,32 @@ export const fetchGaps = () =>
 export const fetchCapabilities = () =>
   json_get<{ block: string }>("/api/capabilities");
 
+/** The tool list with FULL descriptions.
+ *
+ * `/api/capabilities` returns the system-prompt block, where every
+ * description is clipped to 100 characters because it is billed on each
+ * turn. That is a prompt concern, not a reading one.
+ */
+export type CapabilityTool = {
+  name: string;
+  description: string;
+  origin: string;
+  always_on: boolean;
+  bundle: string;
+};
+
+export type CapabilitySkill = {
+  name: string;
+  description: string;
+  enabled: boolean;
+  triggers: string[];
+};
+
+export const fetchCapabilityTools = () =>
+  json_get<{ tools: CapabilityTool[]; skills: CapabilitySkill[] }>(
+    "/api/capabilities/tools",
+  );
+
 // ---- Conversation ----
 // Round A: per-channel filter. Channel=null returns all turns
 // (back-compat for callers that pre-date the channel split).

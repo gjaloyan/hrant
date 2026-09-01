@@ -40,7 +40,7 @@ export const SETTINGS_NAV: SettingsGroup[] = [
       { id: "modelrouting", label: "Model Routing", hint: "Send cheap work to a cheaper model", keywords: "cost cheap small model per task classification keyword routing price save money" },
       { id: "pipeline", label: "Pipeline", hint: "Stages of a turn, and their profiles", keywords: "stages profile turn flow" },
       { id: "engine", label: "Engine", hint: "Temperature, context, token budgets", keywords: "temperature context window tokens budget sampling" },
-      { id: "capabilities", label: "Capabilities", hint: "Tools the agent is allowed to use", keywords: "tools permissions allow terminal browser" },
+      { id: "capabilities", label: "Capabilities", hint: "Every tool and skill it can reach", keywords: "tools skills what can it do list browser terminal bundle" },
     ],
   },
   {

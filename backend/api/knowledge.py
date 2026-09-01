@@ -90,6 +90,51 @@ def get_capabilities():
     return {"block": _capabilities_block()}
 
 
+@router.get("/api/capabilities/tools")
+def get_capability_tools():
+    """Every tool, with its FULL description and how it is reached.
+
+    `/api/capabilities` returns the block that goes into the system
+    prompt, where descriptions are clipped to 100 characters because every
+    one of them is billed on every turn. The WebUI was rendering that
+    prompt artifact, so a reader browsing what the agent can do got
+    sentences cut mid-word ("...to read J").
+
+    Truncation is a prompt concern. A person reading the list wants the
+    whole sentence, plus the thing the block cannot say: whether the tool
+    is always available or sits behind a bundle the model must load first.
+    """
+    from ..builtin_tools import get_registry
+    from ..skills import SKILLS
+    from ..tool_bundles import BASE_TOOLS, TOOL_BUNDLES
+
+    bundle_of: dict[str, str] = {}
+    for bundle, names in TOOL_BUNDLES.items():
+        for n in names:
+            bundle_of[n] = bundle
+
+    registry = get_registry()
+    tools = []
+    for name, tool in sorted(registry.tools.items()):
+        tools.append({
+            "name": name,
+            "description": tool.description or "",
+            "origin": getattr(tool, "origin", "builtin"),
+            "always_on": name in BASE_TOOLS,
+            "bundle": bundle_of.get(name, ""),
+        })
+
+    SKILLS.ensure_loaded()
+    skills = [{
+        "name": sk.name,
+        "description": sk.description or "",
+        "enabled": bool(getattr(sk, "enabled", True)),
+        "triggers": list(getattr(sk, "triggers", []) or [])[:8],
+    } for sk in SKILLS.skills]
+
+    return {"tools": tools, "skills": skills}
+
+
 # ---- quick-note ----
 class QuickNoteRequest(BaseModel):
     text: str
