@@ -1,468 +1,396 @@
-import { useCallback, useEffect, useState } from "react";
+/** The background loop: what it can do, what it did, and the stop button.
+ *
+ * Everything needed was already here — the levers, the kill switch, the
+ * immune signatures — but the order buried it. The screen opened with a
+ * scheduler tick-interval field and a wall of raw tick log
+ * (`2026-09-01T15:12:11.355778+00:00  FIRE_CAPABILITY_SCAN
+ * rule_matched:capability_scan_tick`, wrapping onto two lines), and the
+ * thirty levers sat below the fold. A log is evidence; it is not the
+ * point of a control panel.
+ *
+ * Reordered around what the reader wants: is it running and how do I stop
+ * it, what CAN it do, what needs me, what did it just do. The tick
+ * interval is a rarely-touched knob and now lives behind Advanced.
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  fetchAutonomicStatus,
-  fetchPending,
   approvePending,
-  rejectPending,
-  fetchTicks,
-  fetchLeverHistory,
-  fetchImmune,
-  toggleKillSwitch,
   fetchAutonomicSettings,
+  fetchAutonomicStatus,
+  fetchImmune,
+  fetchLeverHistory,
+  fetchPending,
+  fetchTicks,
   putAutonomicSettings,
-  AutonomicStatus,
-  AutonomicSettings,
-  PendingEntry,
-  TickEntry,
-  LeverReport,
-  ImmuneSignature,
+  rejectPending,
+  toggleKillSwitch,
+  type AutonomicStatus,
+  type ImmuneSignature,
+  type LeverReport,
+  type TickEntry,
 } from "../api";
+import { Badge, Button, Card, EmptyState, Flash, Spinner, cx } from "../ui";
 
-const CATEGORY_COLORS: Record<string, string> = {
-  FIRE_SERVER_HEALTH: "bg-rose-900/40",
-  FIRE_ERROR_TRIAGE: "bg-rose-900/40",
-  FIRE_SELF_HEAL: "bg-rose-900/40",
-  FIRE_SERVICE_REPAIR: "bg-rose-900/40",
-  FIRE_TOOL_INSTALL: "bg-amber-900/40",
+/** FIRE_EMBEDDING_BACKFILL -> "Embedding backfill". The prefix and the
+ *  shouting are an internal naming convention, not information. */
+function leverLabel(name: string): string {
+  const s = (name || "").replace(/^FIRE_/, "").replace(/_/g, " ").toLowerCase();
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function when(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  const mins = Math.round((Date.now() - d.getTime()) / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1440) return `${Math.round(mins / 60)}h ago`;
+  return d.toLocaleDateString();
+}
+
+const exact = (iso: string) => {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString();
 };
 
-function leverBgClass(name: string): string {
-  return CATEGORY_COLORS[name] ?? "bg-sky-900/30";
-}
-
-function statusDotClass(status: string | undefined): string {
-  if (!status) return "bg-slate-500";
-  if (status === "success") return "bg-emerald-400";
-  if (status === "failure") return "bg-rose-500";
-  if (status === "skipped") return "bg-slate-400";
-  if (status === "blocked_by_safety") return "bg-amber-400";
-  if (status === "escalated") return "bg-violet-400";
-  return "bg-slate-500";
-}
+const STATUS_TONE: Record<string, "ok" | "warn" | "danger" | "neutral"> = {
+  SUCCESS: "ok",
+  SKIPPED: "neutral",
+  FAILURE: "danger",
+  ESCALATED: "warn",
+  BLOCKED_BY_SAFETY: "warn",
+  NOT_EXECUTED: "neutral",
+};
 
 export default function AutonomicPanel() {
   const [status, setStatus] = useState<AutonomicStatus | null>(null);
-  const [pending, setPending] = useState<PendingEntry[]>([]);
   const [ticks, setTicks] = useState<TickEntry[]>([]);
-  const [tickLimit, setTickLimit] = useState<number>(50);
-  const [selectedLever, setSelectedLever] = useState<string | null>(null);
-  const [leverHistory, setLeverHistory] = useState<LeverReport[]>([]);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [pending, setPending] = useState<any[]>([]);
   const [immune, setImmune] = useState<ImmuneSignature[]>([]);
-  const [autonomicSettings, setAutonomicSettings] = useState<AutonomicSettings | null>(null);
-  const [intervalDraft, setIntervalDraft] = useState<number>(30);
+  const [interval, setIntervalSec] = useState<number>(30);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [history, setHistory] = useState<LeverReport[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [advanced, setAdvanced] = useState(false);
   const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
 
-  const flash = (text: string) => {
-    setMsg(text);
-    setTimeout(() => setMsg(""), 4000);
+  const flash = (t: string) => {
+    setMsg(t);
+    setTimeout(() => setMsg(""), 3000);
   };
 
-  const refresh = useCallback(async () => {
+  const load = useCallback(async () => {
     try {
-      const [s, p, t] = await Promise.all([
+      const [st, pd, tk, im, cfg] = await Promise.allSettled([
         fetchAutonomicStatus(),
         fetchPending(),
-        fetchTicks(tickLimit),
+        fetchTicks(40),
+        fetchImmune(),
+        fetchAutonomicSettings(),
       ]);
-      setStatus(s);
-      setPending(p.pending);
-      setTicks(t.ticks);
-    } catch (e: any) {
-      flash("Error: " + e.message);
+      if (st.status === "fulfilled") setStatus(st.value);
+      if (pd.status === "fulfilled") setPending((pd.value as any).pending || []);
+      if (tk.status === "fulfilled") setTicks((tk.value as any).ticks || []);
+      if (im.status === "fulfilled")
+        setImmune((im.value as any).signatures || []);
+      if (cfg.status === "fulfilled")
+        setIntervalSec((cfg.value as any).tick_interval_seconds ?? 30);
+    } finally {
+      setLoading(false);
     }
-  }, [tickLimit]);
+  }, []);
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 10000);
+    return () => clearInterval(t);
+  }, [load]);
 
   const openLever = async (name: string) => {
-    setSelectedLever(name);
-    setLoadingHistory(true);
+    setSelected(name);
+    setHistory([]);
     try {
-      const result = await fetchLeverHistory(name, 10);
-      setLeverHistory(result.reports);
-    } catch (e: any) {
-      flash("Error: " + e.message);
-      setLeverHistory([]);
-    } finally {
-      setLoadingHistory(false);
-    }
-  };
-
-  const closeLever = () => {
-    setSelectedLever(null);
-    setLeverHistory([]);
-  };
-
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
-  }, [refresh]);
-
-  const refreshSettings = useCallback(async () => {
-    try {
-      const s = await fetchAutonomicSettings();
-      setAutonomicSettings(s);
-      const cur = s.effective.tick_interval_seconds ?? s.saved.tick_interval_seconds ?? 30;
-      setIntervalDraft(cur);
-    } catch (e: any) {
-      flash("Settings load error: " + e.message);
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshSettings();
-  }, [refreshSettings]);
-
-  const handleSaveInterval = async () => {
-    setBusy(true);
-    try {
-      const r = await putAutonomicSettings(intervalDraft);
-      flash(
-        r.applied_live
-          ? `Tick interval: ${r.effective.tick_interval_seconds}s (live)`
-          : `Tick interval: ${r.effective.tick_interval_seconds}s (saved; restart to apply)`,
-      );
-      refreshSettings();
-    } catch (e: any) {
-      flash("Save failed: " + (e?.message || String(e)));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const refreshSlow = useCallback(async () => {
-    try {
-      const result = await fetchImmune();
-      setImmune(result.signatures);
+      const r = await fetchLeverHistory(name, 10);
+      setHistory((r as any).reports || []);
     } catch (e: any) {
       flash("Error: " + e.message);
     }
-  }, []);
-
-  useEffect(() => {
-    refreshSlow();
-    const t = setInterval(refreshSlow, 30000);
-    return () => clearInterval(t);
-  }, [refreshSlow]);
-
-  const handleApprove = async (id: string) => {
-    setBusy(true);
-    try {
-      const report = await approvePending(id);
-      flash(`Approved — ${report.lever}: ${report.status} (${report.reason})`);
-      refresh();
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    } finally {
-      setBusy(false);
-    }
   };
 
-  const handleReject = async (id: string) => {
-    if (!confirm("Reject this pending action?")) return;
-    setBusy(true);
-    try {
-      await rejectPending(id);
-      flash("Rejected");
-      refresh();
-    } catch (e: any) {
-      flash("Error: " + e.message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleKillSwitch = async () => {
+  const flipKill = async () => {
     if (!status) return;
-    if (status.enabled && !confirm("Disable autonomic scheduler?")) return;
-    setBusy(true);
+    const turningOff = status.enabled;
+    if (
+      turningOff &&
+      !confirm(
+        "Stop the background loop?\n\n" +
+          "Reminders stop being delivered, nothing gets consolidated, and " +
+          "the agent stops noticing its own failures until you turn it back on.",
+      )
+    )
+      return;
     try {
-      const result = await toggleKillSwitch(!status.enabled);
-      flash(result.enabled ? "Scheduler enabled" : "Scheduler disabled");
-      refresh();
+      await toggleKillSwitch(!status.enabled);
+      flash(turningOff ? "Background loop stopped" : "Background loop running");
+      load();
     } catch (e: any) {
       flash("Error: " + e.message);
-    } finally {
-      setBusy(false);
     }
   };
+
+  /** Last time each lever actually ran, from the tick log we already have. */
+  const lastRun = useMemo(() => {
+    const m: Record<string, TickEntry> = {};
+    for (const t of ticks) if (t.lever && !m[t.lever]) m[t.lever] = t;
+    return m;
+  }, [ticks]);
+
+  const levers = useMemo(
+    () => (status?.registered_levers ?? []).slice().sort(),
+    [status],
+  );
+
+  if (loading)
+    return (
+      <div className="flex flex-1 items-center gap-2 p-6 text-sm text-ink-dim">
+        <Spinner /> Loading…
+      </div>
+    );
+
+  const running = !!status?.enabled && !!status?.scheduler_running;
 
   return (
-    <div className="flex flex-1 min-h-0 overflow-hidden">
-      <div className="flex-1 flex flex-col overflow-hidden bg-slate-950/60">
-        {/* Header */}
-        <div className="p-3 border-b border-slate-800 flex items-center gap-3 flex-wrap">
-          <button
-            onClick={handleKillSwitch}
-            disabled={busy || !status}
-            className={`px-3 py-1.5 rounded text-xs font-semibold ${
-              status?.enabled
-                ? "bg-emerald-700 hover:bg-emerald-600"
-                : "bg-rose-700 hover:bg-rose-600"
-            } disabled:opacity-50`}
-          >
-            {status?.enabled ? "● ENABLED" : "● DISABLED"}
-          </button>
-          <span className="text-xs opacity-70">
-            scheduler:{" "}
+    <div className="flex-1 overflow-y-auto">
+      <div className="mx-auto max-w-5xl space-y-5 px-4 py-5 sm:px-6">
+        {/* Is it running, and how do I stop it. Nothing above this. */}
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl2 border border-edge bg-surface px-4 py-3">
+          <div className="flex items-center gap-3">
             <span
-              className={
-                status?.scheduler_running ? "text-emerald-400" : "text-slate-400"
-              }
-            >
-              {status?.scheduler_running ? "running" : "stopped"}
-            </span>
-          </span>
-          <span className="text-xs opacity-70">
-            {status ? `${status.registered_levers.length} levers registered` : "…"}
-          </span>
-          <button
-            onClick={refresh}
-            className="ml-auto px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-xs"
-          >
-            Refresh
-          </button>
+              className={cx(
+                "h-2.5 w-2.5 rounded-full",
+                running ? "bg-ok" : "bg-danger",
+              )}
+            />
+            <div>
+              <p className="font-semibold">
+                {running ? "Running" : status?.enabled ? "Enabled, not ticking" : "Stopped"}
+              </p>
+              <p className="text-xs text-ink-dim">
+                {levers.length} background jobs available · checks every{" "}
+                {interval}s
+              </p>
+            </div>
+          </div>
+          <Button kind={status?.enabled ? "danger" : "ok"} onClick={flipKill}>
+            {status?.enabled ? "Stop background work" : "Start background work"}
+          </Button>
         </div>
 
-        {/* Sections */}
-        <div className="flex-1 overflow-y-auto p-3 space-y-4 text-xs">
-          {/* Scheduler settings */}
-          <section>
-            <h2 className="font-bold text-sm mb-2">⚙ Scheduler</h2>
-            <div className="p-2 rounded bg-slate-800/60 space-y-2">
-              <div className="flex items-center gap-3 flex-wrap">
-                <label className="opacity-70">Tick interval (s):</label>
-                <input
-                  type="number"
-                  min={autonomicSettings?.range_seconds.min ?? 1}
-                  max={autonomicSettings?.range_seconds.max ?? 3600}
-                  step={1}
-                  value={intervalDraft}
-                  onChange={(e) => setIntervalDraft(Number(e.target.value))}
-                  className="w-24 bg-slate-900 rounded px-2 py-1 outline-none focus:ring-1 focus:ring-sky-600 font-mono"
-                />
-                <span className="opacity-50">
-                  live: {autonomicSettings?.effective.tick_interval_seconds ?? "—"}s · saved:{" "}
-                  {autonomicSettings?.saved.tick_interval_seconds ?? "(none)"}
-                </span>
-                <button
-                  onClick={handleSaveInterval}
-                  disabled={busy}
-                  className="ml-auto bg-sky-700 hover:bg-sky-600 disabled:opacity-40 rounded px-2 py-1 text-[10px]"
-                >
-                  Save (applies live)
-                </button>
-              </div>
-              <div className="text-[10px] opacity-50">
-                Lower values run the loop more often (more CPU, faster reactions);
-                higher values reduce overhead. Range{" "}
-                {autonomicSettings?.range_seconds.min ?? 1}–
-                {autonomicSettings?.range_seconds.max ?? 3600}s. Stored in{" "}
-                <span className="font-mono">knowledge/autonomic_settings.json</span>.
-              </div>
-            </div>
-          </section>
-
-          {/* Pending Approvals */}
-          <section>
-            <h2 className="font-bold text-sm mb-2">
-              ⚠ Pending Approvals ({pending.length})
-            </h2>
-            {pending.length === 0 ? (
-              <div className="opacity-40">No pending actions</div>
-            ) : (
-              <div className="space-y-2">
-                {pending.map((p) => (
-                  <div
-                    key={p.id}
-                    className="p-2 rounded bg-amber-900/20 border border-amber-800/40 space-y-1"
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className="text-violet-400 font-semibold">{p.lever}</span>
-                      <span className="text-slate-400 text-[10px]">
-                        {p.requested_at}
-                      </span>
-                      <span className="ml-auto flex gap-1">
-                        <button
-                          onClick={() => handleApprove(p.id)}
-                          disabled={busy}
-                          className="bg-emerald-700 hover:bg-emerald-600 rounded px-2 py-0.5 text-[10px] disabled:opacity-50"
-                        >
-                          Approve
-                        </button>
-                        <button
-                          onClick={() => handleReject(p.id)}
-                          disabled={busy}
-                          className="bg-rose-700 hover:bg-rose-600 rounded px-2 py-0.5 text-[10px] disabled:opacity-50"
-                        >
-                          Reject
-                        </button>
-                      </span>
-                    </div>
-                    <div className="opacity-70 font-mono text-[10px]">
-                      {JSON.stringify(p.params)}
-                    </div>
+        {/* Anything waiting on a human comes before anything else. */}
+        {pending.length > 0 && (
+          <Card
+            title={`${pending.length} action${pending.length === 1 ? "" : "s"} waiting for you`}
+            subtitle="The loop stopped short of doing these on its own."
+          >
+            <ul className="divide-y divide-edge">
+              {pending.map((p: any) => (
+                <li key={p.id} className="flex items-center gap-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">
+                      {leverLabel(p.lever)}
+                    </p>
+                    <p className="truncate text-xs text-ink-dim">
+                      {p.reason || JSON.stringify(p.params || {})}
+                    </p>
                   </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          {/* Recent Ticks */}
-          <section>
-            <div className="flex items-center gap-2 mb-2">
-              <h2 className="font-bold text-sm">📊 Recent Ticks</h2>
-              <select
-                value={tickLimit}
-                onChange={(e) => setTickLimit(parseInt(e.target.value, 10))}
-                className="bg-slate-900 rounded px-1 py-0.5 text-[10px]"
-              >
-                <option value={10}>10</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-              </select>
-            </div>
-            {ticks.length === 0 ? (
-              <div className="opacity-40">No ticks yet</div>
-            ) : (
-              <div className="space-y-0.5 font-mono text-[10px] max-h-72 overflow-y-auto">
-                {ticks.map((t, i) => (
-                  <div
-                    key={i}
-                    className={`flex gap-2 px-1 py-0.5 rounded ${
-                      t.executed ? "bg-sky-900/20" : "bg-slate-800/20 opacity-60"
-                    }`}
+                  <Button
+                    kind="ok"
+                    size="sm"
+                    onClick={async () => {
+                      await approvePending(p.id);
+                      flash("Approved");
+                      load();
+                    }}
                   >
-                    <span className="text-slate-500 w-32 shrink-0">{t.ts}</span>
-                    <span className="text-violet-400 w-44 shrink-0 truncate">
-                      {t.lever ?? "—"}
-                    </span>
-                    <span className="text-slate-300 truncate">{t.reason}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
+                    Approve
+                  </Button>
+                  <Button
+                    kind="danger"
+                    size="sm"
+                    onClick={async () => {
+                      await rejectPending(p.id);
+                      flash("Rejected");
+                      load();
+                    }}
+                  >
+                    Reject
+                  </Button>
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
 
-          {/* Levers grid */}
-          <section>
-            <h2 className="font-bold text-sm mb-2">
-              🦾 Levers ({status?.registered_levers.length ?? 0})
-            </h2>
-            <div
-              className="grid gap-1.5"
-              style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}
-            >
-              {(status?.registered_levers ?? []).slice().sort().map((name) => (
+        {/* The levers ARE the panel. They used to sit below the log. */}
+        <Card
+          title="Background jobs"
+          subtitle="Each one runs on its own schedule. Click for what it did and when."
+        >
+          <div className="grid gap-1.5 sm:grid-cols-2">
+            {levers.map((name) => {
+              const t = lastRun[name];
+              return (
                 <button
                   key={name}
                   onClick={() => openLever(name)}
-                  className={`text-left p-2 rounded ${leverBgClass(
-                    name,
-                  )} hover:brightness-125 flex items-center gap-2`}
+                  className={cx(
+                    "flex items-center gap-2 rounded-lg border px-2.5 py-2 text-left",
+                    selected === name
+                      ? "border-accent/40 bg-accent-soft"
+                      : "border-edge hover:bg-surface-hover",
+                  )}
                 >
-                  <span
-                    className={`inline-block w-2 h-2 rounded-full bg-slate-500`}
-                  />
-                  <span className="text-[10px] truncate">{name}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm">
+                      {leverLabel(name)}
+                    </span>
+                    <span className="block truncate text-[11px] text-ink-faint">
+                      {t ? `ran ${when(t.ts)}` : "not seen recently"}
+                    </span>
+                  </span>
                 </button>
-              ))}
-            </div>
-          </section>
+              );
+            })}
+          </div>
+        </Card>
 
-          {/* Immune signatures */}
-          <section>
-            <h2 className="font-bold text-sm mb-2">
-              🧬 Immune Signatures ({immune.length})
-            </h2>
-            {immune.length === 0 ? (
-              <div className="opacity-40">No signatures loaded</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-[10px]">
-                  <thead>
-                    <tr className="text-slate-400 border-b border-slate-800">
-                      <th className="text-left py-1 pr-2">id</th>
-                      <th className="text-left py-1 pr-2">severity</th>
-                      <th className="text-left py-1 pr-2">fix_lever</th>
-                      <th className="text-right py-1 pr-2">observed</th>
-                      <th className="text-right py-1">success</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {immune.map((s) => (
-                      <tr key={s.id} className="border-b border-slate-800/50">
-                        <td className="py-1 pr-2 font-mono text-violet-400">{s.id}</td>
-                        <td className="py-1 pr-2">{s.severity}</td>
-                        <td className="py-1 pr-2 text-sky-400">{s.fix_lever}</td>
-                        <td className="py-1 pr-2 text-right">{s.observed_count}</td>
-                        <td className="py-1 text-right">
-                          {s.success_rate !== null
-                            ? `${Math.round(s.success_rate * 100)}%`
-                            : "—"}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+        {selected && (
+          <Card
+            title={leverLabel(selected)}
+            subtitle="Last ten runs"
+            actions={
+              <Button kind="ghost" size="sm" onClick={() => setSelected(null)}>
+                Close
+              </Button>
+            }
+          >
+            {history.length === 0 && (
+              <EmptyState title="No runs recorded">
+                This job has not reported since the service last started.
+              </EmptyState>
             )}
-          </section>
+            <ul className="divide-y divide-edge">
+              {history.map((r, i) => (
+                <li key={i} className="flex flex-wrap items-center gap-2 py-2 text-sm">
+                  <Badge tone={STATUS_TONE[r.status] || "neutral"}>
+                    {r.status.toLowerCase()}
+                  </Badge>
+                  <span className="text-xs text-ink-dim" title={exact(r.started_at)}>
+                    {when(r.started_at)}
+                  </span>
+                  {r.reason && (
+                    <span className="text-xs text-ink-faint">{r.reason}</span>
+                  )}
+                  {r.cost?.seconds > 0 && (
+                    <span className="ml-auto text-[11px] text-ink-faint">
+                      {r.cost.seconds.toFixed(1)}s
+                      {r.cost.usd > 0 && ` · $${r.cost.usd.toFixed(4)}`}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </Card>
+        )}
+
+        {/* Evidence, last. Local time, readable names, one line each. */}
+        <Card title="Recent activity" subtitle="What the loop picked, most recent first.">
+          <ul className="divide-y divide-edge text-sm">
+            {ticks.slice(0, 20).map((t, i) => (
+              <li key={i} className="flex items-center gap-3 py-1.5">
+                <span
+                  className="w-16 shrink-0 text-[11px] text-ink-faint"
+                  title={exact(t.ts)}
+                >
+                  {when(t.ts)}
+                </span>
+                <span className="min-w-0 flex-1 truncate">
+                  {t.lever ? leverLabel(t.lever) : (
+                    <span className="text-ink-faint">nothing to do</span>
+                  )}
+                </span>
+                {t.executed === false && t.lever && <Badge>skipped</Badge>}
+              </li>
+            ))}
+          </ul>
+        </Card>
+
+        <div>
+          <Button kind="ghost" size="sm" onClick={() => setAdvanced((v) => !v)}>
+            {advanced ? "Hide advanced" : "Advanced"}
+          </Button>
         </div>
 
-        {msg && (
-          <div className="p-2 text-xs text-sky-400 border-t border-slate-800">{msg}</div>
+        {advanced && (
+          <>
+            <Card
+              title="Tick interval"
+              subtitle="How often the loop decides what to do next. Lower reacts faster and costs more CPU."
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={interval}
+                  onChange={(e) => setIntervalSec(Number(e.target.value))}
+                  className="w-28 text-sm"
+                />
+                <span className="text-sm text-ink-dim">seconds</span>
+                <Button
+                  kind="primary"
+                  size="sm"
+                  onClick={async () => {
+                    try {
+                      await putAutonomicSettings(interval);
+                      flash("Applied live");
+                      load();
+                    } catch (e: any) {
+                      flash("Error: " + e.message);
+                    }
+                  }}
+                >
+                  Save
+                </Button>
+              </div>
+            </Card>
+
+            <Card
+              title="Immune signatures"
+              subtitle="Failures the agent learned to recognise and recover from."
+            >
+              {immune.length === 0 ? (
+                <EmptyState title="Nothing learned yet">
+                  A signature is written when the agent diagnoses a failure it
+                  could recover from unaided.
+                </EmptyState>
+              ) : (
+                <ul className="divide-y divide-edge">
+                  {immune.map((s: any, i) => (
+                    <li key={i} className="py-2">
+                      <p className="text-sm font-medium">{s.name || s.id}</p>
+                      <p className="text-xs text-ink-dim">
+                        {s.description || s.pattern}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+          </>
         )}
       </div>
-
-      {selectedLever && (
-        <div className="w-[420px] border-l border-slate-800 bg-slate-900/80 flex flex-col overflow-hidden">
-          <div className="p-3 border-b border-slate-800 flex items-center gap-2">
-            <h2 className="font-bold text-sm text-violet-400">{selectedLever}</h2>
-            <button
-              onClick={closeLever}
-              className="ml-auto text-slate-400 hover:text-slate-200 text-sm"
-            >
-              ✕
-            </button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-3 space-y-2 text-xs">
-            {loadingHistory ? (
-              <div className="opacity-50">Loading…</div>
-            ) : leverHistory.length === 0 ? (
-              <div className="opacity-40">No history yet</div>
-            ) : (
-              leverHistory.map((r, i) => (
-                <div key={i} className="p-2 rounded bg-slate-800/60 space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`inline-block w-2 h-2 rounded-full ${statusDotClass(
-                        r.status,
-                      )}`}
-                    />
-                    <span className="font-semibold">{r.status}</span>
-                    <span className="text-slate-500 text-[10px] ml-auto">
-                      {r.started_at}
-                    </span>
-                  </div>
-                  <div className="opacity-70">{r.reason}</div>
-                  {Object.keys(r.outcome).length > 0 && (
-                    <details>
-                      <summary className="cursor-pointer text-[10px] text-slate-400">
-                        outcome
-                      </summary>
-                      <pre className="mt-1 font-mono text-[10px] whitespace-pre-wrap opacity-80">
-                        {JSON.stringify(r.outcome, null, 2)}
-                      </pre>
-                    </details>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      )}
+      <Flash text={msg} />
     </div>
   );
 }
