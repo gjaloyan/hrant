@@ -157,7 +157,6 @@ export default function EngineTab({ flash }: Props) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-bold">Engine — Router & Verification</h3>
         <div className="flex gap-2">
           <button
             onClick={refresh}

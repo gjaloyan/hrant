@@ -123,7 +123,6 @@ export default function KnowledgeGraphTab({ flash }: Props) {
       {/* Header: stats + view switch + rebuild */}
       <div className="bg-slate-800 rounded p-3">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-base font-semibold text-slate-100">Knowledge graph</h2>
           <div className="flex gap-2">
             <button
               onClick={() => setView("explorer")}

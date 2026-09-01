@@ -212,7 +212,6 @@ export default function SkillsTab({ flash }: Props) {
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="font-bold">Skills</h3>
         <div className="flex gap-2">
           <button
             onClick={handleReload}

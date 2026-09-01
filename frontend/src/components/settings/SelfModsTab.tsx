@@ -125,7 +125,6 @@ export default function SelfModsTab({ flash }: Props) {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h3 className="font-bold">Self-Modifications</h3>
         <div className="flex gap-2">
           <button
             onClick={refresh}

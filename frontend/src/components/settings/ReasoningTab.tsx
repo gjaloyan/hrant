@@ -116,7 +116,6 @@ export default function ReasoningTab({ flash }: { flash: FlashFn }) {
   return (
     <div className="p-4 space-y-6 max-w-3xl">
       <div>
-        <h2 className="text-lg font-semibold text-slate-100">Reasoning Routing</h2>
         <p className="text-xs text-slate-400 mt-1 leading-relaxed">
           GPT-5.x via OpenAI Codex (ChatGPT subscription) accepts a
           <code className="mx-1 bg-slate-800 rounded px-1">reasoning.effort</code>

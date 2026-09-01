@@ -148,7 +148,6 @@ export default function RolesTab({ flash }: Props) {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="font-bold mb-2">Roles & Contacts</h3>
         <p className="text-xs text-slate-400">
           Each speaker (you on the WebUI, each Telegram user, future channels)
           gets a role. Owner can do anything (self-modification, code, configs,

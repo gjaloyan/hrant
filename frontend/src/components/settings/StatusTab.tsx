@@ -54,7 +54,6 @@ export default function StatusTab({ status, onCompare, onRefresh }: Props) {
 
   return (
     <div className="space-y-4">
-      <h3 className="font-bold">System Status</h3>
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
         <div className="bg-slate-800 rounded p-3">

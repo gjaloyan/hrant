@@ -217,7 +217,6 @@ export default function VoiceTab({ flash }: Props) {
 
   return (
     <div className="space-y-4">
-      <h3 className="font-bold">Voice — Speech-to-Text & Text-to-Speech</h3>
 
       {/* Tailscale / LAN discovery */}
       <div className="bg-slate-800 rounded p-3 space-y-2 text-sm">

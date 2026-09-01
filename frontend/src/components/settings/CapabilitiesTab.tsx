@@ -7,7 +7,6 @@ export default function CapabilitiesTab({ capabilities, onRefresh }: Props) {
   return (
     <div className="space-y-3">
       <div className="flex justify-between items-center">
-        <h3 className="font-bold">Agent Capabilities</h3>
         <button
           onClick={onRefresh}
           className="bg-slate-700 hover:bg-slate-600 rounded px-3 py-1 text-xs"

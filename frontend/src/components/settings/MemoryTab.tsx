@@ -125,7 +125,6 @@ export default function MemoryTab({ flash }: Props) {
 
   return (
     <div className="space-y-4">
-      <h3 className="font-bold">Memory — Embeddings</h3>
 
       {/* Live status banner */}
       <div className="bg-slate-800 rounded p-3 text-sm space-y-1">
