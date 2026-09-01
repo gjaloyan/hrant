@@ -165,7 +165,7 @@ export default function JobsTab({ flash }: Props) {
   }, [stats, statusFilter]);
 
   return (
-    <div className="flex gap-4 h-full min-h-0">
+    <div className="flex h-full min-h-0 min-w-0 gap-4">
       {/* Left: list + filters */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Header + filter chips */}
@@ -292,7 +292,7 @@ export default function JobsTab({ flash }: Props) {
       </div>
 
       {/* Right: details pane */}
-      <div className="w-[460px] shrink-0 border-l border-slate-800 pl-4 flex flex-col min-h-0">
+      <div className="flex w-[min(28rem,45%)] min-w-0 shrink-0 flex-col border-l border-edge pl-4 min-h-0">
         {selected ? (
           <>
             <div className="mb-3 flex items-center justify-between">

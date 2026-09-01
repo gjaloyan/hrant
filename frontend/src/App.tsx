@@ -99,7 +99,7 @@ export default function App() {
         </div>
       </header>
 
-      <div className="flex min-h-0 flex-1">
+      <div className="flex min-h-0 min-w-0 flex-1">
         <div className="hidden md:flex">
           <NavRail tab={tab} setTab={setTab} badges={{ settings: pendingCount }} />
         </div>
