@@ -212,12 +212,17 @@ class TrackerStore:
             # came back +3h, +8h, +24h, +48h.
             sent = int(step.get("nudges") or 0)
             when = next_nudge_at(sent)
+            if not when:
+                # Spent. Do NOT count this call: `nudges` is what the agent
+                # tells the user ("I have asked three times"), so it must be
+                # the number actually sent, not the number of attempts.
+                step["next_check_at"] = ""
+                self._save(t)
+                return None
             step["nudges"] = sent + 1
             step["last_nudge_at"] = _now()
-            step["next_check_at"] = when or ""
+            step["next_check_at"] = when
             self._save(t)
-            if not when:
-                return None
             self._schedule_check_in(t, step, requested_by)
             return step
         return None

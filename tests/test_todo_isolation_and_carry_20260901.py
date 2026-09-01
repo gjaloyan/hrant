@@ -107,6 +107,9 @@ def test_it_gives_up_instead_of_nagging_forever(store, monkeypatch):
     store.park_stalled(t["id"], sid)
     step = store.get(t["id"])["steps"][0]
     assert step["status"] == "stalled"
+    # The count is what the agent reports to the user, so it must be the
+    # number of reminders SENT, not the number of attempts made.
+    assert step["nudges"] == len(fu.BACKOFF_HOURS), step["nudges"]
     assert step["next_check_at"] == ""
 
 
