@@ -49,10 +49,14 @@ function fmtShort(when: string): string {
 // and the user should watch that happen rather than be surprised by it.
 function FollowUp({ step }: { step: TrackerStep }) {
   const sent = step.nudges || 0;
+  // A step normally stalls having spent its whole budget, but it can be
+  // parked for other reasons — "gave up after 0 reminders" reads as a bug.
   if (step.status === "stalled")
     return (
       <span className="text-amber-400">
-        gave up after {sent} reminder{sent === 1 ? "" : "s"}
+        {sent > 0
+          ? `no answer after ${sent} reminder${sent === 1 ? "" : "s"}`
+          : "parked, not asked"}
       </span>
     );
   if (!OPEN(step.status)) return <span className="opacity-30">—</span>;
