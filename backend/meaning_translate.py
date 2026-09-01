@@ -28,20 +28,32 @@ _TRANSLATE_SYSTEM = (
     "on. This is not a dictionary exercise.\n\n"
     "Carry the INTENT. What is the person asking for, and what would they "
     "consider a correct response? Say that, the way a fluent bilingual "
-    "colleague would relay it — not the way a dictionary would.\n\n"
+    "colleague would relay it - not the way a dictionary would.\n\n"
     "Rules:\n"
     "- Keep names, numbers, dates, times, file paths, URLs, model names "
-    "and identifiers EXACTLY as spoken. Never localise or 'correct' them.\n"
+    "and identifiers EXACTLY as spoken. Never localise or correct them.\n"
     "- Speech recognition makes mistakes. When a word is clearly a "
     "mis-hearing of a word that fits the sentence, use the sensible one "
-    "and mark it: 'speech recognition (heard: X)'.\n"
+    "and mark it: speech recognition (heard: X).\n"
     "- Preserve the register: a terse instruction stays terse, an "
     "irritated one stays irritated. Tone is information about what the "
     "person needs.\n"
     "- Do not answer, explain, summarise, or add anything. Output only "
     "the English rendering.\n"
-    "- If the text is already English, return it unchanged."
+    "- If the text is already English, return it unchanged.\n\n"
+    "WHEN IT IS NOT SPEECH AT ALL. Recognition sometimes fails so badly "
+    "that the text is not a sentence in any language: misspelt words that "
+    "resolve to nothing, a name mangled past recognition, grammar that "
+    "does not hold together. Do NOT invent a plausible request out of it. "
+    "Reply with exactly:\n"
+    "  GARBLED: <what little, if anything, seems recoverable>\n"
+    "That is a real answer and a useful one. Guessing turns noise into a "
+    "fluent sentence nobody said, which is worse than admitting the audio "
+    "was not understood."
 )
+
+# The marker the translator returns instead of a confabulated sentence.
+_GARBLED = "GARBLED:"
 
 # Scripts that mean "not English". Latin text is passed through untouched
 # rather than round-tripped through a model that could only damage it.
@@ -87,6 +99,12 @@ def render_for_prompt(original: str) -> str:
     agent reasons in. The original follows because the agent replies in
     the owner's language, and because a translation nobody can check is a
     single point of failure over a channel already known to mis-hear.
+
+    When the text does not parse as speech, the turn is told so instead
+    of being handed a tidy sentence. Measured 2026-09-01: the recogniser
+    produced noise, this layer rendered it as a fluent English request,
+    and the agent answered it. Four notes in a row went that way and it
+    never once wondered why the owner had started talking nonsense.
     """
     src = (original or "").strip()
     if not src:
@@ -94,7 +112,30 @@ def render_for_prompt(original: str) -> str:
     english = to_english(src)
     if english == src:
         return src
+    if english.strip().startswith(_GARBLED):
+        salvage = english.split(":", 1)[-1].strip()
+        return _unintelligible_block(src, salvage)
     return (
         f"{english}\n\n"
-        f"[spoken by the user, verbatim — reply in THIS language: {src}]"
+        f"[spoken by the user, verbatim - reply in THIS language: {src}]"
+    )
+
+
+def _unintelligible_block(src: str, salvage: str) -> str:
+    """What the turn sees when the audio did not survive recognition.
+
+    Written as an instruction, not a warning. A warning is something a
+    model reads and then proceeds anyway, which is exactly what happened
+    when the only signal was that the text looked odd.
+    """
+    hint = f" The only part that may be real: {salvage}" if salvage else ""
+    return (
+        "SPEECH RECOGNITION FAILED ON THIS MESSAGE. What came through is "
+        "not a sentence in any language, so there is no request in it to "
+        "act on." + hint + "\n\n"
+        "Do NOT guess what was meant, and do NOT answer as though you "
+        "understood. Tell the user plainly, in his own language, that you "
+        "could not make out the audio, quote back what you heard so he can "
+        "see it, and ask him to repeat or type it.\n\n"
+        f"[what recognition produced, verbatim: {src}]"
     )

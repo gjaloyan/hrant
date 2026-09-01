@@ -290,3 +290,80 @@ def test_the_specialist_is_used_where_its_language_is_expected(monkeypatch):
     covered = [lg for lg in tr.SECOND_OPINION_FOR
                if lg in (tr.expected_languages() or tr.SECOND_OPINION_FOR)]
     assert covered == ["hy"]
+
+
+# ── noticing that the audio did not survive ─────────────────────────
+#
+# Measured 2026-09-01. Four Armenian notes in a row came through as noise:
+# "Ба референт, ищь качка", "դեվ դանինց վարժ ամա դասին հիշաց". This layer
+# rendered the first as "In the reference, look for a duck" and the agent
+# answered "send the reference and I will find the duck" — a fluent
+# exchange about nothing. It never once wondered why its owner had started
+# talking nonsense.
+#
+# The owner's words: "why agent dont think why text is abnormal,
+# something wrong hear."
+
+def test_the_translator_is_told_not_to_invent_a_request():
+    p = mt._TRANSLATE_SYSTEM
+    assert "Do NOT invent a plausible request" in p
+    assert mt._GARBLED in p
+
+
+def test_the_translator_is_told_that_admitting_it_is_useful():
+    """Otherwise a model reaches for the plausible answer, which is
+    precisely how noise became a duck."""
+    p = mt._TRANSLATE_SYSTEM.lower()
+    assert "a real answer and a useful one" in p
+    assert "nobody said" in p
+
+
+def test_a_garbled_verdict_becomes_an_instruction_not_a_sentence(monkeypatch):
+    monkeypatch.setattr(mt, "to_english",
+                        lambda t, **kw: "GARBLED: maybe 'reference'")
+    out = mt.render_for_prompt("Ба референт, ищь качка")
+    assert "SPEECH RECOGNITION FAILED" in out
+    assert "In the reference" not in out
+
+
+def test_the_turn_is_told_not_to_answer_as_if_it_understood(monkeypatch):
+    monkeypatch.setattr(mt, "to_english", lambda t, **kw: "GARBLED:")
+    out = mt.render_for_prompt("դեվ դանինց վարժ")
+    assert "Do NOT guess what was meant" in out
+    assert "do NOT answer as though you" in out
+
+
+def test_it_is_told_to_ask_for_a_repeat(monkeypatch):
+    """The useful next move, named — otherwise the turn stalls instead."""
+    monkeypatch.setattr(mt, "to_english", lambda t, **kw: "GARBLED:")
+    out = mt.render_for_prompt("դեվ դանինց").lower()
+    assert "repeat or type it" in out
+
+
+def test_the_garbled_text_is_quoted_back(monkeypatch):
+    """He can only tell whether the recogniser or his phone is at fault by
+    seeing what it heard."""
+    monkeypatch.setattr(mt, "to_english", lambda t, **kw: "GARBLED:")
+    out = mt.render_for_prompt("Ба референт, ищь качка")
+    assert "Ба референт, ищь качка" in out
+
+
+def test_a_salvaged_fragment_is_passed_on(monkeypatch):
+    monkeypatch.setattr(mt, "to_english",
+                        lambda t, **kw: "GARBLED: something about a lesson")
+    out = mt.render_for_prompt("դեվ դանինց վարժ ամա դասին")
+    assert "something about a lesson" in out
+
+
+def test_no_salvage_leaves_no_dangling_phrase(monkeypatch):
+    monkeypatch.setattr(mt, "to_english", lambda t, **kw: "GARBLED:")
+    out = mt.render_for_prompt("դեվ")
+    assert "The only part that may be real" not in out
+
+
+def test_a_normal_message_is_unaffected(monkeypatch):
+    """The garbled path must not fire on ordinary speech."""
+    monkeypatch.setattr(mt, "to_english", lambda t, **kw: "Please add Armenian")
+    out = mt.render_for_prompt("Нужно добавить армянский")
+    assert "SPEECH RECOGNITION FAILED" not in out
+    assert out.startswith("Please add Armenian")
