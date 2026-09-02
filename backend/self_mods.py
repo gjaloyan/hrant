@@ -340,6 +340,30 @@ def revert_one(patch_id: str) -> tuple[bool, str]:
 
     ok, err = _git_apply(patch_text, reverse=True)
     if not ok:
+        # The reverse failed. Either the change is already gone — someone
+        # edited the file, or the same content arrived from upstream in a
+        # different shape — or the patch genuinely conflicts with work
+        # built on top of it. Only the first is safe to treat as done.
+        #
+        # Without this branch a superseded patch cannot be removed at all:
+        # revert refuses because there is nothing to reverse, and the
+        # patch stays active and RE-APPLIES on the next start. Measured
+        # 2026-09-02: three lesson patches kept reinstating rules that had
+        # been consolidated into git under different wording, so every
+        # restart put the duplicates back.
+        if _git_apply_check(patch_text)[0]:
+            m.entries.pop(target_idx)
+            save_manifest(m)
+            try:
+                patch_path.unlink()
+            except OSError:
+                pass
+            log.info("self-mod retired (change already absent): %s",
+                     target.patch_filename)
+            return True, (
+                f"patch {patch_id} was no longer applied — the change is "
+                "not in the tree, so it was retired rather than reversed"
+            )
         return False, f"git apply -R failed: {err}"
 
     # Remove from manifest + delete patch file.
