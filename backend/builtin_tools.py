@@ -434,6 +434,17 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
             })
     except Exception as e:
         out.append({"source": "facts_error", "error": str(e)})
+
+    # Facts reached by their LINKS, which similarity cannot do: the useful
+    # facts about a person rarely resemble the question asking for them.
+    # Consolidation has been building those links nightly and nothing
+    # traversed them during a turn.
+    try:
+        from .fact_graph import facts_about
+        for f in facts_about(query, limit=6):
+            out.append(f)
+    except Exception as e:
+        out.append({"source": "fact_graph_error", "error": str(e)})
     return json.dumps(
         {"ok": True, "query": query, "results": out}, ensure_ascii=False,
     )
