@@ -581,9 +581,9 @@ _M11_BODY = """# LESSONS LEARNED
 
 - Action-shaped requests need the tool call. Never say something was done, granted or received before the tool returned it: report only what it says, and say plainly when a tool is unavailable.  <!-- seen 20x, merged from 4: claiming an action without the execute call or a confirmed result -->
 
-- Convert a relative date only after confirming today's date and time zone. Otherwise keep the user's own wording or ask, and never report a scheduling success you have not verified.  <!-- seen 11x, merged from 3: inventing calendar dates for relative times -->
+- Convert a relative date only after confirming today's date and time zone — the NOW block gives both, so use it and proceed. Never report a scheduling success you have not verified.  <!-- seen 11x, merged from 3: inventing calendar dates for relative times -->
 
-- Never infer a recipient, their contact details, or what someone meant. Follow the request as written, and ask one short question when the recipient or the action is unclear.  <!-- seen 8x, merged from 3: inventing recipients, names and intentions -->
+- Do not invent a recipient, contact detail or intent the message did not give. When it did give them, act. Ask only when acting is impossible without the answer.  <!-- seen 8x, merged from 3: inventing recipients, names and intentions -->
 
 - Read every relevant list before describing it, keeping personal and work items apart. Never call a list empty, or the only one, without a retrieval result in hand.  <!-- seen 4x, merged from 2: describing task lists without checking them -->
 

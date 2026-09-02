@@ -445,3 +445,39 @@ def test_the_approved_rules_stay_within_their_own_cap():
     for rule in lp.existing_lessons(body):
         text = rule.split("  <!--")[0]
         assert len(text) <= lp.MAX_LESSON_CHARS, text[:60]
+
+
+def test_the_rules_restrain_asking_rather_than_encourage_it():
+    """A merge lost the qualifier and changed behaviour on live turns.
+
+    The original said "clarify the recipient and the action ONLY WHEN
+    NECESSARY". The consolidation rewrote it as "ask one short question
+    when the recipient or the action is unclear", which reads as an
+    instruction to ask — and on 2026-09-01 21:38 the agent answered
+    "Завтра в 10:30 напомни МНЕ купить обманку" by asking who the reminder
+    was for, when the message had said.
+
+    Checking that words survived a merge is not the same as checking that
+    the instruction survived; this pins the direction.
+    """
+    from backend.prompt_modules import MODULES
+
+    body = MODULES["m11_lessons"].body.lower()
+    # The restraint must be present in some form.
+    assert "ask only when" in body or "only when necessary" in body, (
+        "the rules no longer restrain asking"
+    )
+    # And the bare instruction to ask must not be.
+    assert "ask one short question when" not in body, (
+        "this phrasing reads as an instruction to ask, not a restraint"
+    )
+
+
+def test_the_date_rule_points_at_the_clock_it_has():
+    """Every turn carries a NOW block with the date and zone, so a rule
+    that says "only after confirming" must say where the confirmation is —
+    otherwise it reads as a reason to ask the user what day it is."""
+    from backend.prompt_modules import MODULES
+
+    body = MODULES["m11_lessons"].body
+    assert "NOW block" in body, "the rule does not say where the date comes from"
