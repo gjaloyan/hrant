@@ -136,6 +136,22 @@ def build_scheduler() -> SchedulerBundle:
     )
 
 
+# Test fixtures, unreachable on purpose. See `unreachable_levers`.
+_TOY_LEVERS = frozenset({"noop_green_tick", "noop_yellow_demand"})
+
+
+def orphans_worth_warning_about() -> list[str]:
+    """Unreachable levers minus the ones that are meant to be.
+
+    `unreachable_levers` reports the truth about reachability, toys
+    included, and an earlier test pins that deliberately. This is what the
+    startup warning uses: including the two scaffolding levers made it fire
+    on every single start, and a warning that always fires is one nobody
+    reads — which would hide the real orphan it exists to catch.
+    """
+    return [m for m in unreachable_levers() if m not in _TOY_LEVERS]
+
+
 def unreachable_levers() -> list[str]:
     """Lever modules nothing can ever select.
 
@@ -157,6 +173,11 @@ def unreachable_levers() -> list[str]:
     Logged at startup so this cannot silently rot again — a capability that
     quietly cannot run is the same class of lie as a budget cap that cannot
     cap.
+
+    Toy levers are INCLUDED here on purpose — this function reports what is
+    reachable, and scaffolding that reads as a capability is exactly what
+    it should surface. The startup WARNING filters them out instead: see
+    `_TOY_LEVERS` at the call site.
     """
     import os
     import re
@@ -181,7 +202,7 @@ async def start_autonomic_scheduler(bundle: SchedulerBundle) -> None:
     try:
         await bundle.scheduler.start()
         log.info("Autonomic scheduler started")
-        _orphans = unreachable_levers()
+        _orphans = orphans_worth_warning_about()
         if _orphans:
             log.warning(
                 "%d lever module(s) have NO dispatch path and can never fire: "

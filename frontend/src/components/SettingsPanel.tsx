@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import SettingsNav, { SETTINGS_NAV } from "./SettingsNav";
+import { Speaker } from "../ui/speakers";
 import CoreMemoryTab from "./settings/CoreMemoryTab";
 import ModelRoutingTab from "./settings/ModelRoutingTab";
 // Audit #26: lazy-load Settings tabs so the initial bundle doesn't
@@ -1528,7 +1529,7 @@ export default function SettingsPanel() {
                             flash("Error: " + e.message);
                           }
                         }}
-                        className="bg-rose-800 hover:bg-rose-700 rounded px-3 py-1 text-xs ml-auto"
+                        className="ml-auto rounded-lg border border-edge-strong px-3 py-1 text-xs text-ink-dim hover:bg-danger hover:text-white"
                       >
                         Delete
                       </button>
@@ -1933,9 +1934,27 @@ export default function SettingsPanel() {
                           Token: {ch.config?.bot_token ? "••••" + ch.config.bot_token.slice(-8) : "(not set)"}
                         </div>
                         {ch.config?.allowed_users?.length > 0 && (
-                          <div>Allowed: {ch.config.allowed_users.join(", ")}</div>
+                          <div className="flex flex-wrap items-center gap-x-1.5">
+                            <span>Allowed:</span>
+                            {ch.config.allowed_users.map((u: string, i: number) => (
+                              <span key={u}>
+                                {i > 0 && <span className="text-ink-faint">, </span>}
+                                {/* The roles table has names for these
+                                    accounts; a bare 848732236 makes the
+                                    reader look them up by hand. */}
+                                <Speaker id={`telegram:${u}`} />
+                              </span>
+                            ))}
+                          </div>
                         )}
-                        {ch.last_started && <div>Last started: {ch.last_started}</div>}
+                        {ch.last_started && (
+                          <div title={ch.last_started}>
+                            Last started{" "}
+                            {new Date(
+                              ch.last_started.replace(" ", "T"),
+                            ).toLocaleString()}
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -2000,7 +2019,7 @@ export default function SettingsPanel() {
                       </button>
                       <button
                         onClick={async () => {
-                          if (!confirm(`Delete channel "${ch.name}"?`)) return;
+                          if (!confirm(`Delete the channel "${ch.name}"?\n\nThe bot stops answering on it immediately, and the token has to be entered again to bring it back.`)) return;
                           try {
                             await deleteChannel(ch.id);
                             loadChannels();
