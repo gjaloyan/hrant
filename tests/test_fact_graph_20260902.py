@@ -76,14 +76,32 @@ def test_non_fact_neighbours_are_left_out(monkeypatch):
 def test_it_anchors_on_entities_not_on_facts(monkeypatch):
     """A fact node matching the text is what the vector store already
     returns; anchoring on it would duplicate that and traverse nothing."""
+    # Give it a real neighbourhood, so the KIND filter is what decides —
+    # with an empty one the test passed whether the filter existed or not.
     only_facts = [{"id": "fact:y", "kind": "fact", "label": "Nissan", "degree": 5}]
-    _wire(monkeypatch, only_facts, {})
+    hoods = {
+        "fact:y": {
+            "node": only_facts[0],
+            "neighbors": [
+                {"node": {"kind": "fact", "label": "The Nissan needs a decoy"}},
+            ],
+        }
+    }
+    _wire(monkeypatch, only_facts, hoods)
     assert fg.facts_about("Nissan") == []
 
 
 def test_an_isolated_entity_yields_nothing(monkeypatch):
+    # Same trap: the neighbourhood exists, so the DEGREE check is what
+    # rejects it rather than the absence of data.
     lonely = [{"id": "entity:z", "kind": "entity", "label": "Zed", "degree": 0}]
-    _wire(monkeypatch, lonely, {})
+    hoods = {
+        "entity:z": {
+            "node": lonely[0],
+            "neighbors": [{"node": {"kind": "fact", "label": "Zed is a mystery"}}],
+        }
+    }
+    _wire(monkeypatch, lonely, hoods)
     assert fg.facts_about("Zed") == []
 
 
@@ -117,3 +135,48 @@ def test_duplicates_across_anchors_are_dropped(monkeypatch):
     _wire(monkeypatch, two, hoods)
     got = fg.facts_about("Nissan")
     assert len(got) == 1
+
+
+def test_hedged_restatements_are_not_filtered(monkeypatch):
+    """Documents a known limit rather than pretending it is solved.
+
+    Consolidation writes "User's name is Gor", "User is likely named Gor"
+    and "User may be named Gor" as three rows. A similarity filter for
+    them was written and removed: at the threshold that catches them the
+    score sits on the line, and SequenceMatcher answers differently
+    depending on argument order. Lowering it would merge "lives in
+    Yerevan" with "lives in Moscow".
+
+    So they all come back, and the fix belongs where they are written.
+    """
+    nodes = [{"id": "entity:gor", "kind": "entity", "label": "Gor", "degree": 9}]
+    hoods = {
+        "entity:gor": {
+            "node": nodes[0],
+            "neighbors": [
+                {"node": {"kind": "fact", "label": "User's name is Gor"}},
+                {"node": {"kind": "fact", "label": "User is likely named Gor"}},
+                {"node": {"kind": "fact", "label": "Gor lives in Yerevan"}},
+            ],
+        }
+    }
+    _wire(monkeypatch, nodes, hoods)
+    got = [g["summary"] for g in fg.facts_about("Gor")]
+    assert "Gor lives in Yerevan" in got
+    assert len(got) == 3
+
+
+def test_an_exact_repeat_counts_once(monkeypatch):
+    """The dedup that IS sound: the same string reached twice."""
+    nodes = [{"id": "entity:gor", "kind": "entity", "label": "Gor", "degree": 4}]
+    hoods = {
+        "entity:gor": {
+            "node": nodes[0],
+            "neighbors": [
+                {"node": {"kind": "fact", "label": "Gor lives in Yerevan"}},
+                {"node": {"kind": "fact", "label": "Gor lives in Yerevan"}},
+            ],
+        }
+    }
+    _wire(monkeypatch, nodes, hoods)
+    assert len(fg.facts_about("Gor")) == 1

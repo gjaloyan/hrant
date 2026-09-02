@@ -29,6 +29,24 @@ log = logging.getLogger(__name__)
 MAX_ANCHORS = 2
 MAX_FACTS_PER_ANCHOR = 4
 
+# NOT deduplicated beyond exact matches, deliberately.
+#
+# Consolidation stores hedged restatements — "User's name is Gor", "User
+# is likely named Gor", "User may be named Gor", "User's name appears to
+# be Gor", "User is addressed as Gor" are five rows for one fact, and on
+# prod they filled this whole budget on their own. A similarity filter was
+# written for it and removed: at the threshold that catches those, the
+# score sits so close to the line that SequenceMatcher returns a different
+# answer depending on which string is passed first. A filter that fires or
+# not on argument order is not deduplication.
+#
+# Lowering the threshold is worse, not better: "Gor lives in Yerevan" and
+# "Gor lives in Moscow" are one word apart and mean opposite things.
+#
+# The duplicates are a defect in what consolidation WRITES, and that is
+# where they should be fixed. Storing a hedge beside the assertion it
+# hedges is the actual bug.
+
 
 # Words too common to name anything. Kept tiny and multilingual because
 # the owner writes in three languages; anything longer becomes a keyword
