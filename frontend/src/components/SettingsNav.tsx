@@ -48,7 +48,7 @@ export const SETTINGS_NAV: SettingsGroup[] = [
     items: [
       { id: "memory", label: "Search Index", hint: "How notes are embedded for semantic search", keywords: "embedding embeddings ollama openai cohere vector semantic search backfill index" },
       { id: "digests", label: "Memory Digests", hint: "Nightly consolidation of what it learned", keywords: "consolidation nightly summary sleep replay" },
-      { id: "kgraph", label: "Knowledge Graph", hint: "How notes link to each other", keywords: "graph links entities relations" },
+      { id: "kgraph", label: "Fact Index", hint: "Facts and topics pulled out by consolidation", keywords: "graph kgraph facts topics entities consolidation nodes rebuild" },
     ],
   },
   {

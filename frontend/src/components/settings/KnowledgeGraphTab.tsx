@@ -173,6 +173,21 @@ export default function KnowledgeGraphTab({ flash }: Props) {
             <div>
               <span className="text-slate-500">Edges:</span> {stats.total_edges}
             </div>
+            {/* 6968 nodes and no edges is not a rendering accident: this
+                store shares knowledge/graph.json with the note graph,
+                which writes `edges` in its own adjacency shape, so this
+                reader finds none of its own. Nothing in a turn queries
+                this store either — checked across unified_agent, agent
+                and the tool registry. Saying so beats showing a number
+                that looks broken. */}
+            {stats.total_edges === 0 && stats.total_nodes > 0 && (
+              <div className="col-span-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2 text-xs">
+                These nodes are not linked to each other, and nothing reads
+                this store during a conversation. The graph the agent
+                actually uses is under <b>Graph</b> in the sidebar — it has
+                its own entities and links, built from the same notes.
+              </div>
+            )}
             {stats.top_topics.length > 0 && (
               <div className="col-span-2 mt-1">
                 <span className="text-slate-500">Top topics:</span>{" "}
