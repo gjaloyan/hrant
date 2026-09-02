@@ -216,21 +216,22 @@ export default function SkillsTab({ flash }: Props) {
           <button
             onClick={handleReload}
             disabled={busy}
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 rounded px-3 py-1.5 text-xs"
+            className="rounded-lg border border-edge-strong px-3 py-1.5 text-xs text-ink-dim hover:bg-surface-hover hover:text-ink disabled:opacity-40"
           >
             Reload from disk
           </button>
           <button
             onClick={() => setShowNew(true)}
             disabled={busy}
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-40 rounded px-3 py-1.5 text-xs"
+            className="rounded-lg bg-accent px-3 py-1.5 text-xs font-medium text-white hover:bg-accent-hover disabled:opacity-40"
           >
-            + New skill
+            ＋ New skill
           </button>
           <button
             onClick={() => setShowInstall(true)}
             disabled={busy}
-            className="bg-sky-700 hover:bg-sky-600 disabled:opacity-40 rounded px-3 py-1.5 text-xs"
+            title="Fetches a skill from outside this machine — read it before enabling"
+            className="rounded-lg border border-edge-strong px-3 py-1.5 text-xs text-ink-dim hover:bg-surface-hover hover:text-ink disabled:opacity-40"
           >
             Install from URL / path
           </button>
@@ -238,8 +239,10 @@ export default function SkillsTab({ flash }: Props) {
       </div>
 
       <div className="text-[11px] text-slate-400 mb-3">
-        Skills are markdown plugins the agent loads at startup and matches
-        against your messages by trigger keywords. Two tiers:
+        Skills are markdown procedures the agent can load for a task. Their
+        trigger words only put a skill in front of the agent — they do not
+        route anything, and the agent still decides and calls{" "}
+        <code className="font-mono">load_skill</code> itself. Two tiers:
         <span className="text-slate-300"> builtin</span> (ship with the
         engine, refresh on <code>hrant update</code>) and
         <span className="text-emerald-300"> user</span> (live in{" "}
@@ -343,7 +346,7 @@ export default function SkillsTab({ flash }: Props) {
 
       <div className="flex gap-3 flex-1 min-h-0">
         {/* Skill list */}
-        <div className="w-64 shrink-0 bg-slate-800/60 rounded overflow-y-auto">
+        <div className="w-[min(24rem,40%)] min-w-0 shrink-0 overflow-y-auto rounded-xl2 border border-edge bg-surface">
           {skills.length === 0 ? (
             <div className="p-3 text-xs text-slate-500">No skills loaded</div>
           ) : (
