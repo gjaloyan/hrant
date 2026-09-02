@@ -63,6 +63,9 @@ def _autonomic_default_paths() -> dict[str, Path]:
         "lever_log": kdir / "autonomic" / "lever_log.jsonl",
         "pending": kdir / "autonomic" / "pending_approvals.jsonl",
         "tick_log": kdir / "autonomic" / "tick_log.jsonl",
+        # When each rule last fired. On disk because it used to be in
+        # memory, so every restart re-armed all thirty rules.
+        "layer0_state": kdir / "autonomic" / "layer0_cooldowns.json",
     }
 
 
@@ -94,6 +97,8 @@ def build_scheduler() -> SchedulerBundle:
     lever_log = _env_path("AUTONOMIC_LEVER_LOG_PATH", str(_defaults["lever_log"]))
     pending = _env_path("AUTONOMIC_PENDING_PATH", str(_defaults["pending"]))
     tick_log = _env_path("AUTONOMIC_TICK_LOG_PATH", str(_defaults["tick_log"]))
+    layer0_state = _env_path("AUTONOMIC_LAYER0_STATE_PATH",
+                             str(_defaults["layer0_state"]))
 
     clear_registry()
     register_default_immune_levers()
@@ -109,7 +114,7 @@ def build_scheduler() -> SchedulerBundle:
         pending_approvals_path=pending,
         lever_log_path=lever_log,
     )
-    engine = Layer0Engine(rules=default_rules())
+    engine = Layer0Engine(rules=default_rules(), state_path=layer0_state)
     tick = make_real_tick(
         builder=builder,
         engine=engine,

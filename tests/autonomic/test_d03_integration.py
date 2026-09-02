@@ -168,7 +168,7 @@ def test_reactive_rule_wins_over_scheduled(tmp_path: Path):
     """When an error is present, errors_present rule (reactive) fires before
     scheduled rules, even on a tick where scheduled rules are ready."""
     (tmp_path / "error_log.jsonl").write_text(
-        json.dumps({"message": "boom", "confidence": 10}) + "\n",
+        json.dumps({"ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message": "boom", "confidence": 10}) + "\n",
         encoding="utf-8",
     )
     (tmp_path / "index.json").write_text("{}", encoding="utf-8")

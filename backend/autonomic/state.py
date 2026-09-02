@@ -15,6 +15,36 @@ from .types import LeverReport, StateSnapshot
 _APP_STARTED_MONOTONIC = time.monotonic()
 
 
+# How far back "recent" reaches. Long enough that a burst between two ticks
+# is still seen together, short enough that the `errors_present` reflex can
+# switch off again once things are quiet.
+RECENT_ERROR_WINDOW_SECONDS = 3600.0
+
+# The writers stamp local time as "YYYY-MM-DD HH:MM:SS"; older rows also
+# appear with an ISO "T" separator.
+_ERROR_TS_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S")
+
+
+def _entry_epoch(entry: dict[str, Any]) -> float | None:
+    """When an error-log row was written, or None if it cannot be dated."""
+    raw = entry.get("ts") or entry.get("timestamp")
+    if not isinstance(raw, (str, int, float)):
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = raw.strip()
+    for fmt in _ERROR_TS_FORMATS:
+        try:
+            return datetime.strptime(text[:19], fmt).timestamp()
+        except ValueError:
+            continue
+    try:
+        # Anything else with an offset, e.g. "...+04:00".
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return None
+
+
 class StateSnapshotBuilder:
     def __init__(
         self,
@@ -129,8 +159,22 @@ class StateSnapshotBuilder:
         )
 
     def _recent_errors(self) -> list[dict[str, Any]]:
+        """The faults from the last `RECENT_ERROR_WINDOW_SECONDS`.
+
+        This used to be the last ten lines of the file whatever their age.
+        error_log.jsonl is append-only and also collects low-confidence
+        answers, so one such answer left `errors_present` true forever:
+        measured on prod 2026-09-02 the newest entry was eight hours old
+        and FIRE_ERROR_TRIAGE had re-run every 120 seconds since, taking
+        about a quarter of the tick budget to re-read the same ten rows.
+
+        Both callers -- the `errors_present` rule and the triage lever --
+        are asking "is something wrong right now", so the window is the
+        answer they were already assuming.
+        """
         if not self._error_log_path.exists():
             return []
+        cutoff = time.time() - RECENT_ERROR_WINDOW_SECONDS
         tail: deque[dict[str, Any]] = deque(maxlen=self._recent_errors_limit)
         with self._error_log_path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -138,9 +182,15 @@ class StateSnapshotBuilder:
                 if not line:
                     continue
                 try:
-                    tail.append(json.loads(line))
+                    entry = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+                when = _entry_epoch(entry)
+                # An entry nothing can date cannot be shown to be recent.
+                # Trusting it is exactly what armed the rule permanently.
+                if when is None or when < cutoff:
+                    continue
+                tail.append(entry)
         return list(tail)
 
     def _last_run_by_lever(self) -> dict[str, datetime]:

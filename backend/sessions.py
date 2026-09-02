@@ -123,6 +123,8 @@ class Session:
         title: str | None = None,
         archived: bool = False,
         session_key: str | None = None,
+        consolidated: bool = False,
+        consolidation_summary: str = "",
     ):
         self.id = id or uuid.uuid4().hex[:12]
         self.speaker_id = normalize_speaker(speaker_id)
@@ -137,6 +139,18 @@ class Session:
         # sessions on disk have no session_key — fall back to
         # speaker_id (one-thread-per-user, the pre-refactor behaviour).
         self.session_key = (session_key or self.speaker_id).strip() or self.speaker_id
+        # Set by FIRE_MEMORY_CONSOLIDATION once this session's facts have
+        # been extracted. It has to round-trip through to_dict/from_dict or
+        # the lever re-processes the same sessions forever: measured on prod
+        # 2026-09-02, 85 of 88 rows had lost the mark, the lever had run 26
+        # times in a week, and every run took the same five sessions from
+        # 15 May and appended their facts again.
+        self.consolidated = bool(consolidated)
+        # Stored under the "summary" key, which is what the lever writes and
+        # what the surviving rows carry. It cannot be an attribute of that
+        # name -- `summary()` is already the method that renders a session
+        # for the list views.
+        self.consolidation_summary = consolidation_summary or ""
 
     @property
     def turn_count(self) -> int:
@@ -190,6 +204,8 @@ class Session:
             "intents": self.intents,
             "topics_used": self.topics_used,
             "duration_seconds": self.duration_seconds,
+            "consolidated": self.consolidated,
+            "summary": self.consolidation_summary,
         }
 
     def summary(self) -> dict:
@@ -221,6 +237,8 @@ class Session:
             title=data.get("title", ""),
             archived=data.get("archived", False),
             session_key=data.get("session_key") or None,
+            consolidated=bool(data.get("consolidated", False)),
+            consolidation_summary=str(data.get("summary") or ""),
         )
 
 

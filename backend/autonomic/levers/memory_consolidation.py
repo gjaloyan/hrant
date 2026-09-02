@@ -97,6 +97,9 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
         profile_added = 0
         facts_added = 0
         all_threads: list[str] = []
+        # session id -> summary, applied to the file once the LLM calls are
+        # done rather than to the copy loaded before them.
+        marks: dict[str, str] = {}
 
         for session in targets:
             transcript = self._session_transcript(session)
@@ -125,10 +128,9 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
             facts_added += added_facts
             all_threads.extend(str(t) for t in threads if t)
 
-            session["consolidated"] = True
-            session["summary"] = summary
+            marks[str(session.get("id") or "")] = summary
 
-        self._save_sessions(sessions_path, sessions_blob)
+        self._mark_consolidated(sessions_path, marks)
 
         return LeverReport(
             lever=self.name,
@@ -156,6 +158,32 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
             outcome={},
             reason=reason,
         )
+
+    def _mark_consolidated(self, path: Path, marks: dict[str, str]) -> int:
+        """Record this run's marks on top of whatever the file says now.
+
+        The session store appends turns to this same file while the lever
+        is making its LLM calls, which take minutes. Writing back the blob
+        loaded before them means whichever writer finishes last silently
+        discards the other's work -- and the store writes far more often,
+        which is how 26 runs in a week left 85 sessions still unmarked.
+
+        Re-reading here shrinks the window from minutes to milliseconds.
+        It does not close it: two writers and one file would need a lock
+        for that, and the marks are cheap to redo where a lost turn is not.
+        """
+        if not marks:
+            return 0
+        blob = self._load_sessions(path)
+        marked = 0
+        for session in blob.get("sessions", []):
+            sid = str(session.get("id") or "")
+            if sid and sid in marks:
+                session["consolidated"] = True
+                session["summary"] = marks[sid]
+                marked += 1
+        self._save_sessions(path, blob)
+        return marked
 
     def _load_sessions(self, path: Path) -> dict[str, Any]:
         if not path.exists():

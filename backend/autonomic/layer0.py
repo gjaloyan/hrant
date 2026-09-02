@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import logging
 import time
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable
 
 from .types import StateSnapshot, TickDecision, TickDecisionSource
@@ -18,16 +20,85 @@ class LayerZeroRule:
     lever: str
     params: dict = field(default_factory=dict)
     cooldown_seconds: float = 30.0
+    # A reflex answers a condition -- the disk is full, a unit has died,
+    # a reminder is due. It runs the moment it is eligible, ahead of any
+    # amount of overdue housekeeping. Everything else is periodic: it
+    # says "every N seconds" and takes its turn by how late it is.
+    reflex: bool = False
 
 
 class Layer0Engine:
-    def __init__(self, rules: list[LayerZeroRule]) -> None:
+    """Picks one lever per tick.
+
+    Selection was "first matching rule in list order", and the list index
+    is an accident of when each rule was written. That index has twice
+    had to be corrected by hand when a rule at the wrong end of it went
+    hungry -- reminders in June 2026 after a due message waited five
+    minutes, channel_watch in August after it measured zero fires in
+    eighty selections -- and each promotion pushes something else down.
+
+    Measured on prod over 7.3 days (2026-09-02): the tail is served, so
+    this is not fixing an outage. It removes the reason those manual
+    promotions keep being needed: reflexes keep strict priority, and
+    periodic rules are ordered by how overdue they are relative to their
+    OWN cooldown. A daily rule thirty hours late outranks an hourly one
+    seventy minutes late. Ties go to the earlier rule, so list order
+    still decides between equals and the rule set stays readable.
+
+    The defect that same measurement DID find is in the cooldowns
+    themselves -- see `_load`.
+    """
+
+    def __init__(self, rules: list[LayerZeroRule],
+                 state_path: "Path | None" = None) -> None:
         self._rules = list(rules)
-        self._last_fired: dict[str, float] = {}
+        self._state_path = Path(state_path) if state_path else None
+        self._last_fired: dict[str, float] = self._load()
+
+    def _load(self) -> dict[str, float]:
+        """When each rule last fired, from the last process as well as this one.
+
+        This lived in memory and was keyed off `time.monotonic()`, which is
+        process-relative, so every restart re-armed all thirty rules at
+        once. The longer a rule's interval, the worse that is, and the
+        prod lever log shows exactly that shape over 7.3 days: every lever
+        with a cooldown of a day or more ran 1.5x to 16x more often than
+        its cooldown allows, while the minute-and-hour ones sat at 0.5-1.0x
+        because their cooldowns expire between restarts anyway. Weekly
+        FIRE_NOTE_CURATION ran 17 times; weekly FIRE_CHARACTER_REFLECTION
+        13. Those are the LLM-expensive ones.
+        """
+        if not self._state_path or not self._state_path.exists():
+            return {}
+        try:
+            raw = json.loads(self._state_path.read_text(encoding="utf-8"))
+            return {str(k): float(v) for k, v in raw.items()}
+        except Exception as exc:
+            log.warning("Layer0 cooldown state unreadable (%s); starting clean",
+                        exc)
+            return {}
+
+    def _save(self) -> None:
+        if not self._state_path:
+            return
+        try:
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._last_fired), encoding="utf-8")
+            tmp.replace(self._state_path)
+        except Exception as exc:
+            log.warning("Layer0 cooldown state not saved: %s", exc)
 
     def evaluate(self, state: StateSnapshot) -> TickDecision:
-        now = time.monotonic()
+        # Wall clock, not `time.monotonic()`: see `_load` for why this has
+        # to survive a restart.
+        now = time.time()
         last_cooldown_hit: TickDecision | None = None
+        # The most overdue eligible periodic rule, and how overdue it is.
+        # A rule with no recorded run counts as infinitely overdue, so a
+        # newly added one gets its first turn before anything else waits.
+        best: LayerZeroRule | None = None
+        best_overdue = 0.0
         for rule in self._rules:
             try:
                 matched = bool(rule.predicate(state))
@@ -37,6 +108,14 @@ class Layer0Engine:
             if not matched:
                 continue
             last = self._last_fired.get(rule.name)
+            if last is not None and last > now:
+                # A timestamp from the future -- the clock was corrected
+                # backwards. Left alone it reads as a negative age, which is
+                # inside every cooldown forever, so the rule would never run
+                # again. Rewrite it: the rule waits one more cooldown.
+                last = now
+                self._last_fired[rule.name] = now
+                self._save()
             if last is not None and (now - last) < rule.cooldown_seconds:
                 if last_cooldown_hit is None:
                     last_cooldown_hit = TickDecision(
@@ -47,14 +126,20 @@ class Layer0Engine:
                         rule_name=rule.name,
                     )
                 continue
-            self._last_fired[rule.name] = now
-            return TickDecision(
-                source=TickDecisionSource.L0_REFLEX,
-                lever=rule.lever,
-                params=dict(rule.params),
-                reason=f"rule_matched:{rule.name}",
-                rule_name=rule.name,
-            )
+            if rule.reflex:
+                # A fault or a due delivery. Nothing waits behind it, and
+                # because reflexes are scanned in list order they keep the
+                # priority their position gives them.
+                return self._fire(rule, now)
+            # How late this rule is measured against its OWN cooldown, so a
+            # daily rule and a minute rule can be compared at all. `>` and
+            # not `>=` leaves ties with the earlier rule.
+            overdue = (float("inf") if last is None
+                       else (now - last) / max(rule.cooldown_seconds, 1e-9))
+            if best is None or overdue > best_overdue:
+                best, best_overdue = rule, overdue
+        if best is not None:
+            return self._fire(best, now)
         if last_cooldown_hit is not None:
             return last_cooldown_hit
         return TickDecision(
@@ -62,6 +147,17 @@ class Layer0Engine:
             lever=None,
             params={},
             reason="idle_no_rules_matched",
+        )
+
+    def _fire(self, rule: LayerZeroRule, now: float) -> TickDecision:
+        self._last_fired[rule.name] = now
+        self._save()
+        return TickDecision(
+            source=TickDecisionSource.L0_REFLEX,
+            lever=rule.lever,
+            params=dict(rule.params),
+            reason=f"rule_matched:{rule.name}",
+            rule_name=rule.name,
         )
 
 
@@ -79,6 +175,31 @@ def _has_watched_channels() -> bool:
         return False
 
 
+def _has_repairable_service(state: StateSnapshot) -> bool:
+    """Is any failed unit one the repair lever is actually allowed to restart?
+
+    The note on the rule below says it may sit among the reflexes because
+    prod had zero failed units, making it false in steady state. Prod
+    2026-09-02 broke that: `systemd-networkd-wait-online` fails at boot and
+    stays failed until reboot. It is not on FIRE_SERVICE_REPAIR's whitelist,
+    so every ten minutes the lever was spent answering "not mine" -- while
+    the rules at the end of the list waited for a turn that never came.
+
+    Reads the lever's own whitelist rather than keeping a second copy, so
+    the rule cannot drift out of step with what repair can do. If that
+    import ever fails, fall back to the old behaviour: better to fire a
+    lever that declines than to miss a unit that has genuinely died.
+    """
+    failed = list(getattr(state, "failed_services", None) or [])
+    if not failed:
+        return False
+    try:
+        from .levers.service_repair import SERVICE_WHITELIST, _unit_base
+    except Exception:
+        return True
+    return any(_unit_base(unit) in SERVICE_WHITELIST for unit in failed)
+
+
 def default_rules() -> list[LayerZeroRule]:
     return [
         LayerZeroRule(
@@ -87,6 +208,7 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_SERVER_HEALTH",
             params={"reason": "disk_low"},
             cooldown_seconds=300.0,
+            reflex=True,
         ),
         LayerZeroRule(
             name="memory_low",
@@ -94,6 +216,7 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_SERVER_HEALTH",
             params={"reason": "memory_low"},
             cooldown_seconds=300.0,
+            reflex=True,
         ),
         LayerZeroRule(
             name="cpu_high",
@@ -101,6 +224,7 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_SERVER_HEALTH",
             params={"reason": "cpu_high"},
             cooldown_seconds=300.0,
+            reflex=True,
         ),
         LayerZeroRule(
             # 2026-08-09/10. FIRE_SERVICE_REPAIR was registered with no rule
@@ -121,10 +245,11 @@ def default_rules() -> list[LayerZeroRule]:
             # starve the 20 working levers below it, which is exactly the
             # 2026-06-12 starvation bug documented further down.
             name="service_failed",
-            predicate=lambda s: bool(getattr(s, "failed_services", None)),
+            predicate=lambda s: _has_repairable_service(s),
             lever="FIRE_SERVICE_REPAIR",
             params={},
             cooldown_seconds=600.0,
+            reflex=True,
         ),
         LayerZeroRule(
             name="errors_present",
@@ -132,6 +257,7 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_ERROR_TRIAGE",
             params={},
             cooldown_seconds=120.0,
+            reflex=True,
         ),
         LayerZeroRule(
             # Starvation fix (2026-06-12): this rule lived LAST in
@@ -150,6 +276,7 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_SCHEDULED_MESSAGES",
             params={},
             cooldown_seconds=60.0,
+            reflex=True,
         ),
         LayerZeroRule(
             # Immediately after delivery, and that placement is measured, not
@@ -220,6 +347,7 @@ def default_rules() -> list[LayerZeroRule]:
             lever="FIRE_GRAPH_REBUILD",
             params={},
             cooldown_seconds=3600.0,
+            reflex=True,
         ),
         LayerZeroRule(
             name="integrity_tick",

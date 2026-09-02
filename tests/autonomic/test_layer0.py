@@ -91,7 +91,7 @@ def test_cooldown_blocks_re_fire():
 def test_cooldown_expires_allows_re_fire(monkeypatch):
     import backend.autonomic.layer0 as layer0
     clock = [1000.0]
-    monkeypatch.setattr(layer0.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(layer0.time, "time", lambda: clock[0])
     rule = LayerZeroRule(
         name="noisy",
         predicate=lambda s: True,
@@ -274,3 +274,179 @@ def test_default_rules_d05_cooldowns():
     assert rules["proactive_learn_tick"].cooldown_seconds == 3600.0
     assert rules["note_curation_tick"].lever == "FIRE_NOTE_CURATION"
     assert rules["note_curation_tick"].cooldown_seconds == 604800.0
+
+
+def test_tail_rule_is_reachable_when_head_rules_keep_recurring(monkeypatch):
+    """A rule at the end of the list must get a turn.
+
+    Free ticks were handed out strictly by list index, so a rule whose
+    cooldown expires every minute could reclaim the slot before a rule
+    that had been waiting a day was ever reached. The list index is an
+    accident of when each rule was written; it was acting as a priority,
+    and twice had to be corrected by hand when that starved something.
+
+    Three rules and a 24-hour simulation are enough to show it: two
+    frequent rules alternate forever and the third never runs.
+    """
+    import backend.autonomic.layer0 as layer0
+    clock = [1000.0]
+    monkeypatch.setattr(layer0.time, "time", lambda: clock[0])
+
+    frequent = [
+        LayerZeroRule(name=n, predicate=lambda s: True, lever="FIRE_" + n.upper(),
+                      params={}, cooldown_seconds=60.0)
+        for n in ("a", "b")
+    ]
+    daily = LayerZeroRule(name="daily", predicate=lambda s: True,
+                          lever="FIRE_DAILY", params={}, cooldown_seconds=86400.0)
+    engine = Layer0Engine(rules=frequent + [daily])
+
+    fired = []
+    for _ in range(2880):  # 24 hours of 30-second ticks
+        d = engine.evaluate(_snapshot())
+        if d.lever:
+            fired.append(d.lever)
+        clock[0] += 30.0
+
+    assert "FIRE_DAILY" in fired
+
+
+def test_most_overdue_rule_wins_over_a_lower_index_one(monkeypatch):
+    """Between two eligible periodic rules, the one that has waited
+    longest relative to its own cooldown goes first -- not the one that
+    happens to sit higher in the list."""
+    import backend.autonomic.layer0 as layer0
+    clock = [1000.0]
+    monkeypatch.setattr(layer0.time, "time", lambda: clock[0])
+
+    first = LayerZeroRule(name="first", predicate=lambda s: True, lever="FIRE_FIRST",
+                          params={}, cooldown_seconds=60.0)
+    second = LayerZeroRule(name="second", predicate=lambda s: True, lever="FIRE_SECOND",
+                           params={}, cooldown_seconds=60.0)
+    engine = Layer0Engine(rules=[first, second])
+
+    assert engine.evaluate(_snapshot()).lever == "FIRE_FIRST"
+    clock[0] += 30.0
+    assert engine.evaluate(_snapshot()).lever == "FIRE_SECOND"
+    # Both are off cooldown now. `first` last ran 90s ago and `second`
+    # 60s ago, so `first` is the more overdue and goes again -- which is
+    # also what list order would have said. Push `second` further behind
+    # and the answer has to change.
+    clock[0] += 60.0
+    assert engine.evaluate(_snapshot()).lever == "FIRE_FIRST"
+    clock[0] += 3600.0
+    # first: 3600s behind on a 60s cooldown. second: 3690s behind.
+    assert engine.evaluate(_snapshot()).lever == "FIRE_SECOND"
+
+
+def test_reflex_preempts_a_badly_overdue_periodic_rule(monkeypatch):
+    """A fault is not housekeeping. A reflex rule -- one whose predicate
+    reads real state rather than saying "every N seconds" -- fires ahead
+    of any periodic rule no matter how long that one has waited."""
+    import backend.autonomic.layer0 as layer0
+    clock = [1000.0]
+    monkeypatch.setattr(layer0.time, "time", lambda: clock[0])
+
+    starved = LayerZeroRule(name="starved", predicate=lambda s: True,
+                            lever="FIRE_STARVED", params={},
+                            cooldown_seconds=86400.0)
+    reflex = LayerZeroRule(name="disk_low", predicate=lambda s: s.disk_free_gb < 2.0,
+                           lever="FIRE_SERVER_HEALTH", params={},
+                           cooldown_seconds=300.0, reflex=True)
+    engine = Layer0Engine(rules=[starved, reflex])
+
+    engine.evaluate(_snapshot())          # starved fires once
+    clock[0] += 86400.0 * 10              # ten days overdue
+    decision = engine.evaluate(_snapshot(disk_free_gb=0.5))
+    assert decision.lever == "FIRE_SERVER_HEALTH"
+
+
+def test_default_rules_reflexes_are_the_fault_and_delivery_rules():
+    """Which rules are reflexes is a decision, so it is pinned here.
+
+    Everything else is periodic maintenance and gets scheduled by how
+    overdue it is. `scheduled_messages_tick` is on this list because of
+    2026-06-12: a due reminder waited five minutes behind housekeeping,
+    and user-facing delivery is not housekeeping.
+    """
+    from backend.autonomic.layer0 import default_rules
+    reflexes = {r.name for r in default_rules() if r.reflex}
+    assert reflexes == {
+        "disk_low", "memory_low", "cpu_high", "service_failed",
+        "errors_present", "scheduled_messages_tick", "graph_collapsed",
+    }
+
+
+def test_last_fired_survives_a_restart(tmp_path):
+    """A daily lever must not run again just because the process did.
+
+    Cooldowns lived in memory and were keyed off `time.monotonic()`,
+    which resets per process. Every deploy therefore re-armed all thirty
+    rules, and the expensive daily ones re-ran -- on a day with several
+    deploys, several times.
+    """
+    state = tmp_path / "layer0_state.json"
+    rule = LayerZeroRule(name="daily", predicate=lambda s: True,
+                         lever="FIRE_DAILY", params={},
+                         cooldown_seconds=86400.0)
+
+    first = Layer0Engine(rules=[rule], state_path=state)
+    assert first.evaluate(_snapshot()).lever == "FIRE_DAILY"
+
+    restarted = Layer0Engine(rules=[rule], state_path=state)
+    decision = restarted.evaluate(_snapshot())
+    assert decision.lever is None
+    assert "cooldown" in decision.reason
+
+
+def test_a_clock_that_jumped_backwards_does_not_freeze_a_rule(monkeypatch, tmp_path):
+    """A persisted timestamp from the future would otherwise read as
+    "fired -3 hours ago", which is inside every cooldown forever."""
+    import backend.autonomic.layer0 as layer0
+    clock = [1000.0]
+    monkeypatch.setattr(layer0.time, "time", lambda: clock[0])
+
+    state = tmp_path / "layer0_state.json"
+    rule = LayerZeroRule(name="daily", predicate=lambda s: True,
+                         lever="FIRE_DAILY", params={},
+                         cooldown_seconds=3600.0)
+    engine = Layer0Engine(rules=[rule], state_path=state)
+    engine.evaluate(_snapshot())
+
+    clock[0] -= 10000.0                    # clock corrected backwards
+    restarted = Layer0Engine(rules=[rule], state_path=state)
+    # The stale future timestamp is rewritten to now on the tick that
+    # notices it, so the rule stays quiet for one more cooldown...
+    assert restarted.evaluate(_snapshot()).lever is None
+    # ...and then runs, instead of being frozen for the ~3 hours the
+    # clock moved.
+    clock[0] += 3601.0
+    assert restarted.evaluate(_snapshot()).lever == "FIRE_DAILY"
+
+
+def test_service_failed_ignores_a_unit_repair_may_not_touch():
+    """A rule must not fire a lever that can only answer "not mine".
+
+    The comment on this rule says it may sit among the reflexes because
+    prod had zero failed units, so it is false in steady state. Prod
+    2026-09-02 broke that assumption: `systemd-networkd-wait-online`
+    fails at boot, stays failed until reboot, and is not on the repair
+    lever's whitelist -- so the rule was true on every tick and spent a
+    restart attempt every ten minutes declining to act.
+    """
+    from backend.autonomic.layer0 import default_rules
+    rule = next(r for r in default_rules() if r.name == "service_failed")
+    unrepairable = _snapshot(
+        failed_services=["system:systemd-networkd-wait-online.service"])
+    assert rule.predicate(unrepairable) is False
+
+
+def test_service_failed_still_fires_for_a_unit_repair_owns():
+    from backend.autonomic.layer0 import default_rules
+    rule = next(r for r in default_rules() if r.name == "service_failed")
+    assert rule.predicate(_snapshot(failed_services=["user:lightrag.service"])) is True
+    # And a mixed list is still actionable because of the one it owns.
+    assert rule.predicate(_snapshot(failed_services=[
+        "system:systemd-networkd-wait-online.service",
+        "user:lightrag.service",
+    ])) is True

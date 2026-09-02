@@ -31,8 +31,8 @@ def _reg():
 @pytest.mark.asyncio
 async def test_end_to_end_error_triggers_triage_lever(tmp_path: Path):
     (tmp_path / "error_log.jsonl").write_text(
-        json.dumps({"message": "boom 1", "confidence": 10}) + "\n"
-        + json.dumps({"message": "boom 2", "confidence": 50}) + "\n",
+        json.dumps({"ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message": "boom 1", "confidence": 10}) + "\n"
+        + json.dumps({"ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message": "boom 2", "confidence": 50}) + "\n",
         encoding="utf-8",
     )
     ks_path = tmp_path / "ENABLED"
@@ -79,7 +79,7 @@ async def test_end_to_end_error_triggers_triage_lever(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_kill_switch_disabled_means_no_ticks_execute(tmp_path: Path):
     (tmp_path / "error_log.jsonl").write_text(
-        json.dumps({"message": "boom", "confidence": 5}) + "\n",
+        json.dumps({"ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message": "boom", "confidence": 5}) + "\n",
         encoding="utf-8",
     )
     ks_path = tmp_path / "ENABLED"

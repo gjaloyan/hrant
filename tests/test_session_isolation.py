@@ -390,3 +390,40 @@ def test_run_unified_stamps_job_id_when_provided(mock_unified_turn):
     assert sess is not None
     assert sess.turns
     assert any(t.get("job_id") == "job-deadbeef" for t in sess.turns)
+
+
+def test_consolidated_flag_survives_a_save(tmp_path):
+    """The memory consolidator's mark has to outlive the next save.
+
+    FIRE_MEMORY_CONSOLIDATION sets `consolidated` on a session so it is
+    not processed twice. `Session.to_dict()` emitted a fixed set of
+    thirteen keys that did not include it, so the store dropped the mark
+    on its next write. Measured on prod 2026-09-02: 85 of 88 sessions
+    carried exactly those thirteen keys, the three survivors -- all from
+    15 May -- carried fifteen, the extra two being `consolidated` and
+    `summary`. The lever had run 26 times in a week, every time on the
+    same five oldest sessions, appending the same extracted facts again.
+    """
+    from backend.sessions import SessionManager
+
+    mgr = SessionManager(path=tmp_path / "sessions.json")
+    session = mgr.get_or_create_current(speaker_id="webui:default")
+    session.turns.append({"user": "hi", "answer": "hello"})
+
+    session.consolidated = True
+    session.consolidation_summary = "A greeting."
+    mgr._save()
+
+    reloaded = SessionManager(path=tmp_path / "sessions.json")
+    same = next(s for s in reloaded._sessions if s.id == session.id)
+    assert same.consolidated is True
+    assert same.consolidation_summary == "A greeting."
+
+
+def test_a_session_is_unconsolidated_by_default(tmp_path):
+    from backend.sessions import SessionManager
+
+    mgr = SessionManager(path=tmp_path / "sessions.json")
+    session = mgr.get_or_create_current(speaker_id="webui:default")
+    assert session.consolidated is False
+    assert session.consolidation_summary == ""

@@ -366,3 +366,42 @@ def test_memory_consolidation_follow_ups_includes_topic_threads(tmp_path: Path):
 
     assert "python async" in report.follow_ups
     assert "armenian prices" in report.follow_ups
+
+
+def test_consolidation_marks_do_not_discard_concurrent_turns(tmp_path):
+    """The lever must not write back a file it read minutes ago.
+
+    It loads sessions.json, spends one LLM call per session, then saves.
+    The session store appends turns to that same file throughout, so the
+    old whole-blob write meant whichever writer finished last discarded
+    the other's work.
+    """
+    import json
+    from backend.autonomic.levers.memory_consolidation import (
+        FIRE_MEMORY_CONSOLIDATION,
+    )
+
+    path = tmp_path / "sessions.json"
+    path.write_text(json.dumps({"sessions": [
+        {"id": "a", "turns": [{"user": "one"}]},
+    ]}), encoding="utf-8")
+
+    lever = FIRE_MEMORY_CONSOLIDATION()
+    stale = lever._load_sessions(path)          # what the run started from
+    assert len(stale["sessions"]) == 1
+
+    # While the LLM calls run, the store adds a turn and a whole session.
+    path.write_text(json.dumps({"sessions": [
+        {"id": "a", "turns": [{"user": "one"}, {"user": "two"}]},
+        {"id": "b", "turns": [{"user": "three"}]},
+    ]}), encoding="utf-8")
+
+    lever._mark_consolidated(path, {"a": "a summary"})
+
+    after = json.loads(path.read_text(encoding="utf-8"))["sessions"]
+    by_id = {s["id"]: s for s in after}
+    assert set(by_id) == {"a", "b"}, "the session added meanwhile was dropped"
+    assert len(by_id["a"]["turns"]) == 2, "the turn added meanwhile was dropped"
+    assert by_id["a"]["consolidated"] is True
+    assert by_id["a"]["summary"] == "a summary"
+    assert not by_id["b"].get("consolidated")

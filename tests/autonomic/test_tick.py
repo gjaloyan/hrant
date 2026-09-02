@@ -57,7 +57,7 @@ def test_tick_idle_writes_to_tick_log(tmp_path: Path):
 
 def test_tick_fires_lever_and_writes_both_logs(tmp_path: Path):
     (tmp_path / "error_log.jsonl").write_text(
-        json.dumps({"message": "boom", "confidence": 10}) + "\n",
+        json.dumps({"ts": __import__("datetime").datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "message": "boom", "confidence": 10}) + "\n",
         encoding="utf-8",
     )
     gate = SafetyGate(pending_approvals_path=tmp_path / "pending.jsonl")
