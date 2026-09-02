@@ -112,6 +112,15 @@ def already_known(lesson: str, body: str, pending: list) -> Optional[str]:
     for known in current:
         if _too_similar(lesson, known):
             return f"already a rule: {known[:60]}"
+    # The meaning check ran against the pending queue only, so a lesson
+    # restating an APPROVED rule in other words went straight through.
+    # Prod 2026-09-02 carried nine rules where five ideas existed, and two
+    # of the copies pushed back toward asking where the original had been
+    # corrected to act. Character similarity cannot see that; the cheap
+    # comparison above runs first so this only reaches genuinely new text.
+    for known in current:
+        if _means_the_same(lesson, known):
+            return f"already a rule (same meaning): {known[:50]}"
     for p in pending or []:
         if getattr(p, "status", "") != "pending":
             continue

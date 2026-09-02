@@ -481,3 +481,43 @@ def test_the_date_rule_points_at_the_clock_it_has():
 
     body = MODULES["m11_lessons"].body
     assert "NOW block" in body, "the rule does not say where the date comes from"
+
+
+def test_a_paraphrase_of_an_existing_rule_is_not_proposed(monkeypatch):
+    """The meaning check has to cover rules already in the module.
+
+    It ran against the pending queue only, so a lesson restating an
+    APPROVED rule in other words went straight through. Prod 2026-09-02
+    carried nine rules where five ideas existed: "Only claim completion
+    after a successful execute-class tool call" beside "Never say
+    something was done ... before the tool returned it", and two of the
+    copies pushed back toward asking where the original had been
+    corrected to act.
+    """
+    import backend.lesson_proposals as lp
+
+    nl = chr(10)
+    body = ("# LESSONS LEARNED" + nl + nl
+            + "- Action-shaped requests need the tool call. Never say "
+            + "something was done before the tool returned it." + nl + nl
+            + lp.ANCHOR + nl)
+    paraphrase = "Only claim completion after a successful execute-class tool call."
+
+    # Character similarity alone lets it through: the two share almost no
+    # long run of text, which is exactly how the duplicates got approved.
+    monkeypatch.setattr(lp, "_means_the_same", lambda a, b: False)
+    assert lp.already_known(paraphrase, body, []) is None
+
+    # Asked about meaning, it is refused -- and the reason names the rule
+    # that already covers it, so the log says which one.
+    seen: list[tuple[str, str]] = []
+
+    def same(a: str, b: str) -> bool:
+        seen.append((a, b))
+        return True
+
+    monkeypatch.setattr(lp, "_means_the_same", same)
+    reason = lp.already_known(paraphrase, body, [])
+    assert reason is not None and "already a rule" in reason
+    assert seen and seen[0][0] == paraphrase
+    assert "tool call" in seen[0][1], "compared against the rule in the module"

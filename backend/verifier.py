@@ -265,14 +265,18 @@ def _compress_tool_context(
     lines = tool_context.splitlines()
     keep_idx: set[int] = set()
     found_any = False
+    anchor_re = re.compile(
+        "|".join(
+            re.escape(ident)
+            for ident in sorted(answer_idents, key=len, reverse=True)
+        )
+    )
     for i, line in enumerate(lines):
-        for ident in answer_idents:
-            if ident in line:
-                found_any = True
-                lo = max(0, i - _CONTEXT_LINES_AROUND)
-                hi = min(len(lines), i + _CONTEXT_LINES_AROUND + 1)
-                keep_idx.update(range(lo, hi))
-                break
+        if anchor_re.search(line):
+            found_any = True
+            lo = max(0, i - _CONTEXT_LINES_AROUND)
+            hi = min(len(lines), i + _CONTEXT_LINES_AROUND + 1)
+            keep_idx.update(range(lo, hi))
 
     if not found_any:
         # The answer cites nothing the tool output covers — the verifier
