@@ -887,6 +887,24 @@ export type ModelRoutingConfig = {
   routing: Record<string, ModelRoutingEntry>;
 };
 
+/** What a turn's system prompt is made of, part by part. */
+export type PromptPart = {
+  name: string;
+  source: string;
+  edit_in: string;
+  profile_can_override: boolean;
+  text: string;
+  chars: number;
+};
+
+export const fetchAssembledPrompt = (channel = "telegram") =>
+  json_get<{
+    context: Record<string, string>;
+    parts: PromptPart[];
+    total_chars: number;
+    per_turn: string[];
+  }>(`/api/pipeline-profiles/assembled-prompt?channel=${channel}`);
+
 export const fetchModelRouting = () =>
   json_get<ModelRoutingConfig>("/api/model-routing");
 

@@ -84,6 +84,27 @@ def set_active(body: ActiveBody):
     return {"active_id": body.id}
 
 
+@router.get("/api/pipeline-profiles/assembled-prompt")
+def assembled_prompt(
+    speaker_id: str = "webui:default",
+    channel: str = "telegram",
+    turn_type: str = "task",
+):
+    """What a turn's system prompt is actually made of.
+
+    The Prompt tab edits sections one at a time through a dropdown and
+    nothing showed the result, so "are all the system prompts in there?"
+    had no answer you could look up. The thirteen modules a profile can
+    override are about a third of what the model receives; the rest comes
+    from stores the profile was never designed to touch, which is the
+    architecture rather than a gap — but it has to be visible to be
+    understood.
+    """
+    from ..prompt_preview import assemble
+    return assemble(speaker_id=speaker_id, channel=channel,
+                    turn_type=turn_type)
+
+
 @router.get("/api/pipeline-profiles/system-prompt-sections")
 def get_sections():
     """Return the v2 module catalogue. Endpoint name kept for
