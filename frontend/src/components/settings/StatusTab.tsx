@@ -27,9 +27,51 @@ type Props = {
   onRefresh: () => void;
 };
 
+/** What is actually wrong, if anything.
+ *
+ * The screen is called System Status and its subtitle promises the health
+ * of every moving part, but it rendered facts at uniform weight — "Model
+ * B: available: no" beside "Topics: 28" — with nothing to say which of
+ * those is a problem. In `cloud_only` mode an unavailable Model B is the
+ * expected state, not a fault, and the screen could not tell you that.
+ *
+ * Values do not become status until something judges them.
+ */
+function assess(status: any, r: any, hasRouter: boolean) {
+  const out: { tone: "danger" | "warn"; text: string }[] = [];
+  const cloudOnly =
+    status.mode === "cloud_only" || status.mode === "claude_only";
+
+  if (!hasRouter) {
+    out.push({ tone: "danger", text: `Router unavailable: ${r?.error || "unknown"}` });
+  } else {
+    if (!r.model_a_available)
+      out.push({
+        tone: "danger",
+        text: `The main model (${status.model_a}) is not answering — turns will fail or fall back.`,
+      });
+    // Model B being down only matters where something would use it.
+    if (!r.model_b_available && !cloudOnly)
+      out.push({
+        tone: "warn",
+        text: "The fallback model is unavailable, so a failure of the main model has nowhere to go.",
+      });
+  }
+
+  const corePct = (status.core_tokens / Math.max(1, status.core_max)) * 100;
+  if (corePct >= 90)
+    out.push({
+      tone: "warn",
+      text: `Core memory is ${Math.round(corePct)}% full, and it is re-sent on every turn.`,
+    });
+
+  return out;
+}
+
 export default function StatusTab({ status, onCompare, onRefresh }: Props) {
   const r = status.router as any;
   const hasRouter = r && !("error" in r);
+  const problems = assess(status, r, hasRouter);
 
   const [tokensToday, setTokensToday] = useState<TokensToday | null>(null);
   useEffect(() => {
@@ -54,6 +96,36 @@ export default function StatusTab({ status, onCompare, onRefresh }: Props) {
 
   return (
     <div className="space-y-4">
+      {/* The verdict first. A screen that only lists values leaves the
+          reader to work out which of them is bad. */}
+      {problems.length === 0 ? (
+        <div className="flex items-center gap-2 rounded-xl2 border border-ok/30 bg-ok/10 px-4 py-3 text-sm">
+          <span className="h-2 w-2 rounded-full bg-ok" />
+          <span>Everything reachable and within its limits.</span>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {problems.map((p, i) => (
+            <div
+              key={i}
+              className={
+                "flex items-start gap-2 rounded-xl2 border px-4 py-3 text-sm " +
+                (p.tone === "danger"
+                  ? "border-danger/30 bg-danger/10"
+                  : "border-warn/30 bg-warn/10")
+              }
+            >
+              <span
+                className={
+                  "mt-1.5 h-2 w-2 shrink-0 rounded-full " +
+                  (p.tone === "danger" ? "bg-danger" : "bg-warn")
+                }
+              />
+              <span>{p.text}</span>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
         <div className="bg-slate-800 rounded p-3">
@@ -100,7 +172,11 @@ export default function StatusTab({ status, onCompare, onRefresh }: Props) {
           )}
           {hasRouter && (
             <div className="text-xs opacity-60">
-              available: {r.model_b_available ? "yes" : "no"}
+              {r.model_b_available
+                ? "available"
+                : status.mode === "cloud_only" || status.mode === "claude_only"
+                ? "not used in this mode"
+                : "unavailable"}
             </div>
           )}
         </div>
