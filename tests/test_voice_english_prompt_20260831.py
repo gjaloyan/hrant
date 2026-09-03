@@ -157,7 +157,11 @@ def test_script_not_confidence_decides_between_the_readings():
     import inspect
     src = inspect.getsource(tr.Transcriber._tx_faster_whisper)
     assert "_second_opinion" in src
-    assert "_prefer_second_opinion(text, alt)" in src
+    # The call gained the detected language on 2026-09-03: script
+    # alone stopped separating the two once detection began forcing
+    # `hy`, which makes the base emit Armenian letters as well.
+    assert "_prefer_second_opinion(" in src
+    assert "detected_language=" in src
     assert "alt_score > _avg_logprob" not in src
 
 

@@ -178,7 +178,8 @@ _CYRILLIC = re.compile(r"[Ѐ-ӿ]")
 UNDECIDED = "undecided"
 
 
-def _prefer_second_opinion(base_text: str, alt_text: str) -> bool:
+def _prefer_second_opinion(base_text: str, alt_text: str,
+                           detected_language: str | None = None):
     """Take the specialist's reading instead of the base model's?
 
     Decided on SCRIPT, not on confidence. Averaged log-probability was the
@@ -214,9 +215,29 @@ def _prefer_second_opinion(base_text: str, alt_text: str) -> bool:
     if not alt or not _ARMENIAN.search(alt):
         return False
     base = base_text or ""
+    lang = str(detected_language or "").lower()
+    if lang == "hy":
+        # Script cannot separate the two any more. Since 2026-08-19
+        # detection is restricted to the languages heard here, so Armenian
+        # audio reaches the base model with `language="hy"` FORCED -- and
+        # forced, generic `medium` does emit Armenian letters. Badly:
+        # "Հայդան ատկարկավոտվեց" where the specialist reads "Հայրեն էդ
+        # կարգավորվե՞ց։". Being letters is not being a reading, and the
+        # rule below read them as agreement, so the specialist lost every
+        # Armenian note between 2026-09-01 and 2026-09-03.
+        #
+        # When the audio is Armenian the question is not which script came
+        # out, it is which model knows the language: one is generic
+        # medium, the other is large-v3-turbo fine-tuned on Armenian.
+        return True
     if _ARMENIAN.search(base):
         return False
     if _CYRILLIC.search(base):
+        if lang == "ru":
+            # Detection says Russian and the base wrote Cyrillic: it heard
+            # the right language. The specialist only transliterates
+            # Russian into Armenian letters, so there is nothing to gain.
+            return False
         # Cyrillic used to end the matter: "the base heard Russian, so it
         # heard right". It does not. Measured 2026-09-01 -- Armenian audio
         # came back as "Ба референт, ищь качка", Cyrillic and meaningless,
@@ -404,7 +425,11 @@ class Transcriber:
                         if lg in (expected_languages() or SECOND_OPINION_FOR)]
             if _covered and SECOND_OPINION_MODEL:
                 alt, _ = self._second_opinion(path, _covered[0])
-                verdict = _prefer_second_opinion(text, alt)
+                # The language the base actually worked in. Dropping it
+                # was what left the decision to script alone.
+                _detected = language or getattr(_info, "language", None)
+                verdict = _prefer_second_opinion(
+                    text, alt, detected_language=_detected)
                 if verdict is UNDECIDED:
                     # Both readings travel on. `render_for_prompt` reads
                     # them with a model and keeps whichever is real speech,
