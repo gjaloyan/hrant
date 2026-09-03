@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,42 @@ MAX_LESSON_CHARS = 200
 
 # Kept as a backstop so a pile of very short lessons cannot become a wall.
 MAX_LESSONS = 12
+
+
+# The file the lessons live in, as it exists RIGHT NOW. An applied
+# self-mod patches this file; the running process keeps whatever it
+# imported at start-up. Measuring the ceiling against the in-memory copy
+# therefore under-counts by exactly the lessons the agent has applied
+# since the last restart -- which is how prod reached 1951 characters
+# against an 1800 cap on 2026-09-03.
+MODULE_SOURCE = Path(__file__).with_name("prompt_modules.py")
+
+_BODY_OPEN = '_M11_BODY = """'
+
+
+def module_body_on_disk() -> Optional[str]:
+    """The lessons module body as the file currently has it.
+
+    Returns None when the file cannot be read or the marker is missing;
+    callers fall back to the imported body. Reading the source as text
+    rather than importing it keeps this free of side effects -- the point
+    is to look at a file the running process has deliberately not
+    reloaded.
+    """
+    try:
+        text = MODULE_SOURCE.read_text(encoding="utf-8")
+    except Exception as exc:
+        log.info("lessons module unreadable on disk (%s); using the "
+                 "imported copy", exc)
+        return None
+    start = text.find(_BODY_OPEN)
+    if start < 0:
+        return None
+    start += len(_BODY_OPEN)
+    end = text.find('"""', start)
+    if end < 0:
+        return None
+    return text[start:end]
 
 
 def _norm(text: str) -> str:
@@ -225,7 +262,9 @@ def propose_lesson(lesson: str, *, evidence: str = "",
         from .prompt_modules import MODULES
         from .self_modifier import SELF_MODIFIER
 
-        body = MODULES["m11_lessons"].body
+        # The file first: it carries the lessons applied since this
+        # process started, which the imported module does not.
+        body = module_body_on_disk() or MODULES["m11_lessons"].body
         skip = already_known(lesson, body, list(SELF_MODIFIER._proposals))
         if skip:
             log.info("lesson not proposed (%s): %s", skip, lesson[:60])

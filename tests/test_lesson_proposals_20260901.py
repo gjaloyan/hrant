@@ -521,3 +521,41 @@ def test_a_paraphrase_of_an_existing_rule_is_not_proposed(monkeypatch):
     assert reason is not None and "already a rule" in reason
     assert seen and seen[0][0] == paraphrase
     assert "tool call" in seen[0][1], "compared against the rule in the module"
+
+
+def test_the_ceiling_reads_the_module_on_disk_not_the_one_in_memory(tmp_path,
+                                                                    monkeypatch):
+    """An applied self-mod changes the file, not the running process.
+
+    `already_known` measured against `MODULES["m11_lessons"].body`, which
+    is whatever was imported at start-up. A lesson applied by the agent
+    patches backend/prompt_modules.py on disk but the process keeps the
+    old body until it restarts, so the next proposal measured itself
+    against a module smaller than the real one. Prod 2026-09-03: two
+    approved lessons took the live module to 1951 against its 1800 cap
+    and the default prompt 115 chars past its guardrail.
+    """
+    import backend.lesson_proposals as lp
+
+    src = tmp_path / "prompt_modules.py"
+    body = "# LESSONS LEARNED" + chr(10) + chr(10)
+    for i in range(6):
+        body += "- Rule number %d, written out at a realistic length so the " \
+                "cap is reachable.%s%s" % (i, chr(10), chr(10))
+    body += lp.ANCHOR + chr(10)
+    src.write_text('_M11_BODY = """' + body + '"""' + chr(10),
+                   encoding="utf-8")
+    monkeypatch.setattr(lp, "MODULE_SOURCE", src)
+
+    on_disk = lp.module_body_on_disk()
+    assert on_disk is not None
+    assert on_disk.count(chr(10) + "- ") + on_disk.startswith("- ") >= 6
+    assert lp.ANCHOR in on_disk
+
+
+def test_a_missing_or_unreadable_module_file_falls_back(tmp_path, monkeypatch):
+    """Never block a proposal because the file could not be read."""
+    import backend.lesson_proposals as lp
+
+    monkeypatch.setattr(lp, "MODULE_SOURCE", tmp_path / "nope.py")
+    assert lp.module_body_on_disk() is None
