@@ -39,7 +39,7 @@ def _run():
          patch("backend.roles.is_owner", return_value=True), \
          patch("backend.scheduled_messages.list_pending", return_value=_rows()), \
          patch("backend.settings.user_timezone", return_value="UTC"), \
-         patch("backend.tracker.TRACKER", _Tracker(), create=True):
+         patch("backend.tracker.TRACKERS", _Tracker()):
         import json
         return json.loads(bt._list_scheduled_handler(horizon_days=30))
 

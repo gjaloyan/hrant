@@ -600,8 +600,8 @@ def _reminder_label(row: dict) -> str:
     if not tracker_id:
         return ""
     try:
-        from .tracker import TRACKER
-        tracker = TRACKER.get(tracker_id)
+        from .tracker import TRACKERS
+        tracker = TRACKERS.get(tracker_id)
     except Exception:
         return ""
     if not tracker:
