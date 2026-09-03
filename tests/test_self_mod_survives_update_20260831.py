@@ -224,3 +224,46 @@ def test_a_mixed_batch_is_sorted_correctly(store, repo, tmp_path):
     assert report["kept"] == ["keep"]
     assert report["archived_count"] == 1
     assert [x.id for x in sm.load_manifest().entries] == ["keep"]
+
+
+# --- the other half: the update has to get far enough to decide --------
+#
+# The sorting above only runs AFTER the pull. `hrant update` refused
+# before that, because an applied self-mod IS an uncommitted change to a
+# tracked file and the dirty gate could not tell it from hand-written WIP.
+# So the owner saw "N active self-mod(s) will be archived" and an update
+# that would not run, and the per-patch logic never got a turn.
+
+
+def test_patch_targets_reads_the_files_a_patch_touches():
+    patch = (
+        "--- a/backend/prompt_modules.py\n"
+        "+++ b/backend/prompt_modules.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " keep\n"
+        "+added\n"
+        "--- a/backend/verifier.py\n"
+        "+++ b/backend/verifier.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-old\n"
+        "+new\n"
+    )
+    assert sm.patch_targets(patch) == {
+        "backend/prompt_modules.py", "backend/verifier.py"}
+
+
+def test_patch_targets_ignores_devnull_and_timestamps():
+    """A new file has `--- /dev/null`, and some writers append a tab and
+    a timestamp to the path."""
+    patch = (
+        "--- /dev/null\n"
+        "+++ b/backend/brand_new.py\t2026-09-03 09:00:00\n"
+        "@@ -0,0 +1 @@\n"
+        "+x\n"
+    )
+    assert sm.patch_targets(patch) == {"backend/brand_new.py"}
+
+
+def test_patch_targets_survives_a_patch_it_cannot_parse():
+    assert sm.patch_targets("") == set()
+    assert sm.patch_targets("not a diff at all") == set()

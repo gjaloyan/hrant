@@ -449,6 +449,52 @@ def reapply_patch(patch_path: Path) -> bool:
         return False
 
 
+def patch_targets(patch_text: str) -> set[str]:
+    """The repo-relative files a unified diff touches.
+
+    Reads the `+++ b/<path>` side, because that is the file as it will
+    exist; `/dev/null` there means a deletion, and the `---` side names
+    it instead. Some writers append a tab and a timestamp to the path.
+    """
+    out: set[str] = set()
+    for line in (patch_text or "").splitlines():
+        if line.startswith("+++ ") or line.startswith("--- "):
+            path = line[4:].split("	")[0].strip()
+            if path in ("/dev/null", ""):
+                continue
+            if path[:2] in ("a/", "b/"):
+                path = path[2:]
+            out.add(path)
+    return out
+
+
+def active_patch_targets() -> set[str]:
+    """Every file the currently applied self-mods touch.
+
+    `hrant update` needs this to tell "a self-mod is applied here", which
+    is the normal state of the tree, from hand-written work in progress,
+    which must keep blocking the update. Best effort: an unreadable patch
+    contributes nothing, so a broken file makes the gate stricter rather
+    than looser.
+    """
+    out: set[str] = set()
+    try:
+        entries = load_manifest().entries
+    except Exception as exc:
+        log.warning("self-mod manifest unreadable (%s); no targets", exc)
+        return out
+    for entry in entries:
+        if entry.status not in ("applied", "needs_review"):
+            continue
+        try:
+            text = (_self_mods_dir() / entry.patch_filename).read_text(
+                encoding="utf-8")
+        except Exception:
+            continue
+        out |= patch_targets(text)
+    return out
+
+
 def archive_all_active() -> dict:
     """Move every active patch into a timestamped history bundle and
     clear the active manifest. Called by `backend/updater.py` right

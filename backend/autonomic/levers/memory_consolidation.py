@@ -43,7 +43,11 @@ Rules:
 - Skip greetings, small talk, agent reasoning.
 - Confidence >=0.8 for durable facts worth promoting.
 - Max 8 durable_facts, max 5 user_profile_facts, max 5 topic_threads.
-- Do NOT include anything about the agent's own identity or values."""
+- Do NOT include anything about the agent's own identity or values.
+- Attribute correctly. A name the user uses FOR the agent is not the
+  user's own name, and a person the user mentions is not the user.
+  If a fact is about who someone is, say whose name it is.
+- Do not restate a fact the profile already carries in other words."""
 
 DEFAULT_SESSIONS_PATH = Path("knowledge/sessions.json")
 DEFAULT_USER_MD_PATH = Path("knowledge/identity/user.md")

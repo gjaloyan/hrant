@@ -405,3 +405,21 @@ def test_consolidation_marks_do_not_discard_concurrent_turns(tmp_path):
     assert by_id["a"]["consolidated"] is True
     assert by_id["a"]["summary"] == "a summary"
     assert not by_id["b"].get("consolidated")
+
+
+def test_consolidation_prompt_separates_the_two_names():
+    """The extractor has to be told whose name it is looking at.
+
+    Over three weeks it compressed "the user calls the assistant Hrant"
+    into "the user is named Hrant" about ten times, in three languages,
+    straight into the profile the model reads every turn -- so "как меня
+    зовут" answered with the agent's name. The owner's roles store had
+    labelled them Gor the whole time.
+    """
+    from backend.autonomic.levers.memory_consolidation import (
+        CONSOLIDATION_SYSTEM,
+    )
+
+    rules = CONSOLIDATION_SYSTEM.lower()
+    assert "attribute correctly" in rules
+    assert "not the" in rules and "user's own name" in rules

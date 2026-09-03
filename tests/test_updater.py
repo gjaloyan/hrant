@@ -144,8 +144,11 @@ def test_update_auto_stashes_only_lockfile_noise(isolated_history):
         return True
 
     with patch.object(updater, "is_dirty", return_value=True), \
-         patch.object(updater, "only_auto_regenerated_files_dirty", return_value=True), \
-         patch.object(updater, "stash_auto_regenerated", side_effect=_fake_stash), \
+         patch.object(updater, "only_expected_files_dirty", return_value=True), \
+         patch.object(updater, "dirty_tracked_files",\
+                      return_value=["frontend/package-lock.json"]), \
+         patch.object(updater, "self_mod_owned_files", return_value=set()), \
+         patch.object(updater, "stash_expected_dirt", side_effect=_fake_stash), \
          patch.object(updater, "drop_top_stash", side_effect=lambda: drop_calls.append(1)), \
          patch.object(updater, "restore_top_stash", side_effect=lambda: restore_calls.append(1)), \
          patch.object(updater, "current_sha", side_effect=["old", "new"]), \
@@ -173,7 +176,10 @@ def test_update_restores_stash_when_update_fails_after_stash(isolated_history):
     restore_calls: list[int] = []
     drop_calls: list[int] = []
     with patch.object(updater, "is_dirty", return_value=True), \
-         patch.object(updater, "only_auto_regenerated_files_dirty", return_value=True), \
+         patch.object(updater, "only_expected_files_dirty", return_value=True), \
+         patch.object(updater, "dirty_tracked_files",\
+                      return_value=["frontend/package-lock.json"]), \
+         patch.object(updater, "self_mod_owned_files", return_value=set()), \
          patch.object(updater, "stash_auto_regenerated", return_value=True), \
          patch.object(updater, "drop_top_stash", side_effect=lambda: drop_calls.append(1)), \
          patch.object(updater, "restore_top_stash", side_effect=lambda: restore_calls.append(1)), \
@@ -477,3 +483,78 @@ def test_rollback_refuses_on_dirty_tree(isolated_history):
         r = updater.do_rollback()
     assert r.ok is False
     assert "dirty" in (r.error or "").lower()
+
+
+# --- self-mods must not block the update ------------------------------
+
+
+def test_update_proceeds_when_the_dirty_files_are_applied_self_mods(
+        isolated_history):
+    """An applied self-mod is an uncommitted change to a tracked file --
+    that is what "applied" means. The dirty gate could not tell it from
+    hand-written WIP, so it refused before `archive_all_active()` ever
+    got to sort the patches into upstream / applies / conflicts. The
+    owner was told the mods would be archived by an update that then
+    would not run.
+    """
+    with patch.object(updater, "dirty_tracked_files",
+                      return_value=["backend/prompt_modules.py"]), \
+         patch.object(updater, "self_mod_owned_files",
+                      return_value={"backend/prompt_modules.py"}):
+        assert updater.only_auto_regenerated_files_dirty() is False
+        assert updater.only_expected_files_dirty() is True
+
+
+def test_one_real_wip_edit_still_blocks_even_beside_a_self_mod(
+        isolated_history):
+    """The whole point of the gate is that hand-written work is never
+    stashed and dropped. A self-mod in the same tree does not buy an
+    exemption for the file next to it."""
+    with patch.object(updater, "dirty_tracked_files",
+                      return_value=["backend/prompt_modules.py",
+                                    "backend/llm.py"]), \
+         patch.object(updater, "self_mod_owned_files",
+                      return_value={"backend/prompt_modules.py"}):
+        assert updater.only_expected_files_dirty() is False
+
+
+def test_expected_files_covers_lockfiles_and_self_mods_together(
+        isolated_history):
+    with patch.object(updater, "dirty_tracked_files",
+                      return_value=["frontend/package-lock.json",
+                                    "backend/verifier.py"]), \
+         patch.object(updater, "self_mod_owned_files",
+                      return_value={"backend/verifier.py"}):
+        assert updater.only_expected_files_dirty() is True
+
+
+def test_clean_tree_is_not_reported_as_expected_dirt(isolated_history):
+    with patch.object(updater, "dirty_tracked_files", return_value=[]), \
+         patch.object(updater, "self_mod_owned_files", return_value=set()):
+        assert updater.only_expected_files_dirty() is False
+
+
+def test_the_consent_prompt_does_not_claim_everything_is_archived(
+        isolated_history):
+    """The owner reads this before deciding whether to update at all.
+
+    It used to say "This update will archive N active self-modification(s)",
+    which stopped being true once the pull began sorting them per patch --
+    and being told your agent's own repairs are about to be deleted is a
+    good reason never to update.
+    """
+    shown: list[str] = []
+
+    with patch.object(updater, "count_active_self_mods", return_value=2), \
+         patch.object(updater, "current_sha", return_value="old"), \
+         patch.object(updater, "current_branch", return_value="master"):
+        updater.do_update(
+            assume_yes=False,
+            confirm=lambda prompt, default=False: (shown.append(prompt), False)[1],
+        )
+
+    assert shown, "the owner was never asked"
+    text = shown[0].lower()
+    assert "will archive 2" not in text
+    assert "re-applied" in text and "still fits" in text
+    assert "conflicts" in text
