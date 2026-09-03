@@ -170,9 +170,26 @@ def backfill_fact_embeddings(*, force: bool = False) -> dict:
             continue
         store.add(fid, vec, save=False)
         embedded += 1
+
+    # The other direction. This only ever added, so a fact deleted from
+    # memory_facts.jsonl kept its vector for good -- and `search_facts`
+    # answers out of this store, not out of the file, so the deletion had
+    # no effect on recall at all. Found 2026-09-03 while merging duplicate
+    # rows: without this the merge changes the file and search keeps
+    # returning every old wording.
+    #
+    # In memory, then one flush: `remove()` re-serializes the whole file
+    # per call, which is the O(n^2) that stalled a 2368-fact rebuild for
+    # half an hour in June.
+    pruned = 0
+    for stale in [fid for fid in list(store._items) if fid not in seen_ids]:
+        del store._items[stale]
+        pruned += 1
+
     store.flush()  # single write for the whole batch (was O(n^2) per-add)
     return {
         "ok": True,
+        "pruned": pruned,
         "backend": backend,
         "model": model,
         "dim": dim,
