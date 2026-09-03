@@ -109,6 +109,21 @@ def _iter_facts() -> list[tuple[str, dict]]:
     return out
 
 
+def count_facts() -> int:
+    """How many facts the store holds. Zero when there is no file yet.
+
+    The agent could write facts and never read them back, so asked how
+    much it knew it estimated -- 150 against an actual 3952 on prod
+    2026-09-03. A number it can look up is the difference between an
+    answer and a guess.
+    """
+    try:
+        return len(_iter_facts())
+    except Exception as exc:
+        log.debug("count_facts failed: %s", exc)
+        return 0
+
+
 def count_unembedded_facts() -> int:
     store = get_store()
     rows = _iter_facts()

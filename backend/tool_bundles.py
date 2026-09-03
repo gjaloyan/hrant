@@ -81,6 +81,12 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     "propose_immune_signature",
     # Search / navigation + knowledge education (read + deliberate write)
     "locate_symbol", "search_knowledge", "save_knowledge",
+    # `recall_facts` sits beside `search_knowledge` for the same reason, and
+    # beside `save_user_fact` for a sharper one: the write half was always-on
+    # while nothing could read the store back, so asked what it knew the agent
+    # guessed -- 150 against an actual 3952 (2026-09-03). A question about the
+    # owner arrives on any turn, before any bundle has been loaded.
+    "recall_facts",
     "list_skills", "load_skill",
     # Web. agent_browser moved out of the `media` bundle into BASE on
     # 2026-08-08: it is the documented escalation for "fetch_url returned a JS

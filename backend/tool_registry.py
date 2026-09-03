@@ -81,6 +81,7 @@ _READ_TOOLS = frozenset({
     "soul_history", "list_trackers", "get_tracker", "search_knowledge",
     "list_skills", "list_background_jobs",
     "get_background_job", "locate_symbol", "list_telegram_access", "calc",
+    "recall_facts",
 })
 _CONTROL_TOOLS = frozenset({
     "waive_proof", "set_plan", "update_plan", "load_skill",

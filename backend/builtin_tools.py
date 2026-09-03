@@ -3073,6 +3073,54 @@ def _update_step_handler(tracker_id: str, step_id: str, status: str = "",
 
 
 # ---------- registration ----------
+def _recall_facts_handler(query: str = "", limit: int = 8) -> str:
+    """What the agent knows about the person it is talking to.
+
+    `save_user_fact` could write here and nothing could read it back, so
+    asked on prod 2026-09-03 how many facts it held about the owner, the
+    agent answered "примерно 150" at confidence 85 against an actual
+    3952. It had nothing to call. Same shape as `list_scheduled`: a store
+    you can only write to is not a store.
+
+    Scoped like the reminder list -- the owner inspects everything, and
+    anyone else sees only their own memory.
+    """
+    from .roles import current_speaker, is_owner
+    from . import fact_search
+
+    me = current_speaker() or ""
+    scope = None if is_owner(me) else me
+    try:
+        n = max(1, min(int(limit or 8), 25))
+    except (TypeError, ValueError):
+        n = 8
+
+    total = fact_search.count_facts()
+    q = (query or "").strip()
+    matches = []
+    if q:
+        try:
+            for hit in fact_search.search_facts(q, limit=n, speaker_id=scope):
+                matches.append({
+                    "fact": (hit.get("summary") or "").strip(),
+                    "score": round(float(hit.get("score") or 0.0), 3),
+                    "category": hit.get("category") or "",
+                    "learned": str(hit.get("ts") or "")[:19],
+                })
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": str(exc)},
+                              ensure_ascii=False)
+
+    out = {"ok": True, "total": total, "matches": matches}
+    if not q:
+        out["note"] = ("Total only. Pass `query` to see the facts that bear "
+                       "on something.")
+    elif not matches:
+        out["note"] = ("Nothing stored bears on that. Say so rather than "
+                       "inferring an answer.")
+    return json.dumps(out, ensure_ascii=False)
+
+
 def register_builtin_tools() -> None:
     reg = get_registry()
     if "web_search" in reg.tools:
@@ -4008,6 +4056,43 @@ def register_builtin_tools() -> None:
         },
         handler=_save_user_fact_handler,
     )
+
+    reg.register_func(
+        name="recall_facts",
+        description=(
+            "Read what you have stored about the person you are talking "
+            "to. Call this BEFORE answering any question about them, and "
+            "before saying how much you know -- guessing at your own "
+            "memory is how you end up off by a factor of a hundred."
+            + chr(10) + chr(10) +
+            "With no `query`: the number of facts held. With a `query`: "
+            "the facts that bear on it, most relevant first. An empty "
+            "result means nothing is stored on that subject -- say so; "
+            "do not fill the gap by inference."
+            + chr(10) + chr(10) +
+            "This reads the profile store that `save_user_fact` writes. "
+            "For notes and documents use `search_knowledge` instead."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "What to look for, in words. Leave empty to get "
+                        "only the total."
+                    ),
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "How many facts to return (1-25, default 8).",
+                },
+            },
+            "required": [],
+        },
+        handler=_recall_facts_handler,
+    )
+
 
     from .tools.plan_scratchpad import set_plan_handler, update_plan_handler
 
