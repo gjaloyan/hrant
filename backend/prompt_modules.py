@@ -587,7 +587,7 @@ _M11_BODY = """# LESSONS LEARNED
 
 - Read every relevant list before describing it, keeping personal and work items apart. Never call a list empty, or the only one, without a retrieval result in hand.  <!-- seen 4x, merged from 2: describing task lists without checking them -->
 
-- Require the agent to ground every claim in visible screenshot evidence, distinguish observed facts from inference, and state that the attachment cannot be assessed when it is unavailable or unclear.  <!-- meta-learner, severity 8 -->
+- Separate observed facts from assumptions, inspect the relevant artifact or source before making claims, and clearly mark unknowns when evidence is unavailable.  <!-- meta-learner; replaces the screenshot-only wording -->
 
 <!-- LESSONS ANCHOR — new lessons are inserted directly above this line -->
 """
