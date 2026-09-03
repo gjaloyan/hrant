@@ -582,6 +582,38 @@ def _channel_updates_handler(channel: str = "", mark_reviewed: bool = True,
     return json.dumps(out, ensure_ascii=False)
 
 
+def _reminder_label(row: dict) -> str:
+    """What this reminder is about, in words.
+
+    A tracker check-in has no `text` of its own -- the message is composed
+    at delivery time from the step -- so listing the raw field gave the
+    user a row with a time and nothing else. Prod 2026-09-03: four
+    reminders listed, all blank, and the agent said so. The step title is
+    one lookup away in the `meta` the record already carries.
+    """
+    text = (row.get("text") or "").strip()
+    if text:
+        return text
+    meta = row.get("meta") or {}
+    tracker_id = meta.get("tracker_id")
+    step_id = meta.get("step_id")
+    if not tracker_id:
+        return ""
+    try:
+        from .tracker import TRACKER
+        tracker = TRACKER.get(tracker_id)
+    except Exception:
+        return ""
+    if not tracker:
+        return ""
+    for step in tracker.get("steps") or []:
+        if step.get("id") == step_id:
+            return (step.get("title") or "").strip()
+    # The step is gone but the tracker is not; its title still says more
+    # than an empty line.
+    return (tracker.get("title") or "").strip()
+
+
 def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
     """What is already on the calendar, in the USER'S LOCAL TIME.
 
@@ -636,7 +668,7 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
             "id": r.get("id"),
             "when": local.strftime("%A %Y-%m-%d %H:%M"),
             "in_hours": round((due - now).total_seconds() / 3600, 1),
-            "text": (r.get("text") or "")[:160],
+            "text": _reminder_label(r)[:160],
             "repeat": r.get("repeat") or "",
             "target": r.get("target_speaker"),
         })
