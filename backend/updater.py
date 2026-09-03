@@ -505,9 +505,14 @@ def do_update(
     # `frontend/package-lock.json` modified — and the NEXT update
     # refused on it.
     stashed_noisy = False
+    # Whether that stash holds an applied self-mod, which changes how
+    # it may be disposed of: only a real pull re-applies patches, so
+    # on the no-op path the stash is the only copy in the tree.
+    stashed_self_mods = False
     if is_dirty():
         if only_expected_files_dirty():
             owned = self_mod_owned_files() & set(dirty_tracked_files())
+            stashed_self_mods = bool(owned)
             if owned:
                 # Not data loss: the patches are stored separately and
                 # archive_all_active() re-applies the ones that still fit
@@ -564,10 +569,17 @@ def do_update(
 
     incoming = commits_ahead(br)
     if not incoming:
-        # No-op update — drop the stash since the regenerated lockfile
-        # is the canonical content anyway.
+        # No-op update. A regenerated lockfile is noise and the stash is
+        # dropped -- putting it back would just re-block the next update.
+        # An applied self-mod is not noise: nothing re-applies it on this
+        # path, because `archive_all_active()` runs only after a pull that
+        # actually happened. Dropping it here removed two applied lessons
+        # from prod on 2026-09-03.
         if stashed_noisy:
-            drop_top_stash()
+            if stashed_self_mods:
+                restore_top_stash()
+            else:
+                drop_top_stash()
         msg = (
             f"already up to date (version {_pre_version})"
             if _pre_version else "already up to date"

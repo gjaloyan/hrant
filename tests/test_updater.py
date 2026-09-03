@@ -558,3 +558,61 @@ def test_the_consent_prompt_does_not_claim_everything_is_archived(
     assert "will archive 2" not in text
     assert "re-applied" in text and "still fits" in text
     assert "conflicts" in text
+
+
+def test_noop_update_gives_applied_self_mods_back(isolated_history):
+    """Nothing re-applies them on the path where no commits arrived.
+
+    Setting self-mod files aside for the pull is safe only because
+    `archive_all_active()` re-applies them afterwards -- and that runs
+    only when there was something to pull. On the "already up to date"
+    path the stash used to be dropped, which was fine when it held
+    regenerated lockfiles and silently wiped the agent's applied patches
+    once it could hold those too. Seen live on prod 2026-09-03: a no-op
+    `hrant update` removed two applied lessons from the tree.
+    """
+    drops: list[int] = []
+    restores: list[int] = []
+
+    with patch.object(updater, "is_dirty", return_value=True), \
+         patch.object(updater, "only_expected_files_dirty", return_value=True), \
+         patch.object(updater, "dirty_tracked_files",
+                      return_value=["backend/prompt_modules.py"]), \
+         patch.object(updater, "self_mod_owned_files",
+                      return_value={"backend/prompt_modules.py"}), \
+         patch.object(updater, "stash_expected_dirt", return_value=True), \
+         patch.object(updater, "drop_top_stash", side_effect=lambda: drops.append(1)), \
+         patch.object(updater, "restore_top_stash", side_effect=lambda: restores.append(1)), \
+         patch.object(updater, "current_sha", return_value="same"), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "fetch_remote", return_value=(True, "")), \
+         patch.object(updater, "commits_ahead", return_value=[]):
+        r = updater.do_update(assume_yes=True)
+
+    assert r.ok is True
+    assert restores == [1], "the applied self-mod must be put back"
+    assert drops == [], "dropping the stash here loses the patch"
+
+
+def test_noop_update_still_drops_a_pure_lockfile_stash(isolated_history):
+    """The regenerated lockfile is noise; putting it back would just
+    re-block the next update."""
+    drops: list[int] = []
+    restores: list[int] = []
+
+    with patch.object(updater, "is_dirty", return_value=True), \
+         patch.object(updater, "only_expected_files_dirty", return_value=True), \
+         patch.object(updater, "dirty_tracked_files",
+                      return_value=["frontend/package-lock.json"]), \
+         patch.object(updater, "self_mod_owned_files", return_value=set()), \
+         patch.object(updater, "stash_expected_dirt", return_value=True), \
+         patch.object(updater, "drop_top_stash", side_effect=lambda: drops.append(1)), \
+         patch.object(updater, "restore_top_stash", side_effect=lambda: restores.append(1)), \
+         patch.object(updater, "current_sha", return_value="same"), \
+         patch.object(updater, "current_branch", return_value="master"), \
+         patch.object(updater, "fetch_remote", return_value=(True, "")), \
+         patch.object(updater, "commits_ahead", return_value=[]):
+        updater.do_update(assume_yes=True)
+
+    assert drops == [1]
+    assert restores == []
