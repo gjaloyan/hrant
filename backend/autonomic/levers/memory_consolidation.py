@@ -290,6 +290,15 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
                 key = summary.lower()
                 if key in existing_summaries:
                     continue
+                # Same fact, different words. The lowercase set above only
+                # ever caught a verbatim repeat, which is how the store came
+                # to hold 587 pairs saying one thing twice.
+                from ...fact_search import near_duplicate_of
+                already = near_duplicate_of(summary)
+                if already:
+                    log.info("fact not stored (already known as %r): %s",
+                             already[:60], summary[:60])
+                    continue
                 entry = {
                     "summary": summary,
                     "triples": [list(t) for t in raw.get("triples", []) if isinstance(t, (list, tuple)) and len(t) >= 3],

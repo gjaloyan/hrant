@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from typing import Optional
 from pathlib import Path
 
 from .embedder import EMBEDDER
@@ -118,6 +119,43 @@ def count_unembedded_facts() -> int:
         if not store.has(fact_id(summary)):
             n += 1
     return n
+
+
+# Above this cosine, two summaries are the same fact in different words.
+# Chosen from a measurement rather than a guess: on prod 2026-09-03 the
+# store held 3949 facts with zero character-identical duplicates and 587
+# pairs at or above this, and every pair inspected at this level was a
+# restatement -- "The backend is written primarily in Python." beside
+# "The backend is primarily written in Python." at 0.999. Lower and real
+# distinctions start to merge, including cross-language pairs that are
+# worth keeping separately.
+NEAR_DUPLICATE_COSINE = 0.97
+
+
+def near_duplicate_of(summary: str) -> Optional[str]:
+    """An existing fact that already says this, or None.
+
+    Both writers into memory_facts.jsonl deduped on the lowercased text,
+    so a rephrasing always got through. The vectors to answer this
+    properly were already in the store; nothing was asking them.
+
+    Returns None when the embedder is unavailable, when the store is
+    empty, or on any error: a fact lost because a probe failed is worse
+    than a fact stored twice.
+    """
+    text = (summary or "").strip()
+    if not text:
+        return None
+    try:
+        if EMBEDDER.status().get("backend") in (None, "disabled"):
+            return None
+        for hit in search_facts(text, limit=1, score_floor=NEAR_DUPLICATE_COSINE):
+            other = (hit.get("summary") or "").strip()
+            if other and other.lower() != text.lower():
+                return other
+    except Exception as exc:
+        log.debug("near-duplicate probe failed: %s", exc)
+    return None
 
 
 def backfill_fact_embeddings(*, force: bool = False) -> dict:

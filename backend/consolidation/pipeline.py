@@ -286,6 +286,19 @@ def _maybe_rotate_memory_facts(p) -> None:
         log.warning("memory_facts rotation skipped (%s)", e)
 
 
+def _near_duplicate(text: str) -> bool:
+    """Does the store already say this, in other words?
+
+    Kept behind a helper so a missing embedder is a "no opinion" rather
+    than an import error in the middle of a consolidation run.
+    """
+    try:
+        from ..fact_search import near_duplicate_of
+        return bool(near_duplicate_of(text))
+    except Exception:
+        return False
+
+
 def _append_memory_fact(text: str, category: str, confidence: float,
                        topics: list[str], date_str: str) -> None:
     """Append one row to `memory_facts.jsonl`, shape compatible
@@ -489,6 +502,11 @@ def run(
             fact.reason_if_skipped = "low_confidence"
         elif text.lower() in existing:
             fact.reason_if_skipped = "duplicate"
+        elif _near_duplicate(text):
+            # The exact match above only catches a verbatim repeat.
+            # The other writer into this store had the same blind spot,
+            # which is how 587 pairs came to say one thing twice.
+            fact.reason_if_skipped = "restates_an_existing_fact"
         else:
             if not dry_run:
                 _append_memory_fact(text, category, conf, topics, date_str)
