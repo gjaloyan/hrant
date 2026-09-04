@@ -93,15 +93,23 @@ def facts_about(query: str, *, limit: int = 6) -> list[dict]:
         anchors: list[dict] = []
         seen_ids: set[str] = set()
         for term in _terms(text):
-            for n in gq.search(term, limit=8):
-                if n.get("kind") not in ("entity", "topic"):
-                    continue  # a matching FACT is what the vector store returns
-                if not n.get("degree"):
-                    continue  # nothing to traverse
-                if n["id"] in seen_ids:
-                    continue
-                seen_ids.add(n["id"])
-                anchors.append(n)
+            # Ask for the kinds we can traverse FROM, rather than
+            # searching everything and discarding most of it. `gq.search`
+            # ranks by degree across all kinds, so a fact whose label is a
+            # whole sentence containing the term outranks the short topic
+            # node named by it -- search("Gor", limit=8) came back six
+            # facts deep (degrees 14, 14, 12, 12, 7, 7) while `topic:gor`
+            # and `entity:gor` sat there with degree 4 apiece, and the
+            # filter below had nothing left to keep. The argument has been
+            # there all along.
+            for kind in ("entity", "topic"):
+                for n in gq.search(term, kind=kind, limit=8):
+                    if not n.get("degree"):
+                        continue  # nothing to traverse
+                    if n["id"] in seen_ids:
+                        continue
+                    seen_ids.add(n["id"])
+                    anchors.append(n)
             if len(anchors) >= MAX_ANCHORS:
                 break
         anchors = anchors[:MAX_ANCHORS]

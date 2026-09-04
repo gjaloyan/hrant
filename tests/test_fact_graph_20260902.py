@@ -20,8 +20,14 @@ class _G:
     def __init__(self, nodes, hoods):
         self._nodes, self._hoods = nodes, hoods
 
-    def search(self, q, limit=50):
-        return [n for n in self._nodes if q.lower() in n["label"].lower()][:limit]
+    def search(self, q, *, kind=None, limit=50):
+        # `kind` has always been part of the real signature; leaving it out
+        # of the fake meant the caller could not use it without every test
+        # here failing on a TypeError the production `except` swallows.
+        out = [n for n in self._nodes if q.lower() in n["label"].lower()]
+        if kind is not None:
+            out = [n for n in out if n.get("kind") == kind]
+        return out[:limit]
 
     def neighborhood(self, node_id):
         return self._hoods.get(node_id)
