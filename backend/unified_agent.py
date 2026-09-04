@@ -536,6 +536,32 @@ def _claims_save_without_tool(head: str | None) -> bool:
     return _SAVE_CLAIM_RE.match(head) is not None
 
 
+def _escalation_note(reason) -> str:
+    """What the quick lane concluded, for the turn that inherits the work.
+
+    The lane states a reason when it hands over -- "нужно проверить
+    актуальные названия" -- and that reason was written to the progress
+    log and dropped. The full turn started fresh, treated the message as
+    an ordinary question and answered from memory, so the stage that had
+    already decided something needed checking was overruled by the stage
+    that never heard it (measured 2026-09-04).
+
+    Empty when there is no reason, so the block simply does not appear.
+    """
+    text = (reason or "").strip()
+    if not text:
+        return ""
+    nl = chr(10)
+    return ("# WHY THIS REACHED YOU" + nl + nl
+            + "A quick single-call lane saw this message first and handed "
+            + "it over, giving this reason:" + nl + nl
+            + "  " + text + nl + nl
+            + "That lane has no tools, which is why it stopped. You do. "
+            + "If the reason names something to check, verify it before "
+            + "answering rather than writing from memory -- the handover "
+            + "already established that memory was not enough.")
+
+
 def _try_chat_path(
     *,
     task: str,
@@ -614,6 +640,13 @@ def _try_chat_path(
     if escalate_reason is not None:
         try:
             agent.progress("chat_fast_path", f"escalating: {escalate_reason}")
+        except Exception:
+            pass
+        # Carry the reason forward. Logging it and dropping it is how
+        # the lane's own judgement got overruled by a turn that never
+        # heard it.
+        try:
+            agent._escalated_because = escalate_reason
         except Exception:
             pass
         return None
@@ -2960,6 +2993,10 @@ def run_unified(
         )
     if now_block:
         system_parts.append(f"---\n\n{now_block}")
+    _handover = _escalation_note(
+        getattr(agent, "_escalated_because", ""))
+    if _handover:
+        system_parts.append(f"---\n\n{_handover}")
     if snapshot:
         system_parts.append(f"---\n\n{snapshot}")
     if yesterday:
