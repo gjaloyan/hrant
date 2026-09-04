@@ -2042,6 +2042,100 @@ def _ungrounded_factual_claims(task: str, answer: str) -> list:
         return []
 
 
+# Suffixes where the registrable name is the third label, not the second.
+# A short table, not a rule engine: getting "bbc.co.uk" wrong would count
+# every UK site as one source.
+_TWO_PART_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "co.jp", "or.jp", "com.au",
+    "net.au", "org.au", "com.br", "com.tr", "com.cn", "com.mx", "co.in",
+    "co.nz", "co.za", "com.ar", "com.ua",
+})
+
+
+def _registrable_domain(url: str) -> str:
+    """The part of a URL that identifies WHO published it.
+
+    www.cba.am, cba.am and news.cba.am are one source, not three, and
+    counting them as three would turn a single site into corroboration.
+    """
+    from urllib.parse import urlparse
+    try:
+        host = (urlparse(str(url or "")).hostname or "").lower()
+    except Exception:
+        return ""
+    if not host:
+        return ""
+    parts = [p for p in host.split(".") if p]
+    if len(parts) < 2:
+        return host
+    tail2 = ".".join(parts[-2:])
+    if tail2 in _TWO_PART_SUFFIXES and len(parts) >= 3:
+        return ".".join(parts[-3:])
+    return tail2
+
+
+def _evidence_for_claim(claim: str, raw: str) -> dict:
+    """What a search actually returned for one claim.
+
+    Distinct publishers, in the order they appeared, plus the snippets.
+    Unreadable output yields no evidence rather than an exception -- the
+    caller treats that as "nothing found" and hands the turn over.
+    """
+    import json as _json
+    domains: list = []
+    lines: list = []
+    try:
+        hits = _json.loads(raw or "")
+        if not isinstance(hits, list):
+            hits = []
+    except Exception:
+        hits = []
+    for hit in hits:
+        if not isinstance(hit, dict):
+            continue
+        dom = _registrable_domain(hit.get("url"))
+        if dom and dom not in domains:
+            domains.append(dom)
+        snippet = str(hit.get("snippet") or hit.get("title") or "").strip()
+        if snippet:
+            lines.append(("[" + dom + "] " if dom else "") + snippet[:400])
+    return {"claim": claim, "domains": domains, "lines": lines}
+
+
+def _render_evidence(blocks: list) -> str:
+    """The evidence block, stating what it is rather than ranking it.
+
+    Which source is PRIMARY depends on the claim -- cba.am is primary for
+    an exchange rate and useless for grain moisture meters -- so this does
+    not rank. It reports how many distinct publishers were found and who
+    they were, which is the input to that judgement, and leaves the
+    judgement to the model.
+    """
+    blocks = [b for b in (blocks or []) if b.get("lines")]
+    if not blocks:
+        return ""
+    out = ["# WHAT A SEARCH RETURNED FOR THIS ANSWER", "",
+           "Your draft stated these without checking them. Answer from what "
+           "is below.", "",
+           "Read the sources, not just the text: one publisher is not "
+           "corroboration, a shop or an aggregator is weaker than the maker "
+           "or the official body, and where they disagree say so instead of "
+           "picking one. Where nothing here settles a claim, say that "
+           "plainly rather than repeating it.", ""]
+    for b in blocks:
+        n = len(b["domains"])
+        out.append("CLAIM: " + str(b["claim"]))
+        out.append("  %d source%s: %s"
+                   % (n, "" if n == 1 else "s",
+                      ", ".join(b["domains"]) or "unknown"))
+        if n == 1:
+            out.append("  (a single publisher — not corroborated)")
+        for line in b["lines"][:6]:
+            out.append("  - " + line)
+        out.append("")
+    return chr(10).join(out).strip()
+
+
 # How many claims the lane will chase before giving up and handing over.
 # A cap, or one verbose answer becomes eight searches.
 _LANE_MAX_CLAIMS = 2
@@ -2079,20 +2173,14 @@ def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
         return answer
 
     try:
-        found = []
+        blocks = []
         for claim in claims[:_LANE_MAX_CLAIMS]:
-            hit = (_web_search_for_lane(claim) or "").strip()
-            if hit and hit not in ("[]", "{}"):
-                found.append("CLAIM: " + claim + chr(10) + hit[:2000])
-        if not found:
+            blocks.append(_evidence_for_claim(
+                claim, _web_search_for_lane(claim)))
+        evidence = _render_evidence(blocks)
+        if not evidence:
             raise RuntimeError("nothing came back")
-
-        evidence = ("# WHAT A SEARCH RETURNED FOR THIS ANSWER" + chr(10) + chr(10)
-                    + "Your draft stated these without checking them. Answer "
-                    + "from what is below, and where it does not settle a "
-                    + "claim, say so plainly instead of repeating the claim."
-                    + chr(10) + chr(10)
-                    + (chr(10) + chr(10)).join(found))
+        found = [b for b in blocks if b.get("lines")]
         redraft = _try_chat_path(
             task=task, agent=agent, speaker_id=speaker_id,
             snapshot=(snapshot + chr(10) + chr(10) + evidence
@@ -2349,7 +2437,10 @@ def _decide_self_correction(
                       "what memory gets confidently wrong." + chr(10) + chr(10)
                     + "Look them up NOW -- search_knowledge for what you have "
                       "already learned, web_search / fetch_url for the rest, "
-                      "preferring a primary source over an aggregator -- and "
+                      "and read the sources, not just the text: one publisher "
+                      "is not corroboration, a shop or an aggregator is weaker "
+                      "than the maker or the official body, and where they "
+                      "disagree say so instead of picking one -- and "
                       "then answer with what you found." + chr(10) + chr(10)
                     + "If a source cannot settle one of them, say so plainly in "
                       "the answer instead of asserting it. An honest \"I could "
