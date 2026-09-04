@@ -1,10 +1,35 @@
+import os
 import sys
+import tempfile
 from pathlib import Path
 import pytest
 
-# чтобы `import backend` работал из каталога tests
+# So `import backend` works from the tests directory.
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+# --- keep the suite out of the real data directory --------------------
+#
+# This MUST run before anything imports `backend.config`: that module
+# resolves the knowledge and workspace roots once, at import, and every
+# module doing `from .config import CONFIG` captures the result forever.
+# Point it at a throwaway directory here and the whole session is
+# isolated; set it later and it is already too late.
+#
+# It was already too late. A full run wrote 126 files into
+# ~/.hrant/data — goals.json, identity history, subagents, jobs — and
+# `test_load_config_tolerates_invalid_json` put the literal string
+# "garbage {" into the owner's real tts_config.json. On prod that file
+# carried those nine bytes from 2026-08-07 until it was found on
+# 2026-09-04, and the configured voices were gone the whole time.
+#
+# An explicit HRANT_DATA_DIR is honoured, so a developer can still point
+# a run at a specific tree deliberately.
+if not os.environ.get("HRANT_DATA_DIR", "").strip():
+    _TEST_DATA_DIR = Path(tempfile.mkdtemp(prefix="hrant-test-data-"))
+    for _sub in ("knowledge", "workspace", "jobs", "self_mods"):
+        (_TEST_DATA_DIR / _sub).mkdir(parents=True, exist_ok=True)
+    os.environ["HRANT_DATA_DIR"] = str(_TEST_DATA_DIR)
 
 
 @pytest.fixture(autouse=True)

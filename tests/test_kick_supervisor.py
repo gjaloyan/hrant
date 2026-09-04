@@ -49,15 +49,28 @@ def stub_non_owner(monkeypatch):
     monkeypatch.setattr("backend.roles.is_owner", lambda _sid: False)
 
 
-def _wait_for_terminal(_bg, job_id, deadline_s=2.0):
-    """Block briefly until the background subprocess exits."""
+def _wait_for_terminal(_bg, job_id, deadline_s=20.0):
+    """Block until the background subprocess exits.
+
+    The deadline was two seconds and a timeout returned the job STILL
+    RUNNING rather than saying so, which turned "the machine was busy"
+    into an assertion failure three lines further down. That is the
+    flake: green alone, green with neighbours, red once in a full run
+    (2026-09-04) — and the mystery each time, because the message named
+    the wrong thing.
+    """
     deadline = time.time() + deadline_s
     while time.time() < deadline:
         j = _bg.STORE.get(job_id)
         if j is not None and j.status != "running":
             return j
         time.sleep(0.05)
-    return _bg.STORE.get(job_id)
+    j = _bg.STORE.get(job_id)
+    raise AssertionError(
+        "background job %s did not finish within %.0fs (status=%r) — the "
+        "subprocess is slow or stuck, not the assertion below"
+        % (job_id, deadline_s, getattr(j, "status", None))
+    )
 
 
 def test_kick_supervisor_owner_only(isolated_jobs, stub_non_owner):
