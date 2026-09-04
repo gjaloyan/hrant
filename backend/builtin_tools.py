@@ -135,12 +135,17 @@ def _is_error_result(text: str) -> bool:
 
 
 # ---------- handlers ----------
-def _web_search_handler(query: str, max_results: int = 5) -> str:
-    args = {"query": query, "max_results": max_results}
+def _web_search_handler(query: str, max_results: int = 5,
+                        recency: str | None = None) -> str:
+    # `recency` is part of the cache key: the same query with a window and
+    # without it are different questions, and sharing a key would serve
+    # "this week" whatever "any time" cached first.
+    args = {"query": query, "max_results": max_results, "recency": recency}
     cached = WEB_CACHE.get("web_search", args)
     if cached is not None:
         return cached
-    detail = web_search_detailed(query, max_results=max_results)
+    detail = web_search_detailed(query, max_results=max_results,
+                                 recency=recency)
     results = detail.get("results") or []
     if not results:
         # Never answer a blocked/broken search with a bare "[no results]" —
@@ -3115,6 +3120,12 @@ def register_builtin_tools() -> None:
             "Search the web for up-to-date information. Use when the question "
             "needs facts that aren't already in the notes or core memory. "
             "Returns a JSON list of {title, url, snippet}."
+            + chr(10) + chr(10) +
+            "`recency` narrows to what was published recently: day, week, "
+            "month or year. Use it when the answer changes over time — "
+            "prices, versions, releases, news, what people are saying now — "
+            "and leave it off for things that do not, or you will hide the "
+            "authoritative page under this week's blog posts."
         ),
         input_schema={
             "type": "object",
@@ -3124,6 +3135,15 @@ def register_builtin_tools() -> None:
                     "type": "integer",
                     "description": "Max results to return (default 5).",
                     "default": 5,
+                },
+                "recency": {
+                    "type": "string",
+                    "enum": ["day", "week", "month", "year"],
+                    "description": (
+                        "Only results published within this window. Use it "
+                        "when the answer changes over time; omit it when it "
+                        "does not."
+                    ),
                 },
             },
             "required": ["query"],

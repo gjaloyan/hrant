@@ -63,9 +63,24 @@ def _tavily(query: str, max_results: int) -> list[WebResult]:
     ]
 
 
+# Windows SearXNG understands. Anything else is dropped rather than
+# forwarded to be ignored or to error.
+_TIME_RANGES = ("day", "week", "month", "year")
+
+
 def _searxng(query: str, max_results: int,
-             attempts: list | None = None) -> list[WebResult]:
-    """Search a local SearXNG instance first; never raise to callers."""
+             attempts: list | None = None,
+             recency: str | None = None) -> list[WebResult]:
+    """Search a local SearXNG instance first; never raise to callers.
+
+    `recency` maps to SearXNG's `time_range`. It was never sent, though
+    the instance has always honoured it: on one query, 2026-09-04, no
+    filter returned 67 results led by documentation while `month` and
+    `day` returned current material. That window is the one thing worth
+    taking from `last30days-skill` outright -- its entity resolution,
+    engagement ranking and cross-platform clustering all need
+    per-platform API keys, and this needs a parameter.
+    """
     base = os.getenv("SEARXNG_URL", "http://127.0.0.1:8888").rstrip("/")
     url = f"{base}/search"
     rec = {"provider": "searxng", "status": None, "bytes": 0,
@@ -73,7 +88,11 @@ def _searxng(query: str, max_results: int,
     try:
         r = httpx.get(
             url,
-            params={"q": query, "format": "json"},
+            params=(
+                {"q": query, "format": "json", "time_range": recency}
+                if recency in _TIME_RANGES
+                else {"q": query, "format": "json"}
+            ),
             headers={"Accept": "application/json", "User-Agent": BROWSER_UA},
             # Fail FAST on an unreachable instance. A flat 15s timeout meant
             # every single web_search paid the full 15s before falling back
@@ -332,13 +351,16 @@ def _duckduckgo(query: str, max_results: int,
     return []
 
 
-def web_search_detailed(query: str, max_results: int = 5) -> dict:
+def web_search_detailed(query: str, max_results: int = 5,
+                        recency: str | None = None) -> dict:
     """Search with per-attempt diagnostics. Returns
     {results, attempts, note} — the tool layer surfaces `attempts` to the
     model when `results` is empty so "the tool is blocked" is never again
     reported as "the web has nothing"."""
     attempts: list[dict] = []
-    hits = _searxng(query, max_results, attempts=attempts)
+    # Only SearXNG takes the window today; the fallbacks search all time,
+    # which is better than not searching.
+    hits = _searxng(query, max_results, attempts=attempts, recency=recency)
     if hits:
         return {"results": hits, "attempts": attempts, "note": "searxng"}
     if os.getenv("TAVILY_API_KEY"):

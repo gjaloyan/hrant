@@ -114,7 +114,7 @@ def test_tool_layer_surfaces_diagnostics_not_bare_no_results(monkeypatch):
 
     monkeypatch.setattr(
         bt, "web_search_detailed",
-        lambda q, max_results=5: {
+        lambda q, max_results=5, recency=None: {
             "results": [],
             "attempts": [{"provider": "ddg_html", "status": 202, "bytes": 14159,
                           "parsed": 0, "reason": "anti-bot challenge page"}],

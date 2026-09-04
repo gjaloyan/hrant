@@ -220,7 +220,7 @@ def test_web_search_handler_caches_results(monkeypatch):
 
     calls: list[tuple[str, int]] = []
 
-    def fake_search(query: str, max_results: int = 5):
+    def fake_search(query: str, max_results: int = 5, recency=None):
         calls.append((query, max_results))
         return {"results": [WebResult(title="T", url="https://ex.com",
                                       snippet="S")],
@@ -247,7 +247,7 @@ def test_web_search_handler_does_not_cache_empty_results(monkeypatch):
     # apart from "the provider served a CAPTCHA" (Jul-15 incident).
     monkeypatch.setattr(
         bt, "web_search_detailed",
-        lambda q, max_results=5: {"results": [], "attempts": [
+        lambda q, max_results=5, recency=None: {"results": [], "attempts": [
             {"provider": "ddg_html", "status": 202, "bytes": 14159,
              "parsed": 0, "reason": "anti-bot challenge page"}],
             "note": "Every search provider failed"},
