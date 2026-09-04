@@ -2042,6 +2042,40 @@ def _ungrounded_factual_claims(task: str, answer: str) -> list:
         return []
 
 
+def _fast_answer_stands(*, task: str, answer: str, agent) -> bool:
+    """May the cheap lane's answer be served as it is?
+
+    The lane decides whether to hand over BEFORE it writes, and decides
+    it inconsistently -- three runs of one question gave escalate,
+    escalate, answer-directly (2026-09-04). So its judgement cannot be
+    the last word on whether an answer was checkable.
+
+    Checked after the draft it does not have to be. An answer that
+    asserts facts nothing looked up goes to the full agent, which has
+    tools, and the claims travel with it so that turn knows what to
+    settle.
+
+    Fails open, like everything on this path: losing a cheap answer to a
+    downed provider is worse than serving one unchecked.
+    """
+    claims = _ungrounded_factual_claims(task, answer)
+    if not claims:
+        return True
+    try:
+        agent._escalated_because = (
+            "the quick answer asserted this without checking: "
+            + "; ".join(claims)[:300])
+    except Exception:
+        pass
+    try:
+        agent.progress("chat_fast_path",
+                       "escalating after the draft: %d unchecked claim(s)"
+                       % len(claims))
+    except Exception:
+        pass
+    return False
+
+
 def _decide_self_correction(
     *,
     task: str,
@@ -2924,6 +2958,13 @@ def run_unified(
             ),
             convo=convo,
         )
+        # The lane guessed before writing; this asks after. An answer
+        # that states facts nothing checked is not served -- it falls
+        # through to the agent that has tools.
+        if chat_answer is not None and not _fast_answer_stands(
+            task=task, answer=chat_answer, agent=agent,
+        ):
+            chat_answer = None
         if chat_answer is not None:
             # Fast-path turn — still write a minimal artifact under
             # workspace/turns/<id>.json so every turn has an audit
