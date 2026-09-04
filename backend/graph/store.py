@@ -103,7 +103,24 @@ class Graph:
                     self._nodes[n.id] = n
                 except Exception:
                     continue
-            for raw in data.get("edges") or []:
+            # Two writers share this file. `backend/knowledge_graph` owns
+            # the legacy `edges` DICT keyed by subject; this store owns
+            # `nodes` and `edges_v2`. migration.py set those terms and
+            # knowledge_graph._save() honours them; this loader did not.
+            #
+            # It read `edges` and iterated it. On the legacy dict that
+            # yields KEYS, GraphEdge.from_dict("1 usd") raises, the except
+            # swallows it, and every edge the builder made was dropped on
+            # the next load. Prod 2026-09-04: 11,975 nodes, ZERO edges
+            # here, and 7,037 triples already extracted and going nowhere.
+            raw_edges = data.get("edges_v2")
+            if not isinstance(raw_edges, list):
+                # Files written before this fix put v2 edges in `edges` as
+                # a LIST. Those exist; do not lose them. A DICT there is
+                # the legacy writer's and is not ours to read.
+                legacy_or_ours = data.get("edges")
+                raw_edges = legacy_or_ours if isinstance(legacy_or_ours, list) else []
+            for raw in raw_edges:
                 try:
                     e = GraphEdge.from_dict(raw)
                     self._edges[e.key()] = e
@@ -118,12 +135,29 @@ class Graph:
             self._updated_at = time.time()
             p = self.path
             p.parent.mkdir(parents=True, exist_ok=True)
-            body = {
+            # Keep what is not ours. `knowledge_graph._save()` already
+            # preserves version/nodes/edges_v2 when it writes; this is the
+            # other half of that bargain. Writing `"edges": [...]` here
+            # replaced the legacy DICT with a list, and
+            # FIRE_GRAPH_MAINTENANCE calls .items() on it.
+            body: dict = {}
+            if p.exists():
+                try:
+                    existing = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(existing, dict):
+                        body = dict(existing)
+                except Exception:
+                    body = {}
+            # A stale v2 edge list under `edges` would shadow edges_v2 on
+            # the next load, so drop it once it has been carried over.
+            if isinstance(body.get("edges"), list):
+                body.pop("edges", None)
+            body.update({
                 "version": GRAPH_SCHEMA_VERSION,
                 "updated_at": self._updated_at,
                 "nodes": [asdict(n) for n in self._nodes.values()],
-                "edges": [asdict(e) for e in self._edges.values()],
-            }
+                "edges_v2": [asdict(e) for e in self._edges.values()],
+            })
             tmp = p.with_suffix(".tmp")
             tmp.write_text(
                 json.dumps(body, ensure_ascii=False, indent=2),
