@@ -139,25 +139,52 @@ def _searxng(query: str, max_results: int,
             attempts.append(rec)
 
 
+# Phrases that are never incidental: nobody writes them except a wall.
 _BOT_WALL_MARKERS: tuple[str, ...] = (
     "prove your humanity", "you've been blocked by network security",
     "enable javascript and cookies to continue", "checking your browser",
     "verify you are human", "select all squares containing",
-    "unusual traffic from your computer", "access denied",
-    "cf-browser-verification", "captcha",
+    "unusual traffic from your computer",
+    "cf-browser-verification",
 )
 
+# Words that DO appear in ordinary pages -- a privacy policy, an article
+# about bots, or Wikipedia's own edit-form config
+# (`wgConfirmEditCaptchaNeededForGenericEdit":"hcaptcha"`). They only mean
+# a wall when the page has no article body to speak of.
+_BOT_WALL_WEAK_MARKERS: tuple[str, ...] = ("captcha", "access denied")
 
-def looks_like_bot_wall(text: str) -> bool:
+# Below this many characters, an "extracted body" is a scrap the parser
+# scavenged from the challenge page itself, not an article.
+_REAL_BODY_CHARS = 400
+
+
+def looks_like_bot_wall(text: str, extracted: str | None = None) -> bool:
     """True when a 2xx body is actually an anti-bot challenge, not content.
 
     DuckDuckGo answers HTTP 202 with a CAPTCHA page under load — measured
     live 2026-08-05: 14 KB of "Select all squares containing a duck".
     `raise_for_status()` does not raise on 202, the result regex matched
     nothing, and the model was told "[no results]", i.e. "the web has
-    nothing" — the exact Jul-15 failure. Detect it and say so instead."""
+    nothing" — the exact Jul-15 failure. Detect it and say so instead.
+
+    `extracted` is the main-content extraction, when the caller has one.
+    A challenge page has no article to extract; a page that yielded one
+    is not a challenge, whatever words appear in its markup. Measured
+    2026-09-04: en.wikipedia.org/wiki/Duduk was reported blocked because
+    the bare word "captcha" sits in its JavaScript config, while
+    trafilatura had just pulled 22,559 characters of article out of it.
+
+    Strong markers still decide on their own — some walls do wrap the
+    challenge in prose, and nobody writes "prove your humanity" by
+    accident.
+    """
     low = (text or "")[:4000].lower()
-    return any(m in low for m in _BOT_WALL_MARKERS)
+    if any(m in low for m in _BOT_WALL_MARKERS):
+        return True
+    if not any(m in low for m in _BOT_WALL_WEAK_MARKERS):
+        return False
+    return len((extracted or "").strip()) < _REAL_BODY_CHARS
 
 
 def visible_text_ratio(html: str) -> float:
@@ -583,10 +610,11 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
     # the body: pre-fix raise_for_status() discarded it and the model saw only
     # "[fetch error: 403]" with no idea whether to retry, use another route, or
     # conclude the page is gone.
-    if status >= 400 or looks_like_bot_wall(body):
+    if status >= 400 or looks_like_bot_wall(body, extracted=main):
         head = text[: min(max_chars, 1200)]
         return (
-            f"[blocked: HTTP {status}{' + anti-bot challenge' if looks_like_bot_wall(body) else ''}] "
+            f"[blocked: HTTP {status}"
+            f"{' + anti-bot challenge' if looks_like_bot_wall(body, extracted=main) else ''}] "
             "This is an ACCESS failure, not evidence the information does not "
             "exist. Try another source, an official API, or an authenticated "
             f"route. {_NEXT_TOOL_HINT}\n--- page said ---\n{head}"
@@ -599,7 +627,7 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
             rendered_main = _extract_main_content(dom, url)
             rendered = (rendered_main if rendered_main is not None
                         else _regex_strip_html(dom))
-            if looks_like_bot_wall(dom):
+            if looks_like_bot_wall(dom, extracted=rendered_main):
                 return (
                     "[blocked: anti-bot challenge survived a headless render] "
                     "This site refuses automated access; it is not evidence "
