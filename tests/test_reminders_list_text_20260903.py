@@ -53,3 +53,36 @@ def test_a_check_in_shows_the_step_it_will_ask_about():
 def test_a_plain_message_still_shows_its_own_text():
     rows = {r["id"]: r for r in _run()["reminders"]}
     assert rows["b"]["text"] == "Buy milk"
+
+
+# --- and the card the owner gets when one is queued -------------------
+
+
+def test_the_queued_card_names_what_it_will_remind_about():
+    """"Scheduled message queued … Body: (empty)" — reported by the owner
+    2026-09-04 as "a job notification, but it's empty".
+
+    Same shape as the list: a tracker check-in carries no `text` of its
+    own, and the card printed that field raw. It is the only thing on the
+    card that says what the reminder is FOR, so empty makes the whole
+    card useless.
+    """
+    from backend.scheduled_messages import reminder_label
+
+    class _Tracker:
+        def get(self, tracker_id):
+            return {"id": "trk_1", "title": "Errands",
+                    "steps": [{"id": "st_1", "title": "Զանգել դիզայներին"}]}
+
+    row = {"id": "x", "text": "", "kind": "check_in",
+           "meta": {"tracker_id": "trk_1", "step_id": "st_1"}}
+    with patch("backend.tracker.TRACKERS", _Tracker()):
+        assert reminder_label(row) == "Զանգել դիզայներին"
+
+
+def test_the_card_uses_the_same_answer_as_the_list():
+    """One helper, so the two screens cannot drift apart."""
+    import inspect
+    from backend import channels
+    src = inspect.getsource(channels)
+    assert "reminder_label" in src

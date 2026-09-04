@@ -583,35 +583,13 @@ def _channel_updates_handler(channel: str = "", mark_reviewed: bool = True,
 
 
 def _reminder_label(row: dict) -> str:
-    """What this reminder is about, in words.
+    """Delegates to `scheduled_messages.reminder_label`.
 
-    A tracker check-in has no `text` of its own -- the message is composed
-    at delivery time from the step -- so listing the raw field gave the
-    user a row with a time and nothing else. Prod 2026-09-03: four
-    reminders listed, all blank, and the agent said so. The step title is
-    one lookup away in the `meta` the record already carries.
+    Kept as a name here because the Telegram card needs the same answer
+    and the rows belong to that module, not to this one.
     """
-    text = (row.get("text") or "").strip()
-    if text:
-        return text
-    meta = row.get("meta") or {}
-    tracker_id = meta.get("tracker_id")
-    step_id = meta.get("step_id")
-    if not tracker_id:
-        return ""
-    try:
-        from .tracker import TRACKERS
-        tracker = TRACKERS.get(tracker_id)
-    except Exception:
-        return ""
-    if not tracker:
-        return ""
-    for step in tracker.get("steps") or []:
-        if step.get("id") == step_id:
-            return (step.get("title") or "").strip()
-    # The step is gone but the tracker is not; its title still says more
-    # than an empty line.
-    return (tracker.get("title") or "").strip()
+    from .scheduled_messages import reminder_label
+    return reminder_label(row)
 
 
 def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:

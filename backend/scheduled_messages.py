@@ -732,3 +732,35 @@ def prune(max_rows: int = 1000) -> int:
         dropped = len(rows) - len(new_rows)
         _write_all(new_rows)
         return dropped
+
+
+def reminder_label(row: dict) -> str:
+    """What this reminder is about, in words.
+
+    A tracker check-in has no `text` of its own -- the message is composed
+    at delivery time from the step -- so listing the raw field gave the
+    user a row with a time and nothing else. Prod 2026-09-03: four
+    reminders listed, all blank, and the agent said so. The step title is
+    one lookup away in the `meta` the record already carries.
+    """
+    text = (row.get("text") or "").strip()
+    if text:
+        return text
+    meta = row.get("meta") or {}
+    tracker_id = meta.get("tracker_id")
+    step_id = meta.get("step_id")
+    if not tracker_id:
+        return ""
+    try:
+        from .tracker import TRACKERS
+        tracker = TRACKERS.get(tracker_id)
+    except Exception:
+        return ""
+    if not tracker:
+        return ""
+    for step in tracker.get("steps") or []:
+        if step.get("id") == step_id:
+            return (step.get("title") or "").strip()
+    # The step is gone but the tracker is not; its title still says more
+    # than an empty line.
+    return (tracker.get("title") or "").strip()

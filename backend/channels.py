@@ -1172,7 +1172,13 @@ class TelegramBot:
 
         target = row.get("target_speaker") or "?"
         due = row.get("due_at") or ""
-        body = (row.get("text") or "").strip()
+        # A tracker check-in has no `text` of its own -- the message is
+        # composed at delivery from the step -- and this card printed that
+        # field raw, so the owner got "Body: (empty)" and no idea what the
+        # reminder was for. Same helper the reminder LIST uses, so the two
+        # cannot drift apart.
+        from .scheduled_messages import reminder_label
+        body = reminder_label(row).strip()
         preview = (body[:300] + "…") if len(body) > 300 else body
         if row.get("kind") == "agent_task":
             # An agent_task's body is an instruction to the agent, not a

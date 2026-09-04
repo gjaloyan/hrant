@@ -429,6 +429,18 @@ the store had 3952: a number produced by feel, delivered with
 confidence. If the honest answer is a count or a stored fact you
 cannot see here, say ESCALATE.
 
+The same holds for the world. A question about how something works,
+what a thing is called, what exists, what it costs or what is current
+is not recall -- you have no way to check it in this lane, and an
+answer written from memory alone is a guess in a confident voice.
+Escalate and let the full agent look it up. Measured 2026-09-04:
+"is there a tool for this" was answered here, from weights, with no
+search at all.
+
+Greetings, acknowledgements, and short opinions still belong here --
+escalating those would turn every remark into research, which is its
+own failure.
+
 If you actually NEED tools (saving or remembering a fact/preference
 — `запомни` / `сохрани` / remember / save persist to memory and
 REQUIRE a tool, file operations, settings changes, external lookups,
