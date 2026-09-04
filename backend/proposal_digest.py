@@ -20,6 +20,7 @@ WHAT to say. `channels.py` owns chat ids, bots and buttons.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # Kept equal to FIRE_STALE_PROPOSALS' own window. Imported rather than
@@ -54,6 +55,37 @@ def days_left(created: str, now: datetime, stale_days: int = DEFAULT_STALE_DAYS
     return round((dt + timedelta(days=stale_days) - now).total_seconds() / 86400, 1)
 
 
+# Repo root, so a proposal's target can be checked against the file it
+# names. Overridden in tests.
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def still_applicable(proposal: Any) -> bool:
+    """Could this proposal still land if the owner approved it now?
+
+    Asked when the digest is built rather than stored, so a proposal
+    becomes offerable again if the file goes back to what it was.
+
+    A proposal whose `old_code` has left the file cannot apply -- the
+    approval buys the owner a red "old_code not found" and nothing else.
+    Three were queued on 2026-09-04 in exactly that state, on code their
+    own siblings had already rewritten.
+
+    Anything that cannot be judged -- no diff yet, unreadable file -- is
+    offered. Hiding work because a check failed is worse than showing one
+    that turns out to be stale.
+    """
+    old = (getattr(proposal, "old_code", "") or "").strip()
+    module = str(getattr(proposal, "module", "") or "")
+    if not old or not module:
+        return True
+    try:
+        text = (Path(ROOT) / module).read_text(encoding="utf-8")
+    except Exception:
+        return True
+    return old in text
+
+
 def pending_for_digest(proposals: Iterable[Any], now: Optional[datetime] = None,
                        stale_days: int = DEFAULT_STALE_DAYS) -> list[Any]:
     """Pending proposals, soonest to expire first.
@@ -62,7 +94,9 @@ def pending_for_digest(proposals: Iterable[Any], now: Optional[datetime] = None,
     useful: the top of the list is what you lose first.
     """
     now = now or datetime.now()
-    out = [p for p in proposals if getattr(p, "status", "") == "pending"]
+    out = [p for p in proposals
+           if getattr(p, "status", "") == "pending"
+           and still_applicable(p)]
 
     def key(p: Any) -> tuple[int, float]:
         d = days_left(getattr(p, "created", "") or "", now, stale_days)

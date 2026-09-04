@@ -133,3 +133,58 @@ def test_the_owner_is_told_it_was_already_done_not_that_it_failed(
     assert "may have changed" not in msg
     late = next(p for p in sm._proposals if p.id == pid)
     assert late.status == "superseded"
+
+
+# --- and never ask for an approval that cannot land -------------------
+
+
+class _P:
+    def __init__(self, pid, module, old_code, created="2026-09-01 10:00:00"):
+        self.id = pid
+        self.module = module
+        self.old_code = old_code
+        self.new_code = "whatever"
+        self.status = "pending"
+        self.created = created
+        self.title = pid
+
+
+def test_a_proposal_whose_target_is_gone_is_not_offered(tmp_path, monkeypatch):
+    """Three proposals still queued on 2026-09-04 target code that is no
+    longer in verifier.py -- their siblings changed that region. Each
+    would cost the owner an approval and answer with a red failure.
+
+    Applicability is checked when the digest is built, not stored, so a
+    proposal becomes offerable again if the file goes back."""
+    from backend import proposal_digest as pd
+
+    src = tmp_path / "backend" / "verifier.py"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text("def f():\n    return STILL_HERE\n", encoding="utf-8")
+    monkeypatch.setattr(pd, "ROOT", tmp_path, raising=False)
+
+    live = _P("live", "backend/verifier.py", "    return STILL_HERE")
+    gone = _P("gone", "backend/verifier.py", "    return LONG_REMOVED")
+
+    ids = [p.id for p in pd.pending_for_digest([live, gone])]
+    assert ids == ["live"]
+
+
+def test_a_proposal_with_no_diff_yet_is_still_offered(tmp_path, monkeypatch):
+    """`propose()` files a request before the diff exists. Nothing to
+    check against, so nothing to hide."""
+    from backend import proposal_digest as pd
+
+    monkeypatch.setattr(pd, "ROOT", tmp_path, raising=False)
+    nodiff = _P("nodiff", "backend/verifier.py", "")
+    assert [p.id for p in pd.pending_for_digest([nodiff])] == ["nodiff"]
+
+
+def test_a_missing_file_does_not_hide_the_proposal(tmp_path, monkeypatch):
+    """Cannot read it, cannot judge it -- show it rather than silently
+    dropping work."""
+    from backend import proposal_digest as pd
+
+    monkeypatch.setattr(pd, "ROOT", tmp_path, raising=False)
+    p = _P("x", "backend/nowhere.py", "something")
+    assert [q.id for q in pd.pending_for_digest([p])] == ["x"]
