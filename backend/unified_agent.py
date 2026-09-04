@@ -1987,6 +1987,61 @@ def _append_open_status(answer: str, tag: str) -> str:
     )
 
 
+_CLAIMS_JUDGE_SYSTEM = """You read an assistant's answer and find the
+factual claims in it that a reader could check against a source, and that
+the assistant did NOT check before writing.
+
+Return strictly JSON: {"claims": ["...", "..."]}  — the claim TEXT,
+quoted from the answer, at most three, most load-bearing first.
+
+A claim qualifies only if ALL of these hold:
+- it states something about the world that could be right or wrong
+- getting it wrong would matter to the person who asked
+- a search or a document could settle it
+
+Return an EMPTY list for: greetings and small talk; opinions, advice and
+judgement calls; anything the answer already marks as uncertain; claims
+about the user's own world (their name, files, settings, machines, past
+messages), which memory covers rather than the web; arithmetic and
+reasoning the answer performs in front of the reader; and general
+procedure that no source would state more precisely than the answer does.
+
+Names, numbers, prices, versions, dates, and "X exists / is called Y"
+almost always qualify. Being fluent is not being checked."""
+
+
+def _claims_judge_call(task: str, answer: str) -> dict:
+    """One cheap classification. Separated so tests can make it fail."""
+    from .llm import router, TaskType
+    return router().call_json(
+        TaskType.CLASSIFICATION,
+        _CLAIMS_JUDGE_SYSTEM,
+        "QUESTION:" + chr(10) + (task or "")[:1500] + chr(10) + chr(10)
+        + "ANSWER:" + chr(10) + (answer or "")[:4000],
+        max_tokens=300,
+        temperature=0.0,
+    )
+
+
+def _ungrounded_factual_claims(task: str, answer: str) -> list:
+    """Checkable claims the turn asserted without consulting anything.
+
+    Fails OPEN. A judge that is unavailable must not block the turn: an
+    unchecked answer is worth more than no answer, and this whole path
+    exists to improve an answer that already exists.
+    """
+    if not (answer or "").strip():
+        return []
+    try:
+        data = _claims_judge_call(task, answer) or {}
+        claims = data.get("claims") if isinstance(data, dict) else None
+        out = [str(c).strip() for c in (claims or []) if str(c).strip()]
+        return out[:3]
+    except Exception as exc:
+        log.debug("claims judge unavailable: %s", exc)
+        return []
+
+
 def _decide_self_correction(
     *,
     task: str,
@@ -2192,6 +2247,33 @@ def _decide_self_correction(
     if not turn_tools:
         claim = unbacked_action_claim(task, answer, [])
         if not claim:
+            # (C) The turn asserted checkable facts and consulted nothing.
+            # `should_verify` cannot catch this -- it returns False with no
+            # tool outputs, so a weights-only answer is never verified at
+            # all. Deciding to search BEFORE the draft asks the model what
+            # it does not know, which it answers inconsistently (measured:
+            # the same question gave escalate, escalate, answer-directly).
+            # After the draft the question is answerable.
+            ungrounded = _ungrounded_factual_claims(task, answer)
+            if ungrounded:
+                _quoted = chr(10).join("  - " + c for c in ungrounded)
+                corrective = (
+                    "Your previous answer stated these as fact, and this "
+                    "turn checked none of them:" + chr(10) + chr(10)
+                    + _quoted + chr(10) + chr(10)
+                    + "You wrote them from memory. Fluent is not checked, "
+                      "and a name, a number or an X-is-called-Y is exactly "
+                      "what memory gets confidently wrong." + chr(10) + chr(10)
+                    + "Look them up NOW -- search_knowledge for what you have "
+                      "already learned, web_search / fetch_url for the rest, "
+                      "preferring a primary source over an aggregator -- and "
+                      "then answer with what you found." + chr(10) + chr(10)
+                    + "If a source cannot settle one of them, say so plainly in "
+                      "the answer instead of asserting it. An honest \"I could "
+                      "not verify this\" is a better answer than a confident "
+                      "guess; do not simply repeat the claim."
+                )
+                return (f"ungrounded claims — {len(ungrounded)}", corrective)
             return "", ""
         corrective = (
             f'Your previous answer claimed: "{claim}". But you called no '
