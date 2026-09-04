@@ -289,6 +289,55 @@ class SelfModifier:
         return any((p.title or "").strip().lower() == t
                    for p in self._pending_for_module(module))
 
+    def _applied_twin(self, module: str, old_code: str,
+                      exclude_id: str = ""):
+        """An already-applied proposal that changed this same code."""
+        target = (old_code or "").strip()
+        if not target:
+            return None
+        for p in self._proposals:
+            if p.id == exclude_id or p.module != module:
+                continue
+            if p.status == "applied" and (p.old_code or "").strip() == target:
+                return p
+        return None
+
+
+    def _targets_settled_code(self, module: str, old_code: str,
+                              new_code: str = "") -> bool:
+        """Is this exact change already queued or already made?
+
+        Dedup was by title, and titles are prose: "Avoid scanning every
+        answer identifier FOR every tool-output line" and "...AGAINST
+        every tool-output line" are the same change with different
+        wording, and both were queued. Four proposals ended up aimed at
+        one loop in verifier.py; one was applied and the next two told
+        the owner "Apply failed -- old_code not found" eleven days later
+        (2026-09-04). What a change TARGETS is exact where its title is
+        not.
+
+        Rejected proposals do not block: the owner said no to that
+        attempt, not to the idea.
+
+        An insertion point is exempt. The lessons module is a single
+        anchor line that every new rule is added above -- 22 proposals
+        share that old_code and all 22 are legitimate, because they are
+        additive: the anchor survives inside new_code. A replacement does
+        not carry its target forward, and that is the difference.
+        """
+        target = (old_code or "").strip()
+        if not target:
+            return False
+        if target in (new_code or ""):
+            return False           # additive: the same anchor, again
+        for p in self._proposals:
+            if p.module != module or p.status not in ("pending", "applied"):
+                continue
+            if (p.old_code or "").strip() == target:
+                return True
+        return False
+
+
     def analyze_module(self, module_name: str) -> list[Proposal]:
         """Read a backend module and propose improvements."""
         # Resolve module file
@@ -492,6 +541,23 @@ class SelfModifier:
                     continue
                 match_count = current.count(old_c)
                 if match_count == 0:
+                    # Before calling this a failure, ask whether another
+                    # proposal already made this change. Four proposals
+                    # were once generated against one loop in verifier.py;
+                    # the first was applied and the next two told the owner
+                    # "Apply failed -- code may have changed" eleven days
+                    # later (2026-09-04). Nothing had broken, and a message
+                    # that reads like a defect sends him looking for one.
+                    twin = self._applied_twin(module, old_c, proposal.id)
+                    if twin is not None:
+                        proposal.status = "superseded"
+                        proposal.review_note += (
+                            f" | already done by {twin.id}")
+                        self._save()
+                        return {"ok": False, "message": (
+                            f"Already done: proposal {twin.id} "
+                            f"({twin.title[:60]}) made this same change to "
+                            f"{module}. Nothing left to apply.")}
                     proposal.status = "failed"
                     proposal.review_note += f" | old_code not found in {module}"
                     self._save()
@@ -1067,9 +1133,16 @@ def propose_with_diff(
         raw_tests = [raw_tests]
 
     _title = imp.get("title", description[:80] or "(no title)")
-    if SELF_MODIFIER._is_dupe_pending(f"backend/{module_name}", _title):
+    _module_path = f"backend/{module_name}"
+    if SELF_MODIFIER._is_dupe_pending(_module_path, _title):
         log.info("propose_with_diff: duplicate pending %r — not re-adding",
                  _title)
+        return None
+    # Titles are prose and the near-duplicates differ in a word. What the
+    # change targets is exact.
+    if SELF_MODIFIER._targets_settled_code(_module_path, old_code, new_code):
+        log.info("propose_with_diff: %s already queued or applied for the "
+                 "same code — not re-adding %r", _module_path, _title)
         return None
     proposal = Proposal(
         module=f"backend/{module_name}",
