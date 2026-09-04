@@ -57,6 +57,62 @@ DEFAULT_OPENAI_TTS_VOICE = "alloy"
 _CYRILLIC_RE = re.compile(r"[А-яЁё]")
 
 
+# Scripts a voice has to match to be able to read the text at all. Keyed
+# by the language tag that every voice name carries, so the rule comes
+# from the voice itself rather than from a list someone has to remember
+# to extend.
+_SCRIPT_LANGS = (
+    ("armenian", "hy", re.compile(r"[԰-֏]")),
+    ("cyrillic", "ru", re.compile(r"[Ѐ-ӿ]")),
+    ("greek", "el", re.compile(r"[Ͱ-Ͽ]")),
+    ("hebrew", "he", re.compile(r"[֐-׿]")),
+    ("arabic", "ar", re.compile(r"[؀-ۿ]")),
+    ("georgian", "ka", re.compile(r"[Ⴀ-ჿ]")),
+)
+_LETTER_RE = re.compile(r"[^\W\d_]", re.UNICODE)
+
+
+def _language_not_covered(text: str, voice: Optional[str]) -> Optional[str]:
+    """A plain reason when the voice in use cannot read this script.
+
+    Prod 2026-09-03: an Armenian answer came back as "synthesize via
+    edge_tts failed: No audio was received. Please verify that your
+    parameters are correct." The parameters were correct. Measured the
+    next day: edge-tts publishes 322 voices and not one is Armenian, and
+    the local Piper has only en_US and ru_RU installed. Telling the owner
+    to check settings that are right sends him looking for a fault that
+    is not there.
+
+    Only consulted after synthesis has already failed, so a wrong answer
+    here costs a worse message and nothing else.
+
+    Returns None when it cannot tell: no voice name, no text, a script it
+    does not track, or a voice whose language already matches.
+    """
+    body = (text or "").strip()
+    name = (voice or "").strip()
+    if not body or not name:
+        return None
+    letters = _LETTER_RE.findall(body)
+    if not letters:
+        return None
+    # The voice's language tag: "en-US-AriaNeural" and "ru_RU-irina-medium"
+    # both start with it.
+    tag = re.split(r"[-_]", name, maxsplit=1)[0].lower()
+    for label, lang, pattern in _SCRIPT_LANGS:
+        hits = pattern.findall(body)
+        # A dominant script, not merely a present one: a Russian sentence
+        # with one Armenian word in it synthesizes fine (measured).
+        if len(hits) * 2 <= len(letters):
+            continue
+        if tag == lang:
+            return None
+        return (f"no installed voice can speak {label.capitalize()} — the "
+                f"voice in use is {name}. The text was left unspoken; "
+                f"nothing is misconfigured.")
+    return None
+
+
 def _pick_voice(text: str, *, default: str, ru: Optional[str] = None) -> str:
     """Choose Piper voice name based on the text's script.
     Currently only Russian needs explicit handling — the agent's
@@ -229,8 +285,24 @@ def convert_wav_to_telegram_voice(wav_bytes: bytes) -> tuple[bytes, str]:
 
 
 def _config_path() -> Path:
-    from .config import CONFIG
-    return Path(CONFIG.knowledge["base_dir"]) / "tts_config.json"
+    """Where tts_config.json lives.
+
+    Resolved through `paths.knowledge_dir()`, which re-reads
+    HRANT_DATA_DIR on every call, rather than through
+    `CONFIG.knowledge["base_dir"]`, which is fixed at import. Both give
+    the same directory in production -- checked on the box 2026-09-04 --
+    but only one of them can be redirected by a test.
+
+    That difference had a cost. `test_load_config_tolerates_invalid_json`
+    writes the string "garbage {" to this path after setting
+    HRANT_DATA_DIR to a tmp dir, and the env var did not reach here, so
+    the write landed in the REAL data directory. Prod's tts_config.json
+    has been exactly those nine bytes since 2026-08-07 14:11, which is
+    when someone ran the suite on the box: the owner's configured voices
+    were destroyed and TTS has been running on defaults ever since.
+    """
+    from .paths import knowledge_dir
+    return knowledge_dir() / "tts_config.json"
 
 
 def load_config() -> dict:
@@ -309,7 +381,13 @@ class Synthesizer:
             if self._backend == "openai_tts":
                 return self._tx_openai_tts(text, voice=voice)
         except Exception as e:
-            self._last_error = f"synthesize via {self._backend} failed: {e}"
+            # Name the real reason when there is one. The provider's own
+            # wording ("verify that your parameters are correct") sends
+            # the owner to check settings that are already right.
+            unspeakable = _language_not_covered(text, voice or self._voice)
+            self._last_error = (
+                unspeakable
+                or f"synthesize via {self._backend} failed: {e}")
             log.warning("tts synthesize failed: %s", e)
             return None
         return None
