@@ -2213,6 +2213,57 @@ def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
     return None
 
 
+# How long a delivery covers the turns that follow it. A confirmation
+# lands seconds later; anything longer is a new request.
+_EXCHANGE_WINDOW_SECONDS = 300.0
+
+# speaker_id -> (when, execute-class tools used). In memory on purpose:
+# it only has to survive between two consecutive turns, and a restart
+# losing it costs one corrective, not correctness.
+_LAST_DELIVERY: dict = {}
+
+
+def note_delivery(speaker_id: str, tool_names: list) -> None:
+    """Record that this turn actually changed something.
+
+    Called once per turn. Only execute-class tools count -- two read-only
+    turns in a row is the failure the gate exists for, and must stay one.
+    """
+    sid = str(speaker_id or "").strip()
+    if not sid:
+        return
+    try:
+        from .endpoint_check import _DELIVERY_TOOLS as _EXEC
+    except Exception:
+        return
+    did = [t for t in (tool_names or []) if t in _EXEC]
+    if did:
+        _LAST_DELIVERY[sid] = (_time.time(), did)
+
+
+def _exchange_already_delivered(speaker_id: str) -> bool:
+    """Did the turn just before this one do the thing being confirmed?
+
+    Prod 2026-09-03: the todo and its reminder were created at 16:34:37
+    and the turn at 16:35:17 -- the owner saying "yes, at twelve" and the
+    agent confirming -- was reported NOT DONE, telling him to distrust a
+    report that was true. The gate asked "did THIS turn deliver?" when
+    the honest question spans the exchange.
+
+    Spent on use, so it covers the confirmation and not the turn after
+    that. Bounded by `_EXCHANGE_WINDOW_SECONDS`, so delivering once and
+    coasting stays impossible.
+    """
+    sid = str(speaker_id or "").strip()
+    if not sid:
+        return False
+    entry = _LAST_DELIVERY.pop(sid, None)
+    if not entry:
+        return False
+    when, _tools = entry
+    return (_time.time() - when) <= _EXCHANGE_WINDOW_SECONDS
+
+
 def _decide_self_correction(
     *,
     task: str,
@@ -2461,6 +2512,14 @@ def _decide_self_correction(
         return "", ""
     if endpoint_met(task=task, answer=answer, tool_names=turn_tools,
                     tool_results=_turn_tool_results(trace)):
+        return "", ""
+    # The exchange, not the turn. Prod 2026-09-03: the todo and its
+    # reminder were created at 16:34:37 and the turn at 16:35:17 -- the
+    # owner saying "yes, at twelve", the agent confirming -- was reported
+    # NOT DONE, which told him to distrust a report that was true. Spent
+    # on use and time-bounded, so delivering once and coasting is still
+    # impossible.
+    if _exchange_already_delivered(speaker_id):
         return "", ""
     shown = ", ".join(turn_tools[:6])
     if len(turn_tools) > 6:
@@ -4129,6 +4188,9 @@ def run_unified(
         _last_tag = ""
         for _round in range(2):
             _turn_tools = _turn_tool_names(agent)
+            # Remember an actual delivery so the confirmation that follows
+            # it is not judged as if nothing had happened.
+            note_delivery(speaker_id, _turn_tools)
             _correction_tag, _corrective = _decide_self_correction(
                 task=task,
                 answer=answer,
