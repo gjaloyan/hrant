@@ -47,7 +47,14 @@ Rules:
 - Attribute correctly. A name the user uses FOR the agent is not the
   user's own name, and a person the user mentions is not the user.
   If a fact is about who someone is, say whose name it is.
-- Do not restate a fact the profile already carries in other words."""
+- Do not restate a fact the profile already carries in other words.
+- For every durable fact give `grounding`, one of:
+    user_stated        - the user said it about themselves or their world
+    tool_observed      - it came from a tool result in the transcript
+    assistant_asserted - the assistant said it without showing evidence
+  Where a fact came from decides how much later turns may lean on it.
+  If you cannot tell, omit the field rather than guessing.
+"""
 
 DEFAULT_SESSIONS_PATH = Path("knowledge/sessions.json")
 DEFAULT_USER_MD_PATH = Path("knowledge/identity/user.md")
@@ -66,6 +73,10 @@ try:
 except Exception:  # pragma: no cover - pipeline import optional in tests
     DEDUP_WINDOW = 5000
 CONFIDENCE_THRESHOLD = 0.8
+
+# The only values a reader may switch on. Anything else the extractor
+# coins is recorded as "unknown" rather than passed through.
+_GROUNDINGS = ("user_stated", "tool_observed", "assistant_asserted")
 
 
 class FIRE_MEMORY_CONSOLIDATION(Lever):
@@ -301,6 +312,13 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
                     continue
                 entry = {
                     "summary": summary,
+                    # Where the claim came from. Missing or unrecognised stays
+                    # "unknown": promoting an unlabelled row to evidence is how
+                    # "Пользователя зовут Hrant" became something the agent
+                    # answered with (2026-09-03).
+                    "grounding": (str(raw.get("grounding") or "").strip().lower()
+                                  if str(raw.get("grounding") or "").strip().lower()
+                                  in _GROUNDINGS else "unknown"),
                     "triples": [list(t) for t in raw.get("triples", []) if isinstance(t, (list, tuple)) and len(t) >= 3],
                     "tags": list(raw.get("tags", []) or []),
                     "category": str(raw.get("category", "general")),

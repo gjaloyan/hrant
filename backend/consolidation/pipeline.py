@@ -300,7 +300,8 @@ def _near_duplicate(text: str) -> bool:
 
 
 def _append_memory_fact(text: str, category: str, confidence: float,
-                       topics: list[str], date_str: str) -> None:
+                       topics: list[str], date_str: str,
+                       grounding: str = "unknown") -> None:
     """Append one row to `memory_facts.jsonl`, shape compatible
     with the existing autonomic lever. Rotates the file when it
     exceeds _MEMORY_FACTS_ROTATE_LINES so the dedup scan stays
@@ -317,6 +318,13 @@ def _append_memory_fact(text: str, category: str, confidence: float,
         "confidence": float(confidence),
         "ts": time.time(),
         "source_turn": f"consolidation:{date_str}",
+        # Where the claim came from. Two writers share this store, and a
+        # field only one of them sets is a field nothing can rely on.
+        # "unknown" is the honest default: an unlabelled row must not be
+        # promoted to evidence.
+        "grounding": (grounding if grounding in
+                      ("user_stated", "tool_observed", "assistant_asserted")
+                      else "unknown"),
         # Which code path produced this row (2026-08-10). Until now the store
         # had NO writer attribution: the daily pipeline and the autonomic
         # lever both append here in shapes that differ only by which optional

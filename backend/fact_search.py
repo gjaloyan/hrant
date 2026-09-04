@@ -370,6 +370,11 @@ def search_facts(query: str, limit: int = 5,
                 "source_turn": row.get("source_turn"),
                 "speaker_id": row.get("speaker_id"),
                 "tags": row.get("tags") or [],
+                # Where the claim came from. A field the writer sets and
+                # the reader drops protects nobody, and rows written
+                # before it existed are unlabelled rather than trusted.
+                "grounding": (row.get("grounding")
+                              or "unknown"),
             })
             if len(out) >= limit_n:
                 return out

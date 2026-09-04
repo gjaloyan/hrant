@@ -431,6 +431,10 @@ def _search_knowledge_handler(query: str, limit: int = 5) -> str:
                 "ts": f.get("ts"),
                 "tags": f.get("tags") or [],
                 "source": "fact",
+                # Where the claim came from. "assistant_asserted" means an
+                # earlier turn said it without showing evidence -- memory
+                # storing it does not make it checked.
+                "grounding": f.get("grounding") or "unknown",
             })
     except Exception as e:
         out.append({"source": "facts_error", "error": str(e)})
@@ -3084,6 +3088,7 @@ def _recall_facts_handler(query: str = "", limit: int = 8) -> str:
                     "score": round(float(hit.get("score") or 0.0), 3),
                     "category": hit.get("category") or "",
                     "learned": str(hit.get("ts") or "")[:19],
+                    "grounding": hit.get("grounding") or "unknown",
                 })
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)},
@@ -4047,6 +4052,14 @@ def register_builtin_tools() -> None:
             "the facts that bear on it, most relevant first. An empty "
             "result means nothing is stored on that subject -- say so; "
             "do not fill the gap by inference."
+            + chr(10) + chr(10) +
+            "Every fact carries `grounding`: user_stated (the owner said "
+            "it), tool_observed (a tool showed it), assistant_asserted (an "
+            "earlier turn said it with nothing to back it), unknown (stored "
+            "before this was recorded). The last two are not evidence -- "
+            "memory holding a claim does not make it checked, and this is "
+            "how the agent came to answer with its own name when asked for "
+            "its owner's. Check them before leaning on them."
             + chr(10) + chr(10) +
             "This reads the profile store that `save_user_fact` writes. "
             "For notes and documents use `search_knowledge` instead."
