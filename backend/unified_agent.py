@@ -2042,29 +2042,78 @@ def _ungrounded_factual_claims(task: str, answer: str) -> list:
         return []
 
 
-def _fast_answer_stands(*, task: str, answer: str, agent) -> bool:
-    """May the cheap lane's answer be served as it is?
+# How many claims the lane will chase before giving up and handing over.
+# A cap, or one verbose answer becomes eight searches.
+_LANE_MAX_CLAIMS = 2
 
-    The lane decides whether to hand over BEFORE it writes, and decides
-    it inconsistently -- three runs of one question gave escalate,
-    escalate, answer-directly (2026-09-04). So its judgement cannot be
-    the last word on whether an answer was checkable.
 
-    Checked after the draft it does not have to be. An answer that
-    asserts facts nothing looked up goes to the full agent, which has
-    tools, and the claims travel with it so that turn knows what to
-    settle.
+def _web_search_for_lane(query: str, max_results: int = 4) -> str:
+    """The search itself, behind a name tests can replace."""
+    from .builtin_tools import _web_search_handler
+    return _web_search_handler(query, max_results)
 
-    Fails open, like everything on this path: losing a cheap answer to a
-    downed provider is worse than serving one unchecked.
+
+def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
+                        snapshot: str, convo: str):
+    """Let the cheap lane settle its own claims instead of paying for a
+    full turn.
+
+    Handing over on any unchecked claim was correct and expensive:
+    measured 2026-09-04, a factual question went from ~40k tokens to
+    ~193k-320k, five to eight times. The lane's defect was never that it
+    was the wrong lane -- it was that it had no tools at all.
+
+    By the time the claims are known there is nothing left to guess. The
+    judge has already named what needs settling, so the search is
+    targeted rather than composed blind, and the redraft goes through
+    `_try_chat_path` again so the lane's own rules and its ESCALATE
+    contract apply unchanged.
+
+    Returns the answer to serve, or None to fall through to the full
+    agent. Fails CLOSED, unlike the judge: this draft is already known to
+    contain unchecked claims, so serving it because a search broke would
+    be the old behaviour with extra steps.
     """
     claims = _ungrounded_factual_claims(task, answer)
     if not claims:
-        return True
+        return answer
+
+    try:
+        found = []
+        for claim in claims[:_LANE_MAX_CLAIMS]:
+            hit = (_web_search_for_lane(claim) or "").strip()
+            if hit and hit not in ("[]", "{}"):
+                found.append("CLAIM: " + claim + chr(10) + hit[:2000])
+        if not found:
+            raise RuntimeError("nothing came back")
+
+        evidence = ("# WHAT A SEARCH RETURNED FOR THIS ANSWER" + chr(10) + chr(10)
+                    + "Your draft stated these without checking them. Answer "
+                    + "from what is below, and where it does not settle a "
+                    + "claim, say so plainly instead of repeating the claim."
+                    + chr(10) + chr(10)
+                    + (chr(10) + chr(10)).join(found))
+        redraft = _try_chat_path(
+            task=task, agent=agent, speaker_id=speaker_id,
+            snapshot=(snapshot + chr(10) + chr(10) + evidence
+                      if snapshot else evidence),
+            convo=convo,
+        )
+        if redraft:
+            try:
+                agent.progress("chat_fast_path",
+                               "grounded %d claim(s) in the lane" % len(found))
+            except Exception:
+                pass
+            return redraft
+        raise RuntimeError("redraft declined")
+    except Exception as exc:
+        log.debug("lane grounding fell through: %s", exc)
+
     try:
         agent._escalated_because = (
-            "the quick answer asserted this without checking: "
-            + "; ".join(claims)[:300])
+            "the quick answer asserted this without checking, and the lane "
+            "could not settle it: " + "; ".join(claims)[:300])
     except Exception:
         pass
     try:
@@ -2073,7 +2122,7 @@ def _fast_answer_stands(*, task: str, answer: str, agent) -> bool:
                        % len(claims))
     except Exception:
         pass
-    return False
+    return None
 
 
 def _decide_self_correction(
@@ -2961,10 +3010,17 @@ def run_unified(
         # The lane guessed before writing; this asks after. An answer
         # that states facts nothing checked is not served -- it falls
         # through to the agent that has tools.
-        if chat_answer is not None and not _fast_answer_stands(
-            task=task, answer=chat_answer, agent=agent,
-        ):
-            chat_answer = None
+        if chat_answer is not None:
+            # The lane guessed before writing; this asks after — and now
+            # it can go and settle what it asserted rather than handing
+            # the whole turn to the full agent.
+            chat_answer = _ground_fast_answer(
+                task=task, answer=chat_answer, agent=agent,
+                speaker_id=speaker_id,
+                snapshot=(snapshot + chr(10) + chr(10) + yesterday
+                          if yesterday else snapshot),
+                convo=convo,
+            )
         if chat_answer is not None:
             # Fast-path turn — still write a minimal artifact under
             # workspace/turns/<id>.json so every turn has an audit
