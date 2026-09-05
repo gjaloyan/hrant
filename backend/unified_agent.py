@@ -1012,6 +1012,46 @@ def _turn_tool_results(trace, limit: int = 6,
     return [(name, res) for _, name, res in keep]
 
 
+def _turn_skill_names(agent) -> list:
+    """Skills this turn loaded, in the order it loaded them.
+
+    Read off the `load_skill` calls in the trace rather than tracked
+    separately -- the trace already carries the tool name and its
+    arguments, so there is nothing to keep in sync.
+
+    Recorded on the turn artifact because nothing did. Six skills are
+    installed and there was no way to tell whether any of them helps:
+    the artifact held `n_tool_calls` and not which tools, let alone which
+    skills. `superpowers` answers the same question with drill evals,
+    which need an LLM turn apiece; an agent already handling real traffic
+    can just measure the turns that happened, once they say what they
+    used.
+
+    Never raises. A statistic must not be able to break a turn.
+    """
+    out: list = []
+    try:
+        steps = getattr(agent, "_trace", None) or []
+    except Exception:
+        return out
+    for step in steps:
+        tc = getattr(step, "tool_call", None)
+        if tc is None:
+            continue
+        name = getattr(tc, "name", None)
+        if name is None and isinstance(tc, dict):
+            name = tc.get("name")
+        if name != "load_skill":
+            continue
+        args = getattr(tc, "args", None)
+        if args is None and isinstance(tc, dict):
+            args = tc.get("args")
+        skill = str((args or {}).get("name") or "").strip()
+        if skill and skill not in out:
+            out.append(skill)
+    return out
+
+
 def _turn_tool_names(agent) -> list[str]:
     """Names of tools actually called this turn, read from the trace."""
     out: list[str] = []
@@ -3203,6 +3243,10 @@ def run_unified(
                     "level": "L0_CHAT",
                     "token_usage": tu_now,
                     "n_tool_calls": 0,
+                    # Present and empty rather than absent: a reader that
+                    # has to special-case half the turns gets it wrong.
+                    "tools_used": [],
+                    "skills_used": [],
                     "n_llm_calls": tu_now.get("llm_calls", 1) if isinstance(tu_now, dict) else 1,
                     "thinking_trace": [],
                     "llm_calls": [],
@@ -4638,6 +4682,11 @@ def run_unified(
             "session_key": skey,
             "token_usage": tu.model_dump() if tu else None,
             "n_tool_calls": n_tools,
+            # WHICH tools and skills, not just how many. Counting alone
+            # made two measurements impossible on 2026-09-04 and left no
+            # way to ask whether a skill helps.
+            "tools_used": _turn_tool_names(agent),
+            "skills_used": _turn_skill_names(agent),
             # Audit follow-up — `len(agent._llm_calls)` lied: the
             # unified turn records ONE super-call but the underlying
             # `call_with_tools` may have done 5-15 actual LLM
