@@ -67,3 +67,47 @@ def test_it_survives_a_trace_it_cannot_read():
             raise RuntimeError("gone")
 
     assert ua._turn_skill_names(_Broken()) == []
+
+
+def test_a_tool_call_is_counted_once_not_twice():
+    """The trace emits `tool_starting` AND `tool` for every call, and
+    `_turn_tool_names` counted both.
+
+    Live turn 2026-09-05: `n_tool_calls` said 10 while `tools_used`
+    listed 20. The count is not decoration — it goes into the corrective
+    the model reads ("your previous turn called N tool(s)") and into the
+    line the OWNER reads ("toolful no-deliver — 2 read-only tools"),
+    which was one call. `n_tool_calls` has always filtered on the result
+    events; this now agrees with it.
+    """
+    trace = [
+        ThinkingStep(event="tool_starting", message="",
+                     tool_call=ToolCallDetail(name="web_search")),
+        ThinkingStep(event="tool", message="",
+                     tool_call=ToolCallDetail(name="web_search")),
+        ThinkingStep(event="tool_starting", message="",
+                     tool_call=ToolCallDetail(name="fetch_url")),
+        ThinkingStep(event="tool_error", message="",
+                     tool_call=ToolCallDetail(name="fetch_url")),
+    ]
+    assert ua._turn_tool_names(_Agent(trace)) == ["web_search", "fetch_url"]
+
+
+def test_a_failed_call_still_counts():
+    """`tool_error` is a call that happened. Dropping it would let a turn
+    that tried and failed look like a turn that never tried."""
+    trace = [ThinkingStep(event="tool_error", message="",
+                          tool_call=ToolCallDetail(name="terminal_exec"))]
+    assert ua._turn_tool_names(_Agent(trace)) == ["terminal_exec"]
+
+
+def test_skills_are_counted_off_completed_loads_too():
+    trace = [
+        ThinkingStep(event="tool_starting", message="",
+                     tool_call=ToolCallDetail(name="load_skill",
+                                              args={"name": "calc"})),
+        ThinkingStep(event="tool", message="",
+                     tool_call=ToolCallDetail(name="load_skill",
+                                              args={"name": "calc"})),
+    ]
+    assert ua._turn_skill_names(_Agent(trace)) == ["calc"]

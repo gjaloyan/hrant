@@ -1038,6 +1038,8 @@ def _turn_skill_names(agent) -> list:
         tc = getattr(step, "tool_call", None)
         if tc is None:
             continue
+        if getattr(step, "event", "") not in _COMPLETED_TOOL_EVENTS():
+            continue
         name = getattr(tc, "name", None)
         if name is None and isinstance(tc, dict):
             name = tc.get("name")
@@ -1052,12 +1054,33 @@ def _turn_skill_names(agent) -> list:
     return out
 
 
+def _COMPLETED_TOOL_EVENTS() -> tuple:
+    """Trace events that mean a call HAPPENED.
+
+    The trace emits `tool_starting` and then `tool` (or `tool_error`) for
+    every call, so counting every step with a tool_call counts each one
+    twice. Live turn 2026-09-05: `n_tool_calls` said 10 while the name
+    list held 20.
+
+    The count is not decoration. It goes into the corrective the model
+    reads ("your previous turn called N tool(s)") and into the line the
+    owner reads ("toolful no-deliver — 2 read-only tools"), which was
+    one call. `n_tool_calls` has always used this filter; everything
+    else now agrees with it. `tool_error` counts: a call that tried and
+    failed happened, and dropping it would make that turn look like one
+    that never tried.
+    """
+    return ("tool", "tool_error")
+
+
 def _turn_tool_names(agent) -> list[str]:
     """Names of tools actually called this turn, read from the trace."""
     out: list[str] = []
     for _step in (getattr(agent, "_trace", None) or []):
         tc = getattr(_step, "tool_call", None)
         if tc is None:
+            continue
+        if getattr(_step, "event", "") not in _COMPLETED_TOOL_EVENTS():
             continue
         name = getattr(tc, "name", None)
         if name is None and isinstance(tc, dict):
