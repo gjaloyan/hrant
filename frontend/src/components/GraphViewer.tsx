@@ -2,14 +2,63 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import ForceGraph2D from "react-force-graph-2d";
 import { forceCollide } from "d3-force";
 import {
-  fetchFullGraph,
-  fetchGraphStats,
-  fetchGraphNeighbors,
-  reindexGraph,
-  GraphStats,
+  fetchKGraphStats,
+  fetchKGraphNode,
+  searchKGraph,
+  rebuildKGraph,
+  KGraphStats,
+  KGraphNeighborhood,
+  KGraphSearchResult,
   FullGraph,
   GraphNeighbor,
 } from "../api";
+
+/* This screen was wired to `/api/graph/*` — the LEGACY knowledge_graph,
+ * whose endpoints answer `{"nodes":[],"links":[]}` and
+ * `{"entities":0,"edges":0}`. So it rendered an empty canvas while the
+ * graph it was meant to show sat under `/api/kgraph/*` with 12,229 nodes
+ * and 21,434 edges (measured 2026-09-05, after the edges finally
+ * persisted). The API bindings for it already existed; nothing had ever
+ * called them.
+ *
+ * It does not load the whole graph. `/api/kgraph` is 4.3 MB and a force
+ * layout of 12k nodes is not a picture of anything. You arrive at a hub
+ * — a top topic or a search hit — and expand outward, which is also how
+ * anyone actually reads a graph.
+ */
+
+const EXPAND_CAP = 40;   // neighbours drawn per expansion
+
+/** One neighbourhood in the shape the canvas already renders. */
+function toCanvas(hood: KGraphNeighborhood): FullGraph {
+  const nodes = [
+    { id: hood.node.id, name: hood.node.label, connections: hood.neighbor_count },
+  ];
+  const links: FullGraph["links"] = [];
+  for (const n of (hood.neighbors || []).slice(0, EXPAND_CAP)) {
+    nodes.push({ id: n.node.id, name: n.node.label, connections: 1 });
+    links.push({
+      source: n.edge.source,
+      target: n.edge.target,
+      relation: n.edge.kind,
+      note: n.node.kind,
+      weight: n.edge.weight ?? 1,
+    });
+  }
+  return { nodes, links };
+}
+
+/** Merge an expansion into what is already on screen, without duplicates. */
+function mergeGraph(base: FullGraph, add: FullGraph): FullGraph {
+  const byId = new Map(base.nodes.map((n) => [n.id, n]));
+  for (const n of add.nodes) if (!byId.has(n.id)) byId.set(n.id, n);
+  const key = (l: FullGraph["links"][number]) =>
+    `${l.source}|${l.target}|${l.relation}`;
+  const seen = new Set(base.links.map(key));
+  const links = [...base.links];
+  for (const l of add.links) if (!seen.has(key(l))) { seen.add(key(l)); links.push(l); }
+  return { nodes: [...byId.values()], links };
+}
 
 type NodeObj = {
   id: string;
@@ -44,7 +93,8 @@ function linkId(endpoint: string | NodeObj): string {
 export default function GraphViewer() {
   const containerRef = useRef<HTMLDivElement>(null);
   const graphRef = useRef<any>(null);
-  const [stats, setStats] = useState<GraphStats | null>(null);
+  const [stats, setStats] = useState<KGraphStats | null>(null);
+  const [hits, setHits] = useState<KGraphSearchResult[]>([]);
   const [graphData, setGraphData] = useState<FullGraph>({ nodes: [], links: [] });
   const [selected, setSelected] = useState<NodeObj | null>(null);
   const [neighbors, setNeighbors] = useState<GraphNeighbor[]>([]);
@@ -63,19 +113,34 @@ export default function GraphViewer() {
     setTimeout(() => setMsg(""), 4000);
   };
 
+  /** Draw one node's neighbourhood; `merge` keeps what is already there. */
+  const showNode = useCallback(async (id: string, merge = false) => {
+    try {
+      const hood = await fetchKGraphNode(id);
+      const next = toCanvas(hood);
+      setGraphData((cur) => (merge ? mergeGraph(cur, next) : next));
+      if (!merge) setInitialFit(false);
+    } catch (e: any) {
+      flash("Cannot open that node: " + e.message);
+    }
+  }, []);
+
   const loadGraph = useCallback(async () => {
     setLoading(true);
     setInitialFit(false);
     try {
-      const [s, g] = await Promise.all([fetchGraphStats(), fetchFullGraph()]);
+      const s = await fetchKGraphStats();
       setStats(s);
-      setGraphData(g);
+      // Start at the busiest topic rather than at 12k nodes at once.
+      const start = (s.top_topics || [])[0]?.id;
+      if (start) await showNode(start);
+      else setGraphData({ nodes: [], links: [] });
     } catch (e: any) {
       flash("Error loading graph: " + e.message);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [showNode]);
 
   useEffect(() => {
     loadGraph();
@@ -128,8 +193,12 @@ export default function GraphViewer() {
   const handleReindex = async () => {
     setReindexing(true);
     try {
-      const res = await reindexGraph();
-      flash(`Reindexed: ${res.notes} notes, ${res.triples} triples`);
+      const res = await rebuildKGraph();
+      const st = res.stats || {};
+      flash(
+        `Rebuilt: ${st.facts ?? 0} facts, ${st.topics ?? 0} topics, ` +
+        `${st.edges ?? 0} links`,
+      );
       await loadGraph();
     } catch (e: any) {
       flash("Reindex error: " + e.message);
@@ -143,8 +212,19 @@ export default function GraphViewer() {
     async (node: NodeObj) => {
       setSelected(node);
       try {
-        const res = await fetchGraphNeighbors(node.id);
-        setNeighbors(res.neighbors || []);
+        const hood = await fetchKGraphNode(node.id);
+        // Expanding is how you read a graph: the clicked node's own
+        // neighbours join what is on screen instead of replacing it.
+        setGraphData((cur) => mergeGraph(cur, toCanvas(hood)));
+        setNeighbors(
+          (hood.neighbors || []).slice(0, EXPAND_CAP).map((n) => ({
+            source: n.edge.source,
+            target: n.edge.target,
+            relation: n.edge.kind,
+            note: n.node.label,
+            weight: n.edge.weight ?? 1,
+          })) as GraphNeighbor[],
+        );
       } catch {
         setNeighbors([]);
       }
@@ -311,21 +391,57 @@ export default function GraphViewer() {
 
         {stats && (
           <div className="flex gap-2 text-xs text-ink-dim">
-            <span>{stats.entities} entities</span>
+            <span>{stats.total_nodes.toLocaleString()} nodes</span>
             <span className="text-ink-faint">·</span>
-            <span>{stats.edges} links</span>
+            <span>{stats.total_edges.toLocaleString()} links</span>
             <span className="text-ink-faint">·</span>
-            <span>from {stats.notes_indexed} notes</span>
+            <span>showing {graphData.nodes.length} around {selected?.name
+              ?? stats.top_topics?.[0]?.label ?? "a hub"}</span>
           </div>
         )}
 
-        <input
-          type="search"
-          className="w-48 text-xs"
-          placeholder="Highlight an entity…"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
+        {/* Searches the WHOLE graph, not the handful currently drawn —
+            with 12k nodes, filtering what is on screen finds nothing you
+            did not already have. */}
+        <div className="relative">
+          <input
+            type="search"
+            className="w-56 text-xs"
+            placeholder="Find a topic, entity or fact…"
+            value={filter}
+            onChange={async (e) => {
+              const q = e.target.value;
+              setFilter(q);
+              if (q.trim().length < 2) { setHits([]); return; }
+              try {
+                const r = await searchKGraph(q.trim(), undefined, 8);
+                setHits(r.results || []);
+              } catch { setHits([]); }
+            }}
+          />
+          {hits.length > 0 && (
+            <ul className="absolute z-20 mt-1 max-h-72 w-80 overflow-auto rounded-lg
+                           border border-edge bg-surface shadow-lg">
+              {hits.map((h) => (
+                <li key={h.id}>
+                  <button
+                    className="w-full px-2 py-1.5 text-left hover:bg-surface-hover"
+                    onClick={() => {
+                      setHits([]);
+                      setFilter("");
+                      showNode(h.id);
+                    }}
+                  >
+                    <span className="block truncate text-xs">{h.label}</span>
+                    <span className="block text-[10px] text-ink-faint">
+                      {h.kind} · {h.degree} link{h.degree === 1 ? "" : "s"}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
 
         <label className="flex items-center gap-1 text-xs cursor-pointer select-none">
           <input
@@ -392,19 +508,11 @@ export default function GraphViewer() {
               ref={graphRef}
               width={graphW}
               height={dims.height}
-              graphData={
-                filter.trim()
-                  ? {
-                      nodes: graphData.nodes.filter((n) =>
-                        n.name.toLowerCase().includes(filter.toLowerCase())
-                      ),
-                      links: graphData.links.filter((l) => {
-                        const f = filter.toLowerCase();
-                        return linkId(l.source as any).includes(f) || linkId(l.target as any).includes(f);
-                      }),
-                    }
-                  : graphData
-              }
+              /* No client-side filtering any more. It hid the canvas
+                 while you typed — the match is almost never among the
+                 forty nodes currently drawn — and the box now searches
+                 the whole graph and takes you there instead. */
+              graphData={graphData}
               nodeId="id"
               nodeCanvasObject={nodeCanvasObject as any}
               nodePointerAreaPaint={(node: any, color: string, ctx: CanvasRenderingContext2D) => {
