@@ -151,12 +151,14 @@ def test_adapter_run_posts_task_to_endpoint_and_writes_output(tmp_path, monkeypa
             return self
         async def __aexit__(self, *a):
             return False
-        def post(self, url, json=None, timeout=None):
+        def post(self, url, json=None, timeout=None, headers=None):
             posted["url"] = url
             posted["body"] = json
+            posted["headers"] = headers or {}
             return _FakeResp()
 
     monkeypatch.setattr(aiohttp, "ClientSession", lambda: _FakeClientSession())
+    monkeypatch.setenv("HRANT_EXEC_PROTOCOL_TOKEN", "secret-for-harbor")
 
     agent = mod.HrantAgent(logs_dir=tmp_path)
 
@@ -169,6 +171,9 @@ def test_adapter_run_posts_task_to_endpoint_and_writes_output(tmp_path, monkeypa
     assert posted["body"]["task"] == "solve a thing"
     assert posted["body"]["callback_url"].startswith("http://127.0.0.1:")
     assert "session_id" in posted["body"]
+    # The endpoint requires a bearer since the 2026-09-05 audit; the
+    # adapter has to carry it or every Harbor run 401s.
+    assert posted["headers"]["Authorization"] == "Bearer secret-for-harbor"
     assert (tmp_path / "agent_output.txt").read_text() == "FINAL ANSWER from agent"
 
 
@@ -227,3 +232,35 @@ def test_adapter_callback_forwards_to_environment_exec(tmp_path, monkeypatch):
     assert body["return_code"] == 0
     assert "ls /tmp" in body["stdout"]
     assert env.calls == [{"command": "ls /tmp", "cwd": "", "timeout_sec": 30}]
+
+
+def test_token_falls_back_to_the_repo_env_file(tmp_path, monkeypatch):
+    """A bench run started from a plain shell does not inherit systemd's
+    EnvironmentFile. The adapter reads the same `.env` the gateway does,
+    or it 401s against a correctly configured server."""
+    mod = _import_adapter()
+    monkeypatch.delenv("HRANT_EXEC_PROTOCOL_TOKEN", raising=False)
+
+    import pathlib
+    env_file = pathlib.Path(mod.__file__).resolve().parent.parent / ".env"
+    if env_file.exists():
+        import pytest
+        pytest.skip("refusing to overwrite a real .env")
+    env_file.write_text(
+        "# comment\nOTHER=1\nHRANT_EXEC_PROTOCOL_TOKEN='from-env-file'\n",
+        encoding="utf-8",
+    )
+    try:
+        assert mod._auth_headers() == {"Authorization": "Bearer from-env-file"}
+        # The environment still wins when it is set.
+        monkeypatch.setenv("HRANT_EXEC_PROTOCOL_TOKEN", "from-environ")
+        assert mod._auth_headers() == {"Authorization": "Bearer from-environ"}
+    finally:
+        env_file.unlink()
+
+
+def test_no_token_anywhere_sends_no_header(monkeypatch):
+    mod = _import_adapter()
+    monkeypatch.delenv("HRANT_EXEC_PROTOCOL_TOKEN", raising=False)
+    monkeypatch.setattr(mod, "_token_from_env_file", lambda: "")
+    assert mod._auth_headers() == {}

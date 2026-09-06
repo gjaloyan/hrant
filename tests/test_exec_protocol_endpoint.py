@@ -2,6 +2,9 @@
 
 Contract:
   - Body: {task: str, callback_url: str, session_id: str = ""}
+  - Requires HRANT_EXEC_PROTOCOL_TOKEN as a bearer token; without the
+    env var set the endpoint 404s (added 2026-09-06 — it used to run an
+    OWNER turn for any caller who could reach it).
   - Rejects non-loopback callback_url with 400.
   - Sets the terminal_exec ContextVar before Agent.run, resets after.
   - Speaker is 'webui:bench-harness' (owner via webui:* convention).
@@ -15,10 +18,18 @@ import pytest
 from fastapi.testclient import TestClient
 
 
+_TOKEN = "test-exec-token"
+
+
 @pytest.fixture
-def client():
+def client(monkeypatch):
+    """Authenticated by default: these tests are about the endpoint's
+    behaviour, and the auth gate has its own file."""
+    monkeypatch.setenv("HRANT_EXEC_PROTOCOL_TOKEN", _TOKEN)
     from backend.main import app
-    return TestClient(app)
+    c = TestClient(app)
+    c.headers.update({"Authorization": f"Bearer {_TOKEN}"})
+    return c
 
 
 def test_rejects_non_loopback_callback_url(client):

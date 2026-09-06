@@ -466,6 +466,17 @@ def _ssrf_blocked_nets():
     return _SSRF_BLOCKED_NETS
 
 
+# Enough for ordinary shorteners and canonicalisation chains; past this
+# it is a loop, not a journey.
+_MAX_REDIRECTS = 8
+
+
+def _urljoin(base: str, location: str) -> str:
+    """Absolute destination of a `Location`, which may be relative."""
+    from urllib.parse import urljoin
+    return urljoin(base, location)
+
+
 def _ssrf_check(url: str) -> str:
     """Return `""` if the URL is safe to fetch, else a short reason
     string. Validates scheme is http(s) and that the host resolves to
@@ -473,10 +484,16 @@ def _ssrf_check(url: str) -> str:
 
     Defence-in-depth: resolve EVERY A/AAAA the host advertises (a
     single bad answer is enough to refuse). DNS rebinding remains a
-    theoretical exposure between the check and the actual httpx GET,
-    but `httpx` validates redirect destinations on its own loop, and
+    theoretical exposure between the check and the actual httpx GET;
     a same-process rebind window is small enough that adding a custom
-    connector isn't worth the maintenance cost here."""
+    connector isn't worth the maintenance cost here.
+
+    This used to end "but `httpx` validates redirect destinations on
+    its own loop". It does not. httpx follows redirects; it has no
+    notion of which addresses are private. An external audit
+    (2026-09-05) walked a public page to `http://127.0.0.1:3333/api/
+    identity` and got the content back. `fetch_url` now follows hop by
+    hop and calls this on every one."""
     from urllib.parse import urlparse
     import socket
     import ipaddress
@@ -593,10 +610,31 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
         return f"[fetch refused: {blocked}]"
     status = 0
     body = ""
+    # Hop by hop, because every hop is a URL this process was told to
+    # fetch by someone else. `follow_redirects=True` checked the first
+    # one and obeyed the rest.
+    current = url
     try:
-        r = httpx.get(url, timeout=30.0, follow_redirects=True,
-                      headers=_BROWSER_HEADERS)
-        status, body = r.status_code, r.text
+        for _hop in range(_MAX_REDIRECTS + 1):
+            r = httpx.get(current, timeout=30.0, follow_redirects=False,
+                          headers=_BROWSER_HEADERS)
+            status, body = r.status_code, r.text
+            location = ""
+            if 300 <= status < 400:
+                location = (r.headers.get("Location")
+                            or r.headers.get("location") or "").strip()
+            if not location:
+                break
+            nxt = _urljoin(current, location)
+            refused = _ssrf_check(nxt)
+            if refused:
+                return (f"[fetch refused: redirect to {nxt} — {refused}]"
+                        " A page you were reading tried to send this fetch"
+                        " somewhere private. Nothing was requested from it.")
+            current = nxt
+        else:
+            return (f"[fetch error: more than {_MAX_REDIRECTS} redirects"
+                    f" starting at {url}]")
     except Exception as e:
         return f"[fetch error: {e}]"
 

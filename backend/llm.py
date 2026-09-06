@@ -325,6 +325,15 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
     # Count side effects across the whole chain, not per provider.
     _effects = {"n": 0, "names": []}
     _inner = kw.get("execute_tool")
+    _pos = None
+    if not callable(_inner) and method_name == "call_with_tools" and len(args) > 1:
+        # Belt and braces. The signature is (tools, execute_tool), so a
+        # caller passing them positionally leaves `kw` empty and disarms
+        # everything below without a word. That is exactly how this guard
+        # spent its whole life inert; catch it here too rather than trust
+        # every future call site to remember.
+        if callable(args[1]):
+            _inner, _pos = args[1], 1
     if callable(_inner):
         def _counting_execute_tool(name, arguments, *a, **k):
             if name not in _READ_ONLY_TOOLS:
@@ -332,7 +341,10 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
                 if len(_effects["names"]) < 8:
                     _effects["names"].append(name)
             return _inner(name, arguments, *a, **k)
-        kw = {**kw, "execute_tool": _counting_execute_tool}
+        if _pos is None:
+            kw = {**kw, "execute_tool": _counting_execute_tool}
+        else:
+            args = args[:_pos] + (_counting_execute_tool,) + args[_pos + 1:]
     for prov in chain:
         try:
             method = getattr(prov, method_name)
@@ -4506,7 +4518,13 @@ class DualModelRouter:
             # never fire.
             _out = _run_with_safety_fallback(
                 chain, "call_with_tools", task_type, system, user,
-                tools, execute_tool,
+                # By KEYWORD, not positionally (2026-09-05 audit). The
+                # wrapper finds the callback with kw.get("execute_tool")
+                # to install its side-effect counter; passed positionally
+                # it landed in *args, the counter stayed at zero, and the
+                # restart guard documented above it never fired once in
+                # production.
+                tools=tools, execute_tool=execute_tool,
                 max_tokens=max_tokens, temperature=temperature,
                 max_iterations=max_iterations, on_tool_call=on_tool_call,
                 attachments=attachments, tools_provider=tools_provider,

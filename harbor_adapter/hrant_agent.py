@@ -101,6 +101,44 @@ def _make_exec_handler(environment: BaseEnvironment):
     return handler
 
 
+
+_TOKEN_ENV = "HRANT_EXEC_PROTOCOL_TOKEN"
+
+
+def _token_from_env_file() -> str:
+    """Read the token out of the repo's `.env`.
+
+    The gateway gets it from systemd's `EnvironmentFile=`; a bench run
+    started from an ordinary shell does not, and an adapter that only
+    read `os.environ` would 401 against a correctly configured server.
+    Same file, so the two cannot drift.
+    """
+    from pathlib import Path
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key.strip() == _TOKEN_ENV:
+                return val.strip().strip("'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def _auth_headers() -> dict:
+    """Bearer token for /api/exec-protocol.
+
+    Returns no header when unset, so the failure is the gateway's clear
+    401/404 rather than a confusing one here.
+    """
+    import os
+    tok = (os.environ.get(_TOKEN_ENV) or "").strip() or _token_from_env_file()
+    return {"Authorization": f"Bearer {tok}"} if tok else {}
+
+
 class HrantAgent(BaseInstalledAgent):
     """The Hrant agent runs on the host as a FastAPI service; this
     adapter wires it into Harbor's terminal-bench framework by
@@ -180,6 +218,12 @@ class HrantAgent(BaseInstalledAgent):
                         "callback_url": callback_url,
                         "session_id": session_id,
                     },
+                    # The endpoint is authenticated since 2026-09-06 and
+                    # 404s when HRANT_EXEC_PROTOCOL_TOKEN is unset on the
+                    # gateway. Export the same value in the harness
+                    # environment; without it every trial fails at the
+                    # first request rather than midway.
+                    headers=_auth_headers(),
                     timeout=aiohttp.ClientTimeout(total=_AGENT_TIMEOUT_S),
                 ) as r:
                     payload = await r.json()
