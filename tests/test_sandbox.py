@@ -94,14 +94,22 @@ def test_sandbox_exec_empty_command_errors(monkeypatch):
     assert "empty command" in res.stderr
 
 
-def test_sandbox_exec_runs_in_degraded_tier_when_no_isolator(monkeypatch):
-    """Even with no isolator on PATH, the sandbox must still run
-    the command (degraded tier) and return the output. The result
-    notes must warn loudly."""
+def test_sandbox_exec_refuses_the_degraded_tier_unless_asked(monkeypatch):
+    """With no isolator on PATH nothing would contain the command, so
+    the call is refused BEFORE running — the warning used to arrive in
+    `notes` after the fact, which cannot inform the decision it warns
+    about (2026-09-05 audit). Running it anyway stays available, once
+    the caller says so out loud."""
     from backend.tools import sandbox
     monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
 
-    res = sandbox.sandbox_exec("echo hello-from-degraded")
+    refused = sandbox.sandbox_exec("echo hello-from-degraded")
+    assert refused.ok is False
+    assert refused.isolation == sandbox.TIER_UNAVAILABLE
+    assert "NOT RUN" in refused.stderr
+
+    res = sandbox.sandbox_exec("echo hello-from-degraded",
+                               allow_degraded=True)
     assert res.isolation == sandbox.TIER_DEGRADED
     assert res.ok is True
     assert "hello-from-degraded" in res.stdout
@@ -119,6 +127,8 @@ def test_sandbox_exec_stages_input_files(tmp_path, monkeypatch):
     res = sandbox.sandbox_exec(
         "cat marker.txt",
         input_paths=[str(src)],
+        # This box may have no isolator; the test is about staging.
+        allow_degraded=True,
     )
     assert res.ok is True
     assert "UNIQUE_STAGED_MARKER" in res.stdout
@@ -144,7 +154,7 @@ def test_sandbox_exec_timeout(monkeypatch):
     clear 'timeout' note."""
     from backend.tools import sandbox
     monkeypatch.setattr(sandbox.shutil, "which", lambda name: None)
-    res = sandbox.sandbox_exec("sleep 5", timeout=1)
+    res = sandbox.sandbox_exec("sleep 5", timeout=1, allow_degraded=True)
     assert res.ok is False
     assert "timeout" in res.stderr.lower() or any("timed out" in n for n in res.notes)
 

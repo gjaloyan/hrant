@@ -140,6 +140,9 @@ def _apply_rlimits() -> None:  # pragma: no cover - Linux/Mac only
         pass
 
 
+_TRUNCATION_MARKER = (chr(10) + "…[output truncated, %d more bytes discarded]")
+
+
 def _clip(text: Optional[str]) -> tuple[str, bool]:
     """Cap a stream to _MAX_OUTPUT_BYTES. Returns (clipped_text,
     was_truncated)."""
@@ -249,8 +252,6 @@ def run_python(
         script_path = Path(workdir) / "snippet.py"
         script_path.write_text(_wrap_with_sandbox_preamble(code), encoding="utf-8")
         kwargs: dict = {
-            "capture_output": True,
-            "text": True,
             "timeout": timeout,
             "cwd": workdir,
             "env": _safe_env(),
@@ -262,10 +263,17 @@ def run_python(
             # `timeout` parameter alone.
             kwargs["preexec_fn"] = _apply_rlimits
         try:
-            r = subprocess.run(
+            # Bounded capture (2026-09-05 audit, finding 6). The comment
+            # above `_MAX_OUTPUT_BYTES` claimed the cap prevented an OOM
+            # here; it did not — `capture_output=True` read the whole
+            # stream into this process and clipped afterwards. The
+            # child's rlimits never applied to the parent's buffer.
+            from .bounded_capture import run_capped
+            r = run_capped(
                 # -I: isolated mode (no site, no PYTHONPATH, ignores
                 # PYTHON* env vars that could re-introduce paths).
                 [sys.executable, "-I", str(script_path)],
+                max_bytes=_MAX_OUTPUT_BYTES,
                 **kwargs,
             )
         except subprocess.TimeoutExpired:
@@ -275,11 +283,20 @@ def run_python(
                 returncode=-1,
                 timed_out=True,
             )
-        stdout, sto = _clip(r.stdout)
-        stderr, ste = _clip(r.stderr)
+        stdout, sto = _clip(r.stdout.decode("utf-8", "replace"))
+        stderr, ste = _clip(r.stderr.decode("utf-8", "replace"))
+        # The reader cuts at exactly the cap now, so `_clip` sees a
+        # stream that fits and says nothing. Say it here instead — the
+        # model has to know the output it is reading is partial.
+        if r.stdout_truncated and not sto:
+            stdout += _TRUNCATION_MARKER % r.stdout_dropped
+        if r.stderr_truncated and not ste:
+            stderr += _TRUNCATION_MARKER % r.stderr_dropped
         return ExecResult(
             stdout=stdout,
             stderr=stderr,
             returncode=r.returncode,
-            output_truncated=sto or ste,
+            # `r.truncated` is the reader's verdict; `_clip` can only
+            # see what survived it.
+            output_truncated=sto or ste or r.truncated,
         )

@@ -1655,6 +1655,7 @@ def _sandbox_exec_handler(
     input_paths: str = "",
     timeout: int = 60,
     network: bool = False,
+    allow_degraded: bool = False,
 ) -> str:
     """Run `command` inside the strongest sandbox available
     (bubblewrap > firejail > unshare > degraded). OWNER-only.
@@ -1670,6 +1671,7 @@ def _sandbox_exec_handler(
             input_paths=paths,
             timeout=int(timeout) if timeout else 60,
             network=bool(network),
+            allow_degraded=bool(allow_degraded),
         )
     except Exception as e:
         return json.dumps({
@@ -4698,10 +4700,17 @@ def register_builtin_tools() -> None:
             "`input_paths` (comma-separated) is copied into scratch "
             "at `<scratch>/<basename>` before the command runs.\n\n"
             "Returns `{ok, exit_code, stdout, stderr, isolation, "
-            "scratch_dir, network, notes}`. Isolation tier is "
-            "auto-picked: bwrap > firejail > unshare > degraded. "
-            "Check `isolation`='degraded' means no real "
-            "containment — treat result accordingly."
+            "scratch_dir, requested_network, network_contained, "
+            "fs_isolated, notes}`. Isolation tier is auto-picked: "
+            "bwrap > firejail > unshare > degraded." + chr(10) + chr(10) +
+            "READ `fs_isolated` AND `network_contained`, not your own "
+            "arguments: they say what was ENFORCED. The unshare tier "
+            "gives a fresh network namespace but leaves the real "
+            "filesystem visible. With NO isolator installed the call "
+            "is REFUSED without running — install one "
+            "(`apt install bubblewrap`), or run it with terminal_exec "
+            "if you have decided it is safe, or pass "
+            "allow_degraded=true to accept an uncontained run."
         ),
         input_schema={
             "type": "object",
@@ -4734,6 +4743,17 @@ def register_builtin_tools() -> None:
                         "true ONLY when the test genuinely needs "
                         "to fetch something — that's an attack "
                         "surface."
+                    ),
+                    "default": False,
+                },
+                "allow_degraded": {
+                    "type": "boolean",
+                    "description": (
+                        "Run even when no isolator exists and nothing "
+                        "will contain the command. Default false, "
+                        "which REFUSES instead of pretending. Set true "
+                        "only when you have judged the command safe "
+                        "and still want the scratch dir."
                     ),
                     "default": False,
                 },

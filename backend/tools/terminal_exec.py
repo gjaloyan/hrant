@@ -557,14 +557,20 @@ def run_terminal(
     except Exception:
         pass
     try:
-        proc = subprocess.run(
+        # Bounded capture, not `capture_output=True` (2026-09-05 audit,
+        # finding 6): the cap below described the ANSWER while the whole
+        # stream sat in this process first. A command printing 1 MiB was
+        # held whole to produce 16 KB.
+        from .bounded_capture import run_capped
+        _out_cap = (MAX_OUTPUT_BYTES * 2) // 3
+        proc = run_capped(
             command,
+            max_bytes=_out_cap,
+            stderr_max_bytes=MAX_OUTPUT_BYTES - _out_cap,
             cwd=cwd or None,
-            capture_output=True,
             timeout=timeout,
             shell=True,
             executable=_shell_exe,
-            check=False,
             env=_env,
         )
     except FileNotFoundError as e:
@@ -606,7 +612,9 @@ def run_terminal(
         exit_code=int(proc.returncode),
         stdout=out,
         stderr=err_text,
-        truncated=(out_trunc or err_trunc),
+        # The reader dropped what did not fit, so `_truncate` above sees
+        # an already-capped stream and cannot tell — ask the reader.
+        truncated=(out_trunc or err_trunc or proc.truncated),
         elapsed_ms=elapsed,
         error="" if proc.returncode == 0 else f"exit code {proc.returncode}",
     )

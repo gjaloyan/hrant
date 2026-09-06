@@ -279,13 +279,18 @@ def test_timeout_clamps_above_max():
 def test_output_truncation_marker():
     """Large stdout (>16KB after decode) gets cut and marked.
     We simulate by patching subprocess.run."""
-    big = b"x" * (40 * 1024)
+    from backend.tools.bounded_capture import CappedOutput
 
-    class _FakeProc:
-        returncode = 0
-        stdout = big
-        stderr = b""
-    with patch.object(tex.subprocess, "run", return_value=_FakeProc()):
+    # Patch what run_terminal actually calls. This used to patch
+    # `tex.subprocess.run`, which stopped being the call path on
+    # 2026-09-06 — the test then ran a real `ls` and asserted against
+    # this machine's directory listing.
+    capped = CappedOutput(
+        stdout=b"x" * (40 * 1024), stderr=b"", returncode=0,
+        stdout_truncated=True, stdout_dropped=1,
+    )
+    with patch("backend.tools.bounded_capture.run_capped",
+               return_value=capped):
         res = tex.run_terminal("ls")
     assert res.ok is True
     assert res.truncated is True
@@ -296,11 +301,10 @@ def test_non_zero_exit_returns_ok_false_with_real_exit_code():
     """A command that RAN but exited non-zero is distinguishable
     from a REFUSED command — exit_code is the real one (>0), and
     `ok` is False so the LLM can branch on it."""
-    class _FakeProc:
-        returncode = 2
-        stdout = b""
-        stderr = b"file not found"
-    with patch.object(tex.subprocess, "run", return_value=_FakeProc()):
+    from backend.tools.bounded_capture import CappedOutput
+    capped = CappedOutput(stdout=b"", stderr=b"file not found", returncode=2)
+    with patch("backend.tools.bounded_capture.run_capped",
+               return_value=capped):
         res = tex.run_terminal("ls /no-such-path")
     assert not res.ok
     assert res.exit_code == 2

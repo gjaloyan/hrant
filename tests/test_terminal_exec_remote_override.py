@@ -23,20 +23,21 @@ def reset_var():
 
 
 def test_local_path_runs_subprocess_when_var_unset(monkeypatch):
-    """ContextVar is None → run_terminal MUST fall back to subprocess.run."""
+    """ContextVar is None -> run_terminal MUST run the child locally."""
     from backend.tools import terminal_exec as te
+    from backend.tools.bounded_capture import CappedOutput
     called = {"n": 0}
-
-    class _FakeProc:
-        returncode = 0
-        stdout = b"local stdout\n"
-        stderr = b""
 
     def fake_run(cmd, **kw):
         called["n"] += 1
-        return _FakeProc()
+        return CappedOutput(stdout=b"local stdout" + bytes([10]),
+                            stderr=b"", returncode=0)
 
-    monkeypatch.setattr("backend.tools.terminal_exec.subprocess.run", fake_run)
+    # The local path goes through `run_capped` since 2026-09-06 —
+    # output is drained into a bounded buffer rather than collected
+    # whole. Patching `subprocess.run` here stopped intercepting
+    # anything, and the test quietly ran a real `echo`.
+    monkeypatch.setattr("backend.tools.bounded_capture.run_capped", fake_run)
     result = te.run_terminal("echo hi")
     assert result.ok is True
     assert "local stdout" in result.stdout

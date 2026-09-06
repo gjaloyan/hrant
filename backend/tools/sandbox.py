@@ -74,8 +74,14 @@ class SandboxResult:
     isolation: str                 # one of TIER_*
     elapsed_ms: int
     scratch_dir: str               # absolute path to the temp dir
-    network: bool                  # was network allowed?
+    network: bool                  # was network allowed? (the REQUEST)
     notes: list[str] = field(default_factory=list)
+    # What the tier could actually enforce (2026-09-05 audit, finding 5).
+    # `network` echoed the request, so a caller passing network=False and
+    # reading it back saw its own wish reflected as a guarantee. At the
+    # degraded tier nothing is contained at all.
+    network_contained: bool = False
+    fs_isolated: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -87,6 +93,9 @@ class SandboxResult:
             "elapsed_ms": self.elapsed_ms,
             "scratch_dir": self.scratch_dir,
             "network": self.network,
+            "requested_network": self.network,
+            "network_contained": self.network_contained,
+            "fs_isolated": self.fs_isolated,
             "notes": list(self.notes),
         }
 
@@ -245,6 +254,7 @@ def sandbox_exec(
     input_paths: Optional[list[str]] = None,
     timeout: int = DEFAULT_TIMEOUT,
     network: bool = False,
+    allow_degraded: bool = False,
 ) -> SandboxResult:
     """Run `command` in the strongest isolation tier available.
 
@@ -295,15 +305,44 @@ def sandbox_exec(
             "bubblewrap` if missing)."
         )
     else:
-        # Degraded — no isolator on PATH. Run in scratch dir with
-        # a clean env and HOME override; the command still sees
-        # the real filesystem. Warning loud in notes.
+        # Degraded — no isolator on PATH. This used to run the command
+        # anyway and mention afterwards that nothing had contained it
+        # (2026-09-05 audit, finding 5). The tool's own description
+        # offers it for unknown archives and freshly downloaded
+        # binaries; a warning that arrives after execution cannot
+        # inform the decision it is warning about, and `network=False`
+        # was honoured in the RESULT field while the command had the
+        # network the whole time.
+        #
+        # Refusing costs the agent nothing: `terminal_exec` is a full
+        # shell with no gate, so anything it genuinely wants to run
+        # unsandboxed it can still run, deliberately, in the open.
+        # What it can no longer do is believe it was protected.
+        if not allow_degraded:
+            shutil.rmtree(scratch, ignore_errors=True)
+            return SandboxResult(
+                ok=False, exit_code=-1, stdout="",
+                stderr=(
+                    "no isolator available (bubblewrap, firejail and "
+                    "unshare are all missing), so nothing would contain "
+                    "this command. NOT RUN. Install one — "
+                    "`terminal_exec apt install bubblewrap` — or, if you "
+                    "have decided the command is safe, run it with "
+                    "terminal_exec, or pass allow_degraded=true to accept "
+                    "an uncontained run knowingly."
+                ),
+                isolation=TIER_UNAVAILABLE, elapsed_ms=0,
+                scratch_dir="", network=network,
+                network_contained=False, fs_isolated=False,
+                notes=list(notes) + ["refused: no isolation available"],
+            )
         full_argv = ["sh", "-c", cmd]
         notes.append(
-            "DEGRADED tier: no sandbox binary on PATH (bwrap / "
-            "firejail / unshare all missing). Only env + cwd are "
-            "constrained; the command has full FS + network access. "
-            "Treat the result with appropriate caution."
+            "DEGRADED tier accepted by the caller: no sandbox binary on "
+            "PATH (bwrap / firejail / unshare all missing). Only env + "
+            "cwd are constrained; the command has full FS + network "
+            "access regardless of the `network` argument. Treat the "
+            "result with appropriate caution."
         )
 
     env = {
@@ -319,16 +358,21 @@ def sandbox_exec(
     # the namespace knob; we already configured the isolator above.
 
     try:
-        proc = subprocess.run(
+        # Bounded capture (2026-09-05 audit, finding 6) — the clip
+        # below ran after the whole stream was already in memory.
+        from .bounded_capture import run_capped
+        proc = run_capped(
             full_argv,
+            max_bytes=MAX_OUTPUT_BYTES,
             cwd=str(scratch),
             env=env,
-            capture_output=True,
             timeout=timeout,
         )
         exit_code = proc.returncode
         stdout = _truncate(proc.stdout or b"", MAX_OUTPUT_BYTES)
         stderr = _truncate(proc.stderr or b"", MAX_OUTPUT_BYTES)
+        if proc.truncated:
+            notes.append("output truncated at the read boundary")
     except subprocess.TimeoutExpired:
         exit_code = -1
         stdout = ""
@@ -342,6 +386,19 @@ def sandbox_exec(
         tier = TIER_UNAVAILABLE
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
+    # What was actually enforced, per tier — not what was asked for.
+    # bwrap/firejail confine the filesystem and can drop the network;
+    # unshare gets a fresh netns but leaves the real filesystem visible
+    # (see `_unshare_argv`); degraded confines nothing.
+    fs_isolated = tier in (TIER_BWRAP, TIER_FIREJAIL)
+    network_contained = (
+        not network and tier in (TIER_BWRAP, TIER_FIREJAIL, TIER_UNSHARE)
+    )
+    if not network and not network_contained:
+        notes.append(
+            "network=False was REQUESTED but not enforced at the "
+            f"'{tier}' tier — the command could reach the network."
+        )
     return SandboxResult(
         ok=(exit_code == 0),
         exit_code=exit_code,
@@ -351,5 +408,7 @@ def sandbox_exec(
         elapsed_ms=elapsed_ms,
         scratch_dir=str(scratch),
         network=network,
+        network_contained=network_contained,
+        fs_isolated=fs_isolated,
         notes=notes,
     )
