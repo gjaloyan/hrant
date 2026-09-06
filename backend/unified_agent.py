@@ -75,7 +75,7 @@ import logging
 import os
 import re
 import time as _time
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .models import (
     AgentAnswer,
@@ -2086,23 +2086,37 @@ def _claims_judge_call(task: str, answer: str) -> dict:
     )
 
 
-def _ungrounded_factual_claims(task: str, answer: str) -> list:
+class _ClaimCheck(NamedTuple):
+    """What the judge found, AND whether it got to look.
+
+    2026-09-05 audit, finding 3: this used to be a bare list, so "the
+    judge read the answer and found nothing to check" and "the judge
+    was unavailable" were the same empty list. The caller reads an
+    empty list as permission to serve the draft, so a broken judge
+    silently produced answers labelled as though they had been checked.
+    """
+    claims: list
+    status: str          # "checked" | "failed" | "not_applicable"
+
+
+def _ungrounded_factual_claims(task: str, answer: str) -> _ClaimCheck:
     """Checkable claims the turn asserted without consulting anything.
 
-    Fails OPEN. A judge that is unavailable must not block the turn: an
-    unchecked answer is worth more than no answer, and this whole path
-    exists to improve an answer that already exists.
+    Fails OPEN, and says so. A judge that is unavailable must not block
+    the turn — an unchecked answer is worth more than no answer, and
+    this whole path exists to improve an answer that already exists —
+    but the turn is then labelled `failed`, not verified.
     """
     if not (answer or "").strip():
-        return []
+        return _ClaimCheck([], "not_applicable")
     try:
         data = _claims_judge_call(task, answer) or {}
         claims = data.get("claims") if isinstance(data, dict) else None
         out = [str(c).strip() for c in (claims or []) if str(c).strip()]
-        return out[:3]
+        return _ClaimCheck(out[:3], "checked")
     except Exception as exc:
         log.debug("claims judge unavailable: %s", exc)
-        return []
+        return _ClaimCheck([], "failed")
 
 
 # Suffixes where the registrable name is the third label, not the second.
@@ -2210,6 +2224,32 @@ def _web_search_for_lane(query: str, max_results: int = 4) -> str:
     return _web_search_handler(query, max_results)
 
 
+# The number the fast lane reports when nothing actually checked the
+# answer (2026-09-05 audit, finding 3). It is a MARKER, not a measured
+# probability — read `check_status` to branch on. It sits below the
+# fine-tune collector's >=85 gate on purpose: output nothing verified
+# must not become training data for the next model.
+UNMEASURED_CONFIDENCE = 50
+CHECKED_CONFIDENCE = 85
+
+
+def _lane_check_state(agent) -> tuple[int, str]:
+    """(confidence, check_status) for a fast-lane turn.
+
+    `_claim_check` is set by `_ground_fast_answer`; its absence means
+    the lane never reached the judge at all.
+    """
+    status = getattr(agent, "_claim_check", None)
+    if status == "checked":
+        return CHECKED_CONFIDENCE, "verified"
+    if status == "not_applicable":
+        # A greeting asserts nothing. Serving it confidently is right.
+        return CHECKED_CONFIDENCE, "not_applicable"
+    if status == "failed":
+        return UNMEASURED_CONFIDENCE, "failed"
+    return UNMEASURED_CONFIDENCE, "not_checked"
+
+
 def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
                         snapshot: str, convo: str):
     """Let the cheap lane settle its own claims instead of paying for a
@@ -2231,13 +2271,21 @@ def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
     contain unchecked claims, so serving it because a search broke would
     be the old behaviour with extra steps.
     """
-    claims = _ungrounded_factual_claims(task, answer)
-    if not claims:
+    check = _ungrounded_factual_claims(task, answer)
+    # Record what actually happened, for the artifact and the answer's
+    # verification block. The policy stays soft — a judge that could
+    # not run does not cost the user their answer — but the turn is no
+    # longer labelled as though it had been checked.
+    try:
+        agent._claim_check = check.status
+    except Exception:
+        pass
+    if not check.claims:
         return answer
 
     try:
         blocks = []
-        for claim in claims[:_LANE_MAX_CLAIMS]:
+        for claim in check.claims[:_LANE_MAX_CLAIMS]:
             blocks.append(_evidence_for_claim(
                 claim, _web_search_for_lane(claim)))
         evidence = _render_evidence(blocks)
@@ -2264,13 +2312,13 @@ def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
     try:
         agent._escalated_because = (
             "the quick answer asserted this without checking, and the lane "
-            "could not settle it: " + "; ".join(claims)[:300])
+            "could not settle it: " + "; ".join(check.claims)[:300])
     except Exception:
         pass
     try:
         agent.progress("chat_fast_path",
                        "escalating after the draft: %d unchecked claim(s)"
-                       % len(claims))
+                       % len(check.claims))
     except Exception:
         pass
     return None
@@ -2540,8 +2588,9 @@ def _decide_self_correction(
             # the same question gave escalate, escalate, answer-directly).
             # After the draft the question is answerable.
             ungrounded = _ungrounded_factual_claims(task, answer)
-            if ungrounded:
-                _quoted = chr(10).join("  - " + c for c in ungrounded)
+            if ungrounded.claims:
+                _quoted = chr(10).join(
+                    "  - " + c for c in ungrounded.claims)
                 corrective = (
                     "Your previous answer stated these as fact, and this "
                     "turn checked none of them:" + chr(10) + chr(10)
@@ -2561,7 +2610,8 @@ def _decide_self_correction(
                       "not verify this\" is a better answer than a confident "
                       "guess; do not simply repeat the claim."
                 )
-                return (f"ungrounded claims — {len(ungrounded)}", corrective)
+                return (f"ungrounded claims — {len(ungrounded.claims)}",
+                        corrective)
             return "", ""
         corrective = (
             f'Your previous answer claimed: "{claim}". But you called no '
@@ -3240,6 +3290,7 @@ def run_unified(
             # trace and /api/turns/<id> resolves. Skipping the
             # artifact would silently lose ~30-40% of turns (the
             # chat-shaped ones) from the dev panel + audits.
+            _lane_conf, _lane_status = _lane_check_state(agent)
             turn_id = ""
             try:
                 from .workspace import get_workspace
@@ -3257,7 +3308,7 @@ def run_unified(
                     "answer": chat_answer,
                     "intent": "chat",
                     "is_chat": True,
-                    "confidence": 85,
+                    "confidence": _lane_conf,
                     "topics": [],
                     "channel": channel,
                     "speaker_id": speaker_id,
@@ -3274,7 +3325,8 @@ def run_unified(
                     "thinking_trace": [],
                     "llm_calls": [],
                     "verification": {
-                        "confidence": 85,
+                        "confidence": _lane_conf,
+                        "check_status": _lane_status,
                         "verified_claims": [],
                         "unverified_claims": [],
                         "contradictions": [],
@@ -3318,7 +3370,8 @@ def run_unified(
             from .models import VerificationResult as _VR
             return AgentAnswer(
                 answer=chat_answer,
-                verification=_VR(confidence=85),
+                verification=_VR(confidence=_lane_conf,
+                                 check_status=_lane_status),
                 is_chat=True,
                 mode="fast_chat",
                 turn_id=turn_id,
@@ -4438,6 +4491,7 @@ def run_unified(
     )
     vr = VerificationResult(confidence=85)
     _verification_performed = False
+    _verify_crashed = False
     if _cascade_prevr is not None:
         # The cascade gate already verified THIS answer on the strong
         # model moments ago — reuse it instead of paying a second
@@ -4457,6 +4511,24 @@ def run_unified(
             _verification_performed = True
         except Exception as e:
             log.debug("unified: verifier failed: %s", e)
+            _verify_crashed = True
+
+    # Say which of the four things happened (2026-09-05 audit, finding
+    # 3). The SCALAR is deliberately left alone here, unlike the fast
+    # lane: anything under 60 routes the turn into
+    # `MetaLearner.analyze_failure` and into the memory extractor's
+    # distrust branch, and "nobody checked this" is not the same claim
+    # as "this went wrong". The status field carries the truth without
+    # asserting a failure that was never observed.
+    try:
+        if _verification_performed:
+            vr.check_status = "verified"
+        elif _verify_crashed:
+            vr.check_status = "failed"
+        else:
+            vr.check_status = "not_checked"
+    except Exception:
+        pass
 
     # Endpoint-aware cap (2026-05-27 audit T2.1). The legacy verifier
     # measures CLAIM-verifiability, not REQUEST-delivery. For action-

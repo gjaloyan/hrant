@@ -23,7 +23,7 @@ from backend import unified_agent as ua
 def test_a_checkable_assertion_with_no_tools_is_corrected():
     with patch("backend.endpoint_check.unbacked_action_claim", return_value=""), \
          patch.object(ua, "_ungrounded_factual_claims",
-                      return_value=["Экстрактор притёртых пробок — винтовой съёмник"]):
+                      return_value=ua._ClaimCheck(["Экстрактор притёртых пробок — винтовой съёмник"], "checked")):
         tag, corrective = ua._decide_self_correction(
             task="есть ли приспособление для пробки",
             answer="Да, экстрактор притёртых пробок — винтовой съёмник.",
@@ -37,7 +37,8 @@ def test_a_checkable_assertion_with_no_tools_is_corrected():
 
 def test_nothing_checkable_means_no_correction():
     with patch("backend.endpoint_check.unbacked_action_claim", return_value=""), \
-         patch.object(ua, "_ungrounded_factual_claims", return_value=[]):
+         patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck([], "checked")):
         tag, corrective = ua._decide_self_correction(
             task="привет", answer="Привет, Гор!", turn_tools=[])
     assert (tag, corrective) == ("", "")
@@ -49,7 +50,7 @@ def test_an_action_claim_still_wins_the_branch():
     with patch("backend.endpoint_check.unbacked_action_claim",
                return_value="I saved it"), \
          patch.object(ua, "_ungrounded_factual_claims",
-                      return_value=["something"]) as ungrounded:
+                      return_value=ua._ClaimCheck(["something"], "checked")) as ungrounded:
         tag, corrective = ua._decide_self_correction(
             task="запомни это", answer="Запомнил.", turn_tools=[])
     assert "unbacked claim" in tag
@@ -60,7 +61,8 @@ def test_the_corrective_permits_an_honest_i_do_not_know():
     """Forcing a search on every assertion would trade one confident
     wrong answer for another. Saying so plainly has to stay allowed."""
     with patch("backend.endpoint_check.unbacked_action_claim", return_value=""), \
-         patch.object(ua, "_ungrounded_factual_claims", return_value=["X is Y"]):
+         patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck(["X is Y"], "checked")):
         _, corrective = ua._decide_self_correction(
             task="q", answer="X is Y.", turn_tools=[])
     low = corrective.lower()
@@ -74,4 +76,8 @@ def test_the_judge_fails_open(monkeypatch):
         raise RuntimeError("provider down")
 
     monkeypatch.setattr(ua, "_claims_judge_call", _boom, raising=False)
-    assert ua._ungrounded_factual_claims("q", "a") == []
+    got = ua._ungrounded_factual_claims("q", "a")
+    assert got.claims == []
+    # ...and says it failed rather than passing for a clean bill of
+    # health (2026-09-05 audit, finding 3).
+    assert got.status == "failed"

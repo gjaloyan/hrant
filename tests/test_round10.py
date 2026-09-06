@@ -101,7 +101,14 @@ def test_budget_helper_fires_when_operator_opts_in():
     CONFIG.router["tool_loop_input_budget"] = 50_000
     TOKENS.reset_request()
     try:
-        TOKENS._request_input = 60_000
+        # Record real usage. This used to poke `TOKENS._request_input`
+        # directly, which since 2026-09-06 is not where the running
+        # total lives — the assignment created a dead attribute and the
+        # test would have passed a broken gate.
+        TOKENS.record(
+            task_type="complex_solving", model="m", provider="p",
+            usage={"input_tokens": 60_000, "output_tokens": 0},
+        )
         assert _tool_loop_input_budget_exceeded() is True
     finally:
         TOKENS.reset_request()

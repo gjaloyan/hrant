@@ -80,7 +80,8 @@ def test_the_full_path_corrective_says_the_same_thing():
     from unittest.mock import patch
 
     with patch("backend.endpoint_check.unbacked_action_claim", return_value=""), \
-         patch.object(ua, "_ungrounded_factual_claims", return_value=["a claim"]):
+         patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck(["a claim"], "checked")):
         _, corrective = ua._decide_self_correction(
             task="q", answer="a claim", turn_tools=[])
     low = corrective.lower()

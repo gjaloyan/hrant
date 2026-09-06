@@ -131,6 +131,20 @@ class VerificationResult(BaseModel):
     # the way unverified FACTUAL claims do; a confident fabrication
     # about the future still lands in unverified/contradictions.
     projections: list[str] = []
+    # Did the check actually happen? (2026-09-05 audit, finding 3.)
+    # `confidence` alone could not say: 85 is the value a turn starts
+    # with, so "the verifier ran and was satisfied", "there was nothing
+    # to verify", "verification was skipped" and "the verifier crashed"
+    # all reported the same number, and analytics read the default as
+    # measured quality. One of:
+    #   "verified"        — a check ran and settled the claims
+    #   "not_applicable"  — nothing checkable was asserted
+    #   "not_checked"     — no check was attempted
+    #   "failed"          — a check was attempted and errored
+    #   None              — turn recorded before this field existed
+    # The POLICY stays soft: an unchecked answer is still served. Only
+    # the reporting is honest.
+    check_status: Optional[str] = None
 
 
 class EvidenceItem(BaseModel):

@@ -341,8 +341,19 @@ def health() -> dict[str, Any]:
         "workspace": _check_workspace(),
         "autonomic": _check_autonomic(),
     }
+    status = _aggregate(components)
+    # The one endpoint left open to anonymous callers (2026-09-05
+    # audit), so it answers "is it up" and nothing else. Version,
+    # active model, tts url, telegram state and OS release are all
+    # reconnaissance for someone deciding whether to keep poking.
+    # Monitors read `status`, so docker/systemd health checks are
+    # unaffected either way.
+    from ..roles import current_speaker, is_owner
+    sp = current_speaker()
+    if sp is not None and not is_owner(sp):
+        return {"status": status}
     return {
-        "status": _aggregate(components),
+        "status": status,
         "version": VERSION,
         "uptime_seconds": int(time.time() - _BOOT_TIME),
         "platform": f"{platform.system()} {platform.release()}",

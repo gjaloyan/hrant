@@ -618,7 +618,7 @@ class Agent(
                 "_last_turn_id",
             )
         }
-        TOKENS.reset_request()
+        _usage_token = TOKENS.reset_request()
         self._trace = []
         self._llm_calls = []
         self._request_id = new_request_id()
@@ -693,6 +693,13 @@ class Agent(
                     _rst(self._skey_token)
                 except Exception:
                     pass
+            except Exception:
+                pass
+            # Close this turn's token bucket. For a nested run this
+            # hands the spend back to the parent turn; for a top-level
+            # one it is a no-op beyond dropping the context entry.
+            try:
+                TOKENS.end_request(_usage_token)
             except Exception:
                 pass
             # Re-entrancy state restore — same shape the legacy

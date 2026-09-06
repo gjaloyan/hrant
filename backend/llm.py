@@ -473,6 +473,43 @@ def _utc_today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+class _RequestUsage:
+    """Per-turn accounting, one object per `reset_request()`.
+
+    2026-09-05 audit, finding 2. These numbers used to be plain
+    attributes of the single process-wide `TOKENS`, so two turns
+    running at once shared them: B's `reset_request()` zeroed A's
+    running total, and A then read B's spend as its own. Reproduced by
+    the auditor — A recorded 100 then 50 and read back 250. The lock
+    made each update atomic and did nothing about whose update it was.
+
+    The process-wide log and the daily totals stay shared, because
+    those genuinely are process-wide; only the "current request" view
+    moves in here.
+    """
+    __slots__ = ("input", "output", "cache_read", "cache_create",
+                 "cost", "calls", "calls_log")
+
+    def __init__(self) -> None:
+        self.input = 0
+        self.output = 0
+        self.cache_read = 0
+        self.cache_create = 0
+        self.cost = 0.0
+        self.calls = 0
+        self.calls_log: list[CallRecord] = []
+
+
+# Set by `reset_request()` at the top of every `agent.run()`. A turn
+# runs in one thread (`asyncio.to_thread`, which copies the context),
+# so records land in the bucket belonging to the turn that made them.
+# A thread that records without resetting first contributes to the
+# shared totals only — it no longer corrupts an unrelated turn.
+_REQUEST_USAGE: contextvars.ContextVar["_RequestUsage | None"] = (
+    contextvars.ContextVar("hrant_request_usage", default=None)
+)
+
+
 class TokenTracker:
     """Tracks token usage across all LLM calls."""
 
@@ -492,19 +529,15 @@ class TokenTracker:
         self._log: list[CallRecord] = []
         self._max_log = max_log
         self._traces: list[dict] = []
-        # Running totals for current request (reset per agent.run())
-        self._request_input = 0
-        self._request_output = 0
-        self._request_cache_read = 0
-        self._request_cache_create = 0
-        self._request_cost = 0.0
-        self._request_calls = 0
+        # Running totals for the current request live in the
+        # `_REQUEST_USAGE` ContextVar, not on self — see `_RequestUsage`
+        # for why (concurrent turns used to overwrite each other here).
         # Per-request call list — preserved separately from the global log
         # so `request_breakdown()` can answer "which stage burned the
         # tokens on THIS turn" without scanning history. Cleared on
         # `reset_request()`. Bounded by the same max_log to keep memory
         # bounded if someone forgets to reset between requests.
-        self._request_calls_log: list[CallRecord] = []
+
         # Global totals
         self._total_input = 0
         self._total_output = 0
@@ -577,15 +610,17 @@ class TokenTracker:
             self._log.append(rec)
             if len(self._log) > self._max_log:
                 self._log = self._log[-self._max_log:]
-            self._request_calls_log.append(rec)
-            if len(self._request_calls_log) > self._max_log:
-                self._request_calls_log = self._request_calls_log[-self._max_log:]
-            self._request_input += input_tok
-            self._request_output += output_tok
-            self._request_cache_read += cache_read
-            self._request_cache_create += cache_create
-            self._request_cost += cost
-            self._request_calls += 1
+            req = _REQUEST_USAGE.get()
+            if req is not None:
+                req.calls_log.append(rec)
+                if len(req.calls_log) > self._max_log:
+                    del req.calls_log[:-self._max_log]
+                req.input += input_tok
+                req.output += output_tok
+                req.cache_read += cache_read
+                req.cache_create += cache_create
+                req.cost += cost
+                req.calls += 1
             self._total_input += input_tok
             self._total_output += output_tok
             self._total_cost += cost
@@ -647,7 +682,8 @@ class TokenTracker:
         turn artifact (2026-05-21 audit follow-up — previously the
         whole tool loop collapsed into one `_unified` aggregate)."""
         with self._lock:
-            return len(self._request_calls_log)
+            req = _REQUEST_USAGE.get()
+            return len(req.calls_log) if req is not None else 0
 
     def request_calls_since(self, start_index: int) -> list[dict]:
         """Return `CallRecord` dicts for entries added to the request
@@ -657,21 +693,62 @@ class TokenTracker:
         with self._lock:
             if start_index < 0:
                 start_index = 0
-            log = self._request_calls_log
+            req = _REQUEST_USAGE.get()
+            log = req.calls_log if req is not None else []
             if start_index >= len(log):
                 return []
             return [rec.to_dict() for rec in log[start_index:]]
 
-    def reset_request(self) -> None:
-        """Reset per-request counters (called at start of agent.run())."""
+    def reset_request(self):
+        """Start a fresh per-request bucket for THIS turn.
+
+        Called at the top of `agent.run()`. It installs a new object in
+        the ContextVar rather than zeroing shared fields, so a turn
+        starting while another is mid-flight no longer wipes the other
+        one's running total (2026-09-05 audit, finding 2).
+
+        Returns a token for `end_request()`. Ignoring it is safe for a
+        top-level turn — the context dies with the worker thread — and
+        wrong only for a nested run, which is why `agent.run()` passes
+        it back in its `finally`.
+        """
+        return _REQUEST_USAGE.set(_RequestUsage())
+
+    def end_request(self, token) -> None:
+        """Close the bucket `reset_request()` opened and fold it into
+        the parent's, if there is one.
+
+        Nested runs (a tool handler invoking another `agent.run()`)
+        used to zero the outer turn's counters and leave them zeroed;
+        `agent.run()` already restored its own re-entrant state this
+        way and the token accounting was simply left out. The audit
+        asked for the rule to be decided rather than left implicit, so:
+        **a child's spend counts as part of the parent turn** — it was
+        incurred serving that turn, and a delegating turn that reported
+        itself as free would be the more misleading number. The child
+        still reports its own spend while it runs.
+        """
+        if token is None:
+            return
+        child = _REQUEST_USAGE.get()
+        try:
+            _REQUEST_USAGE.reset(token)
+        except ValueError:
+            # Token from a different context — nothing sane to restore.
+            return
+        parent = _REQUEST_USAGE.get()
+        if parent is None or child is None or parent is child:
+            return
         with self._lock:
-            self._request_input = 0
-            self._request_output = 0
-            self._request_cache_read = 0
-            self._request_cache_create = 0
-            self._request_cost = 0.0
-            self._request_calls = 0
-            self._request_calls_log = []
+            parent.input += child.input
+            parent.output += child.output
+            parent.cache_read += child.cache_read
+            parent.cache_create += child.cache_create
+            parent.cost += child.cost
+            parent.calls += child.calls
+            parent.calls_log.extend(child.calls_log)
+            if len(parent.calls_log) > self._max_log:
+                del parent.calls_log[:-self._max_log]
 
     def request_breakdown(self) -> dict:
         """Per-stage attribution for the current request.
@@ -687,7 +764,8 @@ class TokenTracker:
         next change isn't a guess.
         """
         with self._lock:
-            calls = list(self._request_calls_log)
+            req = _REQUEST_USAGE.get()
+            calls = list(req.calls_log) if req is not None else []
 
         def _empty() -> dict:
             return {
@@ -731,16 +809,25 @@ class TokenTracker:
         }
 
     def request_usage(self) -> dict:
-        """Get token usage for the current request."""
+        """Token usage for THIS turn — the caller's own bucket.
+
+        Zeros when nothing called `reset_request()` in this context
+        (an autonomic tick, a probe, a test). That is the honest
+        answer: those tokens are in the process totals, they just do
+        not belong to any turn.
+        """
         with self._lock:
+            req = _REQUEST_USAGE.get()
+            if req is None:
+                req = _RequestUsage()
             return {
-                "input_tokens": self._request_input,
-                "output_tokens": self._request_output,
-                "total_tokens": self._request_input + self._request_output,
-                "cache_read_tokens": self._request_cache_read,
-                "cache_creation_tokens": self._request_cache_create,
-                "cost_usd": round(self._request_cost, 6),
-                "llm_calls": self._request_calls,
+                "input_tokens": req.input,
+                "output_tokens": req.output,
+                "total_tokens": req.input + req.output,
+                "cache_read_tokens": req.cache_read,
+                "cache_creation_tokens": req.cache_create,
+                "cost_usd": round(req.cost, 6),
+                "llm_calls": req.calls,
             }
 
     def recent_calls(self, limit: int = 50) -> list[dict]:

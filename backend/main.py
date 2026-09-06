@@ -443,14 +443,72 @@ _LOCAL_REQUEST_HOSTS = frozenset({
     "testclient",
 })
 
+# 2026-09-05 audit, finding 4. Reads were left open on the theory that
+# "pure read endpoints are safe to expose" (see `api/_auth.py`). They
+# are not: session names and transcripts, the owner profile and every
+# attachment are private, and listing endpoints hand out the ids, so an
+# unguessable id was never the protection. A remote anonymous client
+# fetched a real session body and got 200.
+#
+# So `/api/*` is default-DENY for non-owners, decided here rather than
+# in 123 separate handlers — a new endpoint is private unless someone
+# adds it to the allowlist below, which is the direction the mistake
+# should fall.
+_PUBLIC_API_PATHS = frozenset({
+    # Liveness only. The handler itself trims its body for non-owners
+    # (active model, tts url, telegram state are reconnaissance).
+    "/api/health",
+})
+
+# The generated API docs enumerate the whole private surface, so they
+# follow the same rule as the endpoints they describe.
+_PRIVATE_DOC_PATHS = frozenset({"/docs", "/redoc", "/openapi.json"})
+
+API_TOKEN_ENV = "HRANT_API_TOKEN"
+
+
+def _api_token_ok(request) -> bool:
+    """Does this request carry the configured remote-access token?
+
+    Unset env var -> no remote access at all, which is the current
+    posture (bind is 127.0.0.1). Setting it is what makes publishing
+    the WebUI over a tailnet possible WITHOUT reopening reads to
+    everyone who can reach the port.
+    """
+    import os
+    import secrets as _secrets
+    want = (os.environ.get(API_TOKEN_ENV) or "").strip()
+    if not want:
+        return False
+    got = (request.headers.get("x-hrant-token") or "").strip()
+    if not got:
+        auth = (request.headers.get("authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            got = auth[7:].strip()
+    return bool(got) and _secrets.compare_digest(got, want)
+
+
+def _is_private_path(path: str) -> bool:
+    if path in _PUBLIC_API_PATHS:
+        return False
+    return path.startswith("/api/") or path in _PRIVATE_DOC_PATHS
+
 
 @app.middleware("http")
 async def _speaker_context_middleware(request, call_next):
-    from .roles import set_current_speaker, reset_current_speaker
+    from .roles import set_current_speaker, reset_current_speaker, is_owner
     client = getattr(request, "client", None)
     host = (getattr(client, "host", None) or "").strip()
-    if host in _LOCAL_REQUEST_HOSTS:
+    # A proxy makes every request look local. `X-Forwarded-For` is the
+    # tell, and trusting it can only ever DOWNGRADE a caller here — a
+    # direct client that forges the header loses owner rights rather
+    # than gaining them — so it is safe to read unauthenticated.
+    proxied = bool((request.headers.get("x-forwarded-for") or "").strip())
+    if host in _LOCAL_REQUEST_HOSTS and not proxied:
         # Local WebUI / curl from the box itself — trust as owner.
+        speaker_id = "webui:default"
+    elif _api_token_ok(request):
+        # Remote, but holding the token the owner configured.
         speaker_id = "webui:default"
     else:
         # Remote IP reaching us — only possible when bind is 0.0.0.0
@@ -459,6 +517,17 @@ async def _speaker_context_middleware(request, call_next):
         speaker_id = f"http:remote-anonymous-{host or 'unknown'}"
     token = set_current_speaker(speaker_id)
     try:
+        if not is_owner(speaker_id) and _is_private_path(request.url.path):
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "detail": (
+                        "this API is private; authenticate with the "
+                        f"{API_TOKEN_ENV} bearer token"
+                    )
+                },
+            )
         return await call_next(request)
     finally:
         reset_current_speaker(token)

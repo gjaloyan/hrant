@@ -24,7 +24,8 @@ class _Agent:
 
 
 def test_an_answer_with_nothing_to_check_is_served_untouched():
-    with patch.object(ua, "_ungrounded_factual_claims", return_value=[]):
+    with patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck([], "checked")):
         out = ua._ground_fast_answer(task="привет", answer="Привет, Гор!",
                                      agent=_Agent(), speaker_id="webui:default",
                                      snapshot="", convo="")
@@ -39,7 +40,7 @@ def test_claims_are_searched_and_the_answer_redrafted():
         return '[{"title": "Grain moisture meter", "snippet": "влагомер зерна"}]'
 
     with patch.object(ua, "_ungrounded_factual_claims",
-                      return_value=["прибор называется гигрометр"]), \
+                      return_value=ua._ClaimCheck(["прибор называется гигрометр"], "checked")), \
          patch.object(ua, "_web_search_for_lane", _search), \
          patch.object(ua, "_try_chat_path", return_value="Это влагомер зерна.") as redraft:
         out = ua._ground_fast_answer(
@@ -59,7 +60,7 @@ def test_at_most_two_claims_are_searched():
     searched = []
 
     with patch.object(ua, "_ungrounded_factual_claims",
-                      return_value=["a", "b", "c", "d"]), \
+                      return_value=ua._ClaimCheck(["a", "b", "c", "d"], "checked")), \
          patch.object(ua, "_web_search_for_lane",
                       lambda q, max_results=5: searched.append(q) or "[]"), \
          patch.object(ua, "_try_chat_path", return_value="x"):
@@ -71,7 +72,8 @@ def test_at_most_two_claims_are_searched():
 def test_a_search_that_returns_nothing_hands_over():
     """No evidence means the lane cannot do better than it already did,
     and must not serve the unchecked draft either."""
-    with patch.object(ua, "_ungrounded_factual_claims", return_value=["a claim"]), \
+    with patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck(["a claim"], "checked")), \
          patch.object(ua, "_web_search_for_lane", lambda q, max_results=5: ""), \
          patch.object(ua, "_try_chat_path", return_value="should not be used"):
         agent = _Agent()
@@ -84,7 +86,8 @@ def test_a_search_that_returns_nothing_hands_over():
 def test_a_redraft_that_escalates_hands_over():
     """`_try_chat_path` returns None when the lane asks for tools. That
     answer is not servable."""
-    with patch.object(ua, "_ungrounded_factual_claims", return_value=["a claim"]), \
+    with patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck(["a claim"], "checked")), \
          patch.object(ua, "_web_search_for_lane",
                       lambda q, max_results=5: '[{"snippet": "something"}]'), \
          patch.object(ua, "_try_chat_path", return_value=None):
@@ -100,7 +103,8 @@ def test_a_failure_anywhere_hands_over_rather_than_serving_the_draft():
     def _boom(*a, **k):
         raise RuntimeError("search down")
 
-    with patch.object(ua, "_ungrounded_factual_claims", return_value=["a claim"]), \
+    with patch.object(ua, "_ungrounded_factual_claims",
+                      return_value=ua._ClaimCheck(["a claim"], "checked")), \
          patch.object(ua, "_web_search_for_lane", _boom):
         out = ua._ground_fast_answer(task="q", answer="draft", agent=_Agent(),
                                      speaker_id="s", snapshot="", convo="")
