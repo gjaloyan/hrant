@@ -4557,7 +4557,12 @@ def run_unified(
     # as "this went wrong". The status field carries the truth without
     # asserting a failure that was never observed.
     try:
-        if _verification_performed:
+        if getattr(vr, "check_status", None):
+            # The verifier already said what happened — including its
+            # own internal failures, which RETURN a result rather than
+            # raising and so look like a successful call from here.
+            pass
+        elif _verification_performed:
             vr.check_status = "verified"
         elif _verify_crashed:
             vr.check_status = "failed"

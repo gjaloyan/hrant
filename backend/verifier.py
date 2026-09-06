@@ -558,6 +558,7 @@ def verify(
             confidence=0,
             unverified_claims=["no loaded notes or tool outputs — all claims unverified"],
             notes_used=[],
+            check_status="not_applicable",
         )
 
     tool_section = ""
@@ -624,16 +625,23 @@ Available topics: {', '.join(used_topics)}"""
             except Exception:
                 pass
     except Exception as e:
+        # Say so in the result (2026-09-05 audit, finding 3). This path
+        # returns rather than raises, so the caller sees a normal
+        # VerificationResult and used to record the turn as verified —
+        # caught on a live turn 2026-09-06, where the verifier came back
+        # empty and the answer was still labelled `verified`.
         return VerificationResult(
             confidence=50,
             unverified_claims=[f"verifier error: {e}"],
             notes_used=used_topics,
+            check_status="failed",
         )
     if not isinstance(data, dict):
         return VerificationResult(
             confidence=50,
             unverified_claims=["verifier returned invalid JSON shape"],
             notes_used=used_topics,
+            check_status="failed",
         )
 
     def _string_list(value: object) -> list[str]:
@@ -735,4 +743,5 @@ Available topics: {', '.join(used_topics)}"""
         contradictions=contradictions,
         projections=projections,
         notes_used=list(data.get("notes_used", used_topics)),
+        check_status="verified",
     )

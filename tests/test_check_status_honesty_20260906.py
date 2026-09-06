@@ -162,3 +162,34 @@ def test_everything_checked_is_still_reported_as_verified():
                                speaker_id="s", snapshot="", convo="")
     assert agent._claim_leftovers == []
     assert ua._lane_check_state(agent)[1] == "verified"
+
+
+# ── found on a live turn, 2026-09-06 ─────────────────────────────────
+
+def test_a_verifier_that_fails_internally_is_not_reported_as_verified():
+    """Caught on prod right after the first fix shipped. The full cycle
+    marked `_verification_performed` whenever `verify()` RETURNED, and
+    verify() handles its own failures by returning a result instead of
+    raising — so a turn whose verifier came back empty was labelled
+    `verified` while carrying "verifier error: LLM returned an empty
+    response" in its own unverified_claims. The verifier now authors
+    the field itself."""
+    from backend import verifier as vf
+
+    class _Boom:
+        def call_json(self, *a, **k):
+            raise RuntimeError("LLM returned an empty response")
+
+    with patch.object(vf, "router", lambda: _Boom()):
+        vr = vf.verify(question="q", answer="a", notes_text="",
+                       used_topics=[], tool_context="some tool output")
+    assert vr.check_status == "failed"
+    assert any("verifier error" in c for c in vr.unverified_claims)
+
+
+def test_nothing_to_verify_against_is_not_a_failure_either():
+    from backend import verifier as vf
+    vr = vf.verify(question="q", answer="a", notes_text="",
+                   used_topics=[], tool_context="")
+    assert vr.check_status == "not_applicable"
+    assert vr.confidence == 0
