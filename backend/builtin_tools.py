@@ -2133,6 +2133,49 @@ _AUDIT_SIMPLE_READ_COMMANDS = frozenset({
 _AUDIT_SHELL_META = (";", "&", "|", ">", "<", "`", "$", "\n", "\r")
 
 
+# Executables the classifier below actually knows. Anything else falls
+# through to its closing `return ToolEffect.WRITE`, which means "I could
+# not tell", not "this changed something".
+_AUDIT_CLASSIFIED_EXECUTABLES = _AUDIT_SIMPLE_READ_COMMANDS | frozenset({
+    "find", "mount", "systemctl", "service", "git", "docker", "podman", "ip",
+})
+
+
+def _terminal_mutation_observed(arguments: dict[str, Any]) -> bool:
+    """Did we RECOGNISE a mutating command, or only fail to recognise a
+    safe one?
+
+    Two questions were being answered by one WRITE verdict (2026-09-05
+    audit, finding 5). "Do not let this run in a read-only audit" is
+    rightly conservative about anything it cannot parse. "A user-visible
+    change happened, so prove it" is a claim about the world, and a
+    guess does not support it.
+
+    Conflating them cost a real turn: the agent finished the code fix,
+    ran `python3 -m unittest -v` to check it, and that successful,
+    read-only verification was classed WRITE — `python3` is in no table
+    — which reopened the turn contract and sent it round the re-prompt
+    loop. Proof obligations now come only from mutations we actually
+    identified.
+
+    The classification itself still lives in `_terminal_effect_for_call`
+    and is delegated to; only "was it recognised" is decided here.
+    """
+    command = str((arguments or {}).get("command") or "").strip()
+    if not command or any(mark in command for mark in _AUDIT_SHELL_META):
+        return False
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    executable = tokens[0].replace("\\", "/").rsplit("/", 1)[-1]
+    if executable not in _AUDIT_CLASSIFIED_EXECUTABLES:
+        return False
+    return _terminal_effect_for_call(arguments).changes_state
+
+
 def _terminal_effect_for_call(arguments: dict[str, Any]) -> ToolEffect:
     """Conservatively distinguish shell inspection from mutation.
 
@@ -4640,6 +4683,7 @@ def register_builtin_tools() -> None:
         },
         handler=_terminal_exec_handler,
         effect_resolver=_terminal_effect_for_call,
+        proof_resolver=_terminal_mutation_observed,
         audit_visible=True,
     )
 

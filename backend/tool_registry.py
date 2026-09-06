@@ -316,9 +316,27 @@ class Tool:
     origin: str = "builtin"
     effect: ToolEffect = ToolEffect.UNKNOWN
     effect_resolver: Optional[Callable[[dict[str, Any]], ToolEffect]] = None
+    # Optional second opinion, consulted ONLY for the proof obligation
+    # (2026-09-05 audit, finding 5). A resolver may be conservative
+    # about what it cannot parse — that is right for audit-mode
+    # enforcement — while the turn contract needs a mutation it actually
+    # observed. Returning False means "no user-visible change was
+    # demonstrated"; the effect itself is unchanged, so drift counting,
+    # frame checks and audit blocking all behave as before.
+    proof_resolver: Optional[Callable[[dict[str, Any]], bool]] = None
     audit_visible: bool = False
     requires_proof: bool = False
     build_action: bool = False
+
+    def _mutation_observed(self, arguments: Optional[dict]) -> bool:
+        """Fails toward demanding proof: a resolver that raises leaves
+        the obligation in place rather than quietly excusing a write."""
+        if self.proof_resolver is None:
+            return True
+        try:
+            return bool(self.proof_resolver(arguments or {}))
+        except Exception:
+            return True
 
     def resolve_semantics(
         self, arguments: Optional[dict] = None,
@@ -340,6 +358,7 @@ class Tool:
             ),
             requires_proof=bool(
                 self.requires_proof and effect.changes_state
+                and self._mutation_observed(arguments)
             ),
             build_action=bool(self.build_action and effect.changes_state),
         )
@@ -383,6 +402,7 @@ class ToolRegistry:
         origin: str = "builtin",
         effect: ToolEffect | str | None = None,
         effect_resolver: Optional[Callable[[dict[str, Any]], ToolEffect]] = None,
+        proof_resolver: Optional[Callable[[dict[str, Any]], bool]] = None,
         audit_visible: bool | None = None,
         requires_proof: bool | None = None,
         build_action: bool | None = None,
@@ -396,6 +416,7 @@ class ToolRegistry:
             origin=origin,
             effect=defaults.effect if effect is None else ToolEffect(effect),
             effect_resolver=effect_resolver,
+            proof_resolver=proof_resolver,
             audit_visible=(
                 defaults.audit_visible
                 if audit_visible is None else bool(audit_visible)

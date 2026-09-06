@@ -253,7 +253,19 @@ def waive_proof(reason: str, obligation_id: str = "") -> str:
     targets = [o for o in _iter(st)
                if o.status not in RESOLVED
                and (not obligation_id or o.id == obligation_id)]
-    if not targets and not st.obligations:
+    # A bare waiver has to be able to cover the CURRENT generation, not
+    # only a first, empty one (2026-09-05 audit, finding 5). The test
+    # used to be `not st.obligations`: after one waiver the list holds a
+    # resolved entry stamped with the previous generation, so a later
+    # change reopened the contract and every further `waive_proof`
+    # returned "Waived 0 obligation(s)" with nothing to target and
+    # nothing created. The agent could not close a turn whose work was
+    # already correct — 134 seconds, 24 LLM calls, `NOT DONE`.
+    #
+    # The generational rule stays: this covers `st.mut_seq` as it is
+    # now, so a waiver made before an edit still does not discharge the
+    # edit. Only the "there is nothing left to waive" case changes.
+    if not targets and not obligation_id and not _covered(st):
         st.seq += 1
         ob = Obligation(id=f"c{st.seq}", description="(no proof registered)",
                         status="waived", detail=why, resolved_at=st.mut_seq)

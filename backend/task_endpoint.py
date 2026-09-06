@@ -452,7 +452,21 @@ def _evaluate_criteria(
             continue
         stdout = (proc.stdout or b"").decode("utf-8", errors="replace")[:500]
         stderr = (proc.stderr or b"").decode("utf-8", errors="replace")[:500]
-        status = "met" if proc.returncode == 0 else "unmet"
+        # 126/127 are the shell's way of saying it could not run the
+        # thing at all — "not executable" and "command not found". That
+        # is a broken check, not a false claim, and the difference
+        # matters: `prove_change` reads `unmet` as "good, it fails now,
+        # that is what makes it a proof" and then reads a later pass as
+        # evidence the work landed. In the turn this came from, the box
+        # had no `python`, the probe exited 127, and the fail->pass it
+        # eventually recorded would have measured an interpreter
+        # appearing rather than a bug being fixed (2026-09-05 audit).
+        if proc.returncode == 0:
+            status = "met"
+        elif proc.returncode in (126, 127):
+            status = "check_error"
+        else:
+            status = "unmet"
         results.append(CriterionResult(
             criterion_id=c.id,
             description=c.description,
