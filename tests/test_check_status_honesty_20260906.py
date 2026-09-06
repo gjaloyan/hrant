@@ -130,3 +130,35 @@ def test_the_lane_usage_dict_actually_fits_the_answer_field():
     )
     assert a.token_usage.input_tokens == 10
     assert a.token_usage.llm_calls == 1
+
+
+def test_a_claim_the_lane_could_not_afford_to_check_is_not_dropped():
+    """The judge reports up to three claims; the lane searches two. The
+    third used to vanish — a claim known to be unbacked, left standing
+    in the answer with nothing said about it (2026-09-05 audit, finding
+    4). The budget stays; the remainder is now on the record."""
+    agent = _Agent()
+    three = ["claim one", "claim two", "claim three"]
+    with patch.object(ua, "_claims_judge_call",
+                      return_value={"claims": three}), \
+         patch.object(ua, "_web_search_for_lane", return_value=[]), \
+         patch.object(ua, "_try_chat_path", return_value="redrafted"):
+        ua._ground_fast_answer(task="q", answer="draft", agent=agent,
+                               speaker_id="s", snapshot="", convo="")
+
+    assert agent._claim_leftovers == ["claim three"]
+    conf, status = ua._lane_check_state(agent)
+    assert status == "partial", "not the same label as a fully settled answer"
+    assert conf < ua.CHECKED_CONFIDENCE
+
+
+def test_everything_checked_is_still_reported_as_verified():
+    agent = _Agent()
+    with patch.object(ua, "_claims_judge_call",
+                      return_value={"claims": ["only one"]}), \
+         patch.object(ua, "_web_search_for_lane", return_value=[]), \
+         patch.object(ua, "_try_chat_path", return_value="redrafted"):
+        ua._ground_fast_answer(task="q", answer="draft", agent=agent,
+                               speaker_id="s", snapshot="", convo="")
+    assert agent._claim_leftovers == []
+    assert ua._lane_check_state(agent)[1] == "verified"

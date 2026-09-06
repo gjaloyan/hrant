@@ -2241,6 +2241,11 @@ def _lane_check_state(agent) -> tuple[int, str]:
     """
     status = getattr(agent, "_claim_check", None)
     if status == "checked":
+        # Some claims found, more than the search budget: the answer is
+        # partly grounded and says so, rather than reporting the same
+        # 85 as a fully settled one.
+        if getattr(agent, "_claim_leftovers", None):
+            return UNMEASURED_CONFIDENCE, "partial"
         return CHECKED_CONFIDENCE, "verified"
     if status == "not_applicable":
         # A greeting asserts nothing. Serving it confidently is right.
@@ -2283,6 +2288,16 @@ def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
     if not check.claims:
         return answer
 
+    # The judge reports up to three claims; the lane searches two,
+    # because each search costs a round trip and the measured price of
+    # the whole grounded path is ~81k tokens against ~40k unchecked.
+    # The third was simply dropped — a claim we KNEW was unbacked, left
+    # in the answer with nothing said about it (2026-09-05 audit,
+    # finding 4). Keep the budget, record the remainder.
+    try:
+        agent._claim_leftovers = list(check.claims[_LANE_MAX_CLAIMS:])
+    except Exception:
+        pass
     try:
         blocks = []
         for claim in check.claims[:_LANE_MAX_CLAIMS]:
@@ -3328,7 +3343,8 @@ def run_unified(
                         "confidence": _lane_conf,
                         "check_status": _lane_status,
                         "verified_claims": [],
-                        "unverified_claims": [],
+                        "unverified_claims": list(
+                            getattr(agent, "_claim_leftovers", None) or []),
                         "contradictions": [],
                         "notes_used": [],
                     },
@@ -3385,8 +3401,12 @@ def run_unified(
                 log.debug("fast lane: token usage unavailable: %s", e)
             return AgentAnswer(
                 answer=chat_answer,
-                verification=_VR(confidence=_lane_conf,
-                                 check_status=_lane_status),
+                verification=_VR(
+                    confidence=_lane_conf,
+                    check_status=_lane_status,
+                    unverified_claims=list(
+                        getattr(agent, "_claim_leftovers", None) or []),
+                ),
                 is_chat=True,
                 mode="fast_chat",
                 turn_id=turn_id,

@@ -93,6 +93,33 @@ def _extract_tool_calls(answer: AgentAnswer) -> list[dict]:
     return out
 
 
+def _outcome_of(answer: AgentAnswer) -> Optional[str]:
+    """Did the work land, as far as this turn could tell?
+
+    Separate from `status` on purpose (2026-09-05 audit). A turn that
+    ran to the end always marks the job `completed`; whether it solved
+    anything is a different question, and the audit's own case answered
+    it "no" — endpoint_met false, confidence clipped to 30 — while the
+    job read `completed`.
+
+    Deliberately soft. This records what the turn already judged; it
+    does not re-judge, block delivery, or fail a job.
+    """
+    vr = getattr(answer, "verification", None)
+    if vr is None:
+        return None
+    if getattr(vr, "endpoint_met", None) is False:
+        return "unconfirmed"
+    if getattr(vr, "contradictions", None):
+        return "unconfirmed"
+    try:
+        if int(getattr(vr, "confidence", 0) or 0) < 60:
+            return "unconfirmed"
+    except (TypeError, ValueError):
+        return None
+    return "delivered"
+
+
 def run_tracked(
     agent: Agent,
     task: str,
@@ -189,6 +216,7 @@ def run_tracked(
                 response=answer.answer or "",
                 tool_calls=tool_calls,
                 execution_budget=answer.execution_budget or {},
+                outcome=_outcome_of(answer),
             )
             terminal_written = True
         except Exception as e:

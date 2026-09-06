@@ -119,6 +119,19 @@ class Job:
     # Each entry: {provider_id, model, ok, error?, elapsed_ms, started_at}
     attempts: list[dict] = field(default_factory=list)
 
+    # Did the work land? (2026-09-05 audit.) `status` is lifecycle —
+    # "completed" means the turn ran to the end and produced an answer,
+    # which `mark_completed` records on any normal return. It says
+    # nothing about whether the task was solved: the audit's own case
+    # finished `completed` with endpoint_met=false and confidence 30.
+    # Anyone counting completed jobs as successes was counting the
+    # wrong thing, so the judgement gets its own field:
+    #   "delivered"    — nothing the turn checked contradicted success
+    #   "unconfirmed"  — the turn could not confirm it (endpoint missed,
+    #                    contradictions, or low confidence)
+    #   None           — no verification was attached
+    outcome: Optional[str] = None
+
     # Counters
     retry_count: int = 0
     interrupted_count: int = 0
@@ -344,6 +357,7 @@ class JobStore:
         response: str,
         tool_calls: Optional[list[dict]] = None,
         execution_budget: Optional[dict] = None,
+        outcome: Optional[str] = None,
     ) -> Optional[Job]:
         with self._lock:
             job = self.get(job_id)
@@ -361,6 +375,7 @@ class JobStore:
                 job.tool_calls = tool_calls
             if execution_budget is not None:
                 job.execution_budget = dict(execution_budget)
+            job.outcome = outcome
             job.error = None
             self._write(job)
         _publish_job_transition(job_id, prev_status, "completed")

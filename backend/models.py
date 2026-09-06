@@ -139,6 +139,8 @@ class VerificationResult(BaseModel):
     # measured quality. One of:
     #   "verified"        — a check ran and settled the claims
     #   "not_applicable"  — nothing checkable was asserted
+    #   "partial"         — checked, but some claims were left
+    #                       unsearched (see `unverified_claims`)
     #   "not_checked"     — no check was attempted
     #   "failed"          — a check was attempted and errored
     #   None              — turn recorded before this field existed
