@@ -102,3 +102,31 @@ def test_the_full_cycle_keeps_its_scalar_and_tells_the_truth_beside_it():
 def test_the_field_defaults_to_unlabelled_for_old_turns():
     from backend.models import VerificationResult
     assert VerificationResult(confidence=85).check_status is None
+
+
+def test_the_lane_usage_dict_actually_fits_the_answer_field():
+    """The artifact carried these numbers all along; the ANSWER did not,
+    so about a third of turns reported `token_usage: null` and read as
+    free. The conversion is wrapped in a try/except so a shape mismatch
+    would fail silently back to null — pin the shapes instead.
+    """
+    from backend.llm import TokenTracker
+    from backend.models import AgentAnswer, TokenUsage, VerificationResult
+
+    tracker = TokenTracker()
+    tracker.reset_request()
+    tracker.record(task_type="chat", model="m", provider="p",
+                   usage={"input_tokens": 10, "output_tokens": 4})
+    usage = tracker.request_usage()
+
+    assert set(usage) <= set(TokenUsage.model_fields), (
+        "request_usage() grew a key TokenUsage cannot take; the lane's "
+        "conversion would swallow it and report null"
+    )
+    a = AgentAnswer(
+        answer="x", is_chat=True,
+        verification=VerificationResult(confidence=85),
+        token_usage=TokenUsage(**usage),
+    )
+    assert a.token_usage.input_tokens == 10
+    assert a.token_usage.llm_calls == 1

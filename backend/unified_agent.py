@@ -3368,6 +3368,21 @@ def run_unified(
             # through TokenTracker.record so per-day counters and
             # request_usage() are up-to-date for the parent turn.
             from .models import VerificationResult as _VR
+            from .models import TokenUsage as _TU
+            # The lane's own telemetry. The artifact has carried these
+            # numbers all along (`tu_now` above); the ANSWER did not, so
+            # every fast-path turn reported `token_usage: null` to the
+            # WebUI and to anything reading the reply — a third of all
+            # turns looking free. 2026-09-05 audit, "restore the fast
+            # lane's telemetry".
+            _lane_usage = None
+            try:
+                _lane_usage = _TU(**{
+                    k: v for k, v in (tu_now or {}).items()
+                    if k in _TU.model_fields
+                })
+            except Exception as e:
+                log.debug("fast lane: token usage unavailable: %s", e)
             return AgentAnswer(
                 answer=chat_answer,
                 verification=_VR(confidence=_lane_conf,
@@ -3375,6 +3390,7 @@ def run_unified(
                 is_chat=True,
                 mode="fast_chat",
                 turn_id=turn_id,
+                token_usage=_lane_usage,
             )
 
     # Audit follow-up: the T8 keyword-based "trivial chat" classifier
