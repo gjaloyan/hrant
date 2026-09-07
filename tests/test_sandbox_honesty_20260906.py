@@ -85,3 +85,71 @@ def test_each_tier_reports_what_it_actually_enforces(tier, fs, net):
         res = sb.sandbox_exec("echo hi", network=False, allow_degraded=True)
     assert res.fs_isolated is fs
     assert res.network_contained is net
+
+
+# ── found on prod 2026-09-07, one tier up from the first fix ─────────
+
+def test_every_isolator_is_probed_not_just_looked_up():
+    """`unshare` was runtime-probed; bwrap and firejail were selected on
+    PATH presence alone. Installed is not usable: measured on prod the
+    same day, `PrivateTmp=true` in the systemd unit makes
+    `unshare --user --fork --net` fail with EPERM, so the service could
+    not create a namespace while an SSH shell on the same box could.
+
+    This was about to matter: the refusal message tells the caller to
+    install bubblewrap, and bwrap wants the same user namespaces —
+    following our own advice would have selected a tier that fails and
+    reported `fs_isolated: True`.
+    """
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen[argv[0]] = True
+        class _P:
+            returncode = 1        # present, refused
+            stdout = stderr = b""
+        return _P()
+
+    sb._STATE_CACHE.clear()
+    with patch.object(sb, "_which", lambda b: "/usr/bin/" + b), \
+         patch.object(sb.subprocess, "run", fake_run):
+        assert sb.detect_tier() == sb.TIER_DEGRADED
+        report = sb.isolation_report()
+    sb._STATE_CACHE.clear()
+
+    assert set(seen) == {"bwrap", "firejail", "unshare"}, seen
+    assert all(v == "unusable" for v in report.values()), report
+
+
+def test_a_working_isolator_is_still_chosen():
+    def fake_run(argv, **kw):
+        class _P:
+            returncode = 0
+            stdout = stderr = b""
+        return _P()
+
+    sb._STATE_CACHE.clear()
+    with patch.object(sb, "_which",
+                      lambda b: "/usr/bin/bwrap" if b == "bwrap" else None), \
+         patch.object(sb.subprocess, "run", fake_run):
+        assert sb.detect_tier() == sb.TIER_BWRAP
+    sb._STATE_CACHE.clear()
+
+
+def test_the_refusal_tells_missing_apart_from_refused():
+    """"Install bubblewrap" is the wrong instruction when bubblewrap is
+    already installed and the unit is what refuses."""
+    sb._STATE_CACHE.clear()
+    sb._STATE_CACHE.update({
+        sb.TIER_BWRAP: "missing",
+        sb.TIER_FIREJAIL: "missing",
+        sb.TIER_UNSHARE: "unusable",
+    })
+    msg = sb._no_isolator_message()
+    sb._STATE_CACHE.clear()
+
+    assert "Installed but refused" in msg
+    assert "unshare" in msg.split("Installed but refused")[1].split(".")[0]
+    assert "PrivateTmp" in msg
+    assert "Not installed: bubblewrap, firejail" in msg
+    assert "allow_degraded=true" in msg

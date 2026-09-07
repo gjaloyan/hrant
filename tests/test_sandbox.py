@@ -26,6 +26,18 @@ import pytest
 # ─── tier detection ─────────────────────────────────────────────────
 
 
+def _probe_ok(monkeypatch, sandbox):
+    """Every tier is runtime-probed since 2026-09-07 — a binary on PATH
+    is not evidence the kernel or the service unit will allow it. These
+    tests are about SELECTION, so let the probe succeed."""
+    class _P:
+        returncode = 0
+        stdout = stderr = b""
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: _P())
+    sandbox._STATE_CACHE.clear()
+    monkeypatch.setattr(sandbox, "_STATE_CACHE", {})
+
+
 def test_detect_tier_picks_bwrap_when_available(monkeypatch):
     from backend.tools import sandbox
 
@@ -33,6 +45,7 @@ def test_detect_tier_picks_bwrap_when_available(monkeypatch):
         return f"/usr/bin/{name}" if name == "bwrap" else None
 
     monkeypatch.setattr(sandbox.shutil, "which", fake_which)
+    _probe_ok(monkeypatch, sandbox)
     assert sandbox.detect_tier() == sandbox.TIER_BWRAP
 
 
@@ -47,6 +60,7 @@ def test_detect_tier_falls_back_to_firejail(monkeypatch):
         return None
 
     monkeypatch.setattr(sandbox.shutil, "which", fake_which)
+    _probe_ok(monkeypatch, sandbox)
     assert sandbox.detect_tier() == sandbox.TIER_FIREJAIL
 
 
@@ -57,10 +71,7 @@ def test_detect_tier_falls_back_to_unshare(monkeypatch):
         return "/usr/bin/unshare" if name == "unshare" else None
 
     monkeypatch.setattr(sandbox.shutil, "which", fake_which)
-    # detect_tier runtime-probes unshare since the kernel can reject
-    # the call even when the binary exists. Pretend the probe passed.
-    monkeypatch.setattr(sandbox, "_unshare_actually_works", lambda: True)
-    monkeypatch.setattr(sandbox, "_UNSHARE_PROBE_CACHE", None)
+    _probe_ok(monkeypatch, sandbox)
     assert sandbox.detect_tier() == sandbox.TIER_UNSHARE
 
 
@@ -73,8 +84,13 @@ def test_detect_tier_demotes_to_degraded_when_unshare_kernel_refuses(monkeypatch
         return "/usr/bin/unshare" if name == "unshare" else None
 
     monkeypatch.setattr(sandbox.shutil, "which", fake_which)
-    monkeypatch.setattr(sandbox, "_unshare_actually_works", lambda: False)
-    monkeypatch.setattr(sandbox, "_UNSHARE_PROBE_CACHE", None)
+
+    class _Refused:
+        returncode = 1
+        stdout = stderr = b""
+
+    monkeypatch.setattr(sandbox.subprocess, "run", lambda *a, **k: _Refused())
+    monkeypatch.setattr(sandbox, "_STATE_CACHE", {})
     assert sandbox.detect_tier() == sandbox.TIER_DEGRADED
 
 

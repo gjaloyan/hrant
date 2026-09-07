@@ -114,36 +114,82 @@ def detect_tier() -> str:
     silently breaks our previous setup. The probe runs a tiny
     `unshare --user --fork true` and falls through to degraded if
     it fails."""
-    if _which("bwrap") is not None:
-        return TIER_BWRAP
-    if _which("firejail") is not None:
-        return TIER_FIREJAIL
-    if _which("unshare") is not None and _unshare_actually_works():
-        return TIER_UNSHARE
+    for tier in (TIER_BWRAP, TIER_FIREJAIL, TIER_UNSHARE):
+        if isolator_state(tier) == "ok":
+            return tier
     return TIER_DEGRADED
 
 
-def _unshare_actually_works() -> bool:
-    """Verify the box's unshare can create a user+net namespace. The
-    check is cheap (~ms) but we still cache the answer for the
-    lifetime of the process — kernel toggles don't flip mid-flight."""
-    global _UNSHARE_PROBE_CACHE
-    cached = _UNSHARE_PROBE_CACHE
+# What each isolator's binary is called on PATH.
+_TIER_BINARY = {
+    TIER_BWRAP: "bwrap",
+    TIER_FIREJAIL: "firejail",
+    TIER_UNSHARE: "unshare",
+}
+
+_STATE_CACHE: dict = {}
+
+
+def isolator_state(tier: str) -> str:
+    """"ok" | "unusable" | "missing", cached per process.
+
+    Installed is not the same as usable, and only `unshare` was ever
+    probed (2026-09-07). Measured on prod the same day: the systemd unit
+    sets `PrivateTmp=true`, and under it `unshare --user --fork --net`
+    fails with EPERM — so the service could not create a namespace while
+    an SSH shell on the same box could. Selecting a tier on PATH
+    presence alone would then have run the command uncontained and
+    reported `fs_isolated: True`.
+
+    That mattered immediately: the refusal message tells the caller to
+    `apt install bubblewrap`, and bwrap wants the same user namespaces.
+    Following our own advice would have produced exactly the false claim
+    this tool was just fixed to stop making.
+
+    Probed with the REAL argv for that tier, not a hand-written
+    approximation, so the probe cannot drift from what runs.
+    """
+    cached = _STATE_CACHE.get(tier)
     if cached is not None:
         return cached
+    state = _probe_isolator(tier)
+    _STATE_CACHE[tier] = state
+    return state
+
+
+def _probe_isolator(tier: str) -> str:
+    binary = _TIER_BINARY.get(tier)
+    if not binary or _which(binary) is None:
+        return "missing"
+    scratch = None
     try:
+        scratch = Path(tempfile.mkdtemp(prefix="hrant-sandbox-probe-"))
+        if tier == TIER_BWRAP:
+            argv = _bwrap_argv(scratch, network=False)
+        elif tier == TIER_FIREJAIL:
+            argv = _firejail_argv(scratch, network=False)
+        else:
+            argv = _unshare_argv(network=False)
         proc = subprocess.run(
-            ["unshare", "--user", "--fork", "--net", "true"],
-            capture_output=True, timeout=5,
+            argv + ["true"], capture_output=True, timeout=10,
         )
-        ok = proc.returncode == 0
+        return "ok" if proc.returncode == 0 else "unusable"
     except Exception:
-        ok = False
-    _UNSHARE_PROBE_CACHE = ok
-    return ok
+        return "unusable"
+    finally:
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
-_UNSHARE_PROBE_CACHE: Optional[bool] = None
+def isolation_report() -> dict:
+    """Per-tier state, for the refusal message and for diagnostics."""
+    return {t: isolator_state(t)
+            for t in (TIER_BWRAP, TIER_FIREJAIL, TIER_UNSHARE)}
+
+
+def _unshare_actually_works() -> bool:
+    """Back-compat shim: `isolator_state` covers all three tiers now."""
+    return isolator_state(TIER_UNSHARE) == "ok"
 
 
 def _truncate(data: bytes, cap: int) -> str:
@@ -248,6 +294,33 @@ def _unshare_argv(*, network: bool) -> list[str]:
     return argv
 
 
+def _no_isolator_message() -> str:
+    """Say WHICH isolator failed and how, because the two failures have
+    different fixes and the wrong message sends the caller to install
+    something that is already there (2026-09-07)."""
+    report = isolation_report()
+    missing = [t for t, st in report.items() if st == "missing"]
+    unusable = [t for t, st in report.items() if st == "unusable"]
+    parts = ["no usable isolator, so nothing would contain this command. "
+             "NOT RUN."]
+    if unusable:
+        parts.append(
+            f"Installed but refused by the kernel or the service unit: "
+            f"{', '.join(sorted(unusable))}. On this box that is usually "
+            f"`PrivateTmp=true` in the systemd unit, which blocks new "
+            f"user namespaces — installing another isolator will not "
+            f"help until that changes."
+        )
+    if missing:
+        parts.append(f"Not installed: {', '.join(sorted(missing))}.")
+    parts.append(
+        "Either run the command openly with terminal_exec if you have "
+        "judged it safe, or pass allow_degraded=true to accept an "
+        "uncontained run knowingly."
+    )
+    return " ".join(parts)
+
+
 def sandbox_exec(
     command: str,
     *,
@@ -322,15 +395,7 @@ def sandbox_exec(
             shutil.rmtree(scratch, ignore_errors=True)
             return SandboxResult(
                 ok=False, exit_code=-1, stdout="",
-                stderr=(
-                    "no isolator available (bubblewrap, firejail and "
-                    "unshare are all missing), so nothing would contain "
-                    "this command. NOT RUN. Install one — "
-                    "`terminal_exec apt install bubblewrap` — or, if you "
-                    "have decided the command is safe, run it with "
-                    "terminal_exec, or pass allow_degraded=true to accept "
-                    "an uncontained run knowingly."
-                ),
+                stderr=_no_isolator_message(),
                 isolation=TIER_UNAVAILABLE, elapsed_ms=0,
                 scratch_dir="", network=network,
                 network_contained=False, fs_isolated=False,
