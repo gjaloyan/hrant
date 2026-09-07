@@ -30,9 +30,20 @@ RestartSec=10
 KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=15
-# Hardening: agent never needs root, fresh tempfs for /tmp.
+# Hardening: agent never needs root.
 NoNewPrivileges=true
-PrivateTmp=true
+# PrivateTmp is OFF deliberately (2026-09-07). It gave the service a
+# private /tmp, and it also made the service unable to create user
+# namespaces: under it `unshare --user --fork --net` fails with EPERM,
+# so `sandbox_exec` had no isolator at all and every call was refused.
+# Measured per option — NoNewPrivileges is fine, PrivateTmp is what
+# breaks it — and systemd 255 has no DelegateNamespaces to keep both.
+#
+# The trade: a private /tmp protects against other local users, of
+# which this box has none, and the agent holds an unrestricted shell
+# anyway. Real containment for untrusted input — an unknown archive, a
+# freshly downloaded binary — is worth more than a separate /tmp.
+# PrivateTmp=true
 # Log to journal — `journalctl --user -u hrant -f` for live tail.
 StandardOutput=journal
 StandardError=journal
