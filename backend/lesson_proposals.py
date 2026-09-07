@@ -49,6 +49,8 @@ SIMILARITY = 0.72
 # default prompt from 16862 to 18434 against a 17000 budget — a count cap
 # cannot see that coming. Characters are what get billed, so characters
 # are what is capped.
+# Counted on the RENDERED module (provenance comments stripped), which
+# is what the turn actually pays for.
 MAX_MODULE_CHARS = 1800
 
 # One rule, one sentence. The model writes paragraphs when left alone —
@@ -142,8 +144,14 @@ def already_known(lesson: str, body: str, pending: list) -> Optional[str]:
         if getattr(p, "status", "") == "pending"
         and (getattr(p, "title", "") or "").startswith("Lesson:")
     )
-    if len(body) + claimed + len(lesson) + 8 > MAX_MODULE_CHARS:
-        return (f"no room left ({len(body)} in the module, {claimed} already "
+    # Measured on what REACHES the model, not on the file. Since
+    # 2026-09-07 the assembler strips provenance comments, and those were
+    # a third of this module — counting them against the lesson budget
+    # billed real rules for bookkeeping nobody sends.
+    from .prompt_modules import strip_provenance
+    billed = len(strip_provenance(body))
+    if billed + claimed + len(lesson) + 8 > MAX_MODULE_CHARS:
+        return (f"no room left ({billed} in the module, {claimed} already "
                 f"proposed, limit {MAX_MODULE_CHARS}); decide on the pending "
                 "ones or prune a rule first")
     for known in current:

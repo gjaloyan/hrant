@@ -134,14 +134,27 @@ def test_m3_warns_against_verbatim_retry():
 # ─── M4: Job Tracking Policy ──────────────────────────────────────
 
 
-def test_m4_loads_for_task_and_supervisor():
-    """M4 must be in the prompt BEFORE the agent loads the bench
-    bundle — otherwise it has the tools but not the protocol.
-    That's what broke on the 2026-05-26 terminal-bench turns."""
+def test_m4_launch_loads_for_task_and_supervisor():
+    """The LAUNCH half must be in the prompt BEFORE the agent loads the
+    bench bundle — otherwise it has the tools but not the protocol.
+    That's what broke on the 2026-05-26 terminal-bench turns.
+
+    Split 2026-09-07: the tracking half moved behind an actual job (see
+    `test_m4_tracking_waits_for_a_real_job`), because it opened by
+    asserting the turn was inside a long-running workflow and rode along
+    on every small fix."""
     from backend.prompt_modules import build_prompt, TurnContext
     for tt in ("task", "supervisor"):
         out = build_prompt(TurnContext(turn_type=tt))
-        assert "JOB TRACKING" in out, f"M4 missing for {tt!r}"
+        assert "LAUNCHING LONG-RUNNING WORK" in out, f"missing for {tt!r}"
+        assert "define_task_endpoint" in out
+
+
+def test_m4_tracking_waits_for_a_real_job():
+    from backend.prompt_modules import build_prompt, TurnContext
+    assert "JOB TRACKING" not in build_prompt(TurnContext(turn_type="task"))
+    assert "JOB TRACKING" in build_prompt(
+        TurnContext(turn_type="task", background_job=True))
 
 
 def test_m4_does_not_load_for_chat():
@@ -154,7 +167,7 @@ def test_m4_distinguishes_prerequisites_from_success_criteria():
     """The whole point of the endpoint contract is the split between
     pre-flight and post-flight gates."""
     from backend.prompt_modules import MODULES
-    body = MODULES["m4_job_tracking"].body
+    body = MODULES["m4_job_launch"].body
     assert "prerequisites" in body
     assert "success_criteria" in body
     assert "BEFORE" in body
@@ -353,7 +366,9 @@ def test_default_task_turn_loads_expected_modules():
         "CORE AGENT BEHAVIOR",
         "TASK SOLVER",
         "TOOL USE",
-        "JOB TRACKING",
+        # The LAUNCH half is always on for a task turn; the tracking
+        # protocol waits for an actual job (2026-09-07 prompt review).
+        "LAUNCHING LONG-RUNNING WORK",
         "SKILL MANAGEMENT",
         "USER INTERACTION",
         "OUTPUT FORMAT — WebUI",

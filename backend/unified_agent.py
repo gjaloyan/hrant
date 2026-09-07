@@ -3552,11 +3552,27 @@ def run_unified(
         _active_model = getattr(_active_llm, "model", None) if _active_llm else None
     except Exception:
         _active_model = None
+    # Is a background job actually in play? (2026-09-07 prompt review.)
+    # The tracking protocol used to load on every task turn and open by
+    # asserting the turn WAS inside a long-running workflow — a false
+    # premise on the ordinary "fix this function" turn, and 3.4 KB of it.
+    # A supervisor turn is one by definition; otherwise ask the store.
+    # Best-effort: on any doubt, load it — a missing protocol costs more
+    # than a redundant one.
+    _has_bg_job = bool(supervisor_mode)
+    if not _has_bg_job:
+        try:
+            from .tools.background_jobs import list_jobs as _list_bg
+            _has_bg_job = bool(_list_bg(status="running", limit=1))
+        except Exception as _e:
+            log.debug("background-job probe failed: %s", _e)
+            _has_bg_job = True
     _turn_ctx = _PromptCtx(
         turn_type="supervisor" if supervisor_mode else "task",
         channel=_channel_norm,  # type: ignore[arg-type]
         loaded_bundles=frozenset(_get_loaded_bundles()),
         model_size=_classify_model_size(_active_model),  # type: ignore[arg-type]
+        background_job=_has_bg_job,
     )
     _rules_for_turn = _build_rules_for_turn(
         ctx=_turn_ctx,

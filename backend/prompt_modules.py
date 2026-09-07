@@ -20,6 +20,7 @@ where strings REPLACE that module's body and `None` SKIPS it.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal, Optional
 
@@ -39,6 +40,12 @@ class Module:
     requires_channel: Optional[frozenset[str]] = None
     requires_bundle: Optional[frozenset[str]] = None
     requires_model_size: Optional[frozenset[str]] = None
+    # True  -> load only when a background job is actually in play.
+    # False -> load only when one is NOT.
+    # None  -> do not care. (2026-09-07 prompt review: the job-tracking
+    # protocol was loading on every task turn and opening with a flat
+    # assertion that the turn was inside a long-running workflow.)
+    requires_background_job: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,16 @@ class TurnContext:
     channel: Channel = "webui"
     loaded_bundles: frozenset[str] = frozenset()
     model_size: ModelSize = "large"
+    # Is there a live background job this turn has to reason about?
+    # Default False: the common task turn is someone asking for a small
+    # fix. A supervisor turn is one BY DEFINITION — it exists because a
+    # job finished — so the invariant lives here rather than in every
+    # caller that builds a context.
+    background_job: bool = False
+
+    def __post_init__(self) -> None:
+        if self.turn_type == "supervisor" and not self.background_job:
+            object.__setattr__(self, "background_job", True)
 
 
 # ─── M1: Core Agent Behavior ──────────────────────────────────────
@@ -74,8 +91,9 @@ You operate in a tool-use loop. Each iteration: think → ONE action \
 
 Before acting, complete this sentence to yourself:
   "This turn is DONE when ____."
-If you cannot complete it in <15 words, the task is unclear — \
-clarify via `ask_user` instead of guessing.
+If you cannot name what done looks like, you do not know what was \
+asked. `ask_user` when the answer changes what you do or may touch; \
+otherwise take the likeliest reading, say so, and proceed.
 
 ## Honesty contract
 
@@ -90,13 +108,15 @@ even when your own previous draft slipped into another language.
 
 ## Final-answer template
 
-1–3 sentences. Shape:
+Default to 1–3 sentences for an operation. Shape:
   [what was done] + [where / evidence] + [next step OR end].
+Length follows the question; a report gets the length it needs. \
+Padding never does — filler, restating the request, or closing \
+with an offer of further help.
 
 Examples:
   ✓ "Set tts.rate to +25% in settings.json. Try saying a phrase to check."
   ✓ "Started job j-7a3c. I will DM you when it finishes."
-  ✗ "I have made the requested changes. Let me know if you need anything else."
 """
 
 
@@ -289,15 +309,11 @@ you checked in the answer.
 # (17 inspect calls, never `define_task_endpoint`). Cost ~480 tok
 # on task turns; saves much more on failed long-running launches.
 
-_M4_BODY = """\
-# JOB TRACKING POLICY
+_M4_LAUNCH_BODY = """# LAUNCHING LONG-RUNNING WORK
 
-You are inside a workflow that involves a long-running background
-job. The discipline:
-
-## Before launch
-
-`define_task_endpoint(...)` with BOTH:
+Work that will outlive this turn — a benchmark, a build, a long
+scrape — goes to a background job rather than blocking the reply.
+Before you launch one, `define_task_endpoint(...)` with BOTH:
   - prerequisites    — what must be TRUE BEFORE launch.
                        Checked pre-flight; launch refused if any
                        critical one is ❌.
@@ -307,6 +323,16 @@ job. The discipline:
 
 Heuristic: if you think "this might fail because X is empty/
 missing", X is a PREREQUISITE, not a success criterion.
+"""
+
+# The rest of the protocol — refusal handling, the supervisor turn,
+# scope-preserving retries, status checks — only means anything once
+# a job exists. It used to ride along on every task turn, 3.4 KB of
+# it, under a heading asserting the turn WAS inside such a workflow
+# (2026-09-07 prompt review).
+_M4_BODY = """# JOB TRACKING POLICY
+
+A background job is in play. The discipline:
 
 ## On launch refusal (`error: prerequisites_unmet`)
 
@@ -660,10 +686,19 @@ MODULES: dict[str, Module] = {
         body=_M3_BODY,
         always_on=True,
     ),
+    # Split 2026-09-07. The launch discipline stays on every task turn:
+    # the 2026-05-26 terminal-bench failure was the agent holding the
+    # tools and not the protocol, and that is the half that prevents it.
+    "m4_job_launch": Module(
+        name="m4_job_launch",
+        body=_M4_LAUNCH_BODY,
+        requires_turn_type=frozenset({"task", "supervisor"}),
+    ),
     "m4_job_tracking": Module(
         name="m4_job_tracking",
         body=_M4_BODY,
         requires_turn_type=frozenset({"task", "supervisor"}),
+        requires_background_job=True,
     ),
     "m5_skill_management": Module(
         name="m5_skill_management",
@@ -730,6 +765,7 @@ DEFAULT_ORDER: list[str] = [
     "m7_format_voice",
     "m9_small_model",
     "m2_task_solver",
+    "m4_job_launch",
     "m4_job_tracking",
 ]
 
@@ -758,6 +794,9 @@ def _module_matches(mod: Module, ctx: TurnContext) -> bool:
     if mod.requires_model_size is not None:
         if ctx.model_size not in mod.requires_model_size:
             return False
+    if mod.requires_background_job is not None:
+        if bool(ctx.background_job) is not mod.requires_background_job:
+            return False
     return True
 
 
@@ -767,6 +806,40 @@ def _select_modules(ctx: TurnContext) -> list[Module]:
         MODULES[name] for name in DEFAULT_ORDER
         if _module_matches(MODULES[name], ctx)
     ]
+
+
+_PROVENANCE_RE = re.compile(r"[ 	]*<!--.*?-->", re.S)
+
+
+def strip_provenance(body: str) -> str:
+    """Drop HTML comments before the text reaches the model.
+
+    2026-09-07 prompt review. The lessons module carries where each rule
+    came from — `<!-- seen 20x, merged from 4 -->`, `<!-- meta-learner,
+    severity 2 -->`, and the anchor the lesson writer inserts against.
+    That is bookkeeping for whoever edits the file, and 602 of the
+    module's 1831 characters, shipped on every turn.
+
+    Worse than the cost: "seen 20x" invites the model to rank rules by a
+    counter that measures how often the meta-learner restated a
+    complaint, not how much the rule matters.
+
+    Stripped at render, not deleted: `lesson_proposals` needs the anchor
+    to know where to insert, and the provenance is what lets a stale
+    rule be argued about later.
+    """
+    if not body or "<!--" not in body:
+        return body
+    out = _PROVENANCE_RE.sub("", body)
+    # Comment-only lines leave blanks behind; collapse runs of them so
+    # the module does not arrive full of holes.
+    lines = [ln.rstrip() for ln in out.splitlines()]
+    kept: list[str] = []
+    for ln in lines:
+        if not ln and kept and not kept[-1]:
+            continue
+        kept.append(ln)
+    return chr(10).join(kept).strip()
 
 
 def _is_empty_collector(body: str) -> bool:
@@ -821,5 +894,5 @@ def build_prompt(
         # only a heading and comments has nothing to contribute.
         if _is_empty_collector(body):
             continue
-        parts.append(body)
+        parts.append(strip_provenance(body))
     return "\n\n".join(parts)
