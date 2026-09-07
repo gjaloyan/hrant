@@ -147,10 +147,18 @@ _ENDPOINT_JUDGE_SYSTEM = """You judge whether an assistant's answer DELIVERED wh
 
 You are given the user's request, the assistant's answer, and an EVIDENCE block. The evidence block is produced by code, not by the assistant: it lists the tools that actually ran this turn and, for every file the answer attaches, whether that file really exists on disk.
 
-Rules:
+STEP 1 — what kind of request is this? Decide this BEFORE reading the evidence.
+
+  INFORMATIONAL: a question, an explanation, a comparison, an opinion, small talk. The user wanted to KNOW something. A relevant, responsive answer delivers it — there is nothing for evidence to show, and no tool needed to run. Return endpoint_met = true and stop. The rules in step 2 are not about this case; do not apply them to it. "Explain X", "what is the difference between X and Y", "why did Z happen" are all this case, however long the answer is and whatever tools the assistant used while composing it.
+
+  ACTION: the user wanted the world changed or a concrete artifact produced — run, execute, send, install, create, configure, fix. Go to step 2.
+
+If a request contains both ("check the logs and tell me what you find"), judge the ACTION part.
+
+STEP 2 — for an ACTION request only, judge from the evidence.
+
 - Judge from the EVIDENCE. The assistant's own assertions are NOT evidence. "Done", "I applied it", "I restarted it", "it now works" prove nothing by themselves.
-- If the request was purely informational (a question, explanation, opinion, small talk) it is satisfied by a relevant answer -> endpoint_met = true.
-- If the request demanded an ACTION, a state change, or a concrete result (run/execute/send/create something, change a setting, produce a file) it is satisfied ONLY if the evidence shows that happening. An asserted effect with nothing in the evidence demonstrating it -> endpoint_met = false.
+- The request is satisfied ONLY if the evidence shows the action happening. An asserted effect with nothing in the evidence demonstrating it -> endpoint_met = false.
 - An attached file satisfies the request only when the user asked FOR a file. The assistant's own working material — measurements, scratch dumps, intermediate notes — is not a deliverable, and attaching it does NOT satisfy a request to change, configure, install or fix something.
 - Honesty is never itself a failure, but it is also not delivery. Separate two cases:
   * BLOCKED — the assistant names a concrete external obstacle it cannot pass (a login it has no credentials for, a site that is down, a permission it lacks, a missing input only the user can give). Nothing more was possible this turn -> endpoint_met = true.
