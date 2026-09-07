@@ -441,9 +441,32 @@ def patch_state(patch_path: Path) -> str:
 
 
 def reapply_patch(patch_path: Path) -> bool:
-    """Put a still-needed patch back after a pull. False on any failure."""
+    """Put a still-needed patch back after a pull. False on any failure.
+
+    Plain apply first, then again with `-C1`. Reducing the required
+    context from three lines to one is what carries a self-mod across
+    an upstream edit to a NEIGHBOURING line — which is the ordinary way
+    these patches used to die, since the agent's repairs live in the
+    same files that keep being changed upstream.
+
+    Measured 2026-09-07, three scenarios:
+      upstream adds a line far above  — plain already applies
+      upstream edits a neighbour line — plain refuses, -C1 applies
+      upstream rewrites the same line — both refuse, correctly
+
+    So the fallback recovers drift and still declines a real collision,
+    which is the behaviour worth having: guessing a merge there would
+    be worse than reporting the conflict. `git apply` is all-or-nothing
+    without `--reject`, so a refusal leaves the tree untouched.
+    """
     try:
-        return _git("apply", str(patch_path), check=False).returncode == 0
+        if _git("apply", str(patch_path), check=False).returncode == 0:
+            return True
+        if _git("apply", "-C1", str(patch_path), check=False).returncode == 0:
+            log.info("self-mod %s re-applied with relaxed context",
+                     patch_path.name)
+            return True
+        return False
     except Exception as e:
         log.warning("reapply failed for %s: %s", patch_path, e)
         return False
@@ -538,16 +561,17 @@ def archive_all_active() -> dict:
     conflicted: list[str] = []
     still_active: list = []
     for entry in list(active):
-        state = patch_state(_self_mods_dir() / entry.patch_filename)
-        if state == "upstream":
+        patch_file = _self_mods_dir() / entry.patch_filename
+        if patch_state(patch_file) == "upstream":
             continue
-        if state == "applies" and reapply_patch(
-                _self_mods_dir() / entry.patch_filename):
+        # `reapply_patch` is the authority on whether it still fits: it
+        # tries a 3-way merge when the plain apply misses, so a patch
+        # `patch_state` calls "conflicts" can still come back (2026-09-07).
+        if reapply_patch(patch_file):
             kept.append(entry.id)
             still_active.append(entry)
             continue
-        if state == "conflicts":
-            conflicted.append(entry.id)
+        conflicted.append(entry.id)
     active = [e for e in active if e not in still_active]
     if not active:
         # Everything was either superseded or carried forward.

@@ -141,7 +141,9 @@ def test_upstream_patches_are_still_archived():
     patch re-applied over code that already contains it."""
     import inspect
     src = inspect.getsource(sm.archive_all_active)
-    assert 'if state == "upstream":' in src
+    # The wording moved on 2026-09-07 when `reapply_patch` became the
+    # authority on whether a patch still fits; the upstream test stayed.
+    assert 'patch_state(patch_file) == "upstream"' in src
     assert "continue" in src
 
 

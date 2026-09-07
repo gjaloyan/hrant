@@ -283,25 +283,34 @@ def test_update_handles_non_fast_forward_pull(isolated_history):
     assert "failed_at_pull" in results
 
 
-def test_update_prompts_when_active_self_mods(isolated_history):
-    """Active self-mods + assume_yes=False → consent callback fires;
-    saying no returns cancelled=True without touching git."""
-    seen_prompts: list[str] = []
+def test_update_never_asks_about_self_mods(isolated_history):
+    """An update with active self-mods must just run.
+
+    There used to be a consent gate here, and it was right when the
+    pull archived every patch: "your agent's own repairs are about to
+    be deleted" is worth stopping for. The pull started sorting patches
+    instead - still fits, already upstream, conflicts - and the prompt
+    outlived the danger it described. It defaulted to NO, so the owner
+    cancelled a routine `hrant update` by pressing Enter (reported with
+    a screenshot, 2026-09-07).
+
+    Nothing is destroyed now: a conflicting patch is preserved under
+    `self_mods/history/` and named in the output. So there is nothing
+    to consent to.
+    """
+    asked: list[str] = []
 
     def fake_confirm(prompt: str, default: bool = False) -> bool:
-        seen_prompts.append(prompt)
+        asked.append(prompt)
         return False
 
-    with patch.object(updater, "count_active_self_mods", return_value=2), \
-         patch.object(updater, "is_dirty", return_value=False), \
-         patch.object(updater, "current_sha", return_value="X"), \
-         patch.object(updater, "current_branch", return_value="master"), \
-         patch.object(updater, "_git") as m_git:
+    with patch.object(updater, "count_active_self_mods", return_value=2),          patch.object(updater, "is_dirty", return_value=False),          patch.object(updater, "current_sha", return_value="X"),          patch.object(updater, "current_branch", return_value="master"),          patch.object(updater, "_git") as m_git:
         r = updater.do_update(confirm=fake_confirm, assume_yes=False)
-    assert r.cancelled is True
-    assert "2" in seen_prompts[0]
-    assert "archive" in seen_prompts[0].lower()
-    m_git.assert_not_called()
+
+    assert asked == [], f"the owner was asked: {asked}"
+    assert r.cancelled is False
+    assert m_git.called, "the update should have gone ahead"
+
 
 
 def test_update_skips_prompt_when_no_active_self_mods(isolated_history):
@@ -532,32 +541,6 @@ def test_clean_tree_is_not_reported_as_expected_dirt(isolated_history):
     with patch.object(updater, "dirty_tracked_files", return_value=[]), \
          patch.object(updater, "self_mod_owned_files", return_value=set()):
         assert updater.only_expected_files_dirty() is False
-
-
-def test_the_consent_prompt_does_not_claim_everything_is_archived(
-        isolated_history):
-    """The owner reads this before deciding whether to update at all.
-
-    It used to say "This update will archive N active self-modification(s)",
-    which stopped being true once the pull began sorting them per patch --
-    and being told your agent's own repairs are about to be deleted is a
-    good reason never to update.
-    """
-    shown: list[str] = []
-
-    with patch.object(updater, "count_active_self_mods", return_value=2), \
-         patch.object(updater, "current_sha", return_value="old"), \
-         patch.object(updater, "current_branch", return_value="master"):
-        updater.do_update(
-            assume_yes=False,
-            confirm=lambda prompt, default=False: (shown.append(prompt), False)[1],
-        )
-
-    assert shown, "the owner was never asked"
-    text = shown[0].lower()
-    assert "will archive 2" not in text
-    assert "re-applied" in text and "still fits" in text
-    assert "conflicts" in text
 
 
 def test_noop_update_gives_applied_self_mods_back(isolated_history):

@@ -470,33 +470,16 @@ def do_update(
     except Exception:
         _pre_version = ""
 
-    # Pre-update consent. This used to say every active self-mod would be
-    # archived, which stopped being true when the pull started sorting them
-    # per patch -- and "they will all be deleted" is a good reason not to
-    # update at all.
-    active_count = count_active_self_mods()
-    if active_count > 0 and not assume_yes:
-        prompt = (
-            f"You have {active_count} active self-modification(s). Each "
-            "one is checked against the incoming code:" + chr(10)
-            + "  still fits        - re-applied, stays active" + chr(10)
-            + "  already upstream  - archived; the change is in the code "
-              "now" + chr(10)
-            + "  conflicts         - archived, and named in the output"
-            + chr(10)
-            + "Archived patches stay in ~/.hrant/data/self_mods/history/ "
-              "and can be re-applied from Settings -> Self-Modifications "
-              "-> History." + chr(10)
-            + "Continue?"
-        )
-        proceed = confirm(prompt, default=False) if confirm is not None else False
-        if not proceed:
-            return UpdateResult(
-                ok=False, old_sha=old, new_sha=None, branch=br,
-                pulled_commits=0, pip_ran=False, frontend_built=False,
-                error="cancelled by user (active self-mods would be archived)",
-                cancelled=True,
-            )
+    # No pre-update consent gate any more (2026-09-07). It was written
+    # when the pull archived every self-mod — "they will all be
+    # deleted" is worth stopping for. That stopped being true when the
+    # pull started sorting patches: one that still fits is re-applied
+    # and stays active, one whose change reached the repo is spent, and
+    # one that genuinely conflicts is preserved in
+    # `self_mods/history/` and named in the output. Nothing is
+    # destroyed, so there is nothing to consent to — and the prompt
+    # defaulted to NO, so a routine `hrant update` was cancelled by
+    # pressing Enter.
 
     # Auto-stash known-noisy files (lockfiles that the next step
     # regenerates anyway) so they don't keep blocking updates. Real
