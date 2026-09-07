@@ -21,6 +21,7 @@ the turn is marked endpoint-missed.
 """
 from __future__ import annotations
 
+import hashlib
 from contextvars import ContextVar
 
 
@@ -57,9 +58,27 @@ def clear_turn_cache() -> None:
 
 
 def _cache_key(prefix: str, task: str, answer: str,
-               tool_names: "list[str] | None") -> tuple:
+               tool_names: "list[str] | None",
+               tool_results: "list[tuple[str, str]] | None" = None) -> tuple:
+    """Key on the EVIDENCE, not only on the names.
+
+    The results used to be left out, so two calls with the same tool
+    names but different evidence shared a verdict — and whichever ran
+    first decided it. On a turn where one call passes results and
+    another passes none, that is the difference between a delivered
+    verdict and a false NOT DONE (2026-09-07 audit).
+    """
+    ev = ""
+    if tool_results:
+        h = hashlib.sha1()
+        for name, head in tool_results:
+            h.update(str(name).encode("utf-8", "replace"))
+            h.update(bytes([0]))
+            h.update(str(head).encode("utf-8", "replace"))
+            h.update(bytes([1]))
+        ev = h.hexdigest()[:16]
     return (prefix, task or "", answer or "",
-            tuple(sorted(tool_names or [])))
+            tuple(sorted(tool_names or [])), ev)
 
 
 # Tools whose presence in the trace UNAMBIGUOUSLY signals "the
@@ -284,7 +303,8 @@ def endpoint_met(*, task: str, answer: str, tool_names: list[str],
     returns the same result without re-hitting the classifier LLM.
     """
     cache = _endpoint_turn_cache.get()
-    key = _cache_key("endpoint_met", task, answer, tool_names) \
+    key = _cache_key("endpoint_met", task, answer, tool_names,
+                     tool_results) \
         if cache is not None else None
     if cache is not None and key in cache:
         return cache[key]
@@ -363,10 +383,17 @@ _MISSED_ENDPOINT_CAP: int = 30
 
 def cap_confidence_for_endpoint(
     *, task: str, answer: str, tool_names: list[str], confidence: int,
+    tool_results: "list[tuple[str, str]] | None" = None,
 ) -> int:
     """If the endpoint isn't met, clip confidence at
     _MISSED_ENDPOINT_CAP. Never raises confidence — already-low
-    scores pass through unchanged."""
-    if endpoint_met(task=task, answer=answer, tool_names=tool_names):
+    scores pass through unchanged.
+
+    Takes `tool_results` so it asks the judge the same question the
+    caller just asked; without them it was a second, worse-informed
+    verdict that could clip a turn the first one had passed.
+    """
+    if endpoint_met(task=task, answer=answer, tool_names=tool_names,
+                    tool_results=tool_results):
         return confidence
     return min(confidence, _MISSED_ENDPOINT_CAP)

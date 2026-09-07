@@ -2110,9 +2110,21 @@ def _ungrounded_factual_claims(task: str, answer: str) -> _ClaimCheck:
     if not (answer or "").strip():
         return _ClaimCheck([], "not_applicable")
     try:
-        data = _claims_judge_call(task, answer) or {}
-        claims = data.get("claims") if isinstance(data, dict) else None
-        out = [str(c).strip() for c in (claims or []) if str(c).strip()]
+        data = _claims_judge_call(task, answer)
+        # The contract is `{"claims": [...]}`. Anything else — None, a
+        # bare list, a dict with no `claims` key — is a judge that did
+        # not answer the question, and it used to be indistinguishable
+        # from one that answered "nothing to check" (2026-09-07 audit).
+        # Only an exception was being caught; a malformed reply passed
+        # as a clean bill of health.
+        if not isinstance(data, dict) or "claims" not in data:
+            log.debug("claims judge returned an unusable shape: %r",
+                      type(data).__name__)
+            return _ClaimCheck([], "failed")
+        claims = data.get("claims")
+        if not isinstance(claims, list):
+            return _ClaimCheck([], "failed")
+        out = [str(c).strip() for c in claims if str(c).strip()]
         return _ClaimCheck(out[:3], "checked")
     except Exception as exc:
         log.debug("claims judge unavailable: %s", exc)
@@ -2314,9 +2326,26 @@ def _ground_fast_answer(*, task: str, answer: str, agent, speaker_id: str,
             convo=convo,
         )
         if redraft:
+            # The redraft is a NEW text, and the judge only ever read
+            # the old one. Reproduced by the audit: the search said 500,
+            # the rewrite kept 123 and added a fresh unbacked sentence,
+            # and the turn still reported 85/verified because the only
+            # check had happened one draft earlier (2026-09-07).
+            #
+            # One more judge call, not a loop: whatever it names now
+            # stays named as unchecked rather than starting another
+            # round of searching.
+            recheck = _ungrounded_factual_claims(task, redraft)
             try:
-                agent.progress("chat_fast_path",
-                               "grounded %d claim(s) in the lane" % len(found))
+                agent._claim_check = recheck.status
+                agent._claim_leftovers = list(recheck.claims)
+            except Exception:
+                pass
+            try:
+                agent.progress(
+                    "chat_fast_path",
+                    "grounded %d claim(s) in the lane; %d still unchecked"
+                    % (len(found), len(recheck.claims)))
             except Exception:
                 pass
             return redraft
@@ -4599,22 +4628,29 @@ def run_unified(
         from .endpoint_check import (
             cap_confidence_for_endpoint, endpoint_met,
         )
-        _trace_tool_names: list[str] = []
-        for _step in (agent._trace or []):
-            tc = getattr(_step, "tool_call", None)
-            if tc is None:
-                continue
-            # `tool_call` is a `ToolCallDetail` Pydantic model on
-            # ThinkingStep — not a dict. Earlier code did
-            # `isinstance(tc, dict)` and silently produced an empty
-            # trace list, defeating the endpoint check. Pull `name`
-            # via attribute access; fall back to dict semantics for
-            # robustness across older trace formats.
-            name = getattr(tc, "name", None)
-            if name is None and isinstance(tc, dict):
-                name = tc.get("name")
-            if isinstance(name, str):
-                _trace_tool_names.append(name)
+        # Collected by the SAME function the early check uses, and with
+        # the tool results, which this call omitted entirely (2026-09-07
+        # audit). Two bugs sat in the hand-rolled loop that used to be
+        # here:
+        #
+        #   * it counted every trace step carrying a `tool_call`, and the
+        #     trace emits `tool_starting` AND `tool` per call — so a
+        #     9-call turn arrived as 18 names. `_turn_tool_names` filters
+        #     on completed events; this site never got that fix.
+        #   * it passed no `tool_results`, so the judge was told to rule
+        #     from the evidence and handed nothing but names. That is the
+        #     exact miss `_turn_tool_results` was written for, and its
+        #     docstring says so: "a false NOT DONE on a turn that did the
+        #     work".
+        #
+        # Measured consequence: a code fix that passed 22 independent
+        # checks, and a sandbox run that returned exit 0, both came back
+        # `endpoint_met=false` with confidence clipped 100 -> 30. The
+        # differing name list also changed the cache key, so the early
+        # verdict was not reused and the judge ran a second time on
+        # strictly worse input.
+        _trace_tool_names = _turn_tool_names(agent)
+        _trace_tool_results = _turn_tool_results(agent._trace or [])
         if audit_mode:
             # Audit is observation by definition. Do not pay an endpoint judge
             # to demand a state-changing action from an intentionally read-only
@@ -4624,6 +4660,7 @@ def run_unified(
         else:
             _was_met = endpoint_met(
                 task=task, answer=answer or "", tool_names=_trace_tool_names,
+                tool_results=_trace_tool_results,
             )
             # Grader calibration (2026-06-11): record the delivery
             # judgment separately so the learning loop can distinguish
@@ -4633,6 +4670,7 @@ def run_unified(
                 _capped = cap_confidence_for_endpoint(
                     task=task, answer=answer or "",
                     tool_names=_trace_tool_names, confidence=vr.confidence,
+                    tool_results=_trace_tool_results,
                 )
                 if _capped != vr.confidence:
                     # Preserve the pre-clip content score for the

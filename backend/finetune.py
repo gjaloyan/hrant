@@ -323,6 +323,20 @@ def collect_from_turn(
         return None
     if getattr(vr, "contradictions", None):
         return None
+    # The verification has to have HAPPENED (2026-09-07 audit). The
+    # full cycle deliberately keeps confidence at 85 when nothing
+    # checked the answer and carries the truth in `check_status`, so
+    # this gate — reading only the number — admitted `failed`,
+    # `not_checked` and `partial` turns and then stamped them
+    # `verified=True` on the way in. That is the model being fine-tuned
+    # on its own unexamined output, which is the one input this queue
+    # must never take.
+    #
+    # `None` is allowed: it means the turn predates the field, not that
+    # it went unchecked.
+    if getattr(vr, "check_status", None) in ("failed", "not_checked",
+                                             "partial"):
+        return None
     # Grounding: prefer the verifier's notes; fall back to the tool
     # evidence that produced the answer. A turn with neither is
     # ungrounded chat-shaped output — skip (curator would score it
