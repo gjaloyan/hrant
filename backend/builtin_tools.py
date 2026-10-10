@@ -497,6 +497,26 @@ def _ingest_image_path(path: str) -> "tuple[str, str]":
     return rec.sha256, ""
 
 
+def _generate_image_handler(prompt: str = "", aspect: str = "square",
+                            quality: str = "medium",
+                            input_images: Any = None) -> str:
+    """Owner and trusted family only: every image spends the owner's
+    ChatGPT subscription."""
+    from .roles import current_speaker, is_at_least
+    if not is_at_least(current_speaker(), "trusted"):
+        return json.dumps({"ok": False, "error": "permission denied — image "
+                           "generation is for the owner and trusted users"},
+                          ensure_ascii=False)
+    if isinstance(input_images, str):
+        try:
+            input_images = json.loads(input_images)
+        except Exception:
+            input_images = [input_images]
+    from .tools.image_gen import generate_image_json
+    return generate_image_json(prompt=prompt, aspect=aspect, quality=quality,
+                               input_images=input_images or None)
+
+
 def _analyze_image_handler(sha256: str = "", question: str = "",
                            path: str = "") -> str:
     """Ask the multimodal LLM a question about an image-attachment.
@@ -3354,6 +3374,46 @@ def register_builtin_tools() -> None:
             "required": ["question"],
         },
         handler=_analyze_image_handler,
+    )
+
+    reg.register_func(
+        name="generate_image",
+        description=(
+            "Create a picture, or edit pictures the user sent, with the image "
+            "model behind the ChatGPT subscription (gpt-image-2). Use it for "
+            "anything visual the user wants made: a redesign of their room "
+            "from their photos, a logo, an illustration, a mock-up. This IS "
+            "your image generator — there is nothing to install, no other "
+            "service to look for and no need to ask which one to use.\n\n"
+            "To EDIT or work from photos, pass them in `input_images` (the "
+            "sha256 of an attachment, or a file path); without it a new image "
+            "is generated from the prompt alone. Write the prompt in English, "
+            "concretely: what to keep, what to change, style, lighting, "
+            "camera angle. One call makes one image and takes 20-90 s; for "
+            "several variants call it several times.\n\n"
+            "Returns `{ok, path, sha256, media_line}`. Deliver the image by "
+            "putting `media_line` on its own line in your answer. Check it "
+            "with analyze_image(sha256=...) when the request was specific."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string",
+                           "description": "What to draw or how to change the inputs."},
+                "aspect": {"type": "string",
+                           "enum": ["square", "landscape", "portrait"],
+                           "description": "Default square."},
+                "quality": {"type": "string", "enum": ["low", "medium", "high"],
+                            "description": "Default medium; high is slower."},
+                "input_images": {
+                    "type": "array", "items": {"type": "string"},
+                    "description": "sha256 of attached images or file paths, "
+                                   "to edit / use as reference (max 16).",
+                },
+            },
+            "required": ["prompt"],
+        },
+        handler=_generate_image_handler,
     )
 
     reg.register_func(

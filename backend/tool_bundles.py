@@ -107,6 +107,10 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # weights are released when the call returns, so BASE costs nothing until
     # it is used.
     "analyze_image", "read_captcha",
+    # Making pictures (2026-10-10). In BASE for the reason this file keeps
+    # recording: the 2026-09-28 turn asked for room renders, found no image
+    # tool, and spent 32 calls looking for one before asking the owner.
+    "generate_image",
     # A scheduled digest turn must be able to reach its own input
     # without a bundle round-trip; it runs unattended, so a tool it
     # cannot find is a digest that quietly reports nothing.

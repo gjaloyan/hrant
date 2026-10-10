@@ -101,7 +101,7 @@ _WRITE_TOOLS = frozenset({
 _EXTERNAL_TOOLS = frozenset({
     "agent_browser", "schedule_message", "delegate", "sandbox_exec",
     "start_background_job", "ask_user", "complete_supervisor",
-    "kick_supervisor",
+    "kick_supervisor", "generate_image",
 })
 # Tools whose CALL IS the deliverable: making it fulfils the request, so the
 # completion judge need not be paid to confirm it. Everything else — including
