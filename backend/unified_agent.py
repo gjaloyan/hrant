@@ -591,6 +591,13 @@ def _try_chat_path(
             sys_parts.append(f"---\n\n{snapshot}")
         if convo:
             sys_parts.append(f"---\n\n{convo}")
+        try:
+            from .learned_rules import render as _learned_render
+            _learned = _learned_render()
+        except Exception:
+            _learned = ""
+        if _learned:
+            sys_parts.append(f"---\n\n{_learned}")
         sys_parts.append(f"---\n\n{_CHAT_FAST_PATH_RULES}")
         try:
             _lang_tail = IDENTITY.reply_language_reminder(speaker_id=speaker_id)
@@ -833,6 +840,34 @@ def _strip_citation_markers(answer: str) -> str:
     return _PRIVATE_USE_MARKER_RE.sub("", _CITATION_MARKER_RE.sub("", answer))
 
 
+# Learning that cannot change THIS answer runs after it has been sent.
+# Memory extraction, correction capture and failure analysis are each an LLM
+# call made on the turn's path before the reply left: measured on prod, a
+# skill reflection plus meta-learner pass delivered an answer at 194.8 s
+# that was ready at 153 s. The owner's design (2026-10-10) puts the real
+# check in the nightly review; these feed it and need not hold the user.
+# Tests turn this off to keep their assertions synchronous.
+_LEARN_AFTER_ANSWER = True
+
+
+def _after_answer(fn, *args, **kwargs) -> None:
+    if not _LEARN_AFTER_ANSWER:
+        fn(*args, **kwargs)
+        return
+    import contextvars as _cv
+    import threading as _th
+    ctx = _cv.copy_context()
+
+    def _run():
+        try:
+            ctx.run(fn, *args, **kwargs)
+        except Exception as e:
+            log.debug("after-answer task %s failed: %s",
+                      getattr(fn, "__name__", fn), e)
+
+    _th.Thread(target=_run, daemon=True, name="hrant-after-answer").start()
+
+
 def _append_thread(skey: str, *, task: str, answer: str, attachments,
                    tool_names: list, turn_id: str, speaker_id: str) -> None:
     """Record one finished exchange in the conversation thread (threads.py)."""
@@ -853,6 +888,7 @@ def _append_thread(skey: str, *, task: str, answer: str, attachments,
             skey, user=task, answer=answer, attachments=attachments or None,
             trace=_t.trace_digest(list(tool_names or []), media),
             turn_id=turn_id or "", session_id=session_id,
+            speaker_id=speaker_id,
         )
     except Exception as e:
         log.debug("thread append failed: %s", e)
@@ -3726,6 +3762,15 @@ def run_unified(
         repeat_refusal=_repeat_refusal and not _threaded,
     )
     system_parts.append(f"---\n\n{_rules_for_turn}")
+    # Rules the agent wrote for itself in the nightly review. Stable all
+    # day, so the cached prefix moves once a night, not once a turn.
+    try:
+        from .learned_rules import render as _learned_render
+        _learned = _learned_render()
+    except Exception:
+        _learned = ""
+    if _learned:
+        system_parts.append(f"---\n\n{_learned}")
     system_parts.append(f"---\n\n{perms}")
     if _threaded:
         if attachments:
@@ -4994,7 +5039,8 @@ def run_unified(
     # excludes assistant-authored claims.
     if not supervisor_mode and not audit_mode and not question_payload:
         try:
-            _commit_turn_memory(
+            _after_answer(
+                _commit_turn_memory,
                 task=task,
                 answer=answer or "",
                 verification=vr,
@@ -5208,7 +5254,8 @@ def run_unified(
         # LLM judge confirms the correction (no keyword matching).
         try:
             from .finetune import maybe_capture_correction
-            maybe_capture_correction(
+            _after_answer(
+                maybe_capture_correction,
                 is_chat=False,
                 supervisor_mode=supervisor_mode,
                 speaker_id=speaker_id,
@@ -5229,7 +5276,8 @@ def run_unified(
         try:
             MEMORY  # noqa: B018 — just ensures the module import succeeded
             from .meta_learner import META_LEARNER as _ML
-            _ML.analyze_failure(
+            _after_answer(
+                _ML.analyze_failure,
                 question=task,
                 answer=answer or "",
                 verification=vr,

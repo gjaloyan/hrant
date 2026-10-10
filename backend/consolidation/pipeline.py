@@ -146,6 +146,10 @@ Rules:
 # ─── Helpers ─────────────────────────────────────────────────────────
 
 
+# Profiles are rewritten by the nightly review (review.compact_profile);
+# the old append-only step stays in the code behind this switch.
+_PROFILES_BY_REVIEW = True
+
 _TRANSCRIPT_USER_CAP = 400        # per-message truncation
 _TRANSCRIPT_AGENT_CAP = 400
 _TRANSCRIPT_TOTAL_CAP = 24_000    # whole-transcript ceiling
@@ -553,8 +557,11 @@ def run(
         except Exception as e:
             log.warning("graph.save after consolidation batch failed: %s", e)
 
-    # Step 5: per-speaker profile updates
-    for speaker in bundle.speakers:
+    # Step 5: per-speaker profile updates — RETIRED 2026-10-10. It only
+    # ever appended a dated paragraph, so profiles grew without bound (the
+    # owner's reached 19.5k characters, read on every reply). The nightly
+    # review below rewrites each active profile to a bounded size instead.
+    for speaker in ([] if _PROFILES_BY_REVIEW else bundle.speakers):
         sub_transcript = _speaker_transcript(bundle, speaker)
         if not sub_transcript:
             continue
@@ -656,6 +663,16 @@ def run(
             ][:5]
         except Exception as e:
             log.warning("consolidation.lessons failed: %s", e)
+
+    # Step 7: the nightly self-review (2026-10-10) — read the day's
+    # conversations, write rules for tomorrow, compact the profiles, tell
+    # the owner. See consolidation/review.py.
+    try:
+        from . import review as _review
+        d.review = _review.run_review(dry_run=dry_run)
+    except Exception as e:
+        log.warning("consolidation.review failed: %s", e)
+        d.review = {"status": "failed", "error": str(e)[:300]}
 
     # Token / cost delta — see snapshot taken at the top of run().
     _tokens_after = _TOKENS.request_usage()

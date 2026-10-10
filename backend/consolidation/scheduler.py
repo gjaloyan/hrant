@@ -184,6 +184,19 @@ def _human_seconds(seconds: float) -> str:
     return f"{h // 24}d {h % 24}h"
 
 
+def _in_night_window(now: float) -> bool:
+    """Is it night where the user lives?"""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        from ..settings import user_timezone
+        hour = datetime.fromtimestamp(now, ZoneInfo(user_timezone())).hour
+    except Exception:
+        return True  # unknown zone: do not block the run on it
+    start, end = config.NIGHT_START_HOUR, config.NIGHT_END_HOUR
+    return start <= hour < end if start < end else (hour >= start or hour < end)
+
+
 def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
     """Return (should_fire, reason). `reason` always populated so
     the WebUI / log can show 'waiting because X'."""
@@ -193,6 +206,15 @@ def _should_fire(now: Optional[float] = None) -> tuple[bool, str]:
     cooldown_left = state.cooldown_remaining_seconds(st)
     if cooldown_left > 0:
         return False, f"cooldown, {_human_seconds(cooldown_left)} left"
+    # At night, so the review reads a whole day (2026-10-10). The gates
+    # above used to fire it at the first quiet quarter-hour after the
+    # cooldown, which drifted to ~16:00 — reviewing half a day, in the
+    # middle of the next one. A missed night is caught up after
+    # CATCHUP_AFTER_SECONDS rather than skipped.
+    since_last = now - float(getattr(st, "last_run_at", 0) or 0)
+    if not _in_night_window(now) and since_last < config.CATCHUP_AFTER_SECONDS:
+        return False, (f"waiting for the night ({config.NIGHT_START_HOUR:02d}:00-"
+                       f"{config.NIGHT_END_HOUR:02d}:00 local)")
     last_active = gather.last_activity_ts()
     if last_active is not None:
         idle_for = now - last_active

@@ -78,7 +78,9 @@ def test_live_unified_path_commits_memory_after_verifier():
     from backend import unified_agent as ua
 
     source = inspect.getsource(ua.run_unified)
-    assert source.index("vr = verify(") < source.index("_commit_turn_memory(")
+    # Since 2026-10-10 the commit is scheduled through `_after_answer`
+    # (off the reply path); it is still handed the final verification.
+    assert source.index("vr = verify(") < source.index("_commit_turn_memory,")
     assert "confidence=100, contradictions=0" not in source
 
 

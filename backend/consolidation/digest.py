@@ -80,6 +80,9 @@ class Digest:
     # morning via consolidation.recall.yesterday_block(). Old digests
     # without this field decode to [] via the tolerant from_dict.
     lessons: list[str] = field(default_factory=list)
+    # Nightly self-review (2026-10-10): what the review of the day's
+    # conversations found and changed. See consolidation/review.py.
+    review: dict = field(default_factory=dict)
 
     # Budget / status
     tokens_used: int = 0

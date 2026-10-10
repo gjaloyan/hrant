@@ -49,6 +49,12 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setattr(_ch, "CHANNELS_PATH", data_dir / "knowledge" / "channels.json")
     # Re-point the singleton JobStore at the isolated tmp.
     monkeypatch.setattr(_jobs, "JOBS", _jobs.JobStore(root=data_dir / "jobs"))
+    # These tests pin the job-transcript steps, including the original
+    # append-a-daily-paragraph profile step. Since 2026-10-10 production
+    # rewrites profiles in the nightly review instead
+    # (tests/test_nightly_review_20261010.py); the old step is kept behind
+    # this switch and still tested here.
+    monkeypatch.setattr(_pipeline, "_PROFILES_BY_REVIEW", False)
     return data_dir
 
 

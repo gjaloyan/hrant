@@ -33,6 +33,21 @@ if not os.environ.get("HRANT_DATA_DIR", "").strip():
 
 
 @pytest.fixture(autouse=True)
+def _learning_runs_synchronously(monkeypatch):
+    """In production, post-answer learning (memory extraction, correction
+    capture, failure analysis) runs on a background thread so the reply is
+    not held for it. In tests it runs inline, so an assertion about its
+    side effects does not race a thread."""
+    try:
+        import backend.unified_agent as _ua
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(_ua, "_LEARN_AFTER_ANSWER", False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_per_turn_call_cache():
     """The per-turn duplicate-call cache in tool_registry is a
     ContextVar — without an explicit reset between pytest tests it

@@ -117,7 +117,8 @@ class ThreadStore:
 
     def append(self, session_key: str, *, user: str, answer: str,
                attachments: Optional[list] = None, trace: str = "",
-               turn_id: str = "", session_id: str = "") -> None:
+               turn_id: str = "", session_id: str = "",
+               speaker_id: str = "") -> None:
         """One finished exchange. Never raises."""
         if not session_key or not (user or "").strip():
             return
@@ -143,6 +144,8 @@ class ThreadStore:
                     state = {"window_start": len(self._entries(log_path))}
                 if session_id:
                     state["session_id"] = session_id
+                if speaker_id:
+                    state["speaker_id"] = speaker_id
                 state.setdefault("session_key", session_key)
                 with log_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -220,6 +223,26 @@ class ThreadStore:
             out.append({"role": "user", "content": _render_user(e)})
             out.append({"role": "assistant", "content": _render_answer(e)})
         return out
+
+
+def iter_day(store: "ThreadStore", since: str, until: str = "9999"):
+    """(session_key, speaker_id, rows) for every thread with exchanges whose
+    `ts` ("YYYY-MM-DD HH:MM:SS") falls in [since, until). For the nightly
+    review. Never raises."""
+    try:
+        files = sorted(store.root.glob("*.jsonl"))
+    except Exception:
+        return
+    for log_path in files:
+        try:
+            state = store._read_state(log_path.with_suffix(".state.json"))
+            rows = [r for r in store._entries(log_path)
+                    if since <= str(r.get("ts") or "") < until]
+        except Exception:
+            continue
+        if rows:
+            yield (state.get("session_key") or log_path.stem,
+                   state.get("speaker_id") or "", rows)
 
 
 def _entry_chars(e: dict) -> int:

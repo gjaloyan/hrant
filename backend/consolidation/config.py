@@ -29,7 +29,10 @@ IDLE_THRESHOLD_SECONDS: float = float(
 # Minimum time between two daily consolidations. 24h-ish; the
 # adaptive idle check above means actual fire time floats.
 COOLDOWN_SECONDS: float = float(
-    os.environ.get("HRANT_CONSOLIDATION_COOLDOWN_SECONDS", 24 * 60 * 60)
+    # 20h, not 24h, since runs are pinned to a night window: a 24h cooldown
+    # after a run late in the window could expire after the next window
+    # had closed and push the run into the day.
+    os.environ.get("HRANT_CONSOLIDATION_COOLDOWN_SECONDS", 20 * 60 * 60)
 )
 
 # How often the scheduler wakes up to check the gates. Cheap —
@@ -78,6 +81,15 @@ PROMOTE_CONFIDENCE_THRESHOLD: float = float(
 
 
 # ─── Paths ────────────────────────────────────────────────────────────
+
+
+# The night the review runs in, in the USER'S time zone, and how long a
+# missed night may wait before the run happens anyway.
+NIGHT_START_HOUR: int = int(os.environ.get("HRANT_CONSOLIDATION_NIGHT_START", 3))
+NIGHT_END_HOUR: int = int(os.environ.get("HRANT_CONSOLIDATION_NIGHT_END", 6))
+CATCHUP_AFTER_SECONDS: float = float(
+    os.environ.get("HRANT_CONSOLIDATION_CATCHUP_SECONDS", 36 * 60 * 60)
+)
 
 
 def state_path() -> Path:
