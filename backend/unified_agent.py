@@ -439,7 +439,8 @@ search at all.
 
 Greetings, acknowledgements, and short opinions still belong here --
 escalating those would turn every remark into research, which is its
-own failure.
+own failure. So does the current date or time: the message carries your
+clock, so answer those from it.
 
 If you actually NEED tools (saving or remembering a fact/preference
 — `запомни` / `сохрани` / remember / save persist to memory and
@@ -623,6 +624,14 @@ def _try_chat_path(
             _note = IDENTITY.reply_language_note(speaker_id=speaker_id)
         except Exception:
             _note = ""
+        # The clock rides in the message, not the system prompt, which must
+        # stay byte-stable for the cache. Without it "what time is it" was
+        # escalated to the full agent (5 calls instead of 1).
+        try:
+            from .settings import clock_line
+            _note = f"[your clock: {clock_line()}]" + (f"\n{_note}" if _note else "")
+        except Exception:
+            pass
         answer = _router().call(
             _TT.QUICK_ANSWER,
             sys_prompt,

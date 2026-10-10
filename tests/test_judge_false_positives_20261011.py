@@ -59,6 +59,24 @@ def test_the_verifier_sees_the_clock(monkeypatch):
     assert _CLOCK in spy.seen["user"]
 
 
+def test_the_fast_lane_gets_the_clock_in_the_message(monkeypatch):
+    from types import SimpleNamespace
+    seen = {}
+
+    class R:
+        def call(self, task_type, system, user, **kw):
+            seen.update(system=system, user=user)
+            return "It is 20:40."
+
+    monkeypatch.setattr(llm, "router", lambda: R())
+    monkeypatch.setattr(settings, "clock_line", lambda: _CLOCK)
+    out = ua._try_chat_path(task="what time is it?",
+                            agent=SimpleNamespace(progress=lambda *a, **k: None),
+                            speaker_id="webui:default", snapshot="", convo="")
+    assert out == "It is 20:40."
+    assert _CLOCK in seen["user"] and _CLOCK not in seen["system"]
+
+
 def test_the_action_judge_knows_the_conversation_is_recorded(monkeypatch):
     spy = _Spy({"unbacked_claim": ""})
     monkeypatch.setattr(llm, "router", lambda: spy)
