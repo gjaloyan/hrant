@@ -2152,8 +2152,10 @@ Return an EMPTY list for: greetings and small talk; opinions, advice and
 judgement calls; anything the answer already marks as uncertain; claims
 about the user's own world (their name, files, settings, machines, past
 messages), which memory covers rather than the web; arithmetic and
-reasoning the answer performs in front of the reader; and general
-procedure that no source would state more precisely than the answer does.
+reasoning the answer performs in front of the reader; general
+procedure that no source would state more precisely than the answer does;
+and the current date, time, weekday or time zone when it agrees with the
+ASSISTANT'S CLOCK line, which is the assistant's own clock.
 
 Names, numbers, prices, versions, dates, and "X exists / is called Y"
 almost always qualify. Being fluent is not being checked."""
@@ -2162,11 +2164,13 @@ almost always qualify. Being fluent is not being checked."""
 def _claims_judge_call(task: str, answer: str) -> dict:
     """One cheap classification. Separated so tests can make it fail."""
     from .llm import router, TaskType
+    from .settings import clock_line
     return router().call_json(
         TaskType.CLASSIFICATION,
         _CLAIMS_JUDGE_SYSTEM,
         "QUESTION:" + chr(10) + (task or "")[:1500] + chr(10) + chr(10)
-        + "ANSWER:" + chr(10) + (answer or "")[:4000],
+        + "ANSWER:" + chr(10) + (answer or "")[:4000] + chr(10) + chr(10)
+        + "ASSISTANT'S CLOCK: " + clock_line(),
         max_tokens=300,
         temperature=0.0,
     )

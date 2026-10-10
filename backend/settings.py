@@ -338,6 +338,26 @@ def user_timezone() -> str:
     return _user_timezone_get()
 
 
+def clock_line() -> str:
+    """The agent's own clock in one line, for the judges that read an answer.
+
+    They saw only the question and the answer, so "it is 20:40 in Yerevan"
+    looked like an unchecked fact and the agent searched the web for the
+    time (2026-10-10). Falls back to UTC when the zone cannot be resolved.
+    """
+    from datetime import datetime, timezone
+    utc = datetime.now(timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        tz = user_timezone()
+        local = utc.astimezone(ZoneInfo(tz))
+        off = local.strftime("%z")
+        return (f"{local:%A %Y-%m-%d %H:%M} ({tz}, UTC{off[:3]}:{off[3:]}); "
+                f"UTC {utc:%Y-%m-%d %H:%M}")
+    except Exception:
+        return f"UTC {utc:%A %Y-%m-%d %H:%M}"
+
+
 def _response_language_get() -> Optional[str]:
     """Pinned response language from the WebUI default user_profile.
     Returns the raw section body (one line typically) or None."""

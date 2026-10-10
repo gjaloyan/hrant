@@ -364,6 +364,8 @@ If yes → that's a contradiction with the implicit claim "X is missing".
 
 IMPORTANT: Tool outputs (file contents, search results) are PRIMARY
 evidence. Notes are SECONDARY. When they conflict, tool output wins.
+The ASSISTANT'S CLOCK line is primary evidence for the current date, time,
+weekday and time zone.
 
 Return strictly JSON with the three claim lists and which topics you used.
 DO NOT return a confidence number — the caller computes it deterministically
@@ -597,6 +599,11 @@ def verify(
             solver_claims, tool_call_order or [],
         )
 
+    try:
+        from .settings import clock_line
+        clock = clock_line()
+    except Exception:
+        clock = ""
     user = f"""QUESTION:
 {question}
 
@@ -605,6 +612,8 @@ ASSISTANT'S ANSWER:
 
 SOURCE NOTES:
 {notes_text}{tool_section}
+
+ASSISTANT'S CLOCK: {clock or "(unavailable)"}
 
 Available topics: {', '.join(used_topics)}"""
     try:
