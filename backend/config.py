@@ -531,6 +531,20 @@ class Config:
         return (v if v is not None else "mirror").strip() or "mirror"
 
     @property
+    def default_response_language(self) -> str:
+        """Reply language for a user who has NOT chosen one.
+
+        Unlike `response_language`, this yields to the user: a language
+        pinned in their profile, or one they ask for in the message, wins.
+        "mirror" (default) keeps the old behaviour — answer in whatever
+        language the message arrived in. A code ("ru") makes that language
+        the house default, which is what the owner chose on 2026-10-10
+        ("Russian; the user chooses") after replies kept hopping between
+        Russian, English and Armenian with every voice note."""
+        v = self._data.get("default_response_language")
+        return (v if v is not None else "mirror").strip() or "mirror"
+
+    @property
     def server(self) -> dict:
         return self._data.get("server", {})
 

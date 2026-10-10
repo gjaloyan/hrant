@@ -2553,12 +2553,15 @@ class CodexLLM(BaseLLM):
       - Tool results re-enter the `input` array as `function_call_output` items.
     """
 
-    # `prompt_cache_key` pins requests that share a prompt prefix to the same
-    # cache node; Codex CLI sends it on every request. Without it, iterations
-    # of ONE turn — identical instructions and tools — missed the cache at
-    # random: the 2026-09-28 artifact shows ~30k fresh input tokens on three
-    # consecutive tool iterations, then ~1k on the next. Switched off for the
-    # process if the backend ever rejects the field.
+    # `prompt_cache_key` + a matching `session_id` header pin requests that
+    # share a prompt prefix to the same cache node, as Codex CLI does. Without
+    # them, iterations of ONE turn — identical instructions and tools — missed
+    # the cache at random: the 2026-09-28 artifact shows ~30k fresh input
+    # tokens on three consecutive tool iterations, then ~1k on the next.
+    # Measured on prod 2026-10-10, same 10.5k-token prompt sent four times:
+    # with the header the repeats hit the cache 9 of 12 times, without it 2
+    # of 12 — the body field alone did nothing. Switched off for the process
+    # if the backend ever rejects the field.
     _cache_key_supported: bool = True
 
     def __init__(self, cfg: dict):
@@ -2612,6 +2615,8 @@ class CodexLLM(BaseLLM):
 
         for attempt in range(_max_retries + 1):
             headers = {**self._auth_headers(), "Content-Type": "application/json", "Accept": "text/event-stream"}
+            if payload.get("prompt_cache_key"):
+                headers["session_id"] = self._session_id_for(payload["prompt_cache_key"])
             try:
                 with httpx.stream(
                     "POST", self.url, json=payload, headers=headers, timeout=180.0
@@ -2713,6 +2718,13 @@ class CodexLLM(BaseLLM):
                 "Codex: forced token refresh after 401 failed: %s", e)
             cls._refresh_failure = (time.time(), str(e)[:200])
             return cls._refresh_failure[1]
+
+    @staticmethod
+    def _session_id_for(cache_key: str) -> str:
+        """A stable UUID per cache key — the backend routes on the header."""
+        import hashlib as _hl
+        import uuid as _uuid
+        return str(_uuid.UUID(hex=_hl.sha1(cache_key.encode("utf-8")).hexdigest()[:32]))
 
     @staticmethod
     def _function_calls(output: list[dict]) -> list[dict]:

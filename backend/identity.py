@@ -585,6 +585,7 @@ class IdentityManager:
             )
         from .config import CONFIG
         forced = (CONFIG.response_language or "mirror").lower()
+        default = (CONFIG.default_response_language or "mirror").lower()
         lang_body = self._extract_language_section(profile_text)
         out += (
             "\n# RESPONSE LANGUAGE\n"
@@ -593,14 +594,15 @@ class IdentityManager:
             "scratch work, and debug text all stay English. Keeps "
             "cognition consistent across multilingual users.\n\n"
         )
+        names = {
+            "en": "English", "ru": "Russian", "fr": "French",
+            "de": "German", "es": "Spanish", "it": "Italian",
+            "pt": "Portuguese", "zh": "Chinese", "ja": "Japanese",
+            "uk": "Ukrainian", "hy": "Armenian", "tr": "Turkish",
+        }
         if forced not in ("mirror", ""):
             # Explicit deployment-level override (opt-in via config).
-            lang_name = {
-                "en": "English", "ru": "Russian", "fr": "French",
-                "de": "German", "es": "Spanish", "it": "Italian",
-                "pt": "Portuguese", "zh": "Chinese", "ja": "Japanese",
-                "uk": "Ukrainian", "hy": "Armenian", "tr": "Turkish",
-            }.get(forced, forced)
+            lang_name = names.get(forced, forced)
             out += (
                 f"Write your final user-facing answer ONLY in {lang_name}, "
                 "regardless of the user's input language or any profile "
@@ -611,14 +613,33 @@ class IdentityManager:
             out += (
                 "Write your final user-facing answer in the language "
                 "pinned in the USER PROFILE Language section below — "
-                "that pin wins over mirroring:\n"
+                "that pin wins over mirroring and over the language a "
+                "message or voice note arrives in. If the user explicitly "
+                "asks for another language, use it for that reply; if they "
+                "want it to stick, save it with "
+                "`save_user_fact(category='language')`:\n"
                 f"{lang_body}\n"
+            )
+        elif default not in ("mirror", ""):
+            # House default: the user has not chosen, so the owner's
+            # default applies, whatever language the message came in.
+            lang_name = names.get(default, default)
+            out += (
+                f"Write your final user-facing answer in {lang_name}. "
+                f"This user has not chosen a language, and {lang_name} is "
+                "the default here — whatever language their message or "
+                "voice note arrives in. Switch only when the user "
+                "explicitly asks for another language: for that reply, or, "
+                "if they want it to stick, save it with "
+                "`save_user_fact(category='language')` and use it from then "
+                "on.\n"
             )
         else:
             # Default: mirror the user's input language.
             out += (
                 "Write your final user-facing answer in the SAME language "
-                "the user wrote their last message in (mirror it). "
+                "the user wrote their last message in (mirror it; for a "
+                "voice note that is the language of the verbatim original). "
                 "Russian -> Russian, English -> English, French -> French, "
                 "and so on. Always think in English internally; only the "
                 "user-facing reply switches language.\n"

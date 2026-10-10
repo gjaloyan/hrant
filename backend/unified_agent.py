@@ -456,7 +456,7 @@ NEVER claim you saved or remembered something here — you have no
 tools to do it, so a "Запомнил/Saved" reply would be a lie. Just
 `ESCALATE: ...` and stop.
 
-Match the user's language. Be brief.
+Answer in the language the RESPONSE LANGUAGE section names. Be brief.
 """
 
 

@@ -299,7 +299,9 @@ def codex(monkeypatch):
         it = iter(responses)
 
         def _stream(method, url, json=None, headers=None, timeout=None):
-            sent.append({"auth": headers.get("Authorization"), "payload": dict(json)})
+            sent.append({"auth": headers.get("Authorization"),
+                         "session": headers.get("session_id"),
+                         "payload": dict(json)})
             return _CM(next(it))
         monkeypatch.setattr(_llm.httpx, "stream", _stream)
         return sent
@@ -371,6 +373,7 @@ def test_a_rejected_cache_key_is_dropped_not_fatal(codex, monkeypatch):
     assert text == "hello"
     assert "prompt_cache_key" in sent[0]["payload"]
     assert "prompt_cache_key" not in sent[1]["payload"]
+    assert sent[0]["session"] and sent[1]["session"] is None
     assert _llm.CodexLLM._cache_key_supported is False
 
 
@@ -548,3 +551,59 @@ def test_the_fast_lane_writes_a_session_row(monkeypatch):
     turn, kw = added[0]
     assert turn["answer"] == "FAST_ANSWER_7"
     assert kw["session_key"] == "telegram:hrant:77:77"
+
+
+def test_the_cache_key_travels_as_a_session_header(codex, monkeypatch):
+    """Measured on prod: the body field alone did not move the hit rate;
+    the matching session_id header did."""
+    monkeypatch.setattr(_llm.CodexLLM, "_cache_key_supported", True)
+    llm, _auth, install = codex
+    sent = install([_Resp(200, lines=_OK_LINES), _Resp(200, lines=_OK_LINES)])
+    for _ in range(2):
+        llm._stream_and_aggregate(llm._build_payload("same instructions", [], None, None, None))
+    assert sent[0]["session"] and sent[0]["session"] == sent[1]["session"]
+
+
+# ── 7. reply language: Russian by default, the user chooses ──────────
+
+def _preamble(tmp_path, monkeypatch, *, default, pin=""):
+    from pathlib import Path
+    from backend.config import CONFIG
+    from backend.identity import IdentityManager
+    monkeypatch.setitem(CONFIG._data, "response_language", None)
+    monkeypatch.setitem(CONFIG._data, "default_response_language", default)
+    im = IdentityManager(base_dir=Path(tmp_path))
+    if pin:
+        im.user_path.parent.mkdir(parents=True, exist_ok=True)
+        im.user_path.write_text(
+            "# User Profile\n\n## Language\n- " + pin + "\n", encoding="utf-8")
+    return im.preamble()
+
+
+def test_unchosen_language_defaults_to_russian(tmp_path, monkeypatch):
+    pre = _preamble(tmp_path, monkeypatch, default="ru")
+    assert "Write your final user-facing answer in Russian" in pre
+    assert "explicitly asks for another language" in pre
+    assert "SAME language the user wrote" not in pre
+
+
+def test_a_users_own_choice_beats_the_default(tmp_path, monkeypatch):
+    pre = _preamble(tmp_path, monkeypatch, default="ru",
+                    pin="Respond to the user in Armenian.")
+    assert "Respond to the user in Armenian." in pre
+    assert "the default here" not in pre
+
+
+def test_mirror_is_still_the_shipped_default(tmp_path, monkeypatch):
+    pre = _preamble(tmp_path, monkeypatch, default=None)
+    assert "SAME language the user wrote" in pre
+
+
+def test_no_rule_in_the_prompt_orders_mirroring_any_more():
+    """The rules block and the fast lane used to say "mirror the user's
+    language" on their own, contradicting a pinned or default language."""
+    import backend.prompt_modules as pm
+    import backend.unified_agent as ua
+    import inspect
+    assert "Mirror the user's language" not in inspect.getsource(pm)
+    assert "Match the user's language" not in inspect.getsource(ua)

@@ -103,8 +103,8 @@ Report what you observe, not what you intended.
 
 ## Language
 
-Mirror the user's language. Preserve it across re-prompt turns \
-even when your own previous draft slipped into another language.
+Use the RESPONSE LANGUAGE section's language, also on re-prompts \
+where your own draft slipped.
 
 ## Final-answer template
 

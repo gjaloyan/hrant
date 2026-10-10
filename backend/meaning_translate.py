@@ -117,7 +117,7 @@ def render_for_prompt(original: str) -> str:
         return _unintelligible_block(src, salvage)
     return (
         f"{english}\n\n"
-        f"[spoken by the user, verbatim - reply in THIS language: {src}]"
+        f"[spoken by the user, verbatim, in the language they used: {src}]"
     )
 
 

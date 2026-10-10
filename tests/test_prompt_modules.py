@@ -268,11 +268,14 @@ def test_m1_states_honesty_contract():
     assert "intend" in body
 
 
-def test_m1_states_language_mirror_rule():
+def test_m1_defers_language_to_the_response_language_block():
+    """M1 used to say "mirror the user's language" on its own, which
+    contradicted a pinned or default language in the preamble (2026-10-10:
+    the owner chose Russian by default, the user may choose otherwise)."""
     from backend.prompt_modules import MODULES
-    body = MODULES["m1_core_behavior"].body.lower()
-    assert "language" in body
-    assert "mirror" in body
+    body = MODULES["m1_core_behavior"].body
+    assert "RESPONSE LANGUAGE" in body
+    assert "mirror" not in body.lower()
 
 
 def test_m1_specifies_final_answer_template():

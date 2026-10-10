@@ -70,11 +70,16 @@ def test_the_original_travels_with_it(monkeypatch):
     assert "Нужно добавить" in out
 
 
-def test_the_agent_is_told_which_language_to_answer_in(monkeypatch):
-    """It replies to him in Armenian and Russian; an English-only prompt
-    would quietly teach it to answer in English."""
+def test_the_original_is_labelled_without_dictating_the_reply(monkeypatch):
+    """The original is marked as the language the user actually spoke, so
+    an English-only prompt does not quietly teach English replies. It no
+    longer ORDERS the reply language: since 2026-10-10 that is the RESPONSE
+    LANGUAGE block's job (owner: "Russian by default; the user chooses"),
+    and "reply in THIS language" made every Armenian voice note override
+    it."""
     out = _rendered(monkeypatch, "Հիմա", "Now then")
-    assert "reply in THIS language" in out
+    assert "in the language they used: Հիմա" in out
+    assert "reply in THIS language" not in out
 
 
 def test_a_failed_translation_keeps_the_message(monkeypatch):
