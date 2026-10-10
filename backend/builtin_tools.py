@@ -1506,6 +1506,13 @@ def _complete_supervisor_handler(
                 speaker_id=job.original_speaker_id,
                 session_key=job.original_speaker_id,
             )
+            from .threads import THREADS
+            THREADS.append(
+                job.original_speaker_id,
+                user=(f"[background job {job.job_id} ({job.label or '?'}) "
+                      f"completed; supervisor decision: {decision_norm}]"),
+                answer=final_message,
+            )
             dm_status = "queued_to_session"
         except Exception as e:
             log.warning(

@@ -457,6 +457,9 @@ def deliver(row: dict) -> tuple[bool, str]:
                 speaker_id=target,
                 session_key=target,
             )
+            from .threads import THREADS
+            THREADS.append(target, user=f"[scheduled message {row.get('id', '?')}]",
+                           answer=text)
         except Exception as e:
             mark_failed(row["id"], f"webui session-log append failed: {e}")
             return False, f"webui session-log append failed: {e}"
@@ -595,6 +598,8 @@ def send_to_speaker(target_speaker: str, text: str) -> tuple[bool, str]:
                 is_chat=False, confidence=70, topics_used=[],
                 channel="scheduled", speaker_id=target, session_key=target,
             )
+            from .threads import THREADS
+            THREADS.append(target, user="[scheduled delivery]", answer=text)
         except Exception as e:
             return False, f"webui session-log append failed: {e}"
         return True, ""

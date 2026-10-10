@@ -1156,6 +1156,58 @@ def _resolve_attachments(refs: list[str] | None) -> list[tuple]:
     return out
 
 
+# ---------- conversation history for the turn loop ----------
+#
+# The turn loop's previous exchanges, as real messages placed before the
+# current request (see backend/threads.py for why). A ContextVar rather than
+# a parameter so it rides through the router, the provider chain and the
+# failover adapters untouched — but it is bound to the request TEXT it was set
+# for: a subagent or judge running a tool loop inside the same turn sends a
+# different request and gets no history.
+_TURN_HISTORY: "contextvars.ContextVar[tuple[tuple, str] | None]" = (
+    contextvars.ContextVar("llm_turn_history", default=None))
+
+
+def set_turn_history(messages: list[dict], for_request: str):
+    """Bind `messages` to tool loops whose request starts with
+    `for_request`. Returns a token for `reset_turn_history`."""
+    return _TURN_HISTORY.set((tuple(messages or ()), for_request or ""))
+
+
+def reset_turn_history(token) -> None:
+    try:
+        _TURN_HISTORY.reset(token)
+    except Exception:
+        _TURN_HISTORY.set(None)
+
+
+def _history_for(user: str) -> list[dict]:
+    bound = _TURN_HISTORY.get()
+    if not bound:
+        return []
+    messages, prefix = bound
+    if not prefix or not isinstance(user, str) or not user.startswith(prefix):
+        return []
+    return [m for m in messages
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
+
+
+def _alternating(messages: list[dict]) -> list[dict]:
+    """Merge same-role neighbours — some APIs require strict alternation."""
+    out: list[dict] = []
+    for m in messages:
+        if out and out[-1]["role"] == m["role"]:
+            out[-1] = {"role": m["role"],
+                       "content": out[-1]["content"] + "\n\n" + m["content"]}
+        else:
+            out.append({"role": m["role"], "content": m["content"]})
+    # A conversation sent before the current request must end on the
+    # assistant side, or two user turns would be glued together.
+    if out and out[-1]["role"] == "user":
+        out.append({"role": "assistant", "content": "(noted)"})
+    return out
+
+
 def _attachment_manifest(resolved: list[tuple]) -> str:
     """Name each non-audio attachment by the id the tools take.
 
@@ -1944,7 +1996,8 @@ class AnthropicLLM(BaseLLM):
         same turn. When None, falls back to the static `tools` arg.
         """
         first_content = self._build_user_content(user, attachments)
-        messages: list[dict] = [{"role": "user", "content": first_content}]
+        messages: list[dict] = _alternating(_history_for(user)) + [
+            {"role": "user", "content": first_content}]
         final_text = ""
         for _iter in range(max_iterations):
             # Per-loop input budget guard. The first iteration always
@@ -2407,6 +2460,7 @@ class OpenAICompatibleLLM(BaseLLM):
             system_content = system
         messages = [
             {"role": "system", "content": system_content},
+            *_alternating(_history_for(user)),
             {"role": "user", "content": first_user},
         ]
         final_text = ""
@@ -2937,6 +2991,16 @@ class CodexLLM(BaseLLM):
         input_items: list[dict] = [
             {
                 "type": "message",
+                "role": m["role"],
+                "content": [{
+                    "type": "input_text" if m["role"] == "user" else "output_text",
+                    "text": m["content"],
+                }],
+            }
+            for m in _history_for(user)
+        ] + [
+            {
+                "type": "message",
                 "role": "user",
                 "content": self._build_user_content_blocks(user, attachments),
             }
@@ -3186,7 +3250,8 @@ class BedrockLLM(BaseLLM):
 
         static_anthropic_tools = _to_anthropic_tools(tools) if tools_provider is None else None
 
-        messages: list[dict] = [{"role": "user", "content": user}]
+        messages: list[dict] = _alternating(_history_for(user)) + [
+            {"role": "user", "content": user}]
         final_text = ""
         for _iter in range(max_iterations):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
@@ -3479,6 +3544,7 @@ class CohereLLM(BaseLLM):
 
         messages: list[dict] = [
             {"role": "system", "content": system},
+            *_alternating(_history_for(user)),
             {"role": "user", "content": user},
         ]
         final_text = ""

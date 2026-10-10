@@ -833,6 +833,31 @@ def _strip_citation_markers(answer: str) -> str:
     return _PRIVATE_USE_MARKER_RE.sub("", _CITATION_MARKER_RE.sub("", answer))
 
 
+def _append_thread(skey: str, *, task: str, answer: str, attachments,
+                   tool_names: list, turn_id: str, speaker_id: str) -> None:
+    """Record one finished exchange in the conversation thread (threads.py)."""
+    try:
+        from . import threads as _t
+        if not _t.enabled():
+            return
+        media = [ln.split(":", 1)[1].strip() for ln in (answer or "").splitlines()
+                 if ln.strip().startswith("MEDIA:")]
+        session_id = ""
+        try:
+            from .sessions import SESSIONS
+            cur = SESSIONS.current_for(speaker_id, session_key=skey)
+            session_id = getattr(cur, "id", "") or ""
+        except Exception:
+            pass
+        _t.THREADS.append(
+            skey, user=task, answer=answer, attachments=attachments or None,
+            trace=_t.trace_digest(list(tool_names or []), media),
+            turn_id=turn_id or "", session_id=session_id,
+        )
+    except Exception as e:
+        log.debug("thread append failed: %s", e)
+
+
 def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
     """If the final LLM answer is an XML-style tool-call dump (the
     failure mode that fires when max_iterations is hit and the model
@@ -3149,6 +3174,12 @@ def run_unified(
     # _decide_self_correction refuses synthesis with pending steps.
     from .tools.plan_scratchpad import reset_plan as _plan_reset
     _plan_reset()
+    # No conversation history is bound until this turn binds its own.
+    try:
+        from .llm import _TURN_HISTORY as _th_var
+        _th_var.set(None)
+    except Exception:
+        pass
     # A question asked this turn remembers the turn's files, so the turn that
     # resumes on the answer still has them.
     try:
@@ -3477,6 +3508,8 @@ def run_unified(
                                   session_key=skey)
             except Exception as e:
                 log.debug("unified fast-path: SESSIONS.add_turn failed: %s", e)
+            _append_thread(skey, task=task, answer=chat_answer, attachments=None,
+                           tool_names=[], turn_id=turn_id, speaker_id=speaker_id)
 
             # The inner `call_with_tools` already pushed token usage
             # through TokenTracker.record so per-day counters and
@@ -3560,9 +3593,21 @@ def run_unified(
     except Exception as e:
         log.debug("now-block assembly failed: %s", e)
 
+    # Hermes-style layout (2026-10-10). The system prompt holds only what is
+    # stable for the whole conversation — character, snapshot, skills
+    # catalog, rules, permissions — so the provider's prompt cache can reuse
+    # it turn after turn; the conversation itself arrives as messages (see
+    # backend/threads.py). Everything that changes per turn (the clock,
+    # recall, yesterday's digest, skill hints, alerts) rides THIS turn's
+    # request instead. Supervisor and audit turns keep the old one-shot
+    # layout: they are not conversations.
+    from . import threads as _threads
+    _threaded = (not audit_mode and not supervisor_mode and _threads.enabled())
     system_parts = [
         IDENTITY.preamble(speaker_id=speaker_id),
     ]
+    turn_parts: list[str] = []
+    _dyn = turn_parts if _threaded else system_parts
     if audit_mode:
         system_parts.append(
             "---\n\n# READ-ONLY AUDIT MODE\n"
@@ -3575,20 +3620,20 @@ def run_unified(
             "trajectory, evaluator, or learning stores."
         )
     if now_block:
-        system_parts.append(f"---\n\n{now_block}")
+        _dyn.append(f"---\n\n{now_block}")
     _handover = _escalation_note(
         getattr(agent, "_escalated_because", ""))
     if _handover:
-        system_parts.append(f"---\n\n{_handover}")
+        _dyn.append(f"---\n\n{_handover}")
     if snapshot:
         system_parts.append(f"---\n\n{snapshot}")
     if yesterday:
-        system_parts.append(f"---\n\n{yesterday}")
+        _dyn.append(f"---\n\n{yesterday}")
     if recall:
-        system_parts.append(f"---\n\n{recall}")
+        _dyn.append(f"---\n\n{recall}")
     if experience:
-        system_parts.append(f"---\n\n{experience}")
-    if convo:
+        _dyn.append(f"---\n\n{experience}")
+    if convo and not _threaded:
         system_parts.append(f"---\n\n{convo}")
     if catalog:
         system_parts.append(f"---\n\n{catalog}")
@@ -3601,7 +3646,7 @@ def run_unified(
         ]
         for sk in semantic_suggestions:
             hint_lines.append(f"- **{sk.name}** — {sk.description}")
-        system_parts.append("---\n\n" + "\n".join(hint_lines))
+        _dyn.append("---\n\n" + "\n".join(hint_lines))
     if auto_proposed:
         # Tell the LLM which deps the matched skills need but aren't
         # installed. The agent decides whether to actually install
@@ -3621,14 +3666,14 @@ def run_unified(
             ap_lines.append(
                 f"- `{p['name']}` via `{p['manager']}` (skill `{p['skill']}`)"
             )
-        system_parts.append("---\n\n" + "\n".join(ap_lines))
+        _dyn.append("---\n\n" + "\n".join(ap_lines))
     for sk in matched_skills:
         try:
             missing = _SKILLS.missing_tools_for(sk)
         except Exception:
             missing = []
         try:
-            system_parts.append(f"---\n\n{sk.system_block(missing_tools=missing)}")
+            _dyn.append(f"---\n\n{sk.system_block(missing_tools=missing)}")
         except Exception as e:
             log.debug("skill %s system_block failed: %s", sk.name, e)
     # Audit follow-up: keyword-based trivial-chat / bug-report
@@ -3670,16 +3715,30 @@ def run_unified(
         channel=_channel_norm,  # type: ignore[arg-type]
         loaded_bundles=frozenset(_get_loaded_bundles()),
         model_size=_classify_model_size(_active_model),  # type: ignore[arg-type]
-        background_job=_has_bg_job,
+        # Threaded: the rules stay byte-stable; the job-tracking protocol
+        # rides this turn's context below while a job is actually running.
+        background_job=_has_bg_job and not _threaded,
     )
     _rules_for_turn = _build_rules_for_turn(
         ctx=_turn_ctx,
-        has_attachments=bool(attachments),
+        has_attachments=bool(attachments) and not _threaded,
         sticky_fired=False,
-        repeat_refusal=_repeat_refusal,
+        repeat_refusal=_repeat_refusal and not _threaded,
     )
     system_parts.append(f"---\n\n{_rules_for_turn}")
     system_parts.append(f"---\n\n{perms}")
+    if _threaded:
+        if attachments:
+            turn_parts.append(f"---\n\n{_RULES_FILE_TYPES}")
+            turn_parts.append(f"---\n\n{_RULES_MEDIA_CONVENTION}")
+        if _repeat_refusal:
+            turn_parts.append(f"---\n\n{_RULES_REPEAT_REFUSAL}")
+        if _has_bg_job:
+            try:
+                from .prompt_modules import MODULES as _PM, strip_provenance as _sp
+                turn_parts.append("---\n\n" + _sp(_PM["m4_job_tracking"].body))
+            except Exception as _e:
+                log.debug("job-tracking module unavailable: %s", _e)
 
     # Self-surface unresolved provider failures (audit 2026-05-28).
     # When the active LLM provider returned 402 / 401 / 5xx during
@@ -3718,7 +3777,7 @@ def run_unified(
                     f"({(ctx.get('category') or 'unknown')}): "
                     f"{(r.get('message') or '')[:120]}"
                 )
-            system_parts.append("---\n\n" + "\n".join(issue_lines))
+            _dyn.append("---\n\n" + "\n".join(issue_lines))
     # Supervisor-mode preamble. The user-visible chat rules above
     # ("answer in Russian / no preamble / ...") still apply but the
     # supervisor block OVERRIDES the "ask before acting" / "DM the
@@ -3817,7 +3876,43 @@ def run_unified(
         _lang_note = IDENTITY.reply_language_note(speaker_id=speaker_id)
     except Exception:
         _lang_note = ""
-    task_for_model = f"{task}\n\n{_lang_note}" if _lang_note else task
+    task_for_model = task
+    if turn_parts:
+        task_for_model = (
+            "[CONTEXT FOR THIS TURN — assembled by the system for reference; "
+            "these are not the user's words]\n\n"
+            + "\n\n".join(turn_parts)
+            + "\n\n[END OF CONTEXT — the user's message follows]\n\n"
+            + task
+        )
+    if _lang_note:
+        task_for_model = f"{task_for_model}\n\n{_lang_note}"
+    # The conversation so far, as real messages before this request.
+    _thread_session_id = ""
+    if _threaded:
+        try:
+            from .sessions import SESSIONS as _S_cur
+            _cur = _S_cur.current_for(speaker_id, session_key=skey)
+            _thread_session_id = getattr(_cur, "id", "") or ""
+        except Exception:
+            _thread_session_id = ""
+        try:
+            # First turn after the switch to threads: carry over what the
+            # old shared buffer still holds for this conversation.
+            _threads.THREADS.seed_if_empty(
+                skey, CONVERSATION.recent(n=10, session_key=skey))
+            _history_msgs = _threads.THREADS.messages(
+                skey, session_id=_thread_session_id)
+        except Exception as _e:
+            log.debug("thread history unavailable: %s", _e)
+            _history_msgs = []
+        if _history_msgs:
+            from .llm import set_turn_history as _set_hist
+            _set_hist(_history_msgs, task_for_model)
+            agent.progress(
+                "history",
+                f"conversation history: {len(_history_msgs) // 2} exchange(s)",
+            )
 
     # Tool surface = base set + currently-loaded bundles. The LLM
     # picks; mid-turn it can call `load_tool_bundle(name)` to unlock
@@ -5054,6 +5149,13 @@ def run_unified(
             speaker_id=speaker_id,
             session_key=skey,
         )
+        if not supervisor_mode:
+            _append_thread(
+                skey, task=task, answer=answer or "", attachments=attachments,
+                tool_names=_turn_tool_names(agent),
+                turn_id=turn_record.get("turn_id", ""),
+                speaker_id=speaker_id,
+            )
     except _SkipAuditPersistence:
         pass
     except Exception as e:
