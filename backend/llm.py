@@ -53,6 +53,7 @@ from .llm_error_classify import (  # noqa: F401
     _MODEL_UNAVAILABLE_MARKERS,
     _is_model_unavailable,
     _is_provider_stream_error,
+    _is_auth_failure,
     _should_fallback,
 )
 
@@ -217,6 +218,9 @@ def turn_fallback_reason() -> str:
 def _short_fallback_reason(err: "LLMError") -> str:
     s = str(err)
     low = s.lower()
+    # First: a 401 body is long JSON, and "rate" below is a bare substring.
+    if _is_auth_failure(err):
+        return "login/credential expired — re-authenticate this provider"
     if "usage_limit_reached" in low or "quota" in low:
         return "quota exhausted"
     if "429" in low or "rate" in low:
@@ -375,6 +379,7 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
                 pass
             return _out
         except LLMError as e:
+            _note_chain_failure(prov, e, terminal=not _should_fallback(e))
             if _should_fallback(e):
                 if _effects["n"]:
                     _log.error(
@@ -384,6 +389,7 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
                         getattr(prov, "name", "?"), _short_fallback_reason(e),
                         _effects["n"], _effects["names"],
                     )
+                    _note_chain_failure(prov, e, terminal=True)
                     raise LLMError(
                         f"{e} — provider failed after "
                         f"{_effects['n']} state-changing tool call(s) "
@@ -403,8 +409,57 @@ def _run_with_safety_fallback(chain, method_name, task_type, system, user, *args
                 continue
             raise
     if last_err is not None:
+        _note_chain_failure(None, last_err, terminal=True)
         raise last_err
     raise LLMError("no providers configured")
+
+
+def _note_chain_failure(prov, err: "LLMError", *, terminal: bool) -> None:
+    """Make a provider failure on the chain path visible to someone.
+
+    The record that feeds the next turn's UNRESOLVED AGENT-SIDE FAILURES block
+    used to be written only from the legacy A/B tail of `call()` — the tail
+    this module itself documents as never executing in production. So from
+    the day the chain became the live path, `provider_errors.jsonl` stopped
+    growing (last row on prod: 2026-08-07) and the agent lost the ability to
+    explain its own outages.
+
+    Writes the record when the call is about to fail for good (`terminal`),
+    and ALWAYS for a dead credential — even when a fallback provider then
+    answers — because only a human can log back in, and the owner gets one
+    Telegram message a day about it. Never raises.
+    """
+    try:
+        from .provider_error_log import (
+            alert_owner_once, classify_llm_error, log_provider_error,
+        )
+        auth = _is_auth_failure(err)
+        if not (terminal or auth):
+            return
+        name = (getattr(prov, "name", "") or getattr(prov, "id", "")
+                or "unknown") if prov is not None else "provider chain"
+        model = (getattr(prov, "model", "") or "unknown") if prov is not None else "unknown"
+        info = classify_llm_error(str(err))
+        log_provider_error(
+            provider=str(name), model=str(model),
+            status_code=int(info.get("status_code") or 0),
+            message=str(info.get("message") or "")[:300],
+            context={"category": info.get("category"), "via": "chain",
+                     "terminal": bool(terminal)},
+        )
+        if auth and prov is not None:
+            pid = getattr(prov, "id", "") or str(name)
+            hint = ("run `codex login` on the server" if "codex" in pid.lower()
+                    else "re-enter its key in Settings → Providers")
+            alert_owner_once(
+                f"auth:{pid}",
+                f"⚠️ {name} ({model}) is rejecting my requests: its login or "
+                f"API key is no longer valid ({str(info.get('message') or '')[:120]}). "
+                "I will answer through the next provider in the chain until "
+                f"it is fixed. To restore it, {hint}.",
+            )
+    except Exception:
+        pass
 
 
 # ---------- Token usage tracking ----------
@@ -1101,6 +1156,36 @@ def _resolve_attachments(refs: list[str] | None) -> list[tuple]:
     return out
 
 
+def _attachment_manifest(resolved: list[tuple]) -> str:
+    """Name each non-audio attachment by the id the tools take.
+
+    The image itself is inlined, but nothing told the model what it is CALLED,
+    so a tool that needs it had nothing to pass. Measured 2026-09-28: the first
+    call of an interior-design turn was `analyze_image(sha256="???")`, an error,
+    and the turn fell back to asking the user a question instead of looking.
+    Voice notes are skipped — they arrive as their transcript.
+    """
+    lines: list[str] = []
+    for meta, _data in resolved or []:
+        if getattr(meta, "kind", "") == "audio":
+            continue
+        line = f"- {meta.kind} sha256={meta.sha256}"
+        if getattr(meta, "filename", ""):
+            line += f" name={meta.filename}"
+        try:
+            from .attachments import ATTACHMENTS
+            p = ATTACHMENTS.get_path(meta.sha256)
+            if p is not None:
+                line += f" path={p}"
+        except Exception:
+            pass
+        lines.append(line)
+    if not lines:
+        return ""
+    return ("[attached to this message — tools such as analyze_image take the "
+            "sha256; shell tools can read the path]\n" + "\n".join(lines))
+
+
 # Caps applied to tool results BEFORE they re-enter `messages` for the
 # next iteration of a tool-use loop. Without this, a 60k `read_file`
 # of agent.py travels with every subsequent turn — the cumulative
@@ -1785,6 +1870,9 @@ class AnthropicLLM(BaseLLM):
                     })
             else:
                 blocks.append({"type": "text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
+        manifest = _attachment_manifest(resolved)
+        if manifest:
+            blocks.append({"type": "text", "text": manifest})
         if user:
             blocks.append({"type": "text", "text": user})
         return blocks
@@ -2236,6 +2324,9 @@ class OpenAICompatibleLLM(BaseLLM):
                     })
             else:
                 blocks.append({"type": "text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
+        manifest = _attachment_manifest(resolved)
+        if manifest:
+            blocks.append({"type": "text", "text": manifest})
         if user:
             blocks.append({"type": "text", "text": user})
         return blocks
@@ -2462,6 +2553,14 @@ class CodexLLM(BaseLLM):
       - Tool results re-enter the `input` array as `function_call_output` items.
     """
 
+    # `prompt_cache_key` pins requests that share a prompt prefix to the same
+    # cache node; Codex CLI sends it on every request. Without it, iterations
+    # of ONE turn — identical instructions and tools — missed the cache at
+    # random: the 2026-09-28 artifact shows ~30k fresh input tokens on three
+    # consecutive tool iterations, then ~1k on the next. Switched off for the
+    # process if the backend ever rejects the field.
+    _cache_key_supported: bool = True
+
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.model = cfg["model"]
@@ -2505,6 +2604,11 @@ class CodexLLM(BaseLLM):
         last_error: Exception | None = None
         payload = dict(payload)
         payload["stream"] = True  # server requires stream=true
+        # One forced token refresh per call on a 401. The server revokes a
+        # token before its `exp` when the login is used elsewhere, and the
+        # auth manager only refreshes on `exp` — so without this a revoked
+        # token is re-sent until it expires on paper (2026-10-05, five days).
+        auth_refreshed = False
 
         for attempt in range(_max_retries + 1):
             headers = {**self._auth_headers(), "Content-Type": "application/json", "Accept": "text/event-stream"}
@@ -2518,8 +2622,30 @@ class CodexLLM(BaseLLM):
                         )
                         time.sleep(min(2 ** attempt * 2, 60.0))
                         continue
+                    if r.status_code == 401 and not auth_refreshed:
+                        auth_refreshed = True
+                        body = b"".join(r.iter_bytes())[:500].decode("utf-8", errors="replace")
+                        refresh_error = self._force_token_refresh()
+                        if refresh_error is None and attempt < _max_retries:
+                            continue
+                        raise LLMError(
+                            f"Codex Responses API 401 ({self.provider_name}/{self.model}): "
+                            "the ChatGPT login behind this provider is no longer "
+                            "valid and refreshing it failed"
+                            + (f" ({refresh_error})" if refresh_error else "")
+                            + " — run `codex login` on the server. Detail: "
+                            + body
+                        )
                     if r.status_code >= 400:
                         body = b"".join(r.iter_bytes())[:500].decode("utf-8", errors="replace")
+                        if (r.status_code == 400 and "prompt_cache_key" in body
+                                and payload.pop("prompt_cache_key", None)
+                                and attempt < _max_retries):
+                            CodexLLM._cache_key_supported = False
+                            logging.getLogger("llm").warning(
+                                "Codex rejected prompt_cache_key; sending "
+                                "requests without it from now on")
+                            continue
                         if r.status_code == 429 and "usage_limit_reached" in body:
                             raise LLMError(
                                 f"Codex subscription quota exhausted ({self.provider_name}/{self.model}). "
@@ -2561,6 +2687,32 @@ class CodexLLM(BaseLLM):
                     f"Codex Responses API error after {_max_retries} retries: {e}"
                 ) from e
         raise LLMError(f"Codex Responses API failed: {last_error}")
+
+    # A refused refresh means the login itself is gone; until someone runs
+    # `codex login`, asking again on every call only adds a round trip to
+    # each of the turn's judge calls before they fall back.
+    _REFRESH_RETRY_AFTER_S = 15 * 60
+    _refresh_failure: "tuple[float, str] | None" = None
+
+    @classmethod
+    def _force_token_refresh(cls) -> "str | None":
+        """Refresh the ChatGPT token regardless of its `exp`. Returns None on
+        success, otherwise a short reason (the caller puts it in the error)."""
+        failed = cls._refresh_failure
+        if failed and time.time() - failed[0] < cls._REFRESH_RETRY_AFTER_S:
+            return failed[1]
+        try:
+            from .providers import CODEX_AUTH
+            CODEX_AUTH.force_refresh()
+            cls._refresh_failure = None
+            logging.getLogger("llm").info(
+                "Codex: token refreshed after a 401; retrying the request")
+            return None
+        except Exception as e:
+            logging.getLogger("llm").warning(
+                "Codex: forced token refresh after 401 failed: %s", e)
+            cls._refresh_failure = (time.time(), str(e)[:200])
+            return cls._refresh_failure[1]
 
     @staticmethod
     def _function_calls(output: list[dict]) -> list[dict]:
@@ -2614,6 +2766,11 @@ class CodexLLM(BaseLLM):
             # chain-of-thought when re-feeding (matches Codex CLI's pattern).
             "include": ["reasoning.encrypted_content"],
         }
+        if system and CodexLLM._cache_key_supported:
+            import hashlib as _hl
+            payload["prompt_cache_key"] = "hrant-" + _hl.sha1(
+                f"{self.model}|{system[:8000]}".encode("utf-8", "replace")
+            ).hexdigest()[:24]
         # Hybrid reasoning routing (May 2026 follow-up). When the caller
         # supplies a task_type, look up the configured effort level
         # (low/medium/high) in `reasoning_routing` and attach it. The
@@ -2704,6 +2861,9 @@ class CodexLLM(BaseLLM):
                         })
                 else:
                     blocks.append({"type": "input_text", "text": f"[file attachment: {meta.filename or meta.sha256[:12]}]"})
+            manifest = _attachment_manifest(resolved)
+            if manifest:
+                blocks.append({"type": "input_text", "text": manifest})
         if user:
             blocks.append({"type": "input_text", "text": user})
         return blocks

@@ -810,6 +810,19 @@ _XML_TOOL_CALL_RE = re.compile(
 )
 
 
+# The model's built-in citation syntax: U+E200 "cite" U+E202 "turn0search0" …
+# U+E201. It renders nowhere — the WebUI showed "citeturn0search0turn0search3"
+# glued to the end of a sentence (2026-09-04, two answers).
+_CITATION_MARKER_RE = re.compile(r"[ \t]*\ue200[^\ue201]{0,200}\ue201")
+_PRIVATE_USE_MARKER_RE = re.compile(r"[\ue200-\ue2ff]")
+
+
+def _strip_citation_markers(answer: str) -> str:
+    if not answer or not _PRIVATE_USE_MARKER_RE.search(answer):
+        return answer or ""
+    return _PRIVATE_USE_MARKER_RE.sub("", _CITATION_MARKER_RE.sub("", answer))
+
+
 def _rewrite_xml_tool_call_dump(answer: str, agent) -> str:
     """If the final LLM answer is an XML-style tool-call dump (the
     failure mode that fires when max_iterations is hit and the model
@@ -2427,6 +2440,7 @@ def _decide_self_correction(
     trace=None,
     speaker_id: str = "",
     job_id: str = "",
+    awaiting_user: bool = False,
 ) -> tuple[str, str]:
     """Decide whether the just-finished turn needs a corrective re-prompt.
 
@@ -2492,6 +2506,13 @@ def _decide_self_correction(
                     f"running]\n{_steered}")
     except Exception:
         pass
+    # The turn ended on a question the user is now looking at. It is paused,
+    # not unfinished: every gate below would read the pending plan steps or
+    # the missing action as a failure and re-prompt — and the re-prompted
+    # model asks AGAIN. 2026-09-28: "plan-incomplete — 2 pending" fired twice
+    # after ask_user, producing three question cards in one turn.
+    if awaiting_user:
+        return "", ""
     try:
         from .turn_policy import current_policy
         if not current_policy().enforce_action_progress:
@@ -3118,6 +3139,13 @@ def run_unified(
     # _decide_self_correction refuses synthesis with pending steps.
     from .tools.plan_scratchpad import reset_plan as _plan_reset
     _plan_reset()
+    # A question asked this turn remembers the turn's files, so the turn that
+    # resumes on the answer still has them.
+    try:
+        from .tools.ask_user import set_turn_attachments as _aq_set_att
+        _aq_set_att(attachments or [])
+    except Exception:
+        pass
     skey = (session_key or "").strip() or speaker_id
     # Late imports to avoid cycles.
     from . import roles as _roles
@@ -3329,6 +3357,7 @@ def run_unified(
                 convo=convo,
             )
         if chat_answer is not None:
+            chat_answer = _strip_citation_markers(chat_answer)
             # Fast-path turn — still write a minimal artifact under
             # workspace/turns/<id>.json so every turn has an audit
             # trace and /api/turns/<id> resolves. Skipping the
@@ -3336,6 +3365,7 @@ def run_unified(
             # chat-shaped ones) from the dev panel + audits.
             _lane_conf, _lane_status = _lane_check_state(agent)
             turn_id = ""
+            artifact = None
             try:
                 from .workspace import get_workspace
                 from datetime import datetime as _dt_fp
@@ -3408,6 +3438,35 @@ def run_unified(
                 )
             except Exception as e:
                 log.debug("unified fast-path: CONVERSATION.add_turn failed: %s", e)
+
+            # And into SESSIONS, like the full path. The fast lane never wrote
+            # a session row: on Telegram the bridge's own copy of every message
+            # hid that, and on the WebUI a third of the turns were simply
+            # missing from the Sessions panel. The bridge copy is gone now.
+            try:
+                from .sessions import SESSIONS
+                _fp_row = {
+                    k: artifact[k] for k in (
+                        "ts", "user", "answer", "intent", "is_chat",
+                        "confidence", "topics", "channel", "speaker_id",
+                        "session_key", "token_usage", "n_tool_calls",
+                        "tools_used", "skills_used", "n_llm_calls", "level",
+                    ) if k in artifact
+                } if isinstance(artifact, dict) else {
+                    "ts": _time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "user": task, "answer": chat_answer, "intent": "chat",
+                    "is_chat": True, "confidence": _lane_conf, "topics": [],
+                    "channel": channel, "speaker_id": speaker_id,
+                    "session_key": skey, "level": "L0_CHAT",
+                }
+                if turn_id:
+                    _fp_row["turn_id"] = turn_id
+                if job_id:
+                    _fp_row["job_id"] = job_id
+                SESSIONS.add_turn(_fp_row, speaker_id=speaker_id,
+                                  session_key=skey)
+            except Exception as e:
+                log.debug("unified fast-path: SESSIONS.add_turn failed: %s", e)
 
             # The inner `call_with_tools` already pushed token usage
             # through TokenTracker.record so per-day counters and
@@ -3952,6 +4011,18 @@ def run_unified(
             }, ensure_ascii=False)
             return blocked, True
         _note_verify_tools(_build_frame_state, name)
+        # One question per turn. A second `ask_user` used to create a second
+        # card, and `create_question` supersedes the speaker's older open
+        # questions — so the card the user was actually SHOWN (the first one,
+        # carried on the answer) went dead: tapping it said "already
+        # answered". Measured 2026-09-28: three cards in one turn.
+        if name == "ask_user" and _pending_question_id["v"]:
+            return (
+                "QUESTION_ALREADY_PENDING. The user is already looking at the "
+                "question you asked this turn and has not answered yet. Do "
+                "not ask again. END THE TURN now with an empty reply.",
+                False,
+            )
         preview = ", ".join(str(k) for k in (args or {}).keys())
         agent.progress(
             "tool_starting",
@@ -4361,7 +4432,7 @@ def run_unified(
     # broken-looking message. Rewrite it into a plain-language
     # status report so the human knows what was tried and what
     # input is missing.
-    answer = _rewrite_xml_tool_call_dump(answer, agent)
+    answer = _strip_citation_markers(_rewrite_xml_tool_call_dump(answer, agent))
 
     # Self-correction: catch two failure modes via ONE corrective re-prompt.
     # See `_decide_self_correction` for the gating logic; both decisions
@@ -4399,6 +4470,7 @@ def run_unified(
                 trace=getattr(agent, "_trace", None),
                 speaker_id=speaker_id,
                 job_id=job_id or "",
+                awaiting_user=bool(_pending_question_id["v"]),
             )
             if not _corrective:
                 _last_tag = ""
@@ -4428,7 +4500,8 @@ def run_unified(
                     max_iterations=_configured_correction_iterations(),
                     on_tool_call=_on_tool_call,
                 )
-                answer = _rewrite_xml_tool_call_dump(answer, agent)
+                answer = _strip_citation_markers(
+                    _rewrite_xml_tool_call_dump(answer, agent))
                 # A correction round that produces nothing is a FAILED
                 # correction, not a new answer. Measured 2026-08-19 on the
                 # owner's own turn: 104 tool calls, 113 LLM calls, 1.05M input
@@ -5056,6 +5129,8 @@ def run_unified(
     except Exception:
         _intended = ""
     _model_note = fallback_note(_intended, _model_used, turn_fallback_reason())
+    # The critic's revision is model text too.
+    answer = _strip_citation_markers(answer)
     # Turn-contract status, appended LAST — after the critic, after every
     # revision pass, immediately before the answer leaves. Nothing downstream
     # can edit or drop it, which is the point: the model must not get a chance

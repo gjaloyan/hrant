@@ -2302,10 +2302,11 @@ class TelegramBot:
                         except Exception:
                             pass
 
-                    _log_channel_message(
-                        self.channel_id, username, text, answer,
-                        speaker_id=speaker_id,
-                    )
+                    # No session row here: run_unified persists every turn
+                    # itself (both lanes). The copy this used to append was
+                    # a second row per message under a different session —
+                    # half the owner's history was duplicates, and readers
+                    # of sessions.json counted every exchange twice.
 
                 except Exception as e:
                     # log.exception (not log.error) so the FULL
@@ -2500,36 +2501,6 @@ class TelegramBot:
                 "Telegram bot %s polling crashed (%s: %s) — supervisor will "
                 "restart it", self.channel_id, type(e).__name__, e,
             )
-
-
-def _log_channel_message(
-    channel_id: str,
-    user: str,
-    question: str,
-    answer: str,
-    *,
-    speaker_id: str | None = None,
-) -> None:
-    """Append a channel interaction to the per-speaker session.
-    Each Telegram user has their own session because each gets a
-    distinct `speaker_id`."""
-    try:
-        from .sessions import SESSIONS
-        sp = speaker_id or f"{channel_id}:{user}"
-        turn = {
-            "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "user": f"[{channel_id}:{user}] {question}",
-            "answer": answer,
-            "intent": "channel",
-            "is_chat": False,
-            "confidence": 0,
-            "topics": [],
-            "channel": channel_id,
-            "speaker_id": sp,
-        }
-        SESSIONS.add_turn(turn, speaker_id=sp)
-    except Exception:
-        pass
 
 
 # --------------- Channel Manager ---------------

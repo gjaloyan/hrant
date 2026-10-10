@@ -283,7 +283,9 @@ async def answer_question(req: AnswerQuestionRequest, request: Request):
             agent,
             user_message,
             PROJECTS.current,
-            None,
+            # The files of the turn that asked — without them the resumed
+            # turn cannot see what the question was about.
+            list(getattr(q, "attachments", None) or []) or None,
             channel="webui" if q.channel == "webui" else "telegram",
             speaker_id=speaker,
             # Continue the thread the question was asked in, not a new one

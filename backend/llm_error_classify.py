@@ -8,9 +8,12 @@ llm.py re-exports everything, so existing importers are untouched.
 Each classifier answers one question about a provider failure; the union,
 `_should_fallback`, decides whether the router chain advances to the next
 provider. History: safety (2026-05), quota (06-04 bench), malformed/truncated
-(06-19 nex :free), model-unavailable (06-24 nex discontinued).
+(06-19 nex :free), model-unavailable (06-24 nex discontinued), dead credential
+(10-05 Codex login invalidated).
 """
 from __future__ import annotations
+
+import re
 
 
 class LLMError(RuntimeError):
@@ -134,15 +137,56 @@ def _is_provider_stream_error(err: "LLMError") -> bool:
     return any(marker in msg for marker in _STREAM_ERROR_MARKERS)
 
 
+# HTTP auth failures as the adapters format them: "<Provider> API 401 (...)"
+# from post_with_retry, "Codex Responses API 401 (...)" from the Codex stream.
+_AUTH_STATUS_RE = re.compile(r"\bapi (?:401|403)\b")
+
+_AUTH_FAILURE_MARKERS: tuple[str, ...] = (
+    "authentication token has expired",
+    "authentication token has been invalidated",
+    "token_expired",
+    "token_invalidated",
+    "invalid api key",
+    "invalid_api_key",
+    "incorrect api key",
+    "codex auth:",          # CodexAuthManager could not produce a token
+    "copilot auth:",
+    "no valid oauth token",
+    "no api key for",
+    "is not set in the environment",
+)
+
+
+def _is_auth_failure(err: "LLMError") -> bool:
+    """True iff this provider's CREDENTIAL is dead: expired, revoked, missing.
+
+    Surfaced 2026-10-05 on prod: the ChatGPT login behind the Codex provider
+    was invalidated ("Your authentication token has been invalidated"), every
+    call came back 401, and because auth was not a fallback class the router
+    raised on the first provider every time. OpenRouter was enabled, funded and
+    second in the chain — and was never tried. The agent was mute for five
+    days and nobody was told.
+
+    A dead credential on one provider says nothing about the next one, so this
+    belongs with the other "this provider can't serve" classes. The side-effect
+    guard in `_run_with_safety_fallback` still refuses to fail over once a
+    state-changing tool has run."""
+    msg = (str(err) or "").lower()
+    if _AUTH_STATUS_RE.search(msg):
+        return True
+    return any(marker in msg for marker in _AUTH_FAILURE_MARKERS)
+
+
 def _should_fallback(err: "LLMError") -> bool:
     """The router fallback engages on a safety refusal, a quota/rate-limit
     failure, a malformed/truncated provider response, an unavailable/dead
-    model, OR a provider-side mid-stream abort. All mean 'this provider can't
-    serve this call; try the next one.'"""
+    model, a provider-side mid-stream abort, OR a dead credential. All mean
+    'this provider can't serve this call; try the next one.'"""
     return (
         _is_safety_refusal(err)
         or _is_quota_exhausted(err)
         or _is_provider_malformed(err)
         or _is_model_unavailable(err)
         or _is_provider_stream_error(err)
+        or _is_auth_failure(err)
     )

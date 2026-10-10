@@ -45,7 +45,7 @@ import secrets
 import threading
 import time
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -94,6 +94,31 @@ def is_question_resume() -> bool:
         return bool(_RESUMING_QUESTION.get())
     except Exception:
         return False
+
+
+# The files the user sent with the turn that is asking. A question pauses the
+# task; the answer arrives as a NEW turn whose only input is the resume text,
+# so whatever was attached to the original message was simply gone.
+#
+# Measured 2026-09-28 on the owner's Telegram: three room photos with "design
+# this room, keep the concrete ceiling". The agent asked which zone; he tapped
+# "living-room + kitchen"; the resumed turn answered "there are no images in
+# the message — attach the photos". He had to send them again.
+_TURN_ATTACHMENTS: "ContextVar[tuple]" = ContextVar(
+    "ask_user_turn_attachments", default=(),
+)
+
+
+def set_turn_attachments(shas) -> None:
+    """Called by run_unified at turn start with the turn's attachment ids."""
+    _TURN_ATTACHMENTS.set(tuple(s for s in (shas or []) if s))
+
+
+def turn_attachments() -> list[str]:
+    try:
+        return list(_TURN_ATTACHMENTS.get())
+    except Exception:
+        return []
 
 
 
@@ -145,6 +170,10 @@ class PendingQuestion:
     answer_choice: str = ""
     # Free-text fallback (e.g. user picked "Other" on Telegram).
     answer_text: str = ""
+    # Attachment ids of the turn that asked. Handed back to the resumed turn
+    # so it can still see what the question was about. Defaulted so stored
+    # questions without the field still load.
+    attachments: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -389,6 +418,11 @@ def _resume_message(q, chosen_label: str, choice_id: str) -> str:
         if opt.get("id") == choice_id and (opt.get("description") or "").strip():
             lines.append(f"That option meant: {opt['description'].strip()}")
             break
+    if getattr(q, "attachments", None):
+        lines.append(
+            "The files I sent with the original request are attached to "
+            "this message again."
+        )
     lines.append(
         "Now continue the task this question was blocking. Do NOT ask what "
         "my answer refers to — it refers to the question above. Do not ask "
@@ -486,6 +520,8 @@ def _register_telegram_callback() -> None:
                 ag = _agent_mod.Agent()
                 res = ag.run(
                     user_msg,
+                    attachments=list(getattr(marked, "attachments", None)
+                                     or []) or None,
                     channel="telegram",
                     speaker_id=speaker,
                     # The thread the question was asked in. Without it the
@@ -545,6 +581,7 @@ def create_question(
     asker_chat_id: Optional[int] = None,
     asker_session_key: str = "",
     channel: str = "",
+    attachments: Optional[list] = None,
 ) -> PendingQuestion:
     """Build + persist a PendingQuestion. The tool handler calls
     this; the agent gets back the question_id sentinel."""
@@ -591,6 +628,8 @@ def create_question(
         asker_chat_id=asker_chat_id,
         asker_session_key=(asker_session_key or "").strip() or _live_skey(),
         channel=(channel or "").strip(),
+        attachments=list(attachments if attachments is not None
+                         else turn_attachments()),
     )
     STORE.put(q)
     # One live question per speaker: a new question supersedes the speaker's

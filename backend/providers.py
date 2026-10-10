@@ -1161,16 +1161,49 @@ class CodexAuthManager:
                 raise RuntimeError(
                     "Codex token expired and no refresh_token — run `codex login` again"
                 )
-            new_tokens = self._refresh(refresh)
-            tokens["access_token"] = new_tokens.get("access_token") or access
-            if new_tokens.get("id_token"):
-                tokens["id_token"] = new_tokens["id_token"]
-            if new_tokens.get("refresh_token"):
-                tokens["refresh_token"] = new_tokens["refresh_token"]
-            raw["tokens"] = tokens
-            raw["last_refresh"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-            self._write_atomic(raw)
-            return tokens["access_token"], account_id
+            return self._refresh_and_store(raw, tokens), account_id
+
+    def force_refresh(self) -> tuple[str, str]:
+        """Refresh NOW, whatever the access token's `exp` claim says.
+
+        The server can revoke a token long before it expires — logging in to
+        ChatGPT/Codex elsewhere rotates the refresh token and invalidates this
+        one. Measured on prod 2026-10-05: the JWT said "valid until 10-11",
+        every call came back 401 `token_invalidated`, and `get_access_token`
+        kept handing out the dead token because it only trusts `exp`.
+
+        Raises RuntimeError when there is nothing to refresh with or the
+        refresh is refused — the login itself is gone and only `codex login`
+        can bring it back.
+        """
+        with self._lock:
+            raw = self._read_raw()
+            if not raw or raw.get("auth_mode") != "chatgpt":
+                raise RuntimeError(
+                    "Codex not logged in — run `codex login` to create ~/.codex/auth.json"
+                )
+            tokens = raw.get("tokens") or {}
+            if not tokens.get("refresh_token"):
+                raise RuntimeError(
+                    "Codex login has no refresh_token — run `codex login` again"
+                )
+            return self._refresh_and_store(raw, tokens), tokens.get("account_id") or ""
+
+    def _refresh_and_store(self, raw: dict, tokens: dict) -> str:
+        """Exchange the refresh token, write the new tokens back, return the
+        new access token. Caller holds `self._lock`."""
+        new_tokens = self._refresh(tokens.get("refresh_token") or "")
+        tokens["access_token"] = (
+            new_tokens.get("access_token") or tokens.get("access_token") or ""
+        )
+        if new_tokens.get("id_token"):
+            tokens["id_token"] = new_tokens["id_token"]
+        if new_tokens.get("refresh_token"):
+            tokens["refresh_token"] = new_tokens["refresh_token"]
+        raw["tokens"] = tokens
+        raw["last_refresh"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        self._write_atomic(raw)
+        return tokens["access_token"]
 
     def _refresh(self, refresh_token: str) -> dict:
         """POST refresh request — JSON body, exactly like Codex CLI does."""

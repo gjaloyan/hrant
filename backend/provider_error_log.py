@@ -226,3 +226,68 @@ def classify_llm_error(text: str) -> dict[str, Any]:
         "message": message,
         "category": category,
     }
+
+
+# ─── Owner alert ──────────────────────────────────────────────────
+
+_ALERT_LOCK = threading.Lock()
+_ALERT_EVERY_SECONDS = 24 * 3600
+
+
+def _alert_state_path() -> Path:
+    """Sibling of the error log, so a test that pins one pins both."""
+    return _log_path().with_name("provider_alerts.json")
+
+
+def _primary_owner_chat_id() -> "int | None":
+    """Chat of the first Telegram owner in roles.json — the person who runs
+    the box. Other owners (family members promoted later) are not paged
+    about credentials they cannot fix."""
+    from . import contacts, roles
+    state = roles._load()
+    for sid in state.get("owner_speaker_ids") or []:
+        if isinstance(sid, str) and sid.startswith("telegram:"):
+            cid = contacts.chat_id_for_speaker(sid)
+            if cid is not None:
+                return cid
+    return None
+
+
+def alert_owner_once(key: str, text: str, *,
+                     every_seconds: int = _ALERT_EVERY_SECONDS) -> bool:
+    """DM the owner on Telegram, at most once per `every_seconds` per `key`.
+
+    Written after 2026-10-05: the Codex login died, self-study logged a 401
+    every night for five days into a journal nobody reads, and the owner
+    found out by the agent going silent. A failure only a human can fix has
+    to reach that human.
+
+    Sends only when the Telegram bridge is already loaded in this process
+    (the running server) — never from a CLI command or a test. Returns True
+    when a message went out. Never raises.
+    """
+    import sys
+    try:
+        channels = sys.modules.get("backend.channels")
+        manager = getattr(channels, "CHANNELS", None) if channels else None
+        if manager is None:
+            return False
+        with _ALERT_LOCK:
+            path = _alert_state_path()
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(state, dict):
+                    state = {}
+            except (OSError, ValueError):
+                state = {}
+            if _now() - float(state.get(key) or 0) < every_seconds:
+                return False
+            chat_id = _primary_owner_chat_id()
+            if chat_id is None or not manager.deliver_dm(chat_id, text):
+                return False
+            state[key] = _now()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(state), encoding="utf-8")
+            return True
+    except Exception:
+        return False
