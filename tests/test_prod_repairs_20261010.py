@@ -607,3 +607,41 @@ def test_no_rule_in_the_prompt_orders_mirroring_any_more():
     import inspect
     assert "Mirror the user's language" not in inspect.getsource(pm)
     assert "Match the user's language" not in inspect.getsource(ua)
+
+
+def _reminder(tmp_path, monkeypatch, *, default, pin=""):
+    from pathlib import Path
+    from backend.config import CONFIG
+    from backend.identity import IdentityManager
+    monkeypatch.setitem(CONFIG._data, "response_language", None)
+    monkeypatch.setitem(CONFIG._data, "default_response_language", default)
+    im = IdentityManager(base_dir=Path(tmp_path))
+    if pin:
+        im.user_path.parent.mkdir(parents=True, exist_ok=True)
+        im.user_path.write_text(
+            "# User Profile" + chr(10) * 2 + "## Language" + chr(10) + "- " + pin + chr(10),
+            encoding="utf-8")
+    return im.reply_language_reminder()
+
+
+def test_the_closing_line_names_the_default(tmp_path, monkeypatch):
+    line = _reminder(tmp_path, monkeypatch, default="ru")
+    assert line.startswith("# REPLY LANGUAGE")
+    assert "Russian" in line
+
+
+def test_the_closing_line_follows_the_users_choice(tmp_path, monkeypatch):
+    line = _reminder(tmp_path, monkeypatch, default="ru",
+                     pin="Respond to the user in Armenian.")
+    assert "Armenian" in line and "Russian" not in line
+
+
+def test_no_closing_line_when_mirroring(tmp_path, monkeypatch):
+    assert _reminder(tmp_path, monkeypatch, default=None) == ""
+
+
+def test_the_closing_line_is_the_last_part_of_both_lanes():
+    import inspect
+    import backend.unified_agent as ua
+    src = inspect.getsource(ua)
+    assert src.count("reply_language_reminder(speaker_id=speaker_id)") == 2

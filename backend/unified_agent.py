@@ -592,6 +592,12 @@ def _try_chat_path(
         if convo:
             sys_parts.append(f"---\n\n{convo}")
         sys_parts.append(f"---\n\n{_CHAT_FAST_PATH_RULES}")
+        try:
+            _lang_tail = IDENTITY.reply_language_reminder(speaker_id=speaker_id)
+        except Exception:
+            _lang_tail = ""
+        if _lang_tail:
+            sys_parts.append(f"---\n\n{_lang_tail}")
         sys_prompt = "\n\n".join(sys_parts)
 
         # Audit P0 fix: the previous version called
@@ -3793,6 +3799,13 @@ def run_unified(
             "is not acceptable."
         )
         system_parts.append(f"---\n\n{sup_block}")
+    # Last, where it is read last. See IdentityManager.reply_language_reminder.
+    try:
+        _lang_tail = IDENTITY.reply_language_reminder(speaker_id=speaker_id)
+    except Exception:
+        _lang_tail = ""
+    if _lang_tail:
+        system_parts.append(f"---\n\n{_lang_tail}")
     system_prompt = "\n\n".join(system_parts)
 
     # Tool surface = base set + currently-loaded bundles. The LLM

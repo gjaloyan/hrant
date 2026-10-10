@@ -646,6 +646,47 @@ class IdentityManager:
             )
         return out
 
+    def reply_language_reminder(self, *, speaker_id: str | None = None) -> str:
+        """One closing line naming the reply language, for the END of the
+        system prompt — or "" when the language is simply mirrored.
+
+        The RESPONSE LANGUAGE block sits inside the preamble, at the top of a
+        ~60k-character prompt. Measured 2026-10-10 right after the owner set
+        Russian as the default: an Armenian message was answered in Armenian
+        with the rule in place, because the message itself was the last thing
+        the model read. The last thing the system prompt says carries the
+        weight; this is that thing.
+        """
+        from .config import CONFIG
+        names = {
+            "en": "English", "ru": "Russian", "fr": "French",
+            "de": "German", "es": "Spanish", "it": "Italian",
+            "pt": "Portuguese", "zh": "Chinese", "ja": "Japanese",
+            "uk": "Ukrainian", "hy": "Armenian", "tr": "Turkish",
+        }
+        forced = (CONFIG.response_language or "mirror").lower()
+        if forced not in ("mirror", ""):
+            return (f"# REPLY LANGUAGE\nWrite the reply in "
+                    f"{names.get(forced, forced)}.")
+        try:
+            pin = self._extract_language_section(
+                self.user_profile(speaker_id=speaker_id))
+        except Exception:
+            pin = ""
+        if pin:
+            return ("# REPLY LANGUAGE\nWrite the reply in the language this "
+                    f"user chose: {pin.splitlines()[0].lstrip('- ').strip()} "
+                    "— not in the language the message happens to be in, "
+                    "unless they ask for that language now.")
+        default = (CONFIG.default_response_language or "mirror").lower()
+        if default in ("mirror", ""):
+            return ""
+        lang = names.get(default, default)
+        return (f"# REPLY LANGUAGE\nWrite the reply in {lang}, even though the "
+                f"message may be in another language: {lang} is the default "
+                "and this user has not chosen otherwise. Only an explicit "
+                "request for another language changes it.")
+
     # ---------- write to user.md ----------
     @staticmethod
     def _normalize_fact(s: str) -> str:
