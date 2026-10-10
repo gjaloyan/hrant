@@ -612,10 +612,14 @@ def _try_chat_path(
         # The correct primitive for a no-tool single-shot LLM call
         # is `router.call(task_type, system, user, ...)` — same
         # provider chain + failover, no tool-loop infrastructure.
+        try:
+            _note = IDENTITY.reply_language_note(speaker_id=speaker_id)
+        except Exception:
+            _note = ""
         answer = _router().call(
             _TT.QUICK_ANSWER,
             sys_prompt,
-            task,
+            f"{task}\n\n{_note}" if _note else task,
             max_tokens=600,
             temperature=0.4,
         )
@@ -3807,6 +3811,13 @@ def run_unified(
     if _lang_tail:
         system_parts.append(f"---\n\n{_lang_tail}")
     system_prompt = "\n\n".join(system_parts)
+    # The model's copy of the request carries the reply language too; the
+    # stored conversation keeps `task` as the user wrote it.
+    try:
+        _lang_note = IDENTITY.reply_language_note(speaker_id=speaker_id)
+    except Exception:
+        _lang_note = ""
+    task_for_model = f"{task}\n\n{_lang_note}" if _lang_note else task
 
     # Tool surface = base set + currently-loaded bundles. The LLM
     # picks; mid-turn it can call `load_tool_bundle(name)` to unlock
@@ -4309,7 +4320,7 @@ def run_unified(
         return router().call_with_tools(
             TaskType.COMPLEX_SOLVING,
             system_prompt,
-            user_task if user_task is not None else task,
+            user_task if user_task is not None else task_for_model,
             tools=tools_schema,
             tools_provider=_current_tool_schema_for_turn,
             execute_tool=_execute_with_progress,
@@ -4401,7 +4412,7 @@ def run_unified(
                 # their effects instead of repeating them. Identical
                 # re-calls are deduped by the per-turn cache anyway;
                 # this note covers same-action-different-args.
-                _esc_task = task
+                _esc_task = task_for_model
                 try:
                     from .endpoint_check import (
                         _EXECUTE_TOOLS as _C_EXEC,
@@ -4496,7 +4507,7 @@ def run_unified(
                 answer = router().call_with_tools(
                     TaskType.COMPLEX_SOLVING,
                     system_prompt,
-                    f"{task}\n\n"
+                    f"{task_for_model}\n\n"
                     + (f"{_findings}\n\n" if _findings else "")
                     + f"[SELF-CORRECTION REQUIRED]\n{_corrective}",
                     tools=_current_tool_schema_for_turn(),

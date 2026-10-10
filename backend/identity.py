@@ -687,6 +687,23 @@ class IdentityManager:
                 "and this user has not chosen otherwise. Only an explicit "
                 "request for another language changes it.")
 
+    def reply_language_note(self, *, speaker_id: str | None = None) -> str:
+        """The same decision as `reply_language_reminder`, as a short note
+        that rides at the end of the MESSAGE the model answers.
+
+        The closing system line was not enough either: measured 2026-10-10,
+        with it deployed, an Armenian message still got an Armenian answer.
+        Only text inside the message itself outweighs the message's own
+        language — which is exactly why voice notes used to win when they
+        carried "reply in THIS language". The note is added to the model's
+        copy only; conversation history keeps the user's words.
+        """
+        line = self.reply_language_reminder(speaker_id=speaker_id)
+        if not line:
+            return ""
+        body = line.split("\n", 1)[-1].strip()
+        return f"[reply language — {body}]"
+
     # ---------- write to user.md ----------
     @staticmethod
     def _normalize_fact(s: str) -> str:

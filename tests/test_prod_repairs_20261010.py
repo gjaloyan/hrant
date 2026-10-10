@@ -645,3 +645,24 @@ def test_the_closing_line_is_the_last_part_of_both_lanes():
     import backend.unified_agent as ua
     src = inspect.getsource(ua)
     assert src.count("reply_language_reminder(speaker_id=speaker_id)") == 2
+
+
+def test_the_message_note_carries_the_same_decision(tmp_path, monkeypatch):
+    from pathlib import Path
+    from backend.config import CONFIG
+    from backend.identity import IdentityManager
+    monkeypatch.setitem(CONFIG._data, "response_language", None)
+    monkeypatch.setitem(CONFIG._data, "default_response_language", "ru")
+    note = IdentityManager(base_dir=Path(tmp_path)).reply_language_note()
+    assert note.startswith("[reply language") and "Russian" in note
+    monkeypatch.setitem(CONFIG._data, "default_response_language", None)
+    assert IdentityManager(base_dir=Path(tmp_path)).reply_language_note() == ""
+
+
+def test_the_model_gets_the_note_but_history_keeps_the_users_words():
+    import inspect
+    import backend.unified_agent as ua
+    src = inspect.getsource(ua.run_unified)
+    assert "else task_for_model," in src
+    assert 'f"{task_for_model}' in src
+    assert "CONVERSATION.add_turn(\n            task," in src
