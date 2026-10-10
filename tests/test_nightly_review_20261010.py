@@ -158,6 +158,17 @@ def test_the_review_reads_the_day_and_writes_tomorrows_rule(day, monkeypatch):
     assert sent and "нарисовать" in sent[0]["report"]
 
 
+def test_a_dry_run_proposes_but_writes_nothing(day, monkeypatch):
+    from backend.consolidation import review
+    monkeypatch.setattr(review, "_call_json", lambda system, user, *, max_tokens: {
+        "lessons": ["When asked to make pictures, call generate_image instead of asking."],
+        "report": "x"} if "nightly self-review" in system else {})
+    monkeypatch.setattr(review, "_notify_owner", lambda out: pytest.fail("dry run notified"))
+    out = review.run_review(dry_run=True)
+    assert out["lessons_proposed"] and out["lessons_added"] == []
+    assert lr.render() == ""
+
+
 def test_a_quiet_day_changes_nothing(tmp_path, monkeypatch):
     from backend import threads
     from backend.threads import ThreadStore

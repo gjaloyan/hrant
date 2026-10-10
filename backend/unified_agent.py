@@ -870,11 +870,13 @@ def _after_answer(fn, *args, **kwargs) -> None:
 
 def _append_thread(skey: str, *, task: str, answer: str, attachments,
                    tool_names: list, turn_id: str, speaker_id: str) -> None:
-    """Record one finished exchange in the conversation thread (threads.py)."""
+    """Record one finished exchange in the conversation thread (threads.py).
+
+    Recorded even when the `threaded_history` kill switch is off: the switch
+    only decides how the prompt is laid out, while the nightly review reads
+    the day from these files and would otherwise go blind."""
     try:
         from . import threads as _t
-        if not _t.enabled():
-            return
         media = [ln.split(":", 1)[1].strip() for ln in (answer or "").splitlines()
                  if ln.strip().startswith("MEDIA:")]
         session_id = ""

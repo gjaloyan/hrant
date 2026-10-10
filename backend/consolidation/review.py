@@ -57,7 +57,8 @@ Return strictly JSON:
 }
 
 Rules:
-- At most 6 issues and 3 lessons. Every lesson must prevent an issue you listed; no issue, no lesson.
+- At most 6 issues and 3 lessons, most important first. Every lesson must prevent an issue you listed; no issue, no lesson.
+- Safety and trust come first: a lesson about credentials, privacy or a false claim outranks one about speed.
 - A lesson is a PROCESS rule that generalises ("When the user sends photos and asks for a design, generate images with generate_image instead of describing them"). Never a fact about one request (a car model, a case number, a person).
 - Do not repeat anything already in CURRENT RULES.
 - Empty lists when the day went fine — say so in the summary and report."""
@@ -87,6 +88,7 @@ Rules:
 - Drop transient details: one-off tasks, a diagnosis in progress, today's prices, "the user asked about X today". Those live in the conversation log and long-term memory, not here.
 - Drop dated "daily update" paragraphs; fold anything durable from them into the sections.
 - Facts only from the existing profile and the transcript — invent nothing.
+- Write in English, whatever language the existing profile uses: it is read by the assistant, not the person, and English is the cheapest to read on every reply. Keep names, nicknames and phrases the person uses verbatim, in their own language.
 - Return strictly JSON: {"profile_markdown": "..."}"""
 
 
@@ -254,6 +256,7 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
             out["issues"] = [i for i in (res.get("issues") or []) if isinstance(i, dict)][:6]
             out["report"] = str(res.get("report") or "").strip()
             lessons = [str(l) for l in (res.get("lessons") or []) if str(l).strip()][:3]
+            out["lessons_proposed"] = lessons
             if lessons and not dry_run:
                 from .. import learned_rules
                 evidence = "; ".join(str(i.get("evidence") or "")[:80]

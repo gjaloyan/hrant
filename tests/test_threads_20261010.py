@@ -188,6 +188,9 @@ def test_the_kill_switch_restores_the_old_layout(monkeypatch, tmp_path):
     _run_turn(monkeypatch, "hello there", captured)
     assert "# NOW" in captured[0]["system"]
     assert captured[0]["history"] == []
+    # The nightly review still gets its day.
+    rows = [r for _k, _s, r in threads.iter_day(threads.THREADS, "2000-01-01")]
+    assert rows and rows[0][-1]["user"] == "hello there"
 
 
 def test_a_new_thread_is_seeded_from_the_old_buffer_once(store):
