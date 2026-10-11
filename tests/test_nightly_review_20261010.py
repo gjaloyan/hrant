@@ -198,6 +198,53 @@ def test_learned_rules_reach_the_system_prompt():
     assert inspect.getsource(ua).count("_learned_render()") == 2
 
 
+# ── the old memory lever no longer writes profiles ────────────────────
+
+def _lever_run(tmp_path, sessions, response):
+    from unittest.mock import patch
+    from backend.autonomic.levers.memory_consolidation import FIRE_MEMORY_CONSOLIDATION
+    sp = tmp_path / "sessions.json"
+    sp.write_text(json.dumps({"sessions": sessions}), encoding="utf-8")
+    user_md = tmp_path / "user.md"
+    user_md.write_text("# User Profile\n## Language\n- Respond in Russian.\n", encoding="utf-8")
+    with patch("backend.autonomic.levers.memory_consolidation.router") as r:
+        r.return_value.call_json.return_value = response
+        rep = FIRE_MEMORY_CONSOLIDATION().run({
+            "sessions_path": str(sp), "user_md_path": str(user_md),
+            "memory_facts_path": str(tmp_path / "facts.jsonl")}, {})
+    return rep, user_md, r, sp
+
+
+_RESPONSE = {"session_summary": "s",
+             "user_profile_facts": [{"summary": "The user prefers responses in English",
+                                     "confidence": 0.95}],
+             "durable_facts": [{"summary": "Tbilisi is the capital of Georgia",
+                                "confidence": 0.95, "triples": []}]}
+
+
+def _session(sid, speaker):
+    return {"id": sid, "speaker_id": speaker,
+            "turns": [{"user": "answer me in English from now on", "answer": "ok"}]}
+
+
+def test_the_lever_leaves_profiles_to_the_nightly_review(tmp_path):
+    """2026-10-11: a test session's "answer in English" reached the owner's
+    profile overnight through this lever."""
+    rep, user_md, _r, _sp = _lever_run(tmp_path, [_session("a", "telegram:1")], _RESPONSE)
+    assert "English" not in user_md.read_text(encoding="utf-8")
+    assert rep.outcome["profile_added"] == 0
+    row = json.loads((tmp_path / "facts.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    assert row["speaker_id"] == "telegram:1", "a fact says whose conversation it came from"
+
+
+def test_the_lever_skips_test_sessions_without_an_llm_call(tmp_path):
+    rep, _md, r, sp = _lever_run(tmp_path, [_session("t", "webui:langtest")], _RESPONSE)
+    assert r.return_value.call_json.call_count == 0
+    assert not (tmp_path / "facts.jsonl").exists()
+    saved = json.loads(sp.read_text(encoding="utf-8"))["sessions"][0]
+    assert saved["consolidated"] is True, "marked, so it leaves the queue"
+
+
 # ── it runs at night ──────────────────────────────────────────────────
 
 def test_the_run_waits_for_the_night(monkeypatch):

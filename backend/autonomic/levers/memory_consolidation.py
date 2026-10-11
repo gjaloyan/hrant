@@ -74,6 +74,14 @@ except Exception:  # pragma: no cover - pipeline import optional in tests
     DEDUP_WINDOW = 5000
 CONFIDENCE_THRESHOLD = 0.8
 
+# Profiles belong to the nightly review now (consolidation/review.py), which
+# rewrites each person's own profile from their own conversations. This lever
+# appended every session's "profile facts" to ONE file, user.md, whoever had
+# been talking: on 2026-10-11 a test session ("answer me in English") became
+# "the user prefers English" in the owner's profile overnight. Kept as a
+# switch for the tests of the old behaviour.
+_PROFILES_BY_REVIEW = True
+
 # The only values a reader may switch on. Anything else the extractor
 # coins is recorded as "unknown" rather than passed through.
 _GROUNDINGS = ("user_stated", "tool_observed", "assistant_asserted")
@@ -116,7 +124,14 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
         # done rather than to the copy loaded before them.
         marks: dict[str, str] = {}
 
+        from backend.consolidation.review import _is_real_person
         for session in targets:
+            speaker = str(session.get("speaker_id") or "webui:default")
+            if not _is_real_person(speaker):
+                # Smoke tests, audits and benchmarks must not teach memory
+                # anything. Marked, so they leave the queue for good.
+                marks[str(session.get("id") or "")] = "skipped: test or audit session"
+                continue
             transcript = self._session_transcript(session)
             current_profile_snapshot = user_md_path.read_text(encoding="utf-8") if user_md_path.exists() else ""
             try:
@@ -136,8 +151,10 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
             durable_facts = data.get("durable_facts", []) or []
             threads = data.get("topic_threads", []) or []
 
-            added_profile = self._append_profile_facts(user_md_path, profile_facts, existing_profile)
-            added_facts = self._append_durable_facts(facts_path, durable_facts, existing_fact_summaries, session.get("id", ""))
+            added_profile = (0 if _PROFILES_BY_REVIEW else
+                             self._append_profile_facts(user_md_path, profile_facts, existing_profile))
+            added_facts = self._append_durable_facts(facts_path, durable_facts, existing_fact_summaries,
+                                                     session.get("id", ""), speaker_id=speaker)
 
             profile_added += added_profile
             facts_added += added_facts
@@ -287,6 +304,7 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
         facts: list[dict],
         existing_summaries: set[str],
         session_id: str,
+        speaker_id: str = "",
     ) -> int:
         added = 0
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -330,6 +348,10 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
                     # two writers share this append-only store and until
                     # 2026-08-10 neither said which one it was.
                     "writer": "autonomic.memory_consolidation",
+                    # Whose conversation it came from. Without it the row
+                    # matched no one's scoped search and everyone's unscoped
+                    # one, and a forget could not be scoped to its owner.
+                    "speaker_id": speaker_id,
                 }
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                 existing_summaries.add(key)

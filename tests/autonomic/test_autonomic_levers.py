@@ -223,7 +223,11 @@ def test_memory_consolidation_skips_when_all_consolidated(tmp_path: Path):
     assert report.reason == "no_unconsolidated_sessions"
 
 
-def test_memory_consolidation_writes_to_three_tiers(tmp_path: Path):
+def test_memory_consolidation_writes_to_three_tiers(tmp_path: Path, monkeypatch):
+    # The old profile append, kept behind a switch since the nightly
+    # review took profiles over (2026-10-11).
+    from backend.autonomic.levers import memory_consolidation as _mc
+    monkeypatch.setattr(_mc, "_PROFILES_BY_REVIEW", False)
     sessions_path = tmp_path / "sessions.json"
     user_md_path = tmp_path / "user.md"
     facts_path = tmp_path / "memory_facts.jsonl"
@@ -259,7 +263,11 @@ def test_memory_consolidation_writes_to_three_tiers(tmp_path: Path):
     assert saved["sessions"][0]["summary"] == "User discussed Python async patterns."
 
 
-def test_memory_consolidation_dedups_profile_facts(tmp_path: Path):
+def test_memory_consolidation_dedups_profile_facts(tmp_path: Path, monkeypatch):
+    # The old profile append, kept behind a switch since the nightly
+    # review took profiles over (2026-10-11).
+    from backend.autonomic.levers import memory_consolidation as _mc
+    monkeypatch.setattr(_mc, "_PROFILES_BY_REVIEW", False)
     sessions_path = tmp_path / "sessions.json"
     user_md_path = tmp_path / "user.md"
     facts_path = tmp_path / "memory_facts.jsonl"
