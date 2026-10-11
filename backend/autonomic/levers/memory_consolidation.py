@@ -290,7 +290,8 @@ class FIRE_MEMORY_CONSOLIDATION(Lever):
     ) -> int:
         added = 0
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
+        from backend.memory_extractor import FACTS_FILE_LOCK
+        with FACTS_FILE_LOCK, path.open("a", encoding="utf-8") as f:
             for raw in facts:
                 conf = float(raw.get("confidence", 0.0) or 0.0)
                 if conf < CONFIDENCE_THRESHOLD:

@@ -20,9 +20,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import threading
+
 from .config import CONFIG
 from .knowledge_graph import GRAPH
 from .llm import LLMError, TaskType, router
+
+# Serialises writers of memory_facts.jsonl: appends here, rewrites in
+# fact_forget. Re-entrant so a forget can append to its own archive.
+FACTS_FILE_LOCK = threading.RLock()
 
 # ---- Prompts ----
 
@@ -405,7 +411,9 @@ class MemoryExtractor:
         """Append a fact to the persistent log."""
         try:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self.log_path, "a", encoding="utf-8") as f:
+            # Under the journal lock: fact_forget rewrites this file, and an
+            # append landing between its read and its replace would be lost.
+            with FACTS_FILE_LOCK, open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(fact.to_dict(), ensure_ascii=False) + "\n")
             self._fact_count += 1
         except Exception:
@@ -433,6 +441,10 @@ class MemoryExtractor:
             # Direct entity match
             if term_n in GRAPH._edges:
                 for edge in GRAPH._edges[term_n]:
+                    # A closed edge (a correction, or a forgotten fact) is
+                    # history, not memory; recall read it as current.
+                    if edge.get("valid_to"):
+                        continue
                     if (
                         edge.get("note") == self.GRAPH_SOURCE
                         and (speaker_id is None or edge.get("scope") == speaker_id)
@@ -455,7 +467,7 @@ class MemoryExtractor:
             # query term — a real cost as the graph grows. Now we hit
             # the reverse target index in O(1) per term.
             for entity, edge in GRAPH.find_facts_by_target(term_n):
-                if edge.get("note") != self.GRAPH_SOURCE:
+                if edge.get("note") != self.GRAPH_SOURCE or edge.get("valid_to"):
                     continue
                 if speaker_id is not None and edge.get("scope") != speaker_id:
                     continue

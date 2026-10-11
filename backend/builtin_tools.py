@@ -3181,6 +3181,50 @@ def _recall_facts_handler(query: str = "", limit: int = 8) -> str:
     return json.dumps(out, ensure_ascii=False)
 
 
+def _forget_fact_handler(query: str = "", fact_ids=None,
+                         undo_last: bool = False) -> str:
+    """Take a stored fact back (fact_forget.py).
+
+    Scoped like `recall_facts`: the owner may forget anyone's facts,
+    everyone else only their own; a guest cannot touch memory at all.
+    """
+    from .roles import current_speaker, is_owner, role_of
+    from . import fact_forget
+
+    me = current_speaker() or ""
+    if role_of(me) == "guest":
+        return json.dumps({"ok": False, "error": "permission denied — guests "
+                           "cannot change memory"}, ensure_ascii=False)
+    owner = is_owner(me)
+    scope = None if owner else me
+    if undo_last:
+        if not owner:
+            return json.dumps({"ok": False, "error": "only the owner can undo "
+                               "a forget"}, ensure_ascii=False)
+        return json.dumps(fact_forget.restore(last=True), ensure_ascii=False)
+    if isinstance(fact_ids, str):
+        fact_ids = [fact_ids]
+    ids = [str(i).strip() for i in (fact_ids or []) if str(i).strip()]
+    if ids:
+        res = fact_forget.forget(ids, speaker_id=scope, by=me)
+        if res.get("ok") and not res.get("forgotten"):
+            res["note"] = ("Nothing matched those ids in your scope; call "
+                           "with `query` to see current ids.")
+        return json.dumps(res, ensure_ascii=False)
+    q = (query or "").strip()
+    if not q:
+        return json.dumps({"ok": False, "error": "pass `query` to find facts, "
+                           "or `fact_ids` to forget them"}, ensure_ascii=False)
+    found = fact_forget.candidates(q, speaker_id=scope)
+    return json.dumps({
+        "ok": True, "candidates": found,
+        "note": ("Nothing was removed. Forget with `fact_ids` from this list. "
+                 "If the matches are exactly what the person named, go ahead; "
+                 "if they go beyond it, show them and ask which.")
+        if found else "No stored fact matches. Say so.",
+    }, ensure_ascii=False)
+
+
 def register_builtin_tools() -> None:
     reg = get_registry()
     if "web_search" in reg.tools:
@@ -4194,7 +4238,8 @@ def register_builtin_tools() -> None:
             "its owner's. Check them before leaning on them."
             + chr(10) + chr(10) +
             "This reads the profile store that `save_user_fact` writes. "
-            "For notes and documents use `search_knowledge` instead."
+            "For notes and documents use `search_knowledge` instead. To "
+            "take a stored fact back, use `forget_fact`."
         ),
         input_schema={
             "type": "object",
@@ -4214,6 +4259,44 @@ def register_builtin_tools() -> None:
             "required": [],
         },
         handler=_recall_facts_handler,
+    )
+
+    reg.register_func(
+        name="forget_fact",
+        description=(
+            "Take facts back out of your long-term memory: when the person "
+            "says to forget something, or a stored fact is wrong, outdated "
+            "or was only a test. Removes every stored copy (the facts, their "
+            "search index and the knowledge-graph links); removed facts are "
+            "archived, so the owner can undo the last forget."
+            + chr(10) + chr(10) +
+            "Two steps. First call with `query` — the words of the fact — "
+            "to see what matches, with ids; nothing is removed. Then call "
+            "with `fact_ids`. If the matches are exactly what the person "
+            "named, forget them at once; if they go further, show the list "
+            "and ask which. A fact also kept in the person's profile is "
+            "rewritten out of it by the nightly review."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The fact to find, in words (e.g. 'favorite color').",
+                },
+                "fact_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Ids from a previous `query` call to forget.",
+                },
+                "undo_last": {
+                    "type": "boolean",
+                    "description": "Owner only: restore what the last forget removed.",
+                },
+            },
+            "required": [],
+        },
+        handler=_forget_fact_handler,
     )
 
 

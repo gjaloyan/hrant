@@ -1555,18 +1555,21 @@ class TelegramBot:
                             filename=f"voice.ogg",
                         )
                         if text:
-                            # Store what he actually said, then hand the
-                            # turn an English rendering with the original
+                            # Show the sender what was heard before anything
+                            # else happens (Hermes does the same): a mis-heard
+                            # word is visible at once, not three messages later
+                            # as an answer to something nobody asked. Then hand
+                            # the turn an English rendering with the original
                             # attached. Prompts are English by the owner's
-                            # rule; the verbatim line stays because the
-                            # agent answers him in his own language, and
-                            # because a transcript this channel is known
-                            # to mis-hear needs something to check against.
+                            # rule; the verbatim line stays because the agent
+                            # answers him in his own language, and because a
+                            # transcript this channel is known to mis-hear
+                            # needs something to check against.
                             try:
-                                from .meaning_translate import render_for_prompt
-                                text = render_for_prompt(text)
+                                from .meaning_translate import voice_turn_text
+                                text = await voice_turn_text(text, msg.reply_text)
                             except Exception as e:
-                                log.debug("meaning translation skipped: %s", e)
+                                log.debug("voice text preparation failed: %s", e)
                             ATTACHMENTS.set_transcript(rec.sha256, text)
                         shas.append(rec.sha256)
                     except Exception as e:
@@ -1839,6 +1842,19 @@ class TelegramBot:
                                 if entry["caption"] else text
                             )
                         return
+
+                # Typed Armenian → an English rendering for the turn, with the
+                # original kept beside it, the same treatment voice gets. The
+                # owner asked for it (2026-10-11): the models read Armenian
+                # less well than Russian, the fallback model least of all.
+                # Only typed text reaches here; a voice body is set below from
+                # a transcript that has already been rendered.
+                if text:
+                    try:
+                        from .meaning_translate import typed_turn_text
+                        text = await typed_turn_text(text)
+                    except Exception as e:
+                        log.debug("typed text preparation failed: %s", e)
 
                 # Voice without text → use the transcript as the message body
                 if not text and attachment_shas:

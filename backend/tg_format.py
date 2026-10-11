@@ -211,6 +211,7 @@ TOOL_ICON: dict[str, str] = {
     # Config
     "set_setting": "⚙️",
     "save_user_fact": "🗒️",
+    "forget_fact": "🧹",
     # Roles + access
     "grant_telegram_access": "🔑",
     "revoke_telegram_access": "🔒",
@@ -261,6 +262,7 @@ _TOOL_PRIMARY_ARG: dict[str, str] = {
     "cronjob": "action",
     "set_setting": "key",
     "save_user_fact": "fact",
+    "forget_fact": "query",
     "grant_telegram_access": "user_id",
     "revoke_telegram_access": "user_id",
     "approve_pairing": "code_or_user_id",

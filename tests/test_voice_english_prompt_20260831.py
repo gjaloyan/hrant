@@ -268,11 +268,22 @@ def test_the_specialist_failing_is_not_fatal(monkeypatch):
     assert text is None and score == -99.0
 
 
-def test_the_voice_channel_renders_before_storing():
+def test_the_voice_channel_renders_before_storing(monkeypatch):
+    """Since 2026-10-11 through `voice_turn_text`, which also echoes the
+    words as heard; the rendered text is what gets stored."""
+    import asyncio
     import inspect
-    from backend import channels
+    from backend import channels, meaning_translate as mt
     src = inspect.getsource(channels)
-    assert "render_for_prompt(text)" in src
+    voice = src[src.index("Voice → store + try to transcribe"):]
+    assert voice.index("await voice_turn_text(text") < voice.index(
+        "ATTACHMENTS.set_transcript(rec.sha256, text)")
+    monkeypatch.setattr(mt, "render_for_prompt", lambda s, **k: f"EN({s})")
+
+    async def reply(_):
+        return None
+
+    assert asyncio.run(mt.voice_turn_text("բարև", reply)) == "EN(բարև)"
 
 
 # ── the gate must not be circular ───────────────────────────────────

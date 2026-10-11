@@ -86,7 +86,9 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # while nothing could read the store back, so asked what it knew the agent
     # guessed -- 150 against an actual 3952 (2026-09-03). A question about the
     # owner arrives on any turn, before any bundle has been loaded.
-    "recall_facts",
+    # `forget_fact` is the third half (2026-10-11): "forget that" arrives the
+    # same way, and memory nobody can correct is memory nobody can trust.
+    "recall_facts", "forget_fact",
     "list_skills", "load_skill",
     # Web. agent_browser moved out of the `media` bundle into BASE on
     # 2026-08-08: it is the documented escalation for "fetch_url returned a JS

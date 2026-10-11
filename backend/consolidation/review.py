@@ -88,6 +88,7 @@ Rules:
 - Drop transient details: one-off tasks, a diagnosis in progress, today's prices, "the user asked about X today". Those live in the conversation log and long-term memory, not here.
 - Drop dated "daily update" paragraphs; fold anything durable from them into the sections.
 - Facts only from the existing profile and the transcript — invent nothing.
+- When the person asked today to forget something, or said a stored fact is wrong, remove it from the profile.
 - Write in English, whatever language the existing profile uses: it is read by the assistant, not the person, and English is the cheapest to read on every reply. Keep names, nicknames and phrases the person uses verbatim, in their own language.
 - Return strictly JSON: {"profile_markdown": "..."}"""
 

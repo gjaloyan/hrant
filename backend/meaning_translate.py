@@ -52,6 +52,28 @@ _TRANSLATE_SYSTEM = (
     "was not understood."
 )
 
+# Typed text needs a different brief: there is no recogniser to blame, so
+# "GARBLED" would only invite the model to refuse a hurried message.
+_TRANSLATE_WRITTEN_SYSTEM = (
+    "You render a typed message in English for another assistant to act "
+    "on. This is not a dictionary exercise.\n\n"
+    "Carry the INTENT. What is the person asking for, and what would they "
+    "consider a correct response? Say that, the way a fluent bilingual "
+    "colleague would relay it - not the way a dictionary would.\n\n"
+    "Rules:\n"
+    "- People type fast: read through typos, missing letters and broken "
+    "grammar to what was meant.\n"
+    "- Keep names, numbers, dates, times, file paths, URLs, model names, "
+    "identifiers and legal or technical terms EXACTLY as written. Never "
+    "localise or correct them. Where a term matters, add the original in "
+    "brackets after the English.\n"
+    "- Preserve the register: a terse instruction stays terse, an "
+    "irritated one stays irritated.\n"
+    "- Do not answer, explain, summarise, or add anything. Output only "
+    "the English rendering.\n"
+    "- If the text is already English, return it unchanged."
+)
+
 # The marker the translator returns instead of a confabulated sentence.
 _GARBLED = "GARBLED:"
 
@@ -59,13 +81,92 @@ _GARBLED = "GARBLED:"
 # rather than round-tripped through a model that could only damage it.
 _NON_LATIN = re.compile(r"[Ѐ-ӿ԰-֏؀-ۿ一-鿿]")
 
+# Armenian letters (the main block and the ligatures). Typed Armenian is the
+# one written input the owner asked to translate (2026-10-11): the models read
+# it less well than Russian, and the fallback model least of all.
+_ARMENIAN = re.compile(r"[Ա-֏ﬓ-ﬗ]")
+
 
 def needs_translation(text: str) -> bool:
     """True when the text contains a script the owner's rule excludes."""
     return bool(_NON_LATIN.search(text or ""))
 
 
-def to_english(text: str, *, max_tokens: int = 700) -> str:
+def is_armenian(text: str) -> bool:
+    """A word or more of Armenian, not a stray letter in another language."""
+    return len(_ARMENIAN.findall(text or "")) >= 3
+
+
+def _switch(key: str) -> bool:
+    try:
+        from .config import CONFIG
+        return bool((CONFIG._data.get("conversation") or {}).get(key, True))
+    except Exception:
+        return True
+
+
+def echo_voice_enabled() -> bool:
+    """`conversation.echo_voice_transcript` (default on)."""
+    return _switch("echo_voice_transcript")
+
+
+def translate_armenian_text_enabled() -> bool:
+    """`conversation.translate_armenian_text` (default on)."""
+    return _switch("translate_armenian_text")
+
+
+_ECHO_LIMIT = 3500
+
+
+def voice_echo(transcript: str) -> str:
+    """What the sender sees before the answer: the words as heard.
+
+    Taken from Hermes, which echoes every transcript back. A mis-heard
+    word is then visible at once, instead of surfacing three messages
+    later as an answer to a question nobody asked. No label, so it reads
+    the same in every language.
+    """
+    t = " ".join((transcript or "").split())
+    if len(t) > _ECHO_LIMIT:
+        t = t[:_ECHO_LIMIT].rstrip() + " …"
+    return f"🎙 \"{t}\"" if t else ""
+
+
+async def voice_turn_text(transcript: str, reply) -> str:
+    """A voice note's text for the turn. First shows the sender the words as
+    heard through `reply` (an async send, e.g. Telegram's `reply_text`), then
+    returns the English rendering with the original kept. Never raises."""
+    import asyncio
+    raw = (transcript or "").strip()
+    if not raw:
+        return raw
+    if echo_voice_enabled() and voice_echo(raw):
+        try:
+            await reply(voice_echo(raw))
+        except Exception as e:
+            log.debug("voice echo failed: %s", e)
+    try:
+        return await asyncio.to_thread(render_for_prompt, raw)
+    except Exception as e:
+        log.debug("meaning translation skipped: %s", e)
+        return raw
+
+
+async def typed_turn_text(text: str) -> str:
+    """A typed message's text for the turn: Armenian gets an English rendering
+    with the original kept; anything else passes through. Never raises."""
+    import asyncio
+    src = (text or "").strip()
+    if not src or not translate_armenian_text_enabled() or not is_armenian(src):
+        return text
+    try:
+        return await asyncio.to_thread(render_for_prompt, src, spoken=False)
+    except Exception as e:
+        log.debug("Armenian text translation skipped: %s", e)
+        return text
+
+
+def to_english(text: str, *, max_tokens: int = 700, spoken: bool = True) -> str:
     """The English rendering, or the original text on any failure.
 
     Never raises and never returns empty: a translation that fails must
@@ -81,7 +182,7 @@ def to_english(text: str, *, max_tokens: int = 700) -> str:
         from .llm import router, TaskType
         out = router().call(
             TaskType.CLASSIFICATION,
-            system=_TRANSLATE_SYSTEM,
+            system=_TRANSLATE_SYSTEM if spoken else _TRANSLATE_WRITTEN_SYSTEM,
             user=src,
             max_tokens=max_tokens,
             temperature=0.0,
@@ -92,7 +193,7 @@ def to_english(text: str, *, max_tokens: int = 700) -> str:
     return (out or "").strip() or src
 
 
-def render_for_prompt(original: str) -> str:
+def render_for_prompt(original: str, *, spoken: bool = True) -> str:
     """Both readings, labelled, for the turn to act on.
 
     The English leads because it is what the rule asks for and what the
@@ -109,15 +210,16 @@ def render_for_prompt(original: str) -> str:
     src = (original or "").strip()
     if not src:
         return ""
-    english = to_english(src)
+    english = to_english(src, spoken=spoken)
     if english == src:
         return src
-    if english.strip().startswith(_GARBLED):
+    if spoken and english.strip().startswith(_GARBLED):
         salvage = english.split(":", 1)[-1].strip()
         return _unintelligible_block(src, salvage)
+    how = "spoken" if spoken else "written"
     return (
         f"{english}\n\n"
-        f"[spoken by the user, verbatim, in the language they used: {src}]"
+        f"[{how} by the user, verbatim, in the language they used: {src}]"
     )
 
 

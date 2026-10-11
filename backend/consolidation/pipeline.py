@@ -312,7 +312,9 @@ def _append_memory_fact(text: str, category: str, confidence: float,
     bounded."""
     p = paths.knowledge_dir() / "memory_facts.jsonl"
     p.parent.mkdir(parents=True, exist_ok=True)
-    _maybe_rotate_memory_facts(p)
+    from ..memory_extractor import FACTS_FILE_LOCK
+    with FACTS_FILE_LOCK:
+        _maybe_rotate_memory_facts(p)
     entry = {
         "summary": text,
         "text": text,                    # alias for forward-compat
@@ -336,7 +338,7 @@ def _append_memory_fact(text: str, category: str, confidence: float,
         # not be traced to its source. 2815 rows existed before this field.
         "writer": "consolidation.pipeline",
     }
-    with p.open("a", encoding="utf-8") as f:
+    with FACTS_FILE_LOCK, p.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
