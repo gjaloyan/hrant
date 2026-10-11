@@ -134,6 +134,13 @@ def test_the_correction_budget_is_configurable():
         CONFIG.router.pop("correction_max_iterations", None)
 
 
+def test_the_shipped_correction_budget_matches_the_code_default():
+    """They diverged once: the code said 30, the shipped config still 50."""
+    from backend.config import _COMMON_OTHER
+    from backend.unified_agent import _DEFAULT_CORRECTION_ITERATIONS
+    assert _COMMON_OTHER["router"]["correction_max_iterations"] == _DEFAULT_CORRECTION_ITERATIONS
+
+
 def test_the_correction_call_site_reads_the_setting():
     import inspect
     import backend.unified_agent as ua

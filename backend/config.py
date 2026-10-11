@@ -331,7 +331,9 @@ _COMMON_OTHER = {
         # TURN until you have the actual result". Six iterations cannot obey
         # that, so both correction rounds ended the same way the main loop
         # did: cut off, writing what it would have done next.
-        "correction_max_iterations": 50,
+        # 30 since 2026-10-11, with the main loop at 90: two rounds keep a
+        # whole turn near the owner's ceiling.
+        "correction_max_iterations": 30,
     },
     "knowledge": {
         "base_dir": "./knowledge",
