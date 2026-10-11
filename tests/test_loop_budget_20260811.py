@@ -52,9 +52,16 @@ def _restore():
 
 def test_the_default_is_not_a_wall_every_task_hits():
     """Today's failing turn made 47 tool calls. A budget under that number
-    guarantees the 'here is what I would do next' ending."""
-    assert _DEFAULT_LOOP_ITERATIONS >= 100
-    assert _configured_loop_iterations() >= 100
+    guarantees the 'here is what I would do next' ending. (The owner set 90
+    on 2026-10-11, as Hermes runs on the same box; the floor is the measured
+    turn with room to spare, not the old 500.)"""
+    assert _DEFAULT_LOOP_ITERATIONS >= 80
+    assert _configured_loop_iterations() >= 80
+
+
+def test_the_default_is_a_ceiling_not_a_formality():
+    """500 let one DataLex turn make 470 calls without a result."""
+    assert _DEFAULT_LOOP_ITERATIONS <= 100
 
 
 def test_the_budget_is_configurable_without_a_restart():
@@ -80,7 +87,7 @@ def test_the_shipped_config_carries_the_key():
     """It must be tunable by the owner via set_setting, not only in source."""
     from backend.config import _COMMON_OTHER
     assert "tool_loop_max_iterations" in _COMMON_OTHER["router"]
-    assert _COMMON_OTHER["router"]["tool_loop_max_iterations"] >= 100
+    assert _COMMON_OTHER["router"]["tool_loop_max_iterations"] == _DEFAULT_LOOP_ITERATIONS
 
 
 def test_the_main_loop_reads_the_setting_not_a_literal():

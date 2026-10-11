@@ -198,14 +198,16 @@ def test_run_unified_iteration_budget_is_not_a_wall(monkeypatch):
     — matching Hermes' documented default (`agent.max_turns`, 500).
 
     What a guard here can usefully assert is that the budget stays large and
-    stays configurable, not that it equals any particular integer."""
+    stays configurable, not that it equals any particular integer. (The owner
+    chose 90 on 2026-10-11 — the value Hermes actually runs with on the same
+    box — still well above the 47-call turn that drew the line.)"""
     import inspect
     from backend import unified_agent
     src = inspect.getsource(unified_agent)
     assert "_configured_loop_iterations()" in src
     assert "iterations if iterations is not None else 20" not in src
     assert "max_iterations=10" not in src
-    assert unified_agent._configured_loop_iterations() >= 100
+    assert unified_agent._configured_loop_iterations() >= 80
 
 
 def test_rules_document_media_convention():

@@ -963,11 +963,12 @@ _FINDINGS_PER_CALL_CAP = 320
 _FINDINGS_MAX_CALLS = 14
 
 
-_DEFAULT_LOOP_ITERATIONS = 500
+_DEFAULT_LOOP_ITERATIONS = 90
 # A correction round is a second chance inside an existing turn, not a fresh
-# turn, so it gets a smaller budget than the main loop — but a real one.
-# Hermes gives its subagents 50 against a parent's 500; the same ratio here.
-_DEFAULT_CORRECTION_ITERATIONS = 50
+# turn, so it gets a smaller budget than the main loop — but a real one, big
+# enough to finish what the corrective asks for (6 was not). Two rounds of 30
+# on top of the main 90 keep a whole turn near the owner's ceiling.
+_DEFAULT_CORRECTION_ITERATIONS = 30
 
 
 def _configured_correction_iterations() -> int:

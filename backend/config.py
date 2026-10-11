@@ -312,7 +312,13 @@ _COMMON_OTHER = {
         # by the duplicate-call guard and the self-repair marker at three
         # identical failures. Iterations are not the right instrument for
         # either, and using them as one silently capped the work instead.
-        "tool_loop_max_iterations": 500,
+        #
+        # 90 since 2026-10-11, the owner's choice. The Hermes install on the
+        # same box runs `agent.max_turns: 90` (500 is only its documented
+        # default), and 500 here had let one DataLex turn burn 470 calls
+        # without a result. 90 is still well above the 47 calls of the turn
+        # that drew the red line above.
+        "tool_loop_max_iterations": 90,
         # Explicit read-only audits are bounded independently from normal
         # work. A diagnostic should gather evidence, not spend hundreds of
         # iterations re-feeding status output. These values are read live by
