@@ -215,6 +215,20 @@ def test_the_run_waits_for_the_night(monkeypatch):
     assert "night" not in reason
 
 
+def test_a_run_the_afternoon_before_does_not_shut_the_night(monkeypatch):
+    """The first night never ran (2026-10-11): the last run was at 16:06 and
+    a 20h cooldown kept 03:00-06:00 closed. A run as late as 18:00 must leave
+    the next window open."""
+    from backend.consolidation import gather, scheduler, state
+    now = time.time()
+    monkeypatch.setattr(state, "load", lambda: state.ConsolidationState(
+        last_run_at=now - 9 * 3600))  # 18:00 the day before, now 03:00
+    monkeypatch.setattr(scheduler, "_in_night_window", lambda t: True)
+    monkeypatch.setattr(gather, "last_activity_ts", lambda: now - 5 * 3600)
+    should, reason = scheduler._should_fire(now)
+    assert should is True, reason
+
+
 def test_the_night_window_is_read_in_the_users_time_zone(monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo

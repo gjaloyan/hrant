@@ -29,10 +29,12 @@ IDLE_THRESHOLD_SECONDS: float = float(
 # Minimum time between two daily consolidations. 24h-ish; the
 # adaptive idle check above means actual fire time floats.
 COOLDOWN_SECONDS: float = float(
-    # 20h, not 24h, since runs are pinned to a night window: a 24h cooldown
-    # after a run late in the window could expire after the next window
-    # had closed and push the run into the day.
-    os.environ.get("HRANT_CONSOLIDATION_COOLDOWN_SECONDS", 20 * 60 * 60)
+    # 8h since 2026-10-11. The night window already makes the run nightly;
+    # the cooldown only has to stop a second run inside one window (3h).
+    # 20h was too long: a run at 16:06 the day before kept the whole 03-06
+    # window shut, and the first night of the nightly review never ran.
+    # 8h keeps the next night open after any run before 19:00.
+    os.environ.get("HRANT_CONSOLIDATION_COOLDOWN_SECONDS", 8 * 60 * 60)
 )
 
 # How often the scheduler wakes up to check the gates. Cheap —
