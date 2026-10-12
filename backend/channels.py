@@ -860,10 +860,10 @@ class TelegramBot:
             owner_state = _roles._load()
         except Exception:
             return
-        owner_ids = [
-            sid for sid in (owner_state.get("owner_speaker_ids") or [])
-            if isinstance(sid, str) and sid.startswith("telegram:")
-        ]
+        # Maintenance goes to the person who runs the box, not to every
+        # owner (2026-10-12: the owner's wife got the code-change list).
+        _primary = _roles.primary_owner()
+        owner_ids = [_primary] if _primary else []
         if not owner_ids:
             return
 
@@ -923,10 +923,10 @@ class TelegramBot:
             owner_state = _roles._load()
         except Exception as e:
             return {"sent": 0, "pending": len(pending), "reason": f"roles: {e}"}
-        owner_ids = [
-            sid for sid in (owner_state.get("owner_speaker_ids") or [])
-            if isinstance(sid, str) and sid.startswith("telegram:")
-        ]
+        # Maintenance goes to the person who runs the box, not to every
+        # owner (2026-10-12: the owner's wife got the code-change list).
+        _primary = _roles.primary_owner()
+        owner_ids = [_primary] if _primary else []
         if not owner_ids:
             return {"sent": 0, "pending": len(pending), "reason": "no_owner"}
 
@@ -974,10 +974,10 @@ class TelegramBot:
             owner_state = _roles._load()
         except Exception:
             return
-        owner_ids = [
-            sid for sid in (owner_state.get("owner_speaker_ids") or [])
-            if isinstance(sid, str) and sid.startswith("telegram:")
-        ]
+        # Maintenance goes to the person who runs the box, not to every
+        # owner (2026-10-12: the owner's wife got the code-change list).
+        _primary = _roles.primary_owner()
+        owner_ids = [_primary] if _primary else []
         if not owner_ids:
             return
 
@@ -1102,10 +1102,10 @@ class TelegramBot:
             state = _roles._load()
         except Exception:
             return
-        owner_ids = [
-            sid for sid in (state.get("owner_speaker_ids") or [])
-            if isinstance(sid, str) and sid.startswith("telegram:")
-        ]
+        # Maintenance goes to the person who runs the box, not to every
+        # owner (2026-10-12: the owner's wife got the code-change list).
+        _primary = _roles.primary_owner()
+        owner_ids = [_primary] if _primary else []
         if not owner_ids:
             return
 

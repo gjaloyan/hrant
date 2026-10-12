@@ -175,6 +175,28 @@ def is_owner(speaker_id: str | None) -> bool:
     return role_of(speaker_id) == "owner"
 
 
+def primary_owner() -> Optional[str]:
+    """The first Telegram owner in roles.json — the person who runs the box.
+
+    Owners promoted later (family members) share the agent, not its
+    maintenance: on 2026-10-12 the owner's wife received the morning list of
+    code changes and rejected one. Code changes and credential alerts go to
+    this one person. None when there is no Telegram owner.
+    """
+    for sid in _load().get("owner_speaker_ids") or []:
+        if isinstance(sid, str) and sid.startswith("telegram:"):
+            return sid
+    return None
+
+
+def is_primary_owner(speaker_id: str | None) -> bool:
+    """The maintainer. Falls back to any owner when no Telegram owner exists."""
+    primary = primary_owner()
+    if primary is None:
+        return is_owner(speaker_id)
+    return normalize_speaker(speaker_id) == primary
+
+
 def is_at_least(speaker_id: str | None, min_role: Role) -> bool:
     """`min_role` semantics: 'guest' = any speaker, 'trusted' =
     trusted-or-owner, 'owner' = owner-only. Used by tool gates."""

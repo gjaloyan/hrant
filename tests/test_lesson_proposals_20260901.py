@@ -309,6 +309,9 @@ def test_a_russian_lesson_is_translated_before_it_reaches_the_prompt(
         def _save(self):
             pass
 
+        def screen(self, p):  # the pre-owner trial (2026-10-12): offer it
+            return True
+
     monkeypatch.setattr("backend.self_modifier.SELF_MODIFIER", Store())
     monkeypatch.setattr("backend.self_modifier._fire_proposal_created",
                         lambda p: seen.setdefault("p", p))

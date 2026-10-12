@@ -300,13 +300,16 @@ def propose_lesson(lesson: str, *, evidence: str = "",
             success_criteria="The rule appears in the LESSONS LEARNED module.",
             rollback_plan="Remove the added bullet from m11_lessons.",
         )
+        offered = SELF_MODIFIER.screen(proposal)
         with SELF_MODIFIER._LOCK:
             SELF_MODIFIER._proposals.append(proposal)
         SELF_MODIFIER._save()
         # The Telegram DM with its approve/reject buttons hangs off this
         # subscription. A proposal nobody is told about is the exact failure
-        # this whole path exists to end.
-        _fire_proposal_created(proposal)
+        # this whole path exists to end — and one that fails its own tests
+        # is not worth his time (SelfModifier.screen).
+        if offered:
+            _fire_proposal_created(proposal)
         return proposal
 
     except Exception as exc:

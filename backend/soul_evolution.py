@@ -366,7 +366,7 @@ def _register_soul_callback() -> None:
         if len(parts) < 2:
             return _tg.CallbackResult(ok=False, toast="malformed callback")
         clicker = ctx.get("clicker_speaker_id") or ""
-        if not _roles_mod.is_owner(clicker):
+        if not _roles_mod.is_primary_owner(clicker):
             return _tg.CallbackResult(
                 ok=False, clear_keyboard=False,
                 toast="only the owner can change the agent's character")

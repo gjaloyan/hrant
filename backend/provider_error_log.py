@@ -244,13 +244,8 @@ def _primary_owner_chat_id() -> "int | None":
     the box. Other owners (family members promoted later) are not paged
     about credentials they cannot fix."""
     from . import contacts, roles
-    state = roles._load()
-    for sid in state.get("owner_speaker_ids") or []:
-        if isinstance(sid, str) and sid.startswith("telegram:"):
-            cid = contacts.chat_id_for_speaker(sid)
-            if cid is not None:
-                return cid
-    return None
+    sid = roles.primary_owner()
+    return contacts.chat_id_for_speaker(sid) if sid else None
 
 
 def alert_owner_once(key: str, text: str, *,

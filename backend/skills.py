@@ -1051,7 +1051,7 @@ def _register_skill_callback() -> None:
         if not parts:
             return _tg.CallbackResult(ok=False, toast="malformed callback")
         clicker_id = ctx.get("clicker_speaker_id") or ""
-        if not _roles_mod.is_owner(clicker_id):
+        if not _roles_mod.is_primary_owner(clicker_id):
             return _tg.CallbackResult(
                 ok=False,
                 toast="only the owner can manage skills",

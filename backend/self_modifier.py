@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import uuid
@@ -138,6 +139,11 @@ def _normalize_test_command(cmd: str) -> str:
 # something is wrong (infinite loop, network call) and we'd rather
 # fail fast than block the apply for minutes.
 _TEST_COMMAND_TIMEOUT_SECONDS = 120
+
+# Run a new proposal's tests on a throwaway copy of the tree before anyone is
+# asked about it (2026-10-12). Off in the unit tests (conftest), which would
+# otherwise run pytest inside pytest for every proposal they create.
+_SCREEN_BEFORE_OWNER = True
 
 
 class Proposal:
@@ -398,6 +404,14 @@ class SelfModifier:
                              "skipping remaining improvements",
                              self.PENDING_PER_MODULE_CAP, _mod)
                     break
+                # By target, not only by title: three proposals for one regex
+                # in verifier.py were queued in one night (2026-10-11), each
+                # worded differently.
+                if self._targets_settled_code(_mod, imp.get("old_code", ""),
+                                              imp.get("new_code", "")):
+                    log.info("analyze: %s already targeted — skipping %r",
+                             _mod, imp.get("title", ""))
+                    continue
                 proposal = Proposal(
                     module=f"backend/{module_name}",
                     title=imp.get("title", ""),
@@ -411,6 +425,7 @@ class SelfModifier:
                     success_criteria=imp.get("success_criteria", ""),
                     rollback_plan=imp.get("rollback_plan", ""),
                 )
+                self.screen(proposal)
                 with self._LOCK:
                     self._proposals.append(proposal)
                 proposals.append(proposal)
@@ -493,98 +508,13 @@ class SelfModifier:
         if not proposal.has_diff():
             return {"ok": False, "message": "Proposal has no code diff"}
 
-        # Multi-change engine (2026-07-06, finding #6): a proposal is a list
-        # of file changes — the legacy single module/old_code/new_code trio
-        # becomes a 1-item list. All-or-nothing: validate everything first,
-        # write everything, compile everything, run tests once; ANY failure
-        # rolls back EVERY written file.
-        changes = proposal.changes or [{
-            "module": proposal.module,
-            "old_code": proposal.old_code,
-            "new_code": proposal.new_code,
-        }]
-
         try:
-            # Phase 1 — validate all changes and fold them into ONE pending
-            # text per file. 2026-08-05: a proposal carrying two edits to the
-            # same module silently lost the first — each change re-read the
-            # file from disk, so the second write overwrote the first and the
-            # patch shipped half-applied (its tests then failed, and the
-            # AUTHOR looked wrong when the applier was). Edits accumulate now.
-            pending: dict = {}          # path -> [original|None, current_text]
-            order: list = []            # paths, first-touch order
-            for ch in changes:
-                module = ch["module"]
-                old_c, new_c = ch["old_code"], ch["new_code"]
-                if not old_c and not new_c:
-                    continue
-                file_path = ROOT / module
-                if file_path not in pending:
-                    if file_path.exists():
-                        original = file_path.read_text(encoding="utf-8")
-                    elif old_c:
-                        proposal.status = "failed"
-                        self._save()
-                        return {"ok": False,
-                                "message": f"File not found: {module}"}
-                    else:
-                        original = None
-                    pending[file_path] = [original, original or ""]
-                    order.append(file_path)
-                current = pending[file_path][1]
-                if not old_c:
-                    # Pure addition: append to existing content, or create.
-                    pending[file_path][1] = (
-                        (current.rstrip("\n") + "\n\n\n" + new_c.lstrip("\n"))
-                        if current.strip() else new_c
-                    )
-                    continue
-                match_count = current.count(old_c)
-                if match_count == 0:
-                    # Before calling this a failure, ask whether another
-                    # proposal already made this change. Four proposals
-                    # were once generated against one loop in verifier.py;
-                    # the first was applied and the next two told the owner
-                    # "Apply failed -- code may have changed" eleven days
-                    # later (2026-09-04). Nothing had broken, and a message
-                    # that reads like a defect sends him looking for one.
-                    twin = self._applied_twin(module, old_c, proposal.id)
-                    if twin is not None:
-                        proposal.status = "superseded"
-                        proposal.review_note += (
-                            f" | already done by {twin.id}")
-                        self._save()
-                        return {"ok": False, "message": (
-                            f"Already done: proposal {twin.id} "
-                            f"({twin.title[:60]}) made this same change to "
-                            f"{module}. Nothing left to apply.")}
-                    proposal.status = "failed"
-                    proposal.review_note += f" | old_code not found in {module}"
-                    self._save()
-                    return {"ok": False, "message": (
-                        f"old_code not found in {module} — code may "
-                        "have changed")}
-                if match_count > 1:
-                    # Ambiguous patch: refuse rather than guess — a silent
-                    # first-hit replace is how patches land in the wrong
-                    # function.
-                    proposal.status = "failed"
-                    proposal.review_note += (
-                        f" | ambiguous: old_code matches {match_count} "
-                        f"places in {module}, expand the snippet"
-                    )
-                    self._save()
-                    return {"ok": False, "message": (
-                        f"Ambiguous old_code in {module}: matched "
-                        f"{match_count} times. Expand the snippet to a "
-                        "unique window before applying.")}
-                pending[file_path][1] = current.replace(old_c, new_c, 1)
-
-            plan: list[tuple] = [
-                (fp, pending[fp][0], pending[fp][1],
-                 str(fp.relative_to(ROOT)).replace("\\", "/"))
-                for fp in order
-            ]
+            # Phase 1 — fold every change into one new text per file (see
+            # `_compose`). Pure, so the trial before the owner runs exactly
+            # the edits an approval would.
+            plan, problem = self._compose(proposal)
+            if problem is not None:
+                return self._refuse_composition(proposal, problem)
             if not plan:
                 return {"ok": False, "message": "Proposal has no code diff"}
 
@@ -707,6 +637,178 @@ class SelfModifier:
             proposal.review_note += f" | apply error: {e}"
             self._save()
             return {"ok": False, "message": str(e)}
+
+    def _compose(self, proposal: "Proposal") -> tuple:
+        """Phase 1 of `apply`, without side effects.
+
+        Multi-change engine (2026-07-06, finding #6): a proposal is a list
+        of file changes — the legacy single module/old_code/new_code trio
+        becomes a 1-item list. Every change is folded into ONE pending text
+        per file. 2026-08-05: a proposal carrying two edits to the same
+        module silently lost the first — each change re-read the file from
+        disk, so the second write overwrote the first and the patch shipped
+        half-applied (its tests then failed, and the AUTHOR looked wrong when
+        the applier was). Edits accumulate now.
+
+        Reads files, writes nothing, changes no state. Returns
+        (plan, problem): plan is [(path, original|None, new_text, module)];
+        problem is None or {"kind": "missing_file" | "not_found" |
+        "ambiguous", "module", "old_code", "count"}.
+        """
+        changes = proposal.changes or [{
+            "module": proposal.module,
+            "old_code": proposal.old_code,
+            "new_code": proposal.new_code,
+        }]
+        pending: dict = {}          # path -> [original|None, current_text]
+        order: list = []            # paths, first-touch order
+        for ch in changes:
+            module = ch["module"]
+            old_c, new_c = ch["old_code"], ch["new_code"]
+            if not old_c and not new_c:
+                continue
+            file_path = ROOT / module
+            if file_path not in pending:
+                if file_path.exists():
+                    original = file_path.read_text(encoding="utf-8")
+                elif old_c:
+                    return [], {"kind": "missing_file", "module": module}
+                else:
+                    original = None
+                pending[file_path] = [original, original or ""]
+                order.append(file_path)
+            current = pending[file_path][1]
+            if not old_c:
+                # Pure addition: append to existing content, or create.
+                pending[file_path][1] = (
+                    (current.rstrip("\n") + "\n\n\n" + new_c.lstrip("\n"))
+                    if current.strip() else new_c
+                )
+                continue
+            match_count = current.count(old_c)
+            if match_count == 0:
+                return [], {"kind": "not_found", "module": module,
+                            "old_code": old_c}
+            if match_count > 1:
+                # Ambiguous patch: refuse rather than guess — a silent
+                # first-hit replace is how patches land in the wrong
+                # function.
+                return [], {"kind": "ambiguous", "module": module,
+                            "count": match_count}
+            pending[file_path][1] = current.replace(old_c, new_c, 1)
+        plan = [
+            (fp, pending[fp][0], pending[fp][1],
+             str(fp.relative_to(ROOT)).replace("\\", "/"))
+            for fp in order
+        ]
+        return plan, None
+
+    def _refuse_composition(self, proposal: "Proposal", problem: dict) -> dict:
+        """What `apply` reports, and records, when `_compose` found a problem."""
+        module = problem.get("module", "")
+        if problem["kind"] == "missing_file":
+            proposal.status = "failed"
+            self._save()
+            return {"ok": False, "message": f"File not found: {module}"}
+        if problem["kind"] == "not_found":
+            # Before calling this a failure, ask whether another proposal
+            # already made this change. Four proposals were once generated
+            # against one loop in verifier.py; the first was applied and the
+            # next two told the owner "Apply failed -- code may have changed"
+            # eleven days later (2026-09-04). Nothing had broken, and a
+            # message that reads like a defect sends him looking for one.
+            twin = self._applied_twin(module, problem.get("old_code", ""),
+                                      proposal.id)
+            if twin is not None:
+                proposal.status = "superseded"
+                proposal.review_note += f" | already done by {twin.id}"
+                self._save()
+                return {"ok": False, "message": (
+                    f"Already done: proposal {twin.id} "
+                    f"({twin.title[:60]}) made this same change to "
+                    f"{module}. Nothing left to apply.")}
+            proposal.status = "failed"
+            proposal.review_note += f" | old_code not found in {module}"
+            self._save()
+            return {"ok": False, "message": (
+                f"old_code not found in {module} — code may have changed")}
+        count = problem.get("count", 0)
+        proposal.status = "failed"
+        proposal.review_note += (
+            f" | ambiguous: old_code matches {count} places in {module}, "
+            "expand the snippet"
+        )
+        self._save()
+        return {"ok": False, "message": (
+            f"Ambiguous old_code in {module}: matched {count} times. Expand "
+            "the snippet to a unique window before applying.")}
+
+    def trial(self, proposal: "Proposal") -> tuple[bool, str]:
+        """Run the proposal's tests against a temporary copy of the tree.
+
+        Returns (ok, output). The live tree is never touched; the copy is
+        thrown away either way, so nothing unapproved can survive a crash.
+        """
+        import py_compile
+        import shutil
+        import tempfile
+
+        plan, problem = self._compose(proposal)
+        if problem is not None:
+            return False, (f"cannot be applied: {problem['kind']} in "
+                           f"{problem.get('module', '')}")
+        if not plan:
+            return False, "no code diff"
+        with tempfile.TemporaryDirectory(prefix="hrant-selfmod-trial-") as tmp:
+            root = Path(tmp)
+            skip = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache")
+            for name in ("backend", "tests"):
+                if (ROOT / name).is_dir():
+                    shutil.copytree(ROOT / name, root / name, ignore=skip)
+            for name in ("pytest.ini", "pyproject.toml", "conftest.py",
+                         "config.example.yaml"):
+                if (ROOT / name).is_file():
+                    shutil.copy2(ROOT / name, root / name)
+            for _fp, _orig, new_text, module in plan:
+                target = root / module
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(new_text, encoding="utf-8")
+                if target.suffix == ".py":
+                    try:
+                        py_compile.compile(str(target), doraise=True)
+                    except py_compile.PyCompileError as e:
+                        return False, f"py_compile: {e}"
+            commands = proposal.test_commands or _default_test_commands(plan)
+            return _run_test_commands(commands, cwd=root)
+
+    def screen(self, proposal: "Proposal") -> bool:
+        """Trial a new proposal before the owner is asked about it.
+
+        Tests used to run only after he approved, so he was asked about
+        changes that could never land: of 116 decided proposals, 23 failed
+        their own tests or rolled back, and on 2026-10-12 one reached him as
+        an approval that "did not apply". A proposal that fails here is kept
+        on record as `tests_failed` and never offered. True = offer it.
+
+        A trial that cannot run says nothing about the change, so it lets
+        the proposal through; the approval-time tests still guard the tree.
+        """
+        if not _SCREEN_BEFORE_OWNER or not proposal.has_diff():
+            return True
+        try:
+            ok, output = self.trial(proposal)
+        except Exception as e:
+            log.warning("self-mod trial could not run for %s: %s", proposal.id, e)
+            return True
+        note = ("passed its tests before reaching the owner" if ok
+                else "failed its own tests before reaching the owner — not offered")
+        proposal.review_note = " | ".join(x for x in (proposal.review_note, note) if x)
+        if not ok:
+            proposal.status = "tests_failed"
+            proposal.test_output = output[:8000]
+            log.info("self-mod %s failed its trial; not offered: %s",
+                     proposal.id, proposal.title[:60])
+        return ok
 
     def list_proposals(self, status: str | None = None) -> list[dict]:
         """List proposals, optionally filtered by status."""
@@ -1160,10 +1262,12 @@ def propose_with_diff(
         success_criteria=imp.get("success_criteria", ""),
         rollback_plan=imp.get("rollback_plan", ""),
     )
+    offered = SELF_MODIFIER.screen(proposal)
     with SELF_MODIFIER._LOCK:
         SELF_MODIFIER._proposals.append(proposal)
         SELF_MODIFIER._save()
-    _fire_proposal_created(proposal)
+    if offered:
+        _fire_proposal_created(proposal)
     return proposal
 
 
@@ -1185,7 +1289,7 @@ def _register_proposal_callback() -> None:
         if not parts:
             return _tg.CallbackResult(ok=False, toast="malformed callback")
         clicker_id = ctx.get("clicker_speaker_id") or ""
-        if not _roles_mod.is_owner(clicker_id):
+        if not _roles_mod.is_primary_owner(clicker_id):
             return _tg.CallbackResult(
                 ok=False,
                 toast="only the owner can act on self-modification proposals",
@@ -1248,14 +1352,9 @@ def _register_proposal_callback() -> None:
             SELF_MODIFIER.approve(pid, note=f"approved via Telegram by {clicker_id}")
             res = SELF_MODIFIER.apply(pid)
             if not res.get("ok"):
-                return _tg.CallbackResult(
-                    ok=False,
-                    toast=res.get("message") or "apply failed",
-                    edited_text=(
-                        f"❌ <b>Apply failed</b>\n<i>"
-                        f"{_tg.escape_html(res.get('message') or '')}</i>"
-                    ),
-                )
+                html, toast = _apply_failure_text(
+                    SELF_MODIFIER.get_proposal(pid), res.get("message") or "")
+                return _tg.CallbackResult(ok=False, toast=toast, edited_text=html)
             return _tg.CallbackResult(
                 ok=True,
                 edited_text=(
@@ -1284,6 +1383,46 @@ def _register_proposal_callback() -> None:
         return _tg.CallbackResult(ok=False, toast=f"unknown action {action!r}")
 
     _tg.register_callback_handler("prop", _handler)
+
+
+def _failed_tests(output: str) -> tuple[list[str], str]:
+    """(failing test names, pytest's summary line) out of a test log."""
+    names = re.findall(r"^FAILED \S+?::(\S+)", output or "", re.M)
+    summary = re.findall(r"(\d+ failed(?:, \d+ \w+)*)", output or "")
+    return list(dict.fromkeys(names)), (summary[-1] if summary else "")
+
+
+def _apply_failure_text(p: "Proposal | None", message: str) -> tuple[str, str]:
+    """What the owner reads after an approval that did not land: (html, toast).
+
+    It used to be the engine's own message — "Patch rolled back —
+    test_commands failed. See proposal.test_output (first lines: …" — with
+    300 characters of raw pytest under it (2026-10-12). He took it for a
+    broken proposal format. What he needs: it did not apply, nothing changed,
+    and why, in a line.
+    """
+    from . import tg_interactive as _tg
+    status = getattr(p, "status", "") if p is not None else ""
+    if status == "tests_failed":
+        names, summary = _failed_tests(getattr(p, "test_output", "") or "")
+        shown = ", ".join(f"<code>{_tg.escape_html(n)}</code>" for n in names[:3])
+        more = f" and {len(names) - 3} more" if len(names) > 3 else ""
+        why = (f"The change broke the existing tests"
+               + (f" ({_tg.escape_html(summary)})" if summary else "")
+               + ", so it was rolled back."
+               + (f"\nFailed: {shown}{more}" if shown else ""))
+        toast = "Not applied: it broke tests, rolled back"
+    elif status == "superseded":
+        why = "Another approved change already did this."
+        toast = "Already done"
+    elif status == "failed" and "not found" in (message or ""):
+        why = "The code it targets has changed since it was written."
+        toast = "Not applied: the code has changed"
+    else:
+        why = _tg.escape_html(message or "the apply step failed")
+        toast = "Not applied"
+    html = f"❌ <b>Not applied — nothing changed.</b>\n{why}"
+    return html, toast
 
 
 def _render_diff_for_telegram(p: Proposal) -> str:

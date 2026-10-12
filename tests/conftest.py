@@ -33,6 +33,20 @@ if not os.environ.get("HRANT_DATA_DIR", "").strip():
 
 
 @pytest.fixture(autouse=True)
+def _no_self_mod_trials(monkeypatch):
+    """In production a new self-mod proposal runs its tests on a copy of the
+    tree before the owner hears of it. In tests that would start pytest
+    inside pytest for every proposal created; the trial has its own tests."""
+    try:
+        import backend.self_modifier as _sm
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(_sm, "_SCREEN_BEFORE_OWNER", False)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _learning_runs_synchronously(monkeypatch):
     """In production, post-answer learning (memory extraction, correction
     capture, failure analysis) runs on a background thread so the reply is
