@@ -193,6 +193,22 @@ def test_the_kill_switch_restores_the_old_layout(monkeypatch, tmp_path):
     assert rows and rows[0][-1]["user"] == "hello there"
 
 
+def test_seeded_history_keeps_its_time_and_is_not_the_days_conversation(store):
+    """2026-10-12: copied September exchanges were stamped with the seeding
+    time and the nightly review reported them as yesterday's mistakes."""
+    from backend import threads
+    store.seed_if_empty("tg:7", [{"user": "can you draw the room?", "answer": "which tool?",
+                                  "ts": "2026-09-28 21:09:09"}])
+    row = store._entries(store._paths("tg:7")[0])[0]
+    assert row["ts"] == "2026-09-28 21:09:09" and row["seeded"] is True
+    assert list(threads.iter_day(store, "2000-01-01")) == []
+    store.append("tg:7", user="a new question", answer="an answer")
+    days = [r["user"] for _k, _s, rows in threads.iter_day(store, "2000-01-01") for r in rows]
+    assert days == ["a new question"]
+    assert [m["content"] for m in store.messages("tg:7")][0] == "can you draw the room?", \
+        "the model still sees the copied history"
+
+
 def test_a_new_thread_is_seeded_from_the_old_buffer_once(store):
     turns = [{"user": "old question", "answer": "old answer"}]
     assert store.seed_if_empty("tg:9", turns) == 1

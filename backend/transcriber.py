@@ -74,6 +74,20 @@ SECOND_OPINION_MODEL = "hurricup/whisper-large-v3-turbo-armenian-ct2"
 
 # Which languages the second model is worth paying for. Empty disables it.
 SECOND_OPINION_FOR = ("hy",)
+
+# The model that WRITES the transcript when the audio is not Armenian.
+#
+# Measured 2026-10-12 on the owner's own notes. Generic `medium` heard
+# "Привет, друг, как ты?" as "Привет, ты только как-то." and "распознавание
+# речи" as "распознавание дичи"; large-v3-turbo read both exactly. It cannot
+# run the whole chain, though: given Armenian audio it decides the language
+# is Russian and writes Cyrillic nonsense ("Исту айден хаскан, мис"), where
+# `medium` decides Armenian and hands the note to the specialist above. So
+# `medium` keeps deciding the language, the specialist keeps Armenian, and
+# this one writes Russian and English. Config: faster_whisper.fine_model
+# ("" turns it off).
+FINE_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
+FINE_FOR = ("ru", "en")
 # int8 on CPU: ~4x faster than float32 with no meaningful accuracy loss on
 # speech, and the box is CPU-only (12 cores, no GPU).
 DEFAULT_FASTER_WHISPER_COMPUTE = "int8"
@@ -275,6 +289,8 @@ class Transcriber:
             self._whisper_cpp_base = None
             self._local_whisper_base = None
             self._last_error = None
+            self._fw_fine = None
+            self._fw_fine_failed = False
 
     def status(self) -> dict:
         if self._backend is None:
@@ -402,7 +418,8 @@ class Transcriber:
                         log.debug("language detection failed, using auto: %s", e)
                         source = path
                         language = None
-            segments, _info = self._fw_model.transcribe(
+            writer = self._fine_model() if language in FINE_FOR else None
+            segments, _info = (writer or self._fw_model).transcribe(
                 source, language=language, vad_filter=True,
             )
             segments = list(segments)
@@ -448,6 +465,32 @@ class Transcriber:
                 os.unlink(path)
             except OSError:
                 pass
+
+    def _fine_model(self):
+        """The writer for Russian and English (FINE_MODEL), or None to let
+        the base model write. Loaded from the local cache only — a 1.6 GB
+        download started by someone's voice note would look exactly like a
+        hang — and given up on for the life of the process if it fails."""
+        if getattr(self, "_fw_fine_failed", False):
+            return None
+        cfg_f = (load_config().get("faster_whisper") or {})
+        name = cfg_f.get("fine_model", FINE_MODEL)
+        if not name:
+            return None
+        try:
+            from faster_whisper import WhisperModel
+            with self._lock:
+                if getattr(self, "_fw_fine", None) is None:
+                    self._fw_fine = WhisperModel(
+                        name, device="cpu", local_files_only=True,
+                        compute_type=getattr(self, "_fw_compute",
+                                             DEFAULT_FASTER_WHISPER_COMPUTE),
+                    )
+            return self._fw_fine
+        except Exception as e:
+            log.warning("fine transcription model unavailable (%s): %s", name, e)
+            self._fw_fine_failed = True
+            return None
 
     def _second_opinion(self, path: str, language: str):
         """Run the specialist model. Returns (text, unused_score).

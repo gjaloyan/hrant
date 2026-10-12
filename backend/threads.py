@@ -118,17 +118,23 @@ class ThreadStore:
     def append(self, session_key: str, *, user: str, answer: str,
                attachments: Optional[list] = None, trace: str = "",
                turn_id: str = "", session_id: str = "",
-               speaker_id: str = "") -> None:
-        """One finished exchange. Never raises."""
+               speaker_id: str = "", ts: str = "",
+               seeded: bool = False) -> None:
+        """One finished exchange. Never raises.
+
+        `ts` and `seeded` are for `seed_if_empty`: a copied exchange keeps
+        the time it happened and says it was copied."""
         if not session_key or not (user or "").strip():
             return
         try:
             log_path, state_path = self._paths(session_key)
             row = {
-                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ts": ts or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "user": _clip(user, MAX_TEXT_CHARS),
                 "answer": _clip(answer, MAX_TEXT_CHARS),
             }
+            if seeded:
+                row["seeded"] = True
             if attachments:
                 row["attachments"] = [str(a) for a in attachments if a][:16]
             if trace:
@@ -164,8 +170,12 @@ class ThreadStore:
             n = 0
             for t in turns or []:
                 if (t.get("user") or "").strip():
+                    # With its own time, marked: stamped "now", September's
+                    # exchanges were reviewed as yesterday's (2026-10-12) and
+                    # the morning report blamed the day for them.
                     self.append(session_key, user=t.get("user") or "",
-                                answer=t.get("answer") or "")
+                                answer=t.get("answer") or "",
+                                ts=str(t.get("ts") or ""), seeded=True)
                     n += 1
             if n == 0:
                 # Remember that there was nothing, so we do not try again.
@@ -236,8 +246,10 @@ def iter_day(store: "ThreadStore", since: str, until: str = "9999"):
     for log_path in files:
         try:
             state = store._read_state(log_path.with_suffix(".state.json"))
+            # Copied history is not the day's conversation (see seed_if_empty).
             rows = [r for r in store._entries(log_path)
-                    if since <= str(r.get("ts") or "") < until]
+                    if since <= str(r.get("ts") or "") < until
+                    and not r.get("seeded")]
         except Exception:
             continue
         if rows:
