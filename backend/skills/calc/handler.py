@@ -39,7 +39,9 @@ def register(registry) -> None:
             "whitelist (sqrt, abs, pow, round, floor, ceil, log, log10, "
             "log2, exp, sin, cos, tan, min, max) plus constants `pi`, `e`. "
             "NO imports, NO attribute access, NO names beyond the whitelist. "
-            "Use this for arithmetic; use run_python for anything more complex."
+            "Use this for arithmetic; use run_python for anything more complex. "
+            "A number you derive for an answer comes from here or run_python, "
+            "never from mental arithmetic."
         ),
         input_schema={
             "type": "object",

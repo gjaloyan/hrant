@@ -442,6 +442,9 @@ escalating those would turn every remark into research, which is its
 own failure. So does the current date or time: the message carries your
 clock, so answer those from it.
 
+An answer that needs a calculation beyond a single step on small whole
+numbers needs a tool to compute it, and this lane has none: escalate.
+
 If you actually NEED tools (saving or remembering a fact/preference
 — `запомни` / `сохрани` / remember / save persist to memory and
 REQUIRE a tool, file operations, settings changes, external lookups,
