@@ -235,6 +235,35 @@ class ThreadStore:
         return out
 
 
+def latest_key_for(speaker_id: str, store: "ThreadStore | None" = None) -> Optional[str]:
+    """The session key of this speaker's most recently active thread.
+
+    For turns nobody typed — a reminder firing, a scheduled task. They
+    carried no session key, so they ran in a thread of their own: on
+    2026-10-13 a reminder was delivered at 21:01, the owner asked "what is
+    this?" at 21:44, and the chat he asked in had never seen it. Never
+    raises; None when the speaker has no thread yet."""
+    if not speaker_id:
+        return None
+    store = store or THREADS
+    best, best_t = None, -1.0
+    try:
+        for state_path in store.root.glob("*.state.json"):
+            state = store._read_state(state_path)
+            if state.get("speaker_id") != speaker_id or not state.get("session_key"):
+                continue
+            log_path = state_path.with_name(state_path.name.replace(".state.json", ".jsonl"))
+            try:
+                t = log_path.stat().st_mtime
+            except OSError:
+                continue
+            if t > best_t:
+                best, best_t = state["session_key"], t
+    except Exception:
+        return None
+    return best
+
+
 def iter_day(store: "ThreadStore", since: str, until: str = "9999"):
     """(session_key, speaker_id, rows) for every thread with exchanges whose
     `ts` ("YYYY-MM-DD HH:MM:SS") falls in [since, until). For the nightly

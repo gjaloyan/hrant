@@ -678,6 +678,10 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
             "text": _reminder_label(r)[:160],
             "repeat": r.get("repeat") or "",
             "target": r.get("target_speaker"),
+            # What a read-back has to be able to see: whether the entry
+            # will run (task) or only send its words (message).
+            "kind": {"agent_task": "task", "message": "message"}.get(
+                r.get("kind") or "message", r.get("kind") or "message"),
         })
     out.sort(key=lambda x: x["in_hours"])
     return json.dumps({
@@ -2355,9 +2359,16 @@ def _schedule_message_handler(
     due_at: str = "",
     message: str = "",
     repeat: str = "",
+    kind: str = "message",
 ) -> str:
     """Owner + trusted gate. Trusted can only schedule TO the owner;
     owner can schedule to anyone.
+
+    `kind='task'` stores an `agent_task`: the text is run as a turn at the
+    due time and the answer is delivered. The delivery side had existed
+    since 2026-08 and nothing could create one: on 2026-10-13 the owner
+    asked for a daily market review and at 21:00 received the sentence
+    describing it.
 
     `target` accepts an alias from `relationships.json` ("wife",
     "mom") or a fully-qualified speaker_id ("telegram:222").
@@ -2436,6 +2447,7 @@ def _schedule_message_handler(
             due_at=due_at,
             requested_by=requester,
             repeat=repeat,
+            kind="agent_task" if str(kind or "").strip().lower() == "task" else "message",
         )
     except Exception as e:
         return json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False)
@@ -2449,6 +2461,9 @@ def _schedule_message_handler(
         # silently got a one-shot would tell the user their standing digest
         # is running when it will fire exactly once.
         "recurring": bool(row.get("repeat")),
+        # Same reason: "task" runs the text at the due time, "message"
+        # sends it as written.
+        "kind": "task" if row.get("kind") == "agent_task" else "message",
     }, ensure_ascii=False)
 
 
@@ -3752,7 +3767,15 @@ def register_builtin_tools() -> None:
             "and stopping: pick a sensible hour, SET IT UP, and say which "
             "hour you chose and that it can be changed. A standing digest "
             "that exists at the wrong time is worth more to the user than a "
-            "question about the right one."
+            "question about the right one.\n\n"
+            "SAY OR DO. `kind='message'` delivers `text` word for word. "
+            "When what the recipient should get has to be PRODUCED at "
+            "delivery time — fresh data, a summary, a review, a check, "
+            "anything you would need tools for — use `kind='task'` and "
+            "write `text` as the instruction to yourself; at the due time "
+            "you run it and the recipient gets your answer. A digest sent "
+            "as a message delivers its own description instead of the "
+            "digest."
         ),
         input_schema={
             "type": "object",
@@ -3788,6 +3811,15 @@ def register_builtin_tools() -> None:
                         "user asked for something standing ('every day', "
                         "'each morning', 'weekly') — the message then "
                         "re-arms after each delivery instead of firing once."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["message", "task"],
+                    "description": (
+                        "'message' (default): deliver `text` as written. "
+                        "'task': `text` is an instruction you carry out at "
+                        "the due time; the recipient gets the result."
                     ),
                 },
             },

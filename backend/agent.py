@@ -637,9 +637,18 @@ class Agent(
         # Session key — thread isolation key. Same person in two
         # different Telegram chats (or different bots) gets distinct
         # session_keys, so their conversation buffers don't bleed.
-        # Defaults to speaker_id when the caller hasn't been updated
-        # to pass a chat-scoped key (e.g. the WebUI single-user path).
-        self._session_key = (session_key or "").strip() or self._speaker_id
+        # Without one (a reminder firing, a scheduled task, a finished
+        # background job — turns nobody typed) the turn joins the speaker's
+        # most recently active thread, so the conversation that follows can
+        # see it; else the speaker_id, as for the single-user WebUI path.
+        self._session_key = (session_key or "").strip()
+        if not self._session_key:
+            try:
+                from .threads import latest_key_for
+                self._session_key = latest_key_for(self._speaker_id) or ""
+            except Exception:
+                self._session_key = ""
+        self._session_key = self._session_key or self._speaker_id
         # Job id — set by run_tracked BEFORE agent.run so unified_agent
         # can deep-link the SESSIONS turn record to the durable Job.
         # None for CLI / fast-path callers that don't track jobs.
