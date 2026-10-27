@@ -160,7 +160,8 @@ def _capabilities_block(compact: bool = False) -> str:
         "backend/finetune.py": "finetune data collection and queue",
         "backend/finetune_pipeline.py": "finetune training pipeline",
         "backend/project_mode.py": "project-scoped knowledge isolation",
-        "backend/background.py": "background task runner",
+        "backend/scheduled_messages.py": "the schedule: messages to say, tasks to do, to-do check-ins; delivery",
+        "backend/scheduled_runs.py": "how scheduled tasks and reminders run: apart from the chat, silent unless there is news",
         "backend/cli.py": "unified `hrant` CLI entry point (init/run/update/rollback/chat/...)",
         "backend/repl.py": "interactive REPL (`hrant chat`)",
         "backend/paths.py": "engine vs user-data path resolution",
@@ -598,9 +599,22 @@ class Agent(
         supervisor_mode: bool = False,
         supervisor_job_id: str | None = None,
         audit_mode: bool = False,
+        background: bool = False,
     ) -> AgentAnswer:
+        """`background=True` is a scheduled task or reminder run: isolated
+        from the chat, its answer is delivered by the scheduler, and it may
+        not schedule or ask anything (see backend/scheduled_runs.py)."""
         import time as _time
         from .sessions import normalize_speaker
+        from .scheduled_runs import background_scope
+        if background:
+            with background_scope(True):
+                return self.run(
+                    task, project, attachments, channel=channel,
+                    speaker_id=speaker_id, session_key=session_key,
+                    job_id=job_id, supervisor_mode=supervisor_mode,
+                    supervisor_job_id=supervisor_job_id, audit_mode=audit_mode,
+                )
         # Audit #14: agent.run state used to be set unconditionally
         # on `self`, so a re-entrant call (tool handler that itself
         # invokes another agent.run) would clobber the outer call's
@@ -637,18 +651,12 @@ class Agent(
         # Session key — thread isolation key. Same person in two
         # different Telegram chats (or different bots) gets distinct
         # session_keys, so their conversation buffers don't bleed.
-        # Without one (a reminder firing, a scheduled task, a finished
-        # background job — turns nobody typed) the turn joins the speaker's
-        # most recently active thread, so the conversation that follows can
-        # see it; else the speaker_id, as for the single-user WebUI path.
-        self._session_key = (session_key or "").strip()
-        if not self._session_key:
-            try:
-                from .threads import latest_key_for
-                self._session_key = latest_key_for(self._speaker_id) or ""
-            except Exception:
-                self._session_key = ""
-        self._session_key = self._session_key or self._speaker_id
+        # Defaults to speaker_id when the caller has no chat-scoped key.
+        # Turns nobody typed do NOT join the person's chat (2026-10-13 tried
+        # it; for four days a scheduled check then answered the chat's
+        # oldest messages). They run apart, and what they actually send is
+        # written into the chat by scheduled_runs.record_in_chat.
+        self._session_key = (session_key or "").strip() or self._speaker_id
         # Job id — set by run_tracked BEFORE agent.run so unified_agent
         # can deep-link the SESSIONS turn record to the durable Job.
         # None for CLI / fast-path callers that don't track jobs.

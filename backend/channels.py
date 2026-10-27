@@ -515,6 +515,78 @@ _MEDIA_SECRET_NAMES = frozenset({
 })
 
 
+def _origin_name(origin) -> str:
+    """Who a forwarded message came from, as Telegram tells it."""
+    for attr in ("sender_user", "sender_chat", "chat"):
+        obj = getattr(origin, attr, None)
+        if obj is not None:
+            name = (getattr(obj, "full_name", None) or getattr(obj, "title", None)
+                    or getattr(obj, "username", None))
+            if name:
+                return str(name)
+    return str(getattr(origin, "sender_user_name", None)
+               or getattr(origin, "author_signature", None) or "someone")
+
+
+def _media_kind(msg) -> str:
+    for kind in ("photo", "voice", "audio", "video", "video_note", "document",
+                 "sticker", "animation"):
+        if getattr(msg, kind, None):
+            return kind.replace("_", " ")
+    return ""
+
+
+def reply_context(msg, *, bot_user_id: Optional[int] = None) -> str:
+    """What a Telegram message refers to, written for the agent.
+
+    The handler read only the message's own text, so a reply was a sentence
+    with no referent: on 2026-10-23 the owner answered the evening market
+    review with "что по ПП? покупать или нет?", the agent never saw the
+    review it was answering, and asked twice which coin he meant. A quote
+    (the selected part), the replied-to message, an external reply and a
+    forward all carry the context the person is pointing at. Labels are in
+    English; the quoted words stay as written."""
+    parts: list[str] = []
+    origin = getattr(msg, "forward_origin", None)
+    if origin is not None:
+        parts.append(f"[Forwarded by the user; originally from {_origin_name(origin)}]")
+    reply = getattr(msg, "reply_to_message", None)
+    external = getattr(msg, "external_reply", None)
+    src = reply or external
+    if src is None:
+        return "\n".join(parts)
+    who = "a message"
+    sender = getattr(reply, "from_user", None) if reply is not None else None
+    me = getattr(msg, "from_user", None)
+    if sender is not None:
+        if bot_user_id and getattr(sender, "id", None) == bot_user_id:
+            who = "your own earlier message"
+        elif me is not None and getattr(sender, "id", None) == getattr(me, "id", None):
+            who = "their own earlier message"
+        else:
+            who = f"a message from {getattr(sender, 'full_name', None) or 'someone'}"
+    elif external is not None:
+        who = "a message from another chat"
+    quoted = (getattr(getattr(msg, "quote", None), "text", "") or "").strip()
+    full = ((getattr(reply, "text", None) or getattr(reply, "caption", None) or "")
+            if reply is not None else "").strip()
+    kind = _media_kind(src)
+    if quoted:
+        parts.append(f"[The user is replying to {who}, quoting this part:\n«{quoted[:1500]}»]")
+    elif full:
+        if len(full) > 2500:
+            full = full[:2500] + " …"
+        parts.append(f"[The user is replying to {who}:\n«{full}»]")
+    if kind:
+        lead = ("The message they replied to" if (quoted or full)
+                else f"The user is replying to {who}, which")
+        parts.append(f"[{lead} contains a {kind}; it is attached to this "
+                     f"turn when it could be fetched.]")
+    if not quoted and not full and not kind:
+        parts.append(f"[The user is replying to {who}.]")
+    return "\n".join(parts)
+
+
 def _media_path_is_safe(p: Path) -> bool:
     """Allow attachments from the delivery directories only — guards against
     `MEDIA:/etc/...` host-file leaks AND against the higher-value target the
@@ -1154,6 +1226,16 @@ class TelegramBot:
         requester = row.get("requested_by") or ""
         if not requester.startswith("telegram:"):
             return
+        # Only a message to SOMEONE ELSE gets a card (2026-10-27). For the
+        # requester's own reminders, tasks and to-dos the agent's reply has
+        # already said what was set; the card repeated it — with a UTC time
+        # — and a task that re-scheduled itself produced one every half
+        # hour, 163 in four days. A Cancel button matters where the words
+        # are about to reach another person.
+        from .sessions import normalize_speaker as _norm
+        if (row.get("kind") or "message") != "message" or \
+                _norm(row.get("target_speaker") or "") == _norm(requester):
+            return
         # A repeating row re-arms itself after every delivery, so previewing
         # each occurrence would DM the owner the same card every single
         # morning for as long as the series runs. He accepted the series
@@ -1180,28 +1262,22 @@ class TelegramBot:
         from .scheduled_messages import reminder_label
         body = reminder_label(row).strip()
         preview = (body[:300] + "…") if len(body) > 300 else body
-        if row.get("kind") == "agent_task":
-            # An agent_task's body is an instruction to the agent, not a
-            # message to the owner — quoting it verbatim showed him
-            # `channel_updates(channel="COIN22T")` and told him to expect
-            # that as his morning text. Describe the arrangement instead.
-            every = {"daily": "every day", "weekly": "every week",
-                     "monthly": "every month"}.get(row.get("repeat") or "", "once")
-            text = (
-                f"⏰ <b>Recurring task set</b>\n\n"
-                f"I will do this <b>{_tg.escape_html(every)}</b>, "
-                f"next at <code>{_tg.escape_html(due)}</code>, "
-                f"and send you the result.\n\n"
-                f"<i>Tap Cancel to stop it.</i>"
-            )
-        else:
-            text = (
-                f"📅 <b>Scheduled message queued</b>\n\n"
-                f"To: <code>{_tg.escape_html(target)}</code>\n"
-                f"Due: <code>{_tg.escape_html(due)}</code>\n"
-                f"Body: <i>{_tg.escape_html(preview) or '(empty)'}</i>\n\n"
-                f"<i>Tap Cancel to drop it before delivery.</i>"
-            )
+        # The owner reads clock time, not UTC stamps.
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            from zoneinfo import ZoneInfo as _ZI
+            from .settings import user_timezone as _utz
+            due = (_dt.strptime(due, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=_tz.utc)
+                   .astimezone(_ZI(_utz())).strftime("%Y-%m-%d %H:%M"))
+        except Exception:
+            pass
+        text = (
+            f"📅 <b>Scheduled message queued</b>\n\n"
+            f"To: <code>{_tg.escape_html(target)}</code>\n"
+            f"Due: <code>{_tg.escape_html(due)}</code>\n"
+            f"Body: <i>{_tg.escape_html(preview) or '(empty)'}</i>\n\n"
+            f"<i>Tap Cancel to drop it before delivery.</i>"
+        )
         buttons = (
             _tg.InlineButtonSet()
             .row(
@@ -1504,10 +1580,16 @@ class TelegramBot:
                             except Exception as e:
                                 log.debug("callback_query followup failed: %s", e)
 
-            async def _gather_attachments(update: "Update") -> list[str]:
+            async def _gather_attachments(update: "Update", msg=None,
+                                          echo_voice: bool = True) -> list[str]:
                 """Pull photos / voice / documents off the Telegram message,
                 stash them via the AttachmentStore, transcribe voice, and
                 return the resulting sha256 list ready to feed agent.run().
+
+                `msg` defaults to the incoming message; the handler also
+                passes the message being REPLIED to, so a reply to a photo
+                carries the photo. `echo_voice=False` for that one: the
+                sender already saw what it said.
 
                 Quietly skips anything that fails — network or Telegram
                 API hiccups should not block the text part of the message.
@@ -1515,7 +1597,7 @@ class TelegramBot:
                 from .attachments import ATTACHMENTS, classify_kind
                 from .transcriber import TRANSCRIBER
 
-                msg = update.message
+                msg = msg if msg is not None else update.message
                 if msg is None:
                     return []
                 shas: list[str] = []
@@ -1567,7 +1649,12 @@ class TelegramBot:
                             # needs something to check against.
                             try:
                                 from .meaning_translate import voice_turn_text
-                                text = await voice_turn_text(text, msg.reply_text)
+
+                                async def _no_echo(_t):
+                                    return None
+
+                                echo = msg.reply_text if echo_voice else _no_echo
+                                text = await voice_turn_text(text, echo)
                             except Exception as e:
                                 log.debug("voice text preparation failed: %s", e)
                             ATTACHMENTS.set_transcript(rec.sha256, text)
@@ -1899,6 +1986,24 @@ class TelegramBot:
                             # Image-only message — give the agent something
                             # to chew on.
                             text = "(see attached file)"
+
+                # What the message points at: a reply (with its media), a
+                # quote, a forward. Added after the body is final so it is
+                # never translated or mistaken for the voice transcript.
+                try:
+                    _ctx = reply_context(
+                        update.message,
+                        bot_user_id=getattr(getattr(context, "bot", None), "id", None))
+                    _replied = getattr(update.message, "reply_to_message", None)
+                    if _replied is not None and _media_kind(_replied):
+                        for _sha in await _gather_attachments(
+                                update, msg=_replied, echo_voice=False):
+                            if _sha not in attachment_shas:
+                                attachment_shas.append(_sha)
+                    if _ctx:
+                        text = f"{_ctx}\n\n{text}" if text else _ctx
+                except Exception as e:
+                    log.debug("reply context skipped: %s", e)
 
                 if not text and not attachment_shas:
                     return

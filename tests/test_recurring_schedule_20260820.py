@@ -41,8 +41,10 @@ def test_case_and_padding_do_not_matter():
 def test_an_unknown_interval_degrades_to_one_shot():
     """Safe direction: a message that fires once when it should have
     repeated is a disappointment the user reports. One that repeats when
-    it should not is a bot that will not stop messaging them."""
-    for word in ("hourly", "every 5 minutes", "cron", "yes", None, ""):
+    it should not is a bot that will not stop messaging them. (Minute and
+    hour intervals are understood since 2026-10-27, floored at 15 minutes;
+    see test_background_runs_20261027.py.)"""
+    for word in ("cron", "yes", "sometimes", "every full moon", None, ""):
         assert sm.normalize_repeat(word) == ""
 
 
@@ -140,20 +142,26 @@ def _tool():
 def test_the_tool_offers_repeat():
     props = _tool().input_schema["properties"]
     assert "repeat" in props
-    assert set(props["repeat"]["enum"]) == {"", "daily", "weekly", "monthly"}
+    d = props["repeat"]["description"]
+    assert all(w in d for w in ("daily", "weekly", "monthly"))
 
 
 def test_the_description_claims_standing_requests():
-    d = _tool().description
-    assert "STANDING REQUESTS ARE THIS TOOL" in d
-    assert "every day" in d
+    """Since 2026-10-27 a standing request has two homes: fixed words
+    repeat through `schedule_message`, produced content through
+    `schedule_task`."""
+    from backend.tool_registry import get_registry
+    assert "every monday" in _tool().description.lower()
+    assert "every evening" in get_registry().tools["schedule_task"].description.lower()
 
 
-def test_the_description_forbids_asking_instead_of_setting_up():
-    """The measured behaviour: asked what hour, scheduled nothing."""
-    d = _tool().description.lower()
-    assert "do not answer a recurring request by asking what time" in d
-    assert "pick a sensible hour" in d
+def test_a_named_time_is_used_and_only_a_missing_one_is_asked_for():
+    """Revised 2026-10-27 at the owner's request: ask only when no time was
+    named. The 2026-08-20 failure (asked the hour, scheduled nothing) came
+    from a tool that could not express "every day"; `repeat` fixed that."""
+    d = " ".join(_tool().description.lower().split())
+    assert "if the user named a time, use it" in d
+    assert "if they named none, ask for one" in d
 
 
 def test_the_reply_says_whether_it_actually_recurs():
@@ -185,7 +193,7 @@ def test_a_scheduled_task_re_arms_like_any_other_row():
     lines = inspect.getsource(sm.deliver_due).splitlines()
     task = next(i for i, l in enumerate(lines) if "run_agent_task(row)" in l)
     rearm = next(i for i, l in enumerate(lines)
-                 if "_rearm(row, summary)" in l and i > task)
+                 if "_rearm(row, summary" in l and i > task)
     fail = next(i for i, l in enumerate(lines)
                 if "mark_failed" in l and i > task)
     assert rearm < fail, "a failed run must stop the series, not continue it"
@@ -239,13 +247,12 @@ def test_the_preview_stays_quiet_for_a_re_armed_row():
 def test_the_preview_does_not_quote_an_agent_task_body():
     """The body of an agent_task is an instruction to the agent. Quoting it
     showed the owner `channel_updates(channel="COIN22T")` and implied that
-    was the text he would receive each morning."""
+    was the text he would receive each morning. Since 2026-10-27 a task gets
+    no card at all (behaviour: test_background_runs_20261027.py)."""
     import inspect
     from backend import channels
-    src = inspect.getsource(channels)
-    assert 'row.get("kind") == "agent_task"' in src
-    assert "Recurring task set" in src
-    assert "instruction to the agent" in src
+    src = inspect.getsource(channels.TelegramBot._on_message_scheduled)
+    assert '!= "message"' in src
 
 
 # ── the answer has to actually reach the user ───────────────────────
@@ -271,16 +278,18 @@ def test_a_scheduled_task_delivers_its_answer(monkeypatch):
     import backend.agent as _ag
     monkeypatch.setattr(_ag, "Agent", _Agent)
     monkeypatch.setattr(sm, "send_to_speaker",
-                        lambda t, b: (sent.update({"to": t, "body": b}), (True, ""))[1])
+                        lambda t, b, *a: (sent.update({"to": t, "body": b}), (True, ""))[1])
     sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
                        "text": "do the digest"})
     assert sent["to"] == "telegram:1"
     assert sent["body"] == "Here is your digest."
 
 
-def test_a_task_that_produced_nothing_is_a_failure(monkeypatch):
-    """Silently delivering an empty message would look like the bug it
-    replaced. Raising stops the series where the owner can see it."""
+def test_a_task_that_produced_nothing_sends_nothing(monkeypatch, caplog):
+    """An empty message is never delivered. Revised 2026-10-27: it no
+    longer ends the series either — one empty turn would have stopped a
+    half-hourly check for good — and it is logged, since unlike [SILENT]
+    nobody chose it."""
     class _Empty:
         answer = "   "
 
@@ -290,9 +299,13 @@ def test_a_task_that_produced_nothing_is_a_failure(monkeypatch):
 
     import backend.agent as _ag
     monkeypatch.setattr(_ag, "Agent", _Agent)
-    with pytest.raises(RuntimeError, match="no answer"):
-        sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
-                           "text": "t"})
+    monkeypatch.setattr(sm, "send_to_speaker",
+                        lambda *a: pytest.fail("an empty answer was sent"))
+    with caplog.at_level("WARNING"):
+        out = sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
+                                 "text": "t"})
+    assert out == ("silent", "")
+    assert "produced no answer" in caplog.text
 
 
 def test_a_delivery_failure_is_raised_not_swallowed(monkeypatch):
@@ -308,7 +321,7 @@ def test_a_delivery_failure_is_raised_not_swallowed(monkeypatch):
     import backend.agent as _ag
     monkeypatch.setattr(_ag, "Agent", _Agent)
     monkeypatch.setattr(sm, "send_to_speaker",
-                        lambda t, b: (False, "no chat_id"))
+                        lambda t, b, *a: (False, "no chat_id"))
     with pytest.raises(RuntimeError, match="delivery failed"):
         sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
                            "text": "t"})

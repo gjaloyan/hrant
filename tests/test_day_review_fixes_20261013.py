@@ -40,17 +40,19 @@ def _schedule(**kw):
 
 
 def test_a_task_is_stored_to_be_run_not_sent(kb):
+    """Since 2026-10-27 tasks have their own tool; an old-style call still
+    lands as a task, not as words."""
     from backend.scheduled_messages import list_all
     out = _schedule(text="Review BTC and ETH now and send the summary.",
                     repeat="daily", kind="task")
-    assert out["ok"] and out["kind"] == "task"
+    assert out["ok"] and out["type"] == "do"
     assert list_all()[-1]["kind"] == "agent_task"
 
 
 def test_words_to_send_stay_a_message(kb):
     from backend.scheduled_messages import list_all
     out = _schedule(text="Call the dentist.")
-    assert out["kind"] == "message" and list_all()[-1]["kind"] == "message"
+    assert out["type"] == "say" and list_all()[-1]["kind"] == "message"
 
 
 def test_a_read_back_shows_which_kind_was_set(kb):
@@ -66,16 +68,19 @@ def test_a_read_back_shows_which_kind_was_set(kb):
         listed = json.loads(_list_scheduled_handler())
     finally:
         roles.reset_current_speaker(token)
-    assert listed["reminders"][0]["kind"] == "task"
+    assert listed["reminders"][0]["type"] == "do"
 
 
-def test_the_tool_tells_the_model_when_to_run_rather_than_send():
+def test_say_and_do_are_two_tools():
+    """2026-10-27, the owner: "say and do must be isolated from each other"."""
     from backend.builtin_tools import register_builtin_tools
     from backend.tool_registry import get_registry
     register_builtin_tools()
-    t = get_registry().tools["schedule_message"]
-    assert "kind='task'" in t.description
-    assert t.input_schema["properties"]["kind"]["enum"] == ["message", "task"]
+    say = get_registry().tools["schedule_message"]
+    do = get_registry().tools["schedule_task"]
+    assert "kind" not in say.input_schema["properties"]
+    assert say.description.startswith("SAY") and do.description.startswith("DO")
+    assert "schedule_task" in say.description and "schedule_message" in do.description
 
 
 # ── 2. a turn nobody typed joins the conversation ─────────────────────
@@ -93,19 +98,30 @@ def test_the_latest_thread_of_a_speaker_is_found(tmp_path):
     assert latest_key_for("telegram:999", store) is None
 
 
-def test_a_reminder_turn_runs_in_the_chat_thread(monkeypatch):
+def test_a_reminder_turn_does_not_join_the_chat_but_its_message_does(monkeypatch, tmp_path):
+    """Revised 2026-10-27. Running background turns INSIDE the chat (the
+    2026-10-13 fix) made a scheduled check answer the chat's oldest
+    messages for four days. Turns nobody typed run apart; what they send is
+    written into the chat (scheduled_runs.record_in_chat)."""
     import backend.threads as threads
     import backend.unified_agent as ua
     from backend.agent import Agent
+    from backend.scheduled_runs import record_in_chat
+    from backend.threads import ThreadStore
     seen = {}
-    monkeypatch.setattr(threads, "latest_key_for",
-                        lambda sid, store=None: "telegram:hrant:848:848")
     monkeypatch.setattr(ua, "run_unified", lambda **kw: seen.update(kw) or None)
-    Agent().run("Reminder due: visit mom", channel="telegram", speaker_id="telegram:848")
-    assert seen["session_key"] == "telegram:hrant:848:848"
+    Agent().run("a scheduled run", channel="telegram", speaker_id="telegram:848")
+    assert seen["session_key"] == "telegram:848"
     Agent().run("hi", channel="telegram", speaker_id="telegram:848",
                 session_key="telegram:hrant:848:848")
     assert seen["session_key"] == "telegram:hrant:848:848", "an explicit key is kept"
+
+    store = ThreadStore(root=tmp_path / "t")
+    monkeypatch.setattr(threads, "THREADS", store)
+    store.append("telegram:hrant:848:848", user="hi", answer="hello", speaker_id="telegram:848")
+    record_in_chat("telegram:848", "Call mom.", "reminder")
+    rows = store._entries(store._paths("telegram:hrant:848:848")[0])
+    assert rows[-1]["answer"] == "Call mom." and rows[-1]["user"] == "[reminder]"
 
 
 # ── 3. a short message is read against the last exchange ─────────────

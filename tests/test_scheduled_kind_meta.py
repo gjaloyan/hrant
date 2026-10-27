@@ -22,7 +22,8 @@ def test_schedule_defaults_to_message_kind(sched):
     row = sched.schedule(target_speaker="webui:default", text="hi",
                          due_at="2026-06-25T09:00:00Z", requested_by="webui:default")
     assert row["kind"] == "message"
-    assert row["meta"] == {}
+    # Only the series id (2026-10-27): a row is the first of its own series.
+    assert row["meta"] == {"series": row["id"]}
 
 
 def test_schedule_records_kind_and_meta(sched):

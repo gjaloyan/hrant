@@ -679,9 +679,11 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
             "repeat": r.get("repeat") or "",
             "target": r.get("target_speaker"),
             # What a read-back has to be able to see: whether the entry
-            # will run (task) or only send its words (message).
-            "kind": {"agent_task": "task", "message": "message"}.get(
-                r.get("kind") or "message", r.get("kind") or "message"),
+            # will DO something (a task run), SAY fixed words, or raise a
+            # to-do.
+            "type": {"agent_task": "do", "message": "say",
+                     "check_in": "todo reminder"}.get(r.get("kind") or "message", "say"),
+            "name": (r.get("meta") or {}).get("name") or "",
         })
     out.sort(key=lambda x: x["in_hours"])
     return json.dumps({
@@ -697,6 +699,9 @@ def _cancel_scheduled_handler(message_id: str = "") -> str:
     """Drop one pending reminder. Yours, or anyone's if you are the owner."""
     from .roles import current_speaker
     from .scheduled_messages import cancel
+    from .scheduled_runs import REFUSAL, is_background
+    if is_background():
+        return json.dumps({"ok": False, "error": REFUSAL}, ensure_ascii=False)
     mid = (message_id or "").strip()
     if not mid:
         return json.dumps({"ok": False, "error": "message_id required"},
@@ -1294,6 +1299,11 @@ def _ask_user_handler(
     """
     from .tools import ask_user as _aq
     from .roles import current_speaker
+    from .scheduled_runs import REFUSAL, is_background
+    if is_background():
+        # A scheduled run that asks would drop a question card on the
+        # person at an hour they never chose, about a turn they never saw.
+        return json.dumps({"ok": False, "error": REFUSAL}, ensure_ascii=False)
     # Parse options JSON. Tolerant to single-quoted Python-repr
     # in case some providers escape funny.
     parsed_opts: list[dict] = []
@@ -2382,6 +2392,14 @@ def _schedule_message_handler(
     from .roles import current_role, current_speaker, is_owner
     from .scheduled_messages import schedule
     from .sessions import normalize_speaker as _norm_speaker
+    from .scheduled_runs import REFUSAL, is_background
+
+    if is_background():
+        return json.dumps({"ok": False, "error": REFUSAL}, ensure_ascii=False)
+    if str(kind or "").strip().lower() == "task":
+        # Calls written before the say/do split (2026-10-27).
+        return _schedule_task_handler(instruction=text or message,
+                                      every=repeat, first_run_at=due_at)
 
     requester = current_speaker() or ""
     role = current_role()
@@ -2447,13 +2465,14 @@ def _schedule_message_handler(
             due_at=due_at,
             requested_by=requester,
             repeat=repeat,
-            kind="agent_task" if str(kind or "").strip().lower() == "task" else "message",
+            kind="message",
         )
     except Exception as e:
         return json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False)
     return json.dumps({
         "ok": True,
         "id": row["id"],
+        "type": "say",
         "target_speaker": row["target_speaker"],
         "due_at": row["due_at"],
         "repeat": row.get("repeat") or "",
@@ -2461,9 +2480,68 @@ def _schedule_message_handler(
         # silently got a one-shot would tell the user their standing digest
         # is running when it will fire exactly once.
         "recurring": bool(row.get("repeat")),
-        # Same reason: "task" runs the text at the due time, "message"
-        # sends it as written.
-        "kind": "task" if row.get("kind") == "agent_task" else "message",
+    }, ensure_ascii=False)
+
+
+def _schedule_task_handler(
+    instruction: str = "",
+    every: str = "",
+    first_run_at: str = "",
+    name: str = "",
+) -> str:
+    """DO something later or on an interval, in the background (2026-10-27).
+
+    Its own tool, not a flag on `schedule_message`, at the owner's request:
+    "say" and "do" must not be confusable. Each run is a background turn
+    (backend/scheduled_runs.py): isolated from the chat, silent unless it has
+    something to report, unable to schedule more runs. The result goes to
+    the person who asked.
+    """
+    from datetime import datetime, timedelta, timezone
+    from .roles import current_role, current_speaker
+    from .scheduled_messages import normalize_repeat, schedule
+    from .scheduled_runs import REFUSAL, is_background
+
+    if is_background():
+        return json.dumps({"ok": False, "error": REFUSAL}, ensure_ascii=False)
+    if current_role() == "guest":
+        return json.dumps({"ok": False, "error": (
+            "refused: scheduled tasks require trusted or owner role.")},
+            ensure_ascii=False)
+    text = (instruction or "").strip()
+    if not text:
+        return json.dumps({"ok": False, "error": "instruction is required"},
+                          ensure_ascii=False)
+    requester = current_speaker() or ""
+    repeat = normalize_repeat(every)
+    if (every or "").strip() and not repeat:
+        return json.dumps({"ok": False, "error": (
+            f"could not read every={every!r}: use 'daily', 'weekly', "
+            "'monthly' or an interval like '30m' / '2h'.")}, ensure_ascii=False)
+    due = (first_run_at or "").strip()
+    if not due:
+        due = (datetime.now(timezone.utc) + timedelta(minutes=1)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    try:
+        datetime.strptime(due, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return json.dumps({"ok": False, "error": (
+            "first_run_at must be UTC 'YYYY-MM-DDTHH:MM:SSZ'")}, ensure_ascii=False)
+    try:
+        row = schedule(target_speaker=requester, text=text, due_at=due,
+                       requested_by=requester, kind="agent_task", repeat=repeat,
+                       meta={"name": (name or "").strip()[:80]})
+    except Exception as e:
+        return json.dumps({"ok": False, "error": str(e)[:300]}, ensure_ascii=False)
+    return json.dumps({
+        "ok": True,
+        "id": row["id"],
+        "type": "do",
+        "name": row["meta"].get("name") or "",
+        "first_run_at": row["due_at"],
+        "every": row.get("repeat") or "once",
+        "note": ("Each run works on its own and messages the user only with "
+                 "a result worth sending; there is no status message per run."),
     }, ensure_ascii=False)
 
 
@@ -3250,7 +3328,9 @@ def register_builtin_tools() -> None:
         description=(
             "Search the web for up-to-date information. Use when the question "
             "needs facts that aren't already in the notes or core memory. "
-            "Returns a JSON list of {title, url, snippet}."
+            "Returns a JSON list of {title, url, snippet}. This is your own "
+            "search engine: the SearXNG instance on this server, many engines "
+            "in one query and no quota, with other providers as fallback."
             + chr(10) + chr(10) +
             "`recency` narrows to what was published recently: day, week, "
             "month or year. Use it when the answer changes over time — "
@@ -3676,20 +3756,19 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="add_todo",
         description=(
-            "Put ONE simple task on the user's list -- 'buy the medicine', "
-            "'call the dentist', 'pay the bill'.\n\n"
-            "THIS is where 'remind me to ...' belongs, in any language. "
-            "If the user could later say 'done', it is a task and it "
-            "goes here -- `schedule_message` fires once and forgets, so "
-            "a task sent there is one nobody follows up on. Use "
-            "`schedule_message` only to deliver a message to SOMEONE "
-            "ELSE or as a standing digest, and `create_tracker` only "
-            "when the work has real internal structure.\n\n"
-            "Give it `due_at` and it becomes self-carrying: the user is "
-            "reminded then, and if nothing comes back the task is raised "
-            "again with a growing gap until they close it or it runs out "
-            "of follow-ups. Never at night. Close it with `update_step` "
-            "(status='done') -- that is what stops the reminders.\n\n"
+            "TRACK one simple task on the user's list until it is done -- "
+            "'add buying the medicine to my list', 'keep reminding me to "
+            "call the dentist until I do'.\n\n"
+            "For when the user wants something KEPT and followed up. A "
+            "plain 'remind me at 9 to ...' is one message at 9: that is "
+            "`schedule_message`. Work to be done later by you is "
+            "`schedule_task`; a project with real internal structure is "
+            "`create_tracker`.\n\n"
+            "Give it `due_at` and the user is reminded then; if nothing "
+            "comes back the task is raised again with a growing gap until "
+            "they close it or it runs out of follow-ups. Never at night. "
+            "Close it with `update_step` (status='done') -- that is what "
+            "stops the reminders.\n\n"
             "Leave `due_at` empty for something with no date."
         ),
         input_schema={
@@ -3752,30 +3831,22 @@ def register_builtin_tools() -> None:
     reg.register_func(
         name="schedule_message",
         description=(
-            "Deliver a MESSAGE at a future time. Use it when something has to be SAID -- to someone else, or as a standing digest.\n\n"
-            "NOT for a task of the user's own that has to get DONE. "
-            "'Remind me to buy the medicine' is a task: it can be finished, so it belongs in `add_todo`, which keeps raising it until the user closes it. This tool fires once and forgets, so a task sent here is a task nobody ever follows up on. The test is simple -- if the user could later say 'done', it is a todo.\n\n"
-            "Right here: 'remind wife at 10am', 'tell Mom in an hour', "
-            "'send me the news every morning'. "
-            "Target = a speaker_id like `telegram:<id>` OR an alias from "
-            "relationships.json (e.g. 'wife'). Convert natural time to "
-            "UTC ISO 8601 yourself. Owner/trusted only. Returns `{ok, id, "
-            "target_speaker, due_at, repeat, recurring}`.\n\n"
-            "STANDING REQUESTS ARE THIS TOOL. 'every day', 'each morning', "
-            "'weekly' — pass `repeat` and it re-arms itself after every "
-            "delivery. Do NOT answer a recurring request by asking what time "
-            "and stopping: pick a sensible hour, SET IT UP, and say which "
-            "hour you chose and that it can be changed. A standing digest "
-            "that exists at the wrong time is worth more to the user than a "
-            "question about the right one.\n\n"
-            "SAY OR DO. `kind='message'` delivers `text` word for word. "
-            "When what the recipient should get has to be PRODUCED at "
-            "delivery time — fresh data, a summary, a review, a check, "
-            "anything you would need tools for — use `kind='task'` and "
-            "write `text` as the instruction to yourself; at the due time "
-            "you run it and the recipient gets your answer. A digest sent "
-            "as a message delivers its own description instead of the "
-            "digest."
+            "SAY something at a set time: a fixed message delivered exactly "
+            "as written, to the user or to someone else. 'Remind me at 9 to "
+            "call mom', 'tell my wife at 18:00 that I'll be late', 'every "
+            "Monday at 9 remind me to pay rent'. One message per occurrence, "
+            "nothing else is done.\n\n"
+            "Not this tool when what should arrive has to be PRODUCED or "
+            "CHECKED at that time (fresh data, a review, a price, a status): "
+            "that is `schedule_task`. Not this tool when the user wants "
+            "something tracked until it is done ('add to my list', 'keep "
+            "reminding me until I do it'): that is `add_todo`.\n\n"
+            "Target = the user's own speaker_id, an alias from "
+            "relationships.json (e.g. 'wife') or a full speaker_id. Convert "
+            "the user's time to UTC yourself. If the user named a time, use "
+            "it; if they named none, ask for one instead of picking it "
+            "yourself. "
+            "Owner/trusted only."
         ),
         input_schema={
             "type": "object",
@@ -3791,7 +3862,8 @@ def register_builtin_tools() -> None:
                 },
                 "text": {
                     "type": "string",
-                    "description": "The message body the recipient will see.",
+                    "description": "The message, word for word, in the "
+                                   "recipient's language.",
                 },
                 "message": {
                     "type": "string",
@@ -3800,26 +3872,14 @@ def register_builtin_tools() -> None:
                 "due_at": {
                     "type": "string",
                     "description": "UTC ISO 8601 timestamp 'YYYY-MM-DDTHH:MM:SSZ'. "
-                                   "Convert the user's natural-language time first. "
                                    "With `repeat`, this is the FIRST occurrence.",
                 },
                 "repeat": {
                     "type": "string",
-                    "enum": ["", "daily", "weekly", "monthly"],
                     "description": (
-                        "Leave empty for a one-off reminder. Set it when the "
-                        "user asked for something standing ('every day', "
-                        "'each morning', 'weekly') — the message then "
-                        "re-arms after each delivery instead of firing once."
-                    ),
-                },
-                "kind": {
-                    "type": "string",
-                    "enum": ["message", "task"],
-                    "description": (
-                        "'message' (default): deliver `text` as written. "
-                        "'task': `text` is an instruction you carry out at "
-                        "the due time; the recipient gets the result."
+                        "Empty = once. 'daily', 'weekly', 'monthly', or an "
+                        "interval such as '2h' when the user asked for the "
+                        "same words again and again."
                     ),
                 },
             },
@@ -3829,6 +3889,58 @@ def register_builtin_tools() -> None:
             "required": ["target", "due_at"],
         },
         handler=_schedule_message_handler,
+    )
+    reg.register_func(
+        name="schedule_task",
+        description=(
+            "DO something at a set time or on an interval, in the "
+            "background, and tell the user the result: 'every evening at 21 "
+            "send me a market review', 'check this price every 30 minutes "
+            "and write to me only if it drops below X', 'tomorrow at 8 "
+            "check the weather and tell me if I need an umbrella'.\n\n"
+            "Each run happens on its own, with no access to this "
+            "conversation, so write `instruction` complete and "
+            "self-contained: what to do, which sources, the exact "
+            "condition, and WHEN the user should hear from it (every run, "
+            "or only when something specific happens; otherwise the run "
+            "stays silent). Do not put scheduling words in the instruction "
+            "('then schedule the next check'): `every` repeats it.\n\n"
+            "Not this tool for fixed words at a time (`schedule_message`) "
+            "or for tracking a to-do (`add_todo`). Owner/trusted only; the "
+            "result goes to the person who asked."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "instruction": {
+                    "type": "string",
+                    "description": "What each run does and when it reports, "
+                                   "self-contained, in the user's language.",
+                },
+                "every": {
+                    "type": "string",
+                    "description": (
+                        "Empty = run once. Otherwise 'daily', 'weekly', "
+                        "'monthly', or an interval such as '30m', '2h' "
+                        "(at least 15 minutes)."
+                    ),
+                },
+                "first_run_at": {
+                    "type": "string",
+                    "description": "UTC 'YYYY-MM-DDTHH:MM:SSZ' of the first "
+                                   "run. Empty = as soon as possible, right "
+                                   "for an interval check. A run at a time "
+                                   "of day the user did not name: ask them.",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "A short label for lists, e.g. 'PEPE buy "
+                                   "signal' or 'evening market review'.",
+                },
+            },
+            "required": ["instruction"],
+        },
+        handler=_schedule_task_handler,
     )
     reg.register_func(
         name="create_tracker",

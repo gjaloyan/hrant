@@ -24,28 +24,23 @@ CLOSED = ("done", "blocked", "stalled", "cancelled")
 
 
 def _prompt(kind: str, tracker: dict, step: dict, left: int) -> str:
-    """What the agent is woken up with."""
+    """What the reminder run is asked to write (the message itself)."""
     title, project = step["title"], tracker["title"]
     if left <= 0:
         return (
-            f"Final follow-up on '{title}' (project '{project}'). It has "
-            f"been raised several times with no resolution. Ask the user "
-            f"ONCE, briefly, whether this still matters: if it does, offer "
-            f"to set a new date; if it does not, close it. Do not ask again "
-            f"after this."
+            f"The user's to-do '{title}' (list '{project}') has been raised "
+            f"several times with no answer. Write ONE short message asking "
+            f"whether it still matters — if so they can name a new date, if "
+            f"not it will be closed. This is the last time it is raised."
         )
     if kind == "remind":
         return (
-            f"Reminder due: {title} (project '{project}'). Deliver it "
-            f"concisely. If the user's reply shows it is finished, mark the "
-            f"step done with update_step -- otherwise it will be raised "
-            f"again."
+            f"Write the reminder for the user's to-do: '{title}' (list "
+            f"'{project}'). One short line, in their language, nothing else."
         )
     return (
-        f"Check-in due: step '{title}' of project '{project}' has reached "
-        f"its date. Review what you know, send the user ONE concise status "
-        f"question, and update the step from their reply. Marking it done "
-        f"is what stops the follow-ups."
+        f"The step '{title}' of the user's project '{project}' has reached "
+        f"its date. Write ONE short question asking whether it is done."
     )
 
 
@@ -80,9 +75,27 @@ def run_check_in(row: dict) -> None:
         if armed is None:
             TRACKERS.park_stalled(tracker_id, step_id)
 
+        # A background run, and its text DELIVERED (2026-10-27). This used to
+        # call the agent and drop the answer: the owner never received a
+        # reminder, only the "scheduled message queued" card each follow-up
+        # produced — at 21:44 he asked the bot what that card was.
         from .agent import Agent
         from .sessions import normalize_speaker
-        Agent().run(prompt, channel="telegram",
-                    speaker_id=normalize_speaker(speaker))
+        from . import scheduled_runs as bg
+        from .scheduled_messages import send_to_speaker
+        target = normalize_speaker(speaker)
+        channel = target.split(":", 1)[0] if ":" in target else "webui"
+        answer = Agent().run(
+            bg.run_prompt(prompt, what="reminder"), channel=channel,
+            speaker_id=target, session_key=f"task:{tracker_id}:{step_id}",
+            background=True,
+        )
+        body, silent, _done = bg.parse_outcome(getattr(answer, "answer", "") or "")
+        if silent:
+            return
+        ok, err = send_to_speaker(target, body,
+                                  f"to-do reminder: {step['title'][:60]}")
+        if not ok:
+            log.warning("check-in %s not delivered: %s", row.get("id"), err)
     except Exception as e:
         log.warning("run_check_in failed for %s: %s", row.get("id"), e)

@@ -97,9 +97,32 @@ def _write_all(rows: list[dict]) -> None:
 # three cover what has actually been requested.
 REPEAT_DAYS = {"daily": 1, "weekly": 7, "monthly": 30}
 
+# Plus a fixed interval in minutes or hours (2026-10-27). "Check every thirty
+# minutes" had no way to be scheduled, so a run re-scheduled itself each time
+# — 163 one-off rows in four days, a confirmation card for each, and the
+# chain broke whenever a run forgot. The floor keeps a typo from becoming a
+# message a minute.
+MIN_INTERVAL_MINUTES = 15
+_INTERVAL_RE = None
+
+
+def _interval_minutes(v: str) -> int:
+    """Minutes for '30m', '2h', 'every 45 minutes'…; 0 when not an interval."""
+    import re
+    global _INTERVAL_RE
+    if _INTERVAL_RE is None:
+        _INTERVAL_RE = re.compile(
+            r"^(?:every\s+)?(\d+)\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours)$")
+    m = _INTERVAL_RE.match(v)
+    if not m:
+        return 0
+    n = int(m.group(1))
+    return n * 60 if m.group(2).startswith("h") else n
+
 
 def normalize_repeat(value: str) -> str:
-    """'' for one-shot, or one of REPEAT_DAYS. Unknown words mean one-shot.
+    """'' for one-shot, one of REPEAT_DAYS, or an interval like '30m'/'2h'.
+    Unknown words mean one-shot.
 
     Silently downgrading an unrecognised value is the safe direction: a
     message that fires once when it should have repeated is a visible
@@ -107,7 +130,27 @@ def normalize_repeat(value: str) -> str:
     should not is a bot that will not stop talking to them.
     """
     v = str(value or "").strip().lower()
-    return v if v in REPEAT_DAYS else ""
+    if v in REPEAT_DAYS:
+        return v
+    if v in ("hourly", "every hour"):
+        return "1h"
+    minutes = _interval_minutes(v)
+    if not minutes:
+        return ""
+    minutes = max(minutes, MIN_INTERVAL_MINUTES)
+    if minutes % (24 * 60) == 0 and minutes // (24 * 60) == 1:
+        return "daily"
+    return f"{minutes // 60}h" if minutes % 60 == 0 else f"{minutes}m"
+
+
+def repeat_step(repeat: str) -> Optional[timedelta]:
+    """The gap between occurrences, or None for a one-shot."""
+    r = normalize_repeat(repeat)
+    if not r:
+        return None
+    if r in REPEAT_DAYS:
+        return timedelta(days=REPEAT_DAYS[r])
+    return timedelta(minutes=_interval_minutes(r))
 
 
 def next_due(due_at: str, repeat: str) -> str:
@@ -118,14 +161,14 @@ def next_due(due_at: str, repeat: str) -> str:
     If the box was off for a week, roll forward past every missed slot
     rather than firing a backlog at the user.
     """
-    if not normalize_repeat(repeat):
+    step = repeat_step(repeat)
+    if step is None:
         return ""
     try:
         base = datetime.strptime(due_at, "%Y-%m-%dT%H:%M:%SZ").replace(
             tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return ""
-    step = timedelta(days=REPEAT_DAYS[normalize_repeat(repeat)])
     now = datetime.now(timezone.utc)
     nxt = base + step
     while nxt <= now:
@@ -149,8 +192,8 @@ def schedule(
     is expected to have already parsed any natural-language time
     reference ('tomorrow 10am') into UTC.
 
-    `repeat` ('daily'/'weekly'/'monthly', or '' for one-shot) makes the
-    row re-arm itself after each successful delivery.
+    `repeat` ('daily'/'weekly'/'monthly', an interval like '30m', or ''
+    for one-shot) makes the row re-arm itself after each delivery.
     """
     row = {
         "id": uuid.uuid4().hex[:12],
@@ -167,12 +210,15 @@ def schedule(
         # `failed` instead of re-sending (the user might've
         # received the message before the crash).
         "status": "pending",
-        "kind": kind,            # message | check_in
-        "repeat": normalize_repeat(repeat),   # "" | daily | weekly | monthly
-        "meta": meta or {},      # check_in carries {tracker_id, step_id, check_in_kind}
+        "kind": kind,            # message (say) | agent_task (do) | check_in
+        "repeat": normalize_repeat(repeat),   # "" | daily | weekly | monthly | 30m | 2h
+        "meta": dict(meta or {}),  # check_in carries {tracker_id, step_id, check_in_kind}
         "delivered_at": None,
         "last_error": "",
     }
+    # Every occurrence of a repeating row carries the id of the first one, so
+    # a series can be named, listed and stopped as one thing.
+    row["meta"].setdefault("series", row["id"])
     with _LEDGER_LOCK:
         rows = _read_all()
         rows.append(row)
@@ -508,6 +554,10 @@ def deliver(row: dict) -> tuple[bool, str]:
         ok = bot.send_text(text, chat_id=chat_id)
         if ok:
             mark_sent(row["id"])
+            # So a reply to it ("done", "what is this?") lands in a chat that
+            # knows what was said.
+            from .scheduled_runs import record_in_chat
+            record_in_chat(target, text, "scheduled message")
             return True, ""
         mark_failed(row["id"], "send_text returned False")
         return False, "send_text returned False"
@@ -536,10 +586,13 @@ def deliver_due() -> dict:
             # marked delivered and re-armed while doing nothing at all,
             # every day, in silence.
             try:
-                run_agent_task(row)
+                outcome, report = run_agent_task(row)
                 mark_sent(row["id"])
                 summary["sent"].append(row["id"])
-                _rearm(row, summary)
+                summary.setdefault("outcomes", {})[row["id"]] = outcome
+                if outcome != "done":
+                    _rearm(row, summary,
+                           last_report=report if outcome == "sent" else None)
             except Exception as e:
                 mark_failed(row["id"], str(e)[:200])
                 summary["failed"].append({"id": row["id"],
@@ -564,8 +617,12 @@ def deliver_due() -> dict:
     return summary
 
 
-def send_to_speaker(target_speaker: str, text: str) -> tuple[bool, str]:
+def send_to_speaker(target_speaker: str, text: str,
+                    label: str = "scheduled delivery") -> tuple[bool, str]:
     """Push `text` to a speaker out of band. Returns (ok, error).
+
+    What is sent is also written into the person's chat under `label`, so
+    the conversation that follows knows it was said.
 
     The transport half of `deliver()`, split out so a scheduled agent task
     can hand over its ANSWER. Ledger bookkeeping stays in the caller: this
@@ -590,16 +647,11 @@ def send_to_speaker(target_speaker: str, text: str) -> tuple[bool, str]:
     target = normalize_speaker(raw_target)
     channel = target.split(":", 1)[0] if ":" in target else ""
 
+    from .scheduled_runs import record_in_chat
     if channel == "webui":
+        # WebUI has no push transport: writing it into the chat IS delivery.
         try:
-            from .conversation import CONVERSATION
-            CONVERSATION.add_turn(
-                "[scheduled delivery]", text, intent="scheduled",
-                is_chat=False, confidence=70, topics_used=[],
-                channel="scheduled", speaker_id=target, session_key=target,
-            )
-            from .threads import THREADS
-            THREADS.append(target, user="[scheduled delivery]", answer=text)
+            record_in_chat(target, text, label)
         except Exception as e:
             return False, f"webui session-log append failed: {e}"
         return True, ""
@@ -619,29 +671,33 @@ def send_to_speaker(target_speaker: str, text: str) -> tuple[bool, str]:
             return False, "no telegram bot running"
         if not bot.send_text(text, chat_id=chat_id):
             return False, "send_text returned False"
+        record_in_chat(target, text, label)
         return True, ""
     except Exception as e:
         return False, str(e)
 
 
-def run_agent_task(row: dict) -> None:
-    """Execute a scheduled row's text as an agent turn AND deliver its answer.
+def run_agent_task(row: dict) -> tuple[str, str]:
+    """Run a scheduled task in the background and deliver what it has to say.
 
-    Delivering here is the whole point, and the first version got it wrong.
-    It carried a comment claiming "the answer reaches the user the same way
-    any turn's answer does" — it does not. `Agent.run` RETURNS an
-    AgentAnswer; the Telegram send lives in the channel layer, after
-    `run_tracked` returns. So the digest ran every morning, produced real
-    text, and threw it away. The owner received nothing and said so.
+    Returns (outcome, delivered_text): outcome is "sent", "silent" (the run
+    answered [SILENT], nothing went out) or "done" (the run ended its series
+    with [DONE]; anything it said first was still sent).
 
-    The dry run that "verified" this printed the answer into the operator's
-    own log, which is exactly the trap: the half that was visible worked.
+    Delivering here is the whole point, and the first version got it wrong:
+    `Agent.run` RETURNS an answer, the Telegram send lives in the channel
+    layer, so the digest ran every morning and threw its text away. The
+    second version delivered every answer, which on 2026-10-24..27 mailed
+    "no signal, I sent nothing" to the owner every half hour. Now the run
+    decides: the answer is the message, [SILENT] is silence
+    (backend/scheduled_runs.py).
 
     Raises on failure so the caller marks the row failed and the series
     stops; a standing task that quietly errors every morning is worse than
     one that visibly stops.
     """
     from .agent import Agent
+    from . import scheduled_runs as bg
     # Validate BEFORE normalising: `normalize_speaker("")` returns
     # "webui:default", so an empty target would silently become a real
     # address and the turn would run for someone who never asked for it.
@@ -651,17 +707,33 @@ def run_agent_task(row: dict) -> None:
         raise ValueError("agent_task row needs both target_speaker and text")
     target = normalize_speaker(raw_target)
     channel = target.split(":", 1)[0] if ":" in target else "webui"
-    log.info("running scheduled agent task %s for %s", row.get("id"), target)
-    answer = Agent().run(text, channel=channel, speaker_id=target)
-    body = (getattr(answer, "answer", "") or "").strip()
-    if not body:
-        raise RuntimeError("scheduled task produced no answer to deliver")
-    ok, err = send_to_speaker(target, body)
-    if not ok:
-        raise RuntimeError(f"task ran but delivery failed: {err}")
+    meta = row.get("meta") or {}
+    series = meta.get("series") or row.get("id") or "once"
+    log.info("running scheduled agent task %s (series %s) for %s",
+             row.get("id"), series, target)
+    answer = Agent().run(
+        bg.run_prompt(text, previous=meta.get("last_report") or ""),
+        channel=channel, speaker_id=target,
+        session_key=f"task:{series}", background=True,
+    )
+    raw = getattr(answer, "answer", "") or ""
+    if not raw.strip():
+        # Treated as silence so one empty turn does not end a standing
+        # series; logged because, unlike [SILENT], nobody chose it.
+        log.warning("scheduled task %s produced no answer; nothing sent",
+                    row.get("id"))
+    body, silent, done = bg.parse_outcome(raw)
+    if not silent:
+        ok, err = send_to_speaker(
+            target, body, f"scheduled task: {meta.get('name') or text[:60]}")
+        if not ok:
+            raise RuntimeError(f"task ran but delivery failed: {err}")
+    if done:
+        return "done", body
+    return ("silent", "") if silent else ("sent", body)
 
 
-def _rearm(row: dict, summary: dict) -> None:
+def _rearm(row: dict, summary: dict, *, last_report: Optional[str] = None) -> None:
     """Queue the next occurrence of a repeating row, AFTER it delivered.
 
     After, not before, and only on success: a row that re-arms itself up
@@ -685,6 +757,12 @@ def _rearm(row: dict, summary: dict) -> None:
         # The Telegram preview uses it to stay quiet: the owner accepted the
         # series once and does not need the card every morning.
         meta["rearmed_from"] = row.get("id") or ""
+        meta.setdefault("series", row.get("id") or "")
+        # The next run is shown what this one sent, so it reports what is
+        # new instead of the same signal every half hour. A silent run
+        # passes the previous report on unchanged.
+        if last_report:
+            meta["last_report"] = last_report[:3000]
         nxt = schedule(
             target_speaker=row.get("target_speaker") or "",
             text=row.get("text") or "",

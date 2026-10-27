@@ -462,6 +462,18 @@ def run(
         d.skip_reason = "no_activity"
         d.tokens_used = 0
         d.estimated_cost_usd = 0.0
+        # The review still runs: it reads the conversation threads, which
+        # hold what scheduled tasks sent on their own. On 2026-10-26/27 the
+        # owner typed nothing while a background check messaged him every
+        # half hour, and the one step that judges noise was skipped as "no
+        # activity". With nothing in the threads it returns without an LLM
+        # call.
+        if _PROFILES_BY_REVIEW:
+            try:
+                from . import review as _review
+                d.review = _review.run_review(dry_run=dry_run)
+            except Exception as e:
+                log.warning("consolidation: review on a quiet day failed: %s", e)
         d.completed_at = time.time()
         return d
 

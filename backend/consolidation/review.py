@@ -311,8 +311,23 @@ def _notify_owner(out: dict) -> None:
         lines.extend(f"+ {l}" for l in out["lessons_added"])
     for p in out.get("profiles") or []:
         lines.append(f"profile {Path(p['path']).name}: {p['before']} → {p['after']}")
+    # Delivered in the morning, not when the review runs. It runs at 03:00,
+    # and on 2026-10-24/25 the report reached the owner's phone at 03:01.
+    # Nothing in it is urgent; it is a "say" message queued for the end of
+    # the quiet hours.
     try:
-        from ..provider_error_log import alert_owner_once
-        alert_owner_once(f"nightly-review:{datetime.now():%Y-%m-%d}", "\n".join(lines))
+        from datetime import timezone as _tz
+        from .. import roles
+        from ..follow_up import respect_quiet_hours
+        from ..scheduled_messages import list_pending, schedule
+        owner = roles.primary_owner()
+        if not owner:
+            return
+        when = respect_quiet_hours(datetime.now(_tz.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tag = f"nightly-review:{datetime.now():%Y-%m-%d}"
+        if any((r.get("meta") or {}).get("tag") == tag for r in list_pending()):
+            return
+        schedule(target_speaker=owner, text="\n".join(lines), due_at=when,
+                 requested_by="system:nightly-review", meta={"tag": tag})
     except Exception as e:
-        log.debug("nightly report not sent: %s", e)
+        log.debug("nightly report not queued: %s", e)

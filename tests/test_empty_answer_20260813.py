@@ -21,8 +21,8 @@ import backend.unified_agent as ua
 
 def test_an_empty_answer_no_longer_skips_correction():
     src = inspect.getsource(ua.run_unified)
-    i = src.index('if not supervisor_mode and not (answer or "").strip():')
-    j = src.index('if not supervisor_mode and (answer or "").strip():', i)
+    i = src.index('if not supervisor_mode and not _bg and not (answer or "").strip():')
+    j = src.index('if not supervisor_mode and (answer or "").strip()', i)
     assert i < j, "the empty-answer branch must run BEFORE the correction gate"
 
 
@@ -41,5 +41,5 @@ def test_supervisor_turns_are_still_allowed_to_be_silent():
     """Supervisor turns are internal plumbing — a background job completing
     does not owe the owner prose, and forcing one would spam him."""
     src = inspect.getsource(ua.run_unified)
-    i = src.index('if not supervisor_mode and not (answer or "").strip():')
+    i = src.index('if not supervisor_mode and not _bg and not (answer or "").strip():')
     assert "not supervisor_mode" in src[i:i + 60]

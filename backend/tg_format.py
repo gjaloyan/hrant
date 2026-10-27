@@ -207,6 +207,7 @@ TOOL_ICON: dict[str, str] = {
     "preprocess_video": "🎬",
     # Schedule / cron / messages
     "schedule_message": "⏰",
+    "schedule_task": "⏱️",
     "cronjob": "⏰",
     # Config
     "set_setting": "⚙️",
@@ -259,6 +260,7 @@ _TOOL_PRIMARY_ARG: dict[str, str] = {
     "analyze_image": "question",
     "preprocess_video": "sha",
     "schedule_message": "when",
+    "schedule_task": "name",
     "cronjob": "action",
     "set_setting": "key",
     "save_user_fact": "fact",

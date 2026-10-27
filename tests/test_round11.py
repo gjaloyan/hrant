@@ -330,13 +330,16 @@ def test_synth_sites_all_use_curation():
     import inspect as _inspect
     import backend.llm as _llm_mod
     src = _inspect.getsource(_llm_mod)
-    # 4 message-based providers + 1 input_items provider = 5 callsites
-    # of curators, plus their definitions = at least 9.
-    callsite_count = (
-        src.count("_curate_synth_messages_anthropic(messages)")
-        + src.count("_curate_synth_messages_openai(messages)")
-        + src.count("_curate_synth_messages_cohere(messages)")
-        + src.count("_curate_synth_input_items_codex(input_items)")
+    # 4 message-based providers + 1 input_items provider = 5 callsites.
+    # Since 2026-10-27 each wraps its payload (the chat history is cut out
+    # first), so count calls by name, definitions excluded.
+    import re as _re
+    callsite_count = sum(
+        len(_re.findall(rf"(?<!def ){name}\(", src))
+        for name in ("_curate_synth_messages_anthropic",
+                     "_curate_synth_messages_openai",
+                     "_curate_synth_messages_cohere",
+                     "_curate_synth_input_items_codex")
     )
     assert callsite_count >= 5, (
         f"expected >=5 curator callsites across providers; saw {callsite_count}"

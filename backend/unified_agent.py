@@ -3249,6 +3249,10 @@ def run_unified(
     except Exception:
         pass
     skey = (session_key or "").strip() or speaker_id
+    # A scheduled task or reminder run: no chat history, no quick lane, not
+    # written into the chat as a turn, no facts learned from its instruction.
+    from .scheduled_runs import is_background as _is_bg
+    _bg = _is_bg()
     # Late imports to avoid cycles.
     from . import roles as _roles
     from . import context_compressor as _cc
@@ -3430,6 +3434,7 @@ def run_unified(
         not attachments
         and not matched_skills
         and not _resuming
+        and not _bg
         and len(task or "") <= 500
     ):
         chat_answer = _try_chat_path(
@@ -3957,9 +3962,10 @@ def run_unified(
         )
     if _lang_note:
         task_for_model = f"{task_for_model}\n\n{_lang_note}"
-    # The conversation so far, as real messages before this request.
+    # The conversation so far, as real messages before this request — never
+    # for a background run, which must not answer the chat.
     _thread_session_id = ""
-    if _threaded:
+    if _threaded and not _bg:
         try:
             from .sessions import SESSIONS as _S_cur
             _cur = _S_cur.current_for(speaker_id, session_key=skey)
@@ -4634,12 +4640,22 @@ def run_unified(
     # actions), hit 12 tool errors, produced no text at all, and shipped —
     # endpoint_met=True, confidence 0, because there was nothing to judge.
     # The owner received a blank message after $1.16 of work.
-    if not supervisor_mode and not (answer or "").strip():
+    # A background run is exempt: nothing it returns empty is ever delivered
+    # (scheduled_messages.run_agent_task logs it and sends nothing), while
+    # this sentence would have reached the owner as the run's report.
+    if not supervisor_mode and not _bg and not (answer or "").strip():
         answer = (
             "I produced no answer for this turn. That is a failure, not a "
             "result: I ran tools and then returned nothing."
         )
-    if not supervisor_mode and (answer or "").strip():
+    # A background run that has nothing to report says so with a token (or,
+    # rarely, with nothing at all), and that is a complete answer: a judge
+    # reading "[SILENT]" as unfinished work would push the run to write the
+    # very status message it exists not to send (backend/scheduled_runs.py).
+    from .scheduled_runs import SILENT as _SILENT
+    _silent_bg = _bg and (not (answer or "").strip()
+                          or answer.strip().startswith(_SILENT))
+    if not supervisor_mode and (answer or "").strip() and not _silent_bg:
         # Two rounds, and the RE-ANSWER IS RE-GATED (2026-08-06). The single
         # -shot version accepted whatever came back unexamined, so a corrective
         # could be answered with a fresh false completion and shipped. When the
@@ -4841,7 +4857,8 @@ def run_unified(
         # verifier call on an accepted small-tier turn.
         vr = _cascade_prevr
         _verification_performed = True
-    elif should_verify(tool_outputs, agent._trace or []):
+    elif not _silent_bg and should_verify(tool_outputs, agent._trace or []):
+        # (A silent background run states no claims; nothing to verify.)
         try:
             from .verifier import verify
             vr = verify(
@@ -5062,7 +5079,7 @@ def run_unified(
     # revision, and confidence caps. If verification never ran, the extractor
     # still mines user-authored facts but receives confidence=0 and therefore
     # excludes assistant-authored claims.
-    if not supervisor_mode and not audit_mode and not question_payload:
+    if not supervisor_mode and not audit_mode and not question_payload and not _bg:
         try:
             _after_answer(
                 _commit_turn_memory,
@@ -5220,7 +5237,9 @@ def run_unified(
             speaker_id=speaker_id,
             session_key=skey,
         )
-        if not supervisor_mode:
+        # A background run's answer is recorded in the chat only if it is
+        # actually delivered (scheduled_runs.record_in_chat), never as a turn.
+        if not supervisor_mode and not _bg:
             _append_thread(
                 skey, task=task, answer=answer or "", attachments=attachments,
                 tool_names=_turn_tool_names(agent),
@@ -5255,7 +5274,7 @@ def run_unified(
     # evidence) — most turns skip. Mirror image of the meta-learner
     # wire below: that one learns from failures, this one harvests
     # successes. Best-effort; never blocks the reply.
-    if not supervisor_mode and not audit_mode:
+    if not supervisor_mode and not audit_mode and not _bg:
         try:
             from .finetune import collect_from_turn
             collect_from_turn(

@@ -1192,6 +1192,21 @@ def _history_for(user: str) -> list[dict]:
             if m.get("role") in ("user", "assistant") and (m.get("content") or "").strip()]
 
 
+def _without_history(items: list, n_history: int, lead: int = 0) -> list:
+    """The tool loop's own items, with the prepended conversation removed.
+
+    The forced-synthesis extractors read the FIRST user message as "what the
+    user asked" and every assistant message as "what I said this turn". With
+    the conversation sent as real messages ahead of the request (2026-10-10),
+    the first user message became the oldest one in the thread: for four days
+    a scheduled market check answered "you replaced the U-joints…", the
+    owner's car question from a fortnight before (prod, 2026-10-24..27).
+    `lead` keeps a leading system message where the API has one."""
+    if n_history <= 0:
+        return list(items)
+    return list(items[:lead]) + list(items[lead + n_history:])
+
+
 def _alternating(messages: list[dict]) -> list[dict]:
     """Merge same-role neighbours — some APIs require strict alternation."""
     out: list[dict] = []
@@ -1996,7 +2011,8 @@ class AnthropicLLM(BaseLLM):
         same turn. When None, falls back to the static `tools` arg.
         """
         first_content = self._build_user_content(user, attachments)
-        messages: list[dict] = _alternating(_history_for(user)) + [
+        _hist = _alternating(_history_for(user))
+        messages: list[dict] = _hist + [
             {"role": "user", "content": first_content}]
         final_text = ""
         for _iter in range(max_iterations):
@@ -2148,7 +2164,8 @@ class AnthropicLLM(BaseLLM):
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": _build_cached_system_blocks(system),
-            "messages": _curate_synth_messages_anthropic(messages),
+            "messages": _curate_synth_messages_anthropic(
+                _without_history(messages, len(_hist))),
         }
         try:
             t0 = time.time()
@@ -2458,9 +2475,10 @@ class OpenAICompatibleLLM(BaseLLM):
             ]
         else:
             system_content = system
+        _hist = _alternating(_history_for(user))
         messages = [
             {"role": "system", "content": system_content},
-            *_alternating(_history_for(user)),
+            *_hist,
             {"role": "user", "content": first_user},
         ]
         final_text = ""
@@ -2568,7 +2586,8 @@ class OpenAICompatibleLLM(BaseLLM):
             "model": self.model,
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
-            "messages": _curate_synth_messages_openai(messages),
+            "messages": _curate_synth_messages_openai(
+                _without_history(messages, len(_hist), lead=1)),
         }
         try:
             t0 = time.time()
@@ -2988,6 +3007,7 @@ class CodexLLM(BaseLLM):
 
         static_flat_tools = _to_flat_tools(tools) if tools_provider is None else None
 
+        _hist = _history_for(user)
         input_items: list[dict] = [
             {
                 "type": "message",
@@ -2997,7 +3017,7 @@ class CodexLLM(BaseLLM):
                     "text": m["content"],
                 }],
             }
-            for m in _history_for(user)
+            for m in _hist
         ] + [
             {
                 "type": "message",
@@ -3087,7 +3107,8 @@ class CodexLLM(BaseLLM):
             int(CONFIG.router.get("tool_synth_max_tokens", 4000)),
         )
         synth_payload = self._build_payload(
-            system, _curate_synth_input_items_codex(input_items),
+            system, _curate_synth_input_items_codex(
+                _without_history(input_items, len(_hist))),
             None, synth_max, temperature,
             task_type=f"{_task_type}:tool_synth",
         )
@@ -3250,7 +3271,8 @@ class BedrockLLM(BaseLLM):
 
         static_anthropic_tools = _to_anthropic_tools(tools) if tools_provider is None else None
 
-        messages: list[dict] = _alternating(_history_for(user)) + [
+        _hist = _alternating(_history_for(user))
+        messages: list[dict] = _hist + [
             {"role": "user", "content": user}]
         final_text = ""
         for _iter in range(max_iterations):
@@ -3342,7 +3364,8 @@ class BedrockLLM(BaseLLM):
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "system": system,
-            "messages": _curate_synth_messages_anthropic(messages),
+            "messages": _curate_synth_messages_anthropic(
+                _without_history(messages, len(_hist))),
         }
         try:
             data = self._invoke(synth_payload)
@@ -3542,9 +3565,10 @@ class CohereLLM(BaseLLM):
 
         static_coh_tools = _to_coh_tools(tools) if tools_provider is None else None
 
+        _hist = _alternating(_history_for(user))
         messages: list[dict] = [
             {"role": "system", "content": system},
-            *_alternating(_history_for(user)),
+            *_hist,
             {"role": "user", "content": user},
         ]
         final_text = ""
@@ -3635,7 +3659,8 @@ class CohereLLM(BaseLLM):
         )
         synth_payload = {
             "model": self.model,
-            "messages": _curate_synth_messages_cohere(messages),
+            "messages": _curate_synth_messages_cohere(
+                _without_history(messages, len(_hist), lead=1)),
             "max_tokens": synth_max,
             "temperature": temperature if temperature is not None else self.default_temp,
             "stream": False,

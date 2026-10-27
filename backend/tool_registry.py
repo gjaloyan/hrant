@@ -99,7 +99,7 @@ _WRITE_TOOLS = frozenset({
     "list_pending_pairings", "forget_fact",
 })
 _EXTERNAL_TOOLS = frozenset({
-    "agent_browser", "schedule_message", "delegate", "sandbox_exec",
+    "agent_browser", "schedule_message", "schedule_task", "delegate", "sandbox_exec",
     "start_background_job", "ask_user", "complete_supervisor",
     "kick_supervisor", "generate_image",
 })
@@ -116,7 +116,7 @@ _EXTERNAL_TOOLS = frozenset({
 # the work; it is judged now.
 _DELIVERY_TOOLS = frozenset({
     "set_setting", "save_user_fact", "define_task_endpoint",
-    "complete_supervisor", "kick_supervisor", "schedule_message",
+    "complete_supervisor", "kick_supervisor", "schedule_message", "schedule_task",
     "grant_telegram_access", "revoke_telegram_access", "approve_pairing",
     "propose_skill", "propose_self_modification", "propose_soul_revision",
     "propose_immune_signature", "start_background_job", "delegate",

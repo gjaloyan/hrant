@@ -122,7 +122,7 @@ BASE_TOOLS: Final[frozenset[str]] = frozenset({
     # it and the model hand-rolled scheduling via raw python/terminal (slow,
     # fragile, sometimes a useless outbox file). A self-reminder is a core,
     # common, owner-gated action — it belongs always-on.
-    "ask_user", "save_user_fact", "schedule_message",
+    "ask_user", "save_user_fact", "schedule_message", "schedule_task",
     # Reading and cancelling belong beside creating: a calendar the
     # agent can only write to cannot avoid a clash, answer "what do I
     # have tomorrow", or move anything it set.

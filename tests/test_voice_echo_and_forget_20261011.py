@@ -80,7 +80,10 @@ def test_the_echo_can_be_switched_off(monkeypatch):
 def test_the_telegram_handler_uses_both():
     import backend.channels as ch
     src = inspect.getsource(ch)
-    assert "await voice_turn_text(text, msg.reply_text)" in src
+    # The echo goes to the sender, except for a voice note fetched from the
+    # message they replied to (2026-10-27): that one they already heard.
+    assert "echo = msg.reply_text if echo_voice else _no_echo" in src
+    assert "await voice_turn_text(text, echo)" in src
     i_typed = src.index("await typed_turn_text(text)")
     i_voice = src.index("# Voice without text → use the transcript as the message body")
     assert i_typed < i_voice, "typed text only; the voice body is rendered already"

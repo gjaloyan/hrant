@@ -23,7 +23,7 @@ class Level(IntEnum):
 # delegate) and omits terminal_exec. save_to_workspace / save_knowledge are
 # intentionally absent — their CONTENT can be wrong, so they still get verified.
 _PURE_ACTION_TOOLS: frozenset[str] = frozenset({
-    "save_user_fact", "set_setting", "schedule_message",
+    "save_user_fact", "set_setting", "schedule_message", "schedule_task",
     "start_background_job", "define_task_endpoint", "complete_supervisor",
     "kick_supervisor", "grant_telegram_access", "revoke_telegram_access",
     "approve_pairing", "propose_skill", "propose_self_modification",
