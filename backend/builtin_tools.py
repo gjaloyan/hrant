@@ -2198,6 +2198,44 @@ def _terminal_mutation_observed(arguments: dict[str, Any]) -> bool:
     return _terminal_effect_for_call(arguments).changes_state
 
 
+# What a Python snippet has to contain to change something the owner could
+# check: files written, moved or deleted, a process started, data posted.
+_PY_MUTATION_CALLS = (
+    ".write_text(", ".write_bytes(", ".touch(", ".mkdir(", "makedirs(",
+    ".unlink(", ".rmdir(", "rmtree(", "os.remove(", "os.rename(",
+    "os.replace(", "shutil.copy", "shutil.move", "shutil.make_archive",
+    "shutil.unpack_archive", "subprocess", "os.system(", "os.popen(",
+    "os.exec", "os.spawn", ".savefig(", ".save(", ".to_csv(", ".to_excel(",
+    ".to_json(", ".to_parquet(", ".extractall(", ".commit(",
+    "executescript(", "chmod(", "chown(", "symlink(", ".post(", ".put(",
+    ".patch(", ".delete(",
+)
+_PY_WRITE_OPEN = None
+
+
+def _python_mutation_observed(arguments: dict[str, Any]) -> bool:
+    """Did the snippet visibly change something, so a proof is owed?
+
+    The same question `_terminal_mutation_observed` answers for the shell.
+    Unanswered, every run_python call owed one: the agent computes numbers
+    with it by rule, so "17 × 23" came back with a waiver and an
+    "ⓘ not verified" line under it (2026-10-28; the owner had it removed
+    where nothing changed). A pure computation owes nothing.
+    """
+    import re
+    global _PY_WRITE_OPEN
+    code = str((arguments or {}).get("code") or "")
+    if not code.strip():
+        return False
+    if any(mark in code for mark in _PY_MUTATION_CALLS):
+        return True
+    if _PY_WRITE_OPEN is None:
+        # open(path, "w") / open(path, mode="a") / Path(...).open("wb") …
+        _PY_WRITE_OPEN = re.compile(
+            r"""(?:\bopen\([^)]*,\s*|\.open\(\s*)(?:mode\s*=\s*)?['"][rbt]*[wax+]""")
+    return bool(_PY_WRITE_OPEN.search(code))
+
+
 def _terminal_effect_for_call(arguments: dict[str, Any]) -> ToolEffect:
     """Conservatively distinguish shell inspection from mutation.
 
@@ -4303,6 +4341,7 @@ def register_builtin_tools() -> None:
             "required": ["code"],
         },
         handler=_run_python_handler,
+        proof_resolver=_python_mutation_observed,
     )
 
     # save_user_fact — replaces the old `preference` pipeline branch

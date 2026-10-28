@@ -209,3 +209,37 @@ def test_a_task_keeps_the_users_condition():
     register_builtin_tools()
     d = " ".join(get_registry().tools["schedule_task"].description.split())
     assert "do not make it stricter than they said" in d
+
+
+# ── owner, 2026-10-28: no "ⓘ not verified" where nothing changed ──────
+
+@pytest.mark.parametrize("code,owes", [
+    ("print(17 * 23)", False),
+    ("data = open('report.txt').read()", False),
+    ("with open(p, 'rb') as f: head = f.read(64)", False),
+    ("import shutil; print(shutil.disk_usage('/'))", False),
+    ("open('out.txt', 'w').write('x')", True),
+    ("Path('model.json').open('wb')", True),
+    ("Path('notes.md').write_text('hi')", True),
+    ("import os; os.remove('old.stl')", True),
+    ("subprocess.run(['orca-slicer', 'model.3mf'])", True),
+])
+def test_run_python_owes_a_proof_only_for_a_change(code, owes):
+    from backend.builtin_tools import register_builtin_tools
+    from backend.tool_registry import get_registry
+    register_builtin_tools()
+    sem = get_registry().tools["run_python"].resolve_semantics({"code": code})
+    assert sem.requires_proof is owes
+
+
+def test_a_waiver_on_a_turn_that_changed_nothing_shows_nothing():
+    from backend import turn_contract as tc
+    tok = tc.begin_turn()
+    try:
+        tc.waive_proof("only computed a product")
+        assert tc.render_user_block() == ""
+        tc.note_mutation()
+        tc.waive_proof("could not restart the service to check it")
+        assert "not verified" in tc.render_user_block(), "kept where something changed"
+    finally:
+        tc.reset_turn(tok)

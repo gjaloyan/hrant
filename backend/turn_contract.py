@@ -376,7 +376,11 @@ def render_user_block() -> str:
     for o in obs:
         label = o.description or o.probe_cmd
         if o.status == "waived":
-            rows.append(f"ⓘ not verified — {o.detail}")
+            # Only for a turn that changed something. On one that did not,
+            # the line said "not verified" about nothing (the owner had it
+            # removed, 2026-10-28).
+            if st.required:
+                rows.append(f"ⓘ not verified — {o.detail}")
         elif o.status == "unproven":
             rows.append(f"⚠ UNPROVEN — {label}\n  the check already passed "
                         f"before the work, so it demonstrates nothing")
