@@ -6,6 +6,7 @@ and relay answers back. Channel configs are stored in knowledge/channels.json.
 from __future__ import annotations
 
 import asyncio
+import html as _html
 import json
 import logging
 import threading
@@ -587,6 +588,18 @@ def reply_context(msg, *, bot_user_id: Optional[int] = None) -> str:
     return "\n".join(parts)
 
 
+def with_failed_downloads(text: str, failed: list[str]) -> str:
+    """Put what the user sent but could not be downloaded in front of the
+    turn. Without it the agent saw four parts of a six-part archive and told
+    the owner, twice, that he had not sent the other two (2026-10-28)."""
+    if not failed:
+        return text
+    note = ("[The user sent these, but downloading them from Telegram failed: "
+            + "; ".join(failed) + ". Say which file did not arrive and ask "
+            "them to send that file again; do not say they did not send it.]")
+    return f"{note}\n\n{text}" if text else note
+
+
 def _media_path_is_safe(p: Path) -> bool:
     """Allow attachments from the delivery directories only — guards against
     `MEDIA:/etc/...` host-file leaks AND against the higher-value target the
@@ -633,9 +646,14 @@ def _media_path_is_safe(p: Path) -> bool:
     return False
 
 
-async def _strip_and_send_media(answer: str, update: "Any") -> tuple[str, int]:
+async def _strip_and_send_media(answer: str, update: "Any" = None, *,
+                                bot: "Any" = None, chat_id: "Any" = None,
+                                silent: bool = False) -> tuple[str, int]:
     """Scan `answer` for MEDIA: lines, send each referenced file as
     a Telegram attachment, and return (cleaned_answer, sent_count).
+
+    Replies to `update`, or — for a message nobody sent first (a scheduled
+    report, a finished background job) — sends through `bot` to `chat_id`.
 
     Best-effort:
       - missing file → keep the path in the textual answer so the
@@ -647,6 +665,14 @@ async def _strip_and_send_media(answer: str, update: "Any") -> tuple[str, int]:
     matches = list(_MEDIA_LINE_RE.finditer(answer))
     if not matches:
         return answer, 0
+
+    async def _send(kind: str, fh) -> None:
+        if update is not None:
+            await getattr(update.message, f"reply_{kind}")(**{kind: fh})
+        else:
+            await getattr(bot, f"send_{kind}")(
+                chat_id=chat_id, **({"disable_notification": True} if silent else {}),
+                **{kind: fh})
     # Iterate in REVERSE so the slice indexes stay valid as we cut.
     cleaned = answer
     cuts: list[tuple[int, int]] = []
@@ -661,22 +687,13 @@ async def _strip_and_send_media(answer: str, update: "Any") -> tuple[str, int]:
         ext = p.suffix.lower()
         ok = False
         try:
-            if ext in _MEDIA_VIDEO_EXTS:
-                with p.open("rb") as fh:
-                    await update.message.reply_video(video=fh)
-                ok = True
-            elif ext in _MEDIA_IMAGE_EXTS:
-                with p.open("rb") as fh:
-                    await update.message.reply_photo(photo=fh)
-                ok = True
-            elif ext in _MEDIA_AUDIO_EXTS:
-                with p.open("rb") as fh:
-                    await update.message.reply_audio(audio=fh)
-                ok = True
-            else:
-                with p.open("rb") as fh:
-                    await update.message.reply_document(document=fh)
-                ok = True
+            kind = ("video" if ext in _MEDIA_VIDEO_EXTS
+                    else "photo" if ext in _MEDIA_IMAGE_EXTS
+                    else "audio" if ext in _MEDIA_AUDIO_EXTS
+                    else "document")
+            with p.open("rb") as fh:
+                await _send(kind, fh)
+            ok = True
         except Exception as e:
             log.warning("MEDIA: send failed for %s: %s", p, e)
             ok = False
@@ -779,7 +796,8 @@ class TelegramBot:
             self._thread = None
         log.info("Telegram bot %s stopped", self.channel_id)
 
-    def send_text(self, text: str, *, chat_id: int | None = None) -> bool:
+    def send_text(self, text: str, *, chat_id: int | None = None,
+                  markdown: bool = False, silent: bool = False) -> bool:
         """Round E: deliver `text` to a Telegram chat without going
         through agent.run. Used by the WebUI's "compose-as-telegram"
         mode — the agent processes the message in WebUI but the
@@ -794,6 +812,11 @@ class TelegramBot:
 
         Splits long bodies at Telegram's 4096-char limit so the call
         doesn't 400 on a long agent answer.
+
+        `markdown=True` is for text the agent wrote: rendered the way a chat
+        answer is (Markdown → Telegram HTML, MEDIA: lines sent as files),
+        falling back to plain text. Plain, the evening review arrived as
+        "*_BTC_*". `silent=True` delivers without a notification sound.
         """
         target = chat_id if chat_id is not None else self._last_chat_id
         if target is None or not self._running or not self._app or not self._loop:
@@ -802,16 +825,42 @@ class TelegramBot:
         if not body:
             return False
         LIMIT = 4000
-        chunks: list[str] = []
-        i = 0
-        while i < len(body):
-            chunks.append(body[i : i + LIMIT])
-            i += LIMIT
+
+        def _chunks(s: str) -> list[str]:
+            return [s[i:i + LIMIT] for i in range(0, len(s), LIMIT)]
+
+        chunks = _chunks(body)
+
+        # Only when asked: the plain call stays the one every caller knows.
+        quiet = {"disable_notification": True} if silent else {}
 
         async def _send_all() -> None:
+            bot = self._app.bot
+            if markdown:
+                plain = body
+                try:
+                    plain, _ = await _strip_and_send_media(
+                        body, bot=bot, chat_id=target, silent=silent)
+                except Exception as e:
+                    log.warning("TG send_text media failed: %s", e)
+                if not plain.strip():
+                    return
+                from .tg_format import markdown_to_telegram_html
+                for i, chunk in enumerate(_chunks(markdown_to_telegram_html(plain))):
+                    try:
+                        await bot.send_message(
+                            chat_id=target, text=chunk, parse_mode="HTML",
+                            disable_web_page_preview=True, **quiet)
+                    except Exception as e:
+                        log.warning("TG send_text HTML failed (%s); plain text", e)
+                        rest = (_chunks(plain) if i == 0 else
+                                [_html.unescape(_re_media.sub(r"<[^>]+>", "", chunk))])
+                        for c in rest:
+                            await bot.send_message(chat_id=target, text=c, **quiet)
+                return
             for chunk in chunks:
                 try:
-                    await self._app.bot.send_message(chat_id=target, text=chunk)
+                    await bot.send_message(chat_id=target, text=chunk, **quiet)
                 except Exception as e:
                     log.warning("TG send_text failed on bot %s chat %s: %s",
                                 self.channel_id, target, e)
@@ -1581,7 +1630,8 @@ class TelegramBot:
                                 log.debug("callback_query followup failed: %s", e)
 
             async def _gather_attachments(update: "Update", msg=None,
-                                          echo_voice: bool = True) -> list[str]:
+                                          echo_voice: bool = True,
+                                          failed: "list | None" = None) -> list[str]:
                 """Pull photos / voice / documents off the Telegram message,
                 stash them via the AttachmentStore, transcribe voice, and
                 return the resulting sha256 list ready to feed agent.run().
@@ -1591,8 +1641,11 @@ class TelegramBot:
                 carries the photo. `echo_voice=False` for that one: the
                 sender already saw what it said.
 
-                Quietly skips anything that fails — network or Telegram
-                API hiccups should not block the text part of the message.
+                Skips anything that fails — network or Telegram API hiccups
+                should not block the text part of the message — but lists it
+                in `failed`, so the agent can say which file did not arrive.
+                Unsaid, on 2026-10-28 it told the owner twice that he had not
+                sent two archive parts he had sent.
                 """
                 from .attachments import ATTACHMENTS, classify_kind
                 from .transcriber import TRANSCRIBER
@@ -1602,13 +1655,37 @@ class TelegramBot:
                     return []
                 shas: list[str] = []
 
+                async def _fetch(media) -> bytes:
+                    # Room to arrive, and one more try: the library's default
+                    # read timeout is 5 s, and two 20 MB parts of an album
+                    # timed out under it.
+                    err: Exception | None = None
+                    for _ in range(2):
+                        try:
+                            f = await media.get_file(read_timeout=60,
+                                                     connect_timeout=30)
+                            return bytes(await f.download_as_bytearray(
+                                read_timeout=300, connect_timeout=30))
+                        except Exception as e:
+                            err = e
+                    raise err if err else RuntimeError("download failed")
+
+                def _lost(kind: str, media, e: Exception) -> None:
+                    log.warning("Telegram %s download failed: %s", kind, e)
+                    if failed is not None:
+                        name = getattr(media, "file_name", None) or kind
+                        size = getattr(media, "file_size", None) or 0
+                        failed.append(
+                            f"{kind} '{name}'"
+                            + (f" ({size / 1048576:.1f} MB)" if size else "")
+                            + f": {e}")
+
                 # Photos (Telegram sends multiple resolutions; take the
                 # largest — better for vision models)
                 if getattr(msg, "photo", None):
                     try:
                         largest = msg.photo[-1]
-                        f = await largest.get_file()
-                        data = await f.download_as_bytearray()
+                        data = await _fetch(largest)
                         rec = ATTACHMENTS.save(
                             bytes(data),
                             "image/jpeg",
@@ -1617,13 +1694,12 @@ class TelegramBot:
                         )
                         shas.append(rec.sha256)
                     except Exception as e:
-                        log.warning("Telegram photo download failed: %s", e)
+                        _lost("photo", msg.photo[-1], e)
 
                 # Voice → store + try to transcribe
                 if getattr(msg, "voice", None):
                     try:
-                        f = await msg.voice.get_file()
-                        data = await f.download_as_bytearray()
+                        data = await _fetch(msg.voice)
                         mime = msg.voice.mime_type or "audio/ogg"
                         rec = ATTACHMENTS.save(
                             bytes(data),
@@ -1660,7 +1736,7 @@ class TelegramBot:
                             ATTACHMENTS.set_transcript(rec.sha256, text)
                         shas.append(rec.sha256)
                     except Exception as e:
-                        log.warning("Telegram voice handling failed: %s", e)
+                        _lost("voice message", msg.voice, e)
 
                 # Audio files (mp3 / m4a / wav sent as TG audio). Same
                 # treatment as msg.voice — auto-transcribe so the LLM
@@ -1670,8 +1746,7 @@ class TelegramBot:
                 # had to invent a workaround.
                 if getattr(msg, "audio", None):
                     try:
-                        f = await msg.audio.get_file()
-                        data = await f.download_as_bytearray()
+                        data = await _fetch(msg.audio)
                         mime = msg.audio.mime_type or "audio/mpeg"
                         fname = msg.audio.file_name or f"telegram_audio_{msg.audio.file_unique_id}"
                         rec = ATTACHMENTS.save(bytes(data), mime, filename=fname, kind="audio")
@@ -1685,12 +1760,11 @@ class TelegramBot:
                             log.debug("Telegram audio transcribe failed (non-fatal): %s", e)
                         shas.append(rec.sha256)
                     except Exception as e:
-                        log.warning("Telegram audio download failed: %s", e)
+                        _lost("audio", msg.audio, e)
 
                 if getattr(msg, "document", None):
                     try:
-                        f = await msg.document.get_file()
-                        data = await f.download_as_bytearray()
+                        data = await _fetch(msg.document)
                         mime = msg.document.mime_type or "application/octet-stream"
                         rec = ATTACHMENTS.save(
                             bytes(data),
@@ -1700,7 +1774,7 @@ class TelegramBot:
                         )
                         shas.append(rec.sha256)
                     except Exception as e:
-                        log.warning("Telegram document download failed: %s", e)
+                        _lost("document", msg.document, e)
 
                 # Regular video (msg.video) — Telegram pre-encodes most
                 # uploads as mp4. Stored with kind="video"; the LLM
@@ -1708,8 +1782,7 @@ class TelegramBot:
                 # audio transcript via video_processor on first use.
                 if getattr(msg, "video", None):
                     try:
-                        f = await msg.video.get_file()
-                        data = await f.download_as_bytearray()
+                        data = await _fetch(msg.video)
                         mime = msg.video.mime_type or "video/mp4"
                         rec = ATTACHMENTS.save(
                             bytes(data), mime,
@@ -1718,14 +1791,13 @@ class TelegramBot:
                         )
                         shas.append(rec.sha256)
                     except Exception as e:
-                        log.warning("Telegram video download failed: %s", e)
+                        _lost("video", msg.video, e)
 
                 # Video note ("circle video") — square, no caption, always
                 # mp4. Same handling as msg.video.
                 if getattr(msg, "video_note", None):
                     try:
-                        f = await msg.video_note.get_file()
-                        data = await f.download_as_bytearray()
+                        data = await _fetch(msg.video_note)
                         rec = ATTACHMENTS.save(
                             bytes(data), "video/mp4",
                             filename=f"telegram_videonote_{msg.video_note.file_unique_id}.mp4",
@@ -1733,7 +1805,7 @@ class TelegramBot:
                         )
                         shas.append(rec.sha256)
                     except Exception as e:
-                        log.warning("Telegram video_note download failed: %s", e)
+                        _lost("video note", msg.video_note, e)
 
                 return shas
 
@@ -1864,7 +1936,8 @@ class TelegramBot:
                 user_sent_voice = bool(getattr(update.message, "voice", None))
 
                 # Pick up any media (photos / voice / audio / docs)
-                attachment_shas = await _gather_attachments(update)
+                failed_media: list[str] = []
+                attachment_shas = await _gather_attachments(update, failed=failed_media)
 
                 # Media-group batching. Telegram delivers a photo album
                 # as multiple Update objects, each with the same
@@ -1890,6 +1963,7 @@ class TelegramBot:
                     if entry is None:
                         entry = {
                             "shas": list(attachment_shas),
+                            "failed": list(failed_media),
                             "caption": text,
                             "first_update": update,
                             "speaker_id": f"telegram:{user.id}",
@@ -1914,6 +1988,7 @@ class TelegramBot:
                         # the merged batch below.
                         await entry["flush_event"].wait()
                         attachment_shas = entry["shas"]
+                        failed_media = entry["failed"]
                         text = entry["caption"].strip()
                     else:
                         # Subsequent update for the same group — append
@@ -1923,6 +1998,7 @@ class TelegramBot:
                         for sha in attachment_shas:
                             if sha not in entry["shas"]:
                                 entry["shas"].append(sha)
+                        entry["failed"].extend(failed_media)
                         if text and text not in entry["caption"]:
                             entry["caption"] = (
                                 f"{entry['caption']}\n{text}".strip()
@@ -1997,13 +2073,15 @@ class TelegramBot:
                     _replied = getattr(update.message, "reply_to_message", None)
                     if _replied is not None and _media_kind(_replied):
                         for _sha in await _gather_attachments(
-                                update, msg=_replied, echo_voice=False):
+                                update, msg=_replied, echo_voice=False,
+                                failed=failed_media):
                             if _sha not in attachment_shas:
                                 attachment_shas.append(_sha)
                     if _ctx:
                         text = f"{_ctx}\n\n{text}" if text else _ctx
                 except Exception as e:
                     log.debug("reply context skipped: %s", e)
+                text = with_failed_downloads(text, failed_media)
 
                 if not text and not attachment_shas:
                     return

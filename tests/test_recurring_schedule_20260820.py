@@ -278,7 +278,7 @@ def test_a_scheduled_task_delivers_its_answer(monkeypatch):
     import backend.agent as _ag
     monkeypatch.setattr(_ag, "Agent", _Agent)
     monkeypatch.setattr(sm, "send_to_speaker",
-                        lambda t, b, *a: (sent.update({"to": t, "body": b}), (True, ""))[1])
+                        lambda t, b, *a, **k: (sent.update({"to": t, "body": b}), (True, ""))[1])
     sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
                        "text": "do the digest"})
     assert sent["to"] == "telegram:1"
@@ -321,7 +321,7 @@ def test_a_delivery_failure_is_raised_not_swallowed(monkeypatch):
     import backend.agent as _ag
     monkeypatch.setattr(_ag, "Agent", _Agent)
     monkeypatch.setattr(sm, "send_to_speaker",
-                        lambda t, b, *a: (False, "no chat_id"))
+                        lambda t, b, *a, **k: (False, "no chat_id"))
     with pytest.raises(RuntimeError, match="delivery failed"):
         sm.run_agent_task({"id": "x", "target_speaker": "telegram:1",
                            "text": "t"})

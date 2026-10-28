@@ -82,9 +82,13 @@ class _State:
 _state: ContextVar["_State | None"] = ContextVar("_turn_contract", default=None)
 
 
-def begin_turn():
-    """Open a fresh contract for this turn. Returns a reset token."""
-    return _state.set(_State())
+def begin_turn(active: bool = True):
+    """Open a fresh contract for this turn. Returns a reset token.
+
+    `active=False` opens none: a scheduled run is a report, and on
+    2026-10-27 the waiver it was pushed into reached the owner as an English
+    "ⓘ not verified" line under the evening market review."""
+    return _state.set(_State() if active else None)
 
 
 def reset_turn(token) -> None:

@@ -84,9 +84,15 @@ def _fake_run(monkeypatch, answer: str):
 
     import backend.agent as agent_mod
     monkeypatch.setattr(agent_mod.Agent, "run", run)
-    sent = []
-    monkeypatch.setattr(sm, "send_to_speaker",
-                        lambda t, text, label="": sent.append((t, text, label)) or (True, ""))
+    sent, opts = [], []
+
+    def send(t, text, label="", **kw):
+        sent.append((t, text, label))
+        opts.append(kw)
+        return True, ""
+
+    monkeypatch.setattr(sm, "send_to_speaker", send)
+    _fake_run.opts = opts
     return calls, sent
 
 
@@ -107,6 +113,8 @@ def test_a_report_is_sent_and_labelled(kb, monkeypatch):
                       meta={"name": "PEPE watch"})
     assert sm.run_agent_task(row) == ("sent", "⚠️ PEPE −9%")
     assert sent == [("telegram:1", "⚠️ PEPE −9%", "scheduled task: PEPE watch")]
+    # Rendered like a chat answer (it arrived as "*_BTC_*" on 2026-10-27).
+    assert _fake_run.opts[0]["markdown"] is True and "silent" in _fake_run.opts[0]
 
 
 def test_the_series_repeats_carries_the_report_and_stops_on_done(kb, monkeypatch):
@@ -206,18 +214,23 @@ def _background_turn(monkeypatch, tmp_path, reply):
         def call_json(self, *a, **k):
             return {}
 
+    def never(what):
+        return lambda *a, **k: pytest.fail(f"a background run must not {what}")
+
     monkeypatch.setattr(_llm, "router", lambda: FakeRouter())
-    monkeypatch.setattr(unified_agent, "_try_chat_path",
-                        lambda **kw: pytest.fail("no quick lane for a background run"))
+    monkeypatch.setattr(unified_agent, "_try_chat_path", never("take the quick lane"))
     monkeypatch.setattr(cascade, "route", lambda: None)
-    monkeypatch.setattr(escalation, "should_verify", lambda *_: False)
-    monkeypatch.setattr(endpoint_check, "endpoint_met", lambda **_: True)
-    monkeypatch.setattr(unified_agent, "_post_turn_skill_reflection", lambda *a, **k: None)
-    monkeypatch.setattr(finetune, "collect_from_turn", lambda **_: None)
-    monkeypatch.setattr(finetune, "maybe_capture_correction", lambda **_: None)
-    monkeypatch.setattr(trajectory_memory, "index_turn", lambda *a, **k: None)
+    # Since 2026-10-28 none of the chat-answer judges run on a background
+    # run: their verdicts reached the owner as "[TURN GATE] NOT DONE".
+    monkeypatch.setattr(escalation, "should_verify", never("be verified as a chat answer"))
+    monkeypatch.setattr(endpoint_check, "endpoint_met", never("be judged for a send tool"))
+    monkeypatch.setattr(unified_agent, "_decide_self_correction", never("be corrected"))
+    monkeypatch.setattr(unified_agent, "_post_turn_skill_reflection", never("propose skills"))
+    monkeypatch.setattr(finetune, "collect_from_turn", never("feed finetuning"))
+    monkeypatch.setattr(finetune, "maybe_capture_correction", never("feed finetuning"))
+    monkeypatch.setattr(trajectory_memory, "index_turn", never("be indexed as experience"))
     monkeypatch.setattr(unified_agent, "_commit_turn_memory",
-                        lambda **_: pytest.fail("no facts learned from a task instruction"))
+                        never("learn facts from a task instruction"))
     out = Agent().run(bg.run_prompt("Check PEPE."), channel="telegram",
                       speaker_id="telegram:1", session_key="telegram:hrant:1:1",
                       background=True)
@@ -241,6 +254,17 @@ def test_an_empty_background_turn_stays_empty(monkeypatch, tmp_path):
     answer, _, _ = _background_turn(monkeypatch, tmp_path, "")
     assert answer.strip() == ""
     assert bg.parse_outcome(answer)[1] is True
+
+
+def test_a_background_report_goes_out_as_written(monkeypatch, tmp_path):
+    """2026-10-28: a PEPE report reached the owner with "[TURN GATE] NOT DONE
+    (toolful no-deliver …)" under it after two correction rounds, and the
+    evening review with an English "ⓘ not verified" line. A report is one
+    model call and leaves exactly as the run wrote it."""
+    report = "*PEPE −9%* — protective exit: price below $0.00000425."
+    answer, captured, _ = _background_turn(monkeypatch, tmp_path, report)
+    assert answer == report
+    assert len(captured) == 1, "no correction rounds"
 
 
 # ── the do tool ───────────────────────────────────────────────────────
@@ -309,11 +333,12 @@ def test_a_todo_reminder_is_actually_sent(monkeypatch):
                         SimpleNamespace(answer="Зайди к маме."))
     sent = []
     monkeypatch.setattr(sm, "send_to_speaker",
-                        lambda t, text, label="": sent.append((t, text, label)) or (True, ""))
+                        lambda t, text, label="", **kw: sent.append(
+                            (t, text, label, kw.get("markdown"))) or (True, ""))
     tc.run_check_in({"id": "c1", "target_speaker": "telegram:1",
                      "meta": {"tracker_id": "t1", "step_id": "s1",
                               "check_in_kind": "remind"}})
-    assert sent == [("telegram:1", "Зайди к маме.", "to-do reminder: Visit mom")]
+    assert sent == [("telegram:1", "Зайди к маме.", "to-do reminder: Visit mom", True)]
     assert runs[0]["background"] is True
 
 

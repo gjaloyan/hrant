@@ -3168,7 +3168,12 @@ def run_unified(
     excluded from memory, conversation, trajectory, evaluator, and learning
     stores. Provider usage counters remain operational telemetry."""
     from .turn_policy import begin_turn as _policy_begin
-    _policy_begin(audit_mode=audit_mode)
+    # A scheduled task or reminder run (backend/scheduled_runs.py): no chat
+    # history, no quick lane, not written into the chat as a turn, none of
+    # the gates that judge a chat answer, nothing learned from it.
+    from .scheduled_runs import is_background as _is_bg
+    _bg = _is_bg()
+    _policy_begin(audit_mode=audit_mode, background=_bg)
     # Phase 2 (2026-05-23): reset the per-turn tool-bundle state at
     # the very start of every turn. The ContextVar's default is an
     # empty frozenset, but a previous turn in the same process may
@@ -3220,7 +3225,7 @@ def run_unified(
     # that the change took effect; see backend/turn_contract.py.
     try:
         from .turn_contract import begin_turn as _tc_begin
-        _tc_begin()
+        _tc_begin(active=not _bg)
     except Exception:
         pass
     # Reset the per-turn router fallback reason so the honest model notice
@@ -3249,10 +3254,6 @@ def run_unified(
     except Exception:
         pass
     skey = (session_key or "").strip() or speaker_id
-    # A scheduled task or reminder run: no chat history, no quick lane, not
-    # written into the chat as a turn, no facts learned from its instruction.
-    from .scheduled_runs import is_background as _is_bg
-    _bg = _is_bg()
     # Late imports to avoid cycles.
     from . import roles as _roles
     from . import context_compressor as _cc
@@ -3821,8 +3822,9 @@ def run_unified(
     # block tells the agent that something failed AND that it should
     # explain to the user + propose a fix (config change, model
     # swap, or self-modification). Skipped for supervisor turns —
-    # those are non-user-facing.
-    if not supervisor_mode and not audit_mode:
+    # those are non-user-facing — and for background runs, whose answer is
+    # mailed as the report.
+    if not supervisor_mode and not audit_mode and not _bg:
         try:
             from .provider_error_log import recent_unresolved
             unresolved = recent_unresolved(within_hours=24)
@@ -4320,13 +4322,14 @@ def run_unified(
         # call.
         marker_drift = ""
         try:
-            if audit_mode:
+            # A background run observes and reports; reading is its job.
+            if audit_mode or _bg:
                 cur = 0
             elif not is_error and call_semantics.advances:
                 _drift_state["consecutive_readonly"] = 0
             elif not is_error:
                 _drift_state["consecutive_readonly"] += 1
-            if not audit_mode:
+            if not (audit_mode or _bg):
                 cur = _drift_state["consecutive_readonly"]
             # Fire at 6 (first warning) and 12 (stronger). Beyond
             # that the end-of-turn self-correction will catch it
@@ -4648,14 +4651,12 @@ def run_unified(
             "I produced no answer for this turn. That is a failure, not a "
             "result: I ran tools and then returned nothing."
         )
-    # A background run that has nothing to report says so with a token (or,
-    # rarely, with nothing at all), and that is a complete answer: a judge
-    # reading "[SILENT]" as unfinished work would push the run to write the
-    # very status message it exists not to send (backend/scheduled_runs.py).
-    from .scheduled_runs import SILENT as _SILENT
-    _silent_bg = _bg and (not (answer or "").strip()
-                          or answer.strip().startswith(_SILENT))
-    if not supervisor_mode and (answer or "").strip() and not _silent_bg:
+    # Not for a background run, whose final answer IS the message (or
+    # [SILENT], or nothing). These rounds read a report that names no send
+    # tool as an unfinished turn, steer it toward ask_user / schedule_message
+    # — both refused in a run — and on 2026-10-28 05:47 put "[TURN GATE] NOT
+    # DONE" under a PEPE report the owner received.
+    if not supervisor_mode and (answer or "").strip() and not _bg:
         # Two rounds, and the RE-ANSWER IS RE-GATED (2026-08-06). The single
         # -shot version accepted whatever came back unexamined, so a corrective
         # could be answered with a fresh false completion and shipped. When the
@@ -4857,8 +4858,8 @@ def run_unified(
         # verifier call on an accepted small-tier turn.
         vr = _cascade_prevr
         _verification_performed = True
-    elif not _silent_bg and should_verify(tool_outputs, agent._trace or []):
-        # (A silent background run states no claims; nothing to verify.)
+    elif not _bg and should_verify(tool_outputs, agent._trace or []):
+        # (A background run's verdict would change nothing it sends.)
         try:
             from .verifier import verify
             vr = verify(
@@ -4930,10 +4931,12 @@ def run_unified(
         # strictly worse input.
         _trace_tool_names = _turn_tool_names(agent)
         _trace_tool_results = _turn_tool_results(agent._trace or [])
-        if audit_mode:
+        if audit_mode or _bg:
             # Audit is observation by definition. Do not pay an endpoint judge
             # to demand a state-changing action from an intentionally read-only
             # turn, and do not cap an otherwise grounded diagnostic report.
+            # A background run delivers by answering; the judge asks for a
+            # send tool it does not have.
             _was_met = True
             vr.endpoint_met = True
         else:
@@ -4975,8 +4978,9 @@ def run_unified(
     # re-verified, and the better of {original, revised} ships. Placed
     # BEFORE skill_reflection so the reflection gates on the improved
     # confidence. ask_user turns skip — the answer is about to be
-    # replaced by the question payload anyway.
-    if not supervisor_mode and not _pending_question_id["v"]:
+    # replaced by the question payload anyway. Background runs skip it with
+    # the verifier that feeds it.
+    if not supervisor_mode and not _bg and not _pending_question_id["v"]:
         try:
             from .answer_critic import revise_and_pick, should_critique
             _crit_fire, _crit_why = should_critique(vr, answer=answer or "")
@@ -5013,8 +5017,10 @@ def run_unified(
     # the answer isn't a refusal/rewriter output AND no propose_skill
     # was already called this turn AND verifier confidence ≥ 50 AND
     # endpoint was met. See `_should_reflect_for_skill`. Supervisor
-    # turns SKIP — internal plumbing, not workflows worth distilling.
-    if not supervisor_mode and not audit_mode:
+    # turns SKIP — internal plumbing, not workflows worth distilling. So do
+    # background runs: at 00:43 on 2026-10-28 an election check proposed a
+    # skill and put its activation card in the owner's Telegram.
+    if not supervisor_mode and not audit_mode and not _bg:
         try:
             _post_turn_skill_reflection(
                 agent, task, answer, speaker_id,
@@ -5092,8 +5098,9 @@ def run_unified(
         except Exception as e:
             log.debug("unified: memory extract failed: %s", e)
 
-    # Goals + conversation persistence + evaluator log.
-    if not audit_mode:
+    # Goals + conversation persistence + evaluator log. A background run is
+    # not an interaction and not a conversation turn.
+    if not audit_mode and not _bg:
         try:
             GOALS.tick_interaction()
         except Exception:
@@ -5103,8 +5110,9 @@ def run_unified(
     # They're internal plumbing — including them would make the
     # conversation buffer look like "user asked status, agent asked
     # status, user asked status…" because the synthetic
-    # BACKGROUND_JOB_COMPLETED messages would surface as turns.
-    if not supervisor_mode and not audit_mode:
+    # BACKGROUND_JOB_COMPLETED messages would surface as turns. Same for a
+    # background run: what it sends is recorded by record_in_chat.
+    if not supervisor_mode and not audit_mode and not _bg:
         CONVERSATION.add_turn(
             task, answer or "",
             intent="task", is_chat=False,
@@ -5212,7 +5220,9 @@ def run_unified(
             # tasks can retrieve the trajectory. Supervisor turns are
             # synthetic plumbing, not reusable experience. The module
             # applies its own quality gates (confidence, tool count).
-            if not supervisor_mode:
+            # Background runs are the same check every half hour — they
+            # would crowd out the turns worth retrieving.
+            if not supervisor_mode and not _bg:
                 try:
                     from .trajectory_memory import index_turn
                     index_turn(turn_id, artifact)
@@ -5251,7 +5261,7 @@ def run_unified(
     except Exception as e:
         log.debug("unified: sessions add_turn failed (non-fatal): %s", e)
 
-    if not audit_mode:
+    if not audit_mode and not _bg:
         try:
             EVALUATOR.log(EvalEntry(
                 question=task,
@@ -5316,7 +5326,7 @@ def run_unified(
     # MetaLearner.stats() / extract_patterns() / FIRE_SELF_REFLECTION /
     # FIRE_GOAL_PROPOSE actually have material to work on. Best-effort
     # — never let analysis crash the user-facing reply.
-    if vr.confidence < 60 and not supervisor_mode and not audit_mode:
+    if vr.confidence < 60 and not supervisor_mode and not audit_mode and not _bg:
         try:
             MEMORY  # noqa: B018 — just ensures the module import succeeded
             from .meta_learner import META_LEARNER as _ML
@@ -5353,7 +5363,7 @@ def run_unified(
     # revision pass, immediately before the answer leaves. Nothing downstream
     # can edit or drop it, which is the point: the model must not get a chance
     # to soften the record of what it failed to prove.
-    if not supervisor_mode and not audit_mode:
+    if not supervisor_mode and not audit_mode and not _bg:
         if _contract_status_tag:
             answer = _append_open_status(answer, _contract_status_tag)
         else:

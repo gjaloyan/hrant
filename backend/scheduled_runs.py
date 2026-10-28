@@ -88,8 +88,24 @@ def run_prompt(instruction: str, *, previous: str = "", what: str = "task") -> s
     return head + "\n\n## The task\n" + (instruction or "").strip()
 
 
+# Spellings of "nothing to send" a model writes when it drops the brackets.
+_SILENCE_LINES = {"[SILENT]", "SILENT", "NO_REPLY", "NO REPLY"}
+
+
+def _is_silence_line(line: str) -> bool:
+    return line.strip().strip(".!*_`'\"").strip().upper() in _SILENCE_LINES
+
+
 def parse_outcome(answer: str) -> tuple[str, bool, bool]:
-    """(text to deliver, silent, done) from a run's final answer."""
+    """(text to deliver, silent, done) from a run's final answer.
+
+    Silent when the answer is empty, opens with [SILENT], or has a silence
+    marker as its own first or last line — Hermes's rule for its cron lane.
+    2026-10-27 15:15: a run on the fallback model wrote its whole check and
+    put [SILENT] under it; only a leading token counted then, so the owner
+    got the check with "[SILENT]" at the bottom. A marker inside a sentence
+    is still content and is delivered.
+    """
     text = (answer or "").strip()
     done = False
     lines = text.splitlines()
@@ -100,7 +116,9 @@ def parse_outcome(answer: str) -> tuple[str, bool, bool]:
     if DONE in text and text.rstrip().endswith(DONE):
         done = True
         text = text.rstrip()[: -len(DONE)].strip()
-    silent = (not text) or text == SILENT or text.startswith(SILENT)
+    rows = [ln for ln in text.splitlines() if ln.strip()]
+    silent = (not rows or text.upper().startswith(SILENT)
+              or _is_silence_line(rows[0]) or _is_silence_line(rows[-1]))
     return ("" if silent else text), silent, done
 
 

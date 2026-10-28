@@ -29,15 +29,26 @@ AUDIT_POLICY = TurnPolicy(
     persist_cognitive_state=False,
     enforce_action_progress=False,
 )
+# A scheduled task or reminder run (backend/scheduled_runs.py). It may act,
+# but its final answer IS the delivery, so the pressure to "take an action"
+# (ask_user, schedule_message — both refused there) is wrong for it, and a
+# run repeated every half hour is nothing to learn from.
+BACKGROUND_POLICY = TurnPolicy(
+    mode="background",
+    persist_cognitive_state=False,
+    enforce_action_progress=False,
+)
 
 _current_policy: ContextVar[TurnPolicy] = ContextVar(
     "hrant_turn_policy", default=NORMAL_POLICY,
 )
 
 
-def begin_turn(*, audit_mode: bool = False):
+def begin_turn(*, audit_mode: bool = False, background: bool = False):
     """Install a fresh policy for the current turn and return its token."""
-    return _current_policy.set(AUDIT_POLICY if audit_mode else NORMAL_POLICY)
+    return _current_policy.set(AUDIT_POLICY if audit_mode
+                               else BACKGROUND_POLICY if background
+                               else NORMAL_POLICY)
 
 
 def reset_turn(token) -> None:

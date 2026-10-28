@@ -94,7 +94,8 @@ def run_check_in(row: dict) -> None:
         if silent:
             return
         ok, err = send_to_speaker(target, body,
-                                  f"to-do reminder: {step['title'][:60]}")
+                                  f"to-do reminder: {step['title'][:60]}",
+                                  markdown=True)
         if not ok:
             log.warning("check-in %s not delivered: %s", row.get("id"), err)
     except Exception as e:

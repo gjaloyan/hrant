@@ -618,11 +618,14 @@ def deliver_due() -> dict:
 
 
 def send_to_speaker(target_speaker: str, text: str,
-                    label: str = "scheduled delivery") -> tuple[bool, str]:
+                    label: str = "scheduled delivery", *,
+                    markdown: bool = False, silent: bool = False) -> tuple[bool, str]:
     """Push `text` to a speaker out of band. Returns (ok, error).
 
     What is sent is also written into the person's chat under `label`, so
-    the conversation that follows knows it was said.
+    the conversation that follows knows it was said. `markdown=True` for
+    text the agent wrote (rendered like a chat answer, MEDIA: lines sent as
+    files); `silent=True` for Telegram without a notification sound.
 
     The transport half of `deliver()`, split out so a scheduled agent task
     can hand over its ANSWER. Ledger bookkeeping stays in the caller: this
@@ -669,7 +672,8 @@ def send_to_speaker(target_speaker: str, text: str,
                     if getattr(b, "_running", False)), None)
         if bot is None:
             return False, "no telegram bot running"
-        if not bot.send_text(text, chat_id=chat_id):
+        if not bot.send_text(text, chat_id=chat_id, markdown=markdown,
+                             silent=silent):
             return False, "send_text returned False"
         record_in_chat(target, text, label)
         return True, ""
@@ -724,8 +728,13 @@ def run_agent_task(row: dict) -> tuple[str, str]:
                     row.get("id"))
     body, silent, done = bg.parse_outcome(raw)
     if not silent:
+        # A report found at night arrives without a sound (2026-10-28: two
+        # PEPE reports at 04:46 and 05:47); a message the user timed lands as
+        # set, through deliver().
+        from .follow_up import in_quiet_hours
         ok, err = send_to_speaker(
-            target, body, f"scheduled task: {meta.get('name') or text[:60]}")
+            target, body, f"scheduled task: {meta.get('name') or text[:60]}",
+            markdown=True, silent=in_quiet_hours(datetime.now(timezone.utc)))
         if not ok:
             raise RuntimeError(f"task ran but delivery failed: {err}")
     if done:

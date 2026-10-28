@@ -120,6 +120,15 @@ def _is_real_person(speaker: str) -> bool:
     return not speaker.startswith(("audit:", "system:", "bench"))
 
 
+def _cut(text, cap: int) -> str:
+    """Shorten for the transcript, saying so. Cut silently at 900 characters,
+    the 2593-character evening review of 2026-10-27 read as a message that
+    stopped mid-sentence, and the review reported — and wrote a rule
+    against — a truncated delivery that never happened."""
+    s = text or ""
+    return s if len(s) <= cap else f"{s[:cap]} [… {len(s) - cap} more characters, not shown here]"
+
+
 def day_transcript(since: str, until: str = "9999", *, store=None) -> tuple[str, dict]:
     """Yesterday's conversations, grouped by thread. Returns (text, stats)."""
     from .. import threads as _t
@@ -135,8 +144,8 @@ def day_transcript(since: str, until: str = "9999", *, store=None) -> tuple[str,
             stats["speakers"].append(speaker)
         lines = [f"=== conversation {skey} (speaker {speaker or '?'}) ==="]
         for r in rows:
-            lines.append(f"[{r.get('ts', '')}] USER: {(r.get('user') or '')[:_USER_CAP]}")
-            lines.append(f"ASSISTANT: {(r.get('answer') or '')[:_AGENT_CAP]}")
+            lines.append(f"[{r.get('ts', '')}] USER: {_cut(r.get('user'), _USER_CAP)}")
+            lines.append(f"ASSISTANT: {_cut(r.get('answer'), _AGENT_CAP)}")
             if r.get("trace"):
                 lines.append(f"(did: {r['trace'][:300]})")
         blocks.append("\n".join(lines))

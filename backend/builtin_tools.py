@@ -1472,20 +1472,31 @@ def _complete_supervisor_handler(
                     "unmet": [r.to_dict() for r in blocking],
                     "endpoint_id": job.endpoint_id,
                 }, ensure_ascii=False)
-    # Deliver the final DM to the user. Path picked per channel:
-    #   • Telegram (original_chat_id set) → push via _send_with_buttons
-    #     so the user sees it directly in their chat.
-    #   • Web UI / CLI / API (no chat_id but speaker_id present) →
-    #     append a synthetic turn to the conversation log so the next
-    #     time the user opens the session they SEE the agent's final
-    #     answer. Pre-fix the final_message lived only in
-    #     supervisor_history (internal audit) and the WebUI session
-    #     showed nothing — the user had no way to know the chain
-    #     terminated.
-    # Either path is fail-soft: we still mark_terminal after, so the
-    # chain doesn't loop on a delivery glitch.
+    # Deliver the final message to whoever started the job, in their chat:
+    # pushed to Telegram (the chat id looked up from the speaker) or written
+    # into the WebUI session, and recorded in the conversation either way so
+    # "is it done?" has an answer. Until 2026-10-28 a first launch never
+    # carried a chat id, so every job started from Telegram since August —
+    # 42 of them — took the session-log branch and its result never reached
+    # the phone: the 3D-skill install that day promised to confirm by itself
+    # and did not. Fail-soft: we still mark_terminal after, so the chain
+    # doesn't loop on a delivery glitch.
     dm_status = "skipped"
-    if final_message and job.original_chat_id:
+    if final_message and (job.original_speaker_id or "").strip():
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            from .follow_up import in_quiet_hours
+            from .scheduled_messages import send_to_speaker
+            _ok, _err = send_to_speaker(
+                job.original_speaker_id, final_message,
+                f"background job {job.job_id} ({job.label or '?'}) "
+                f"completed; supervisor decision: {decision_norm}",
+                markdown=True, silent=in_quiet_hours(_dt.now(_tz.utc)))
+            dm_status = "sent" if _ok else f"error:{_err[:120]}"
+        except Exception as e:
+            log.warning("complete_supervisor delivery failed: %s", e)
+            dm_status = f"error:{type(e).__name__}"
+    elif final_message and job.original_chat_id:
         try:
             from . import channels as _ch
             cm = getattr(_ch, "CHANNELS", None)
@@ -1500,39 +1511,7 @@ def _complete_supervisor_handler(
         except Exception as e:
             log.warning("complete_supervisor DM dispatch failed: %s", e)
             dm_status = f"error:{type(e).__name__}"
-    elif final_message and (job.original_speaker_id or "").strip():
-        # Non-Telegram channel (WebUI / CLI / API). Stash the message
-        # as a synthetic assistant turn keyed by speaker_id so the user
-        # sees the supervisor's final answer when they next open this
-        # session. The synthetic "user side" of the turn names the
-        # background job so the conversation log is self-explanatory.
-        try:
-            from .conversation import CONVERSATION
-            CONVERSATION.add_turn(
-                f"[background job {job.job_id} ({job.label or '?'}) "
-                f"completed; supervisor decision: {decision_norm}]",
-                final_message,
-                intent="supervisor",
-                is_chat=False,
-                confidence=70,
-                topics_used=[],
-                channel="supervisor",
-                speaker_id=job.original_speaker_id,
-                session_key=job.original_speaker_id,
-            )
-            from .threads import THREADS
-            THREADS.append(
-                job.original_speaker_id,
-                user=(f"[background job {job.job_id} ({job.label or '?'}) "
-                      f"completed; supervisor decision: {decision_norm}]"),
-                answer=final_message,
-            )
-            dm_status = "queued_to_session"
-        except Exception as e:
-            log.warning(
-                "complete_supervisor session-log fallback failed: %s", e,
-            )
-            dm_status = f"error:{type(e).__name__}"
+    if final_message:
         # Side-publish to LogBus so any open SSE clients (WebUI Logs
         # tab) see the supervisor decision in real time even without
         # opening the chat session.
@@ -3903,8 +3882,11 @@ def register_builtin_tools() -> None:
             "self-contained: what to do, which sources, the exact "
             "condition, and WHEN the user should hear from it (every run, "
             "or only when something specific happens; otherwise the run "
-            "stays silent). Do not put scheduling words in the instruction "
-            "('then schedule the next check'): `every` repeats it.\n\n"
+            "stays silent). That condition is the user's, in their terms: "
+            "do not make it stricter than they said — 'tell me when there "
+            "are results' includes the first results. Do not put scheduling "
+            "words in the instruction ('then schedule the next check'): "
+            "`every` repeats it.\n\n"
             "Not this tool for fixed words at a time (`schedule_message`) "
             "or for tracking a to-do (`add_todo`). Owner/trusted only; the "
             "result goes to the person who asked."
