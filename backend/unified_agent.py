@@ -1864,8 +1864,10 @@ def _post_turn_skill_reflection(
     `propose_skill(name=<same>, ...)` to overwrite the user-tier
     skill with a merged version (preserving useful old parts, adding
     new patterns from this turn). The `upsert_user_skill` path writes
-    by name, so propose_skill with an existing name replaces it
-    (and the new version is still DISABLED until owner approves).
+    by name, so propose_skill with an existing name replaces it. The
+    replacement keeps the skill's enabled state, so a switched-on
+    skill is live at once; the previous version is kept and the
+    rewrite is listed in the next morning report.
     """
     should, reason = _should_reflect_for_skill(
         agent, answer,

@@ -781,6 +781,8 @@ def _load_skill_handler(name: str) -> str:
             "ok": False,
             "error": f"skill {name!r} is disabled — owner toggles in the Skills panel",
         }, ensure_ascii=False)
+    from . import skill_upkeep
+    skill_upkeep.record_use(sk.name)
     return json.dumps({
         "ok": True,
         "name": sk.name,

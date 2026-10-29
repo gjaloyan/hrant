@@ -13,8 +13,13 @@ prod that had jammed ("too long", "no room left"). Profiles were only ever
 APPENDED to — the owner's reached 19.5k characters, all of it in every
 prompt.
 
-Three outputs:
-  * learned rules  -> backend.learned_rules (data, bounded, revertible)
+Outputs:
+  * learned rules  -> backend.learned_rules (data, bounded, revertible);
+    an issue a current rule already forbids is counted against that rule
+    instead of being dropped, and a rule broken on several nights is
+    reported as needing a check in code
+  * skill upkeep   -> backend.skill_upkeep: long-unused agent skills are
+    switched off, and skills rewritten while on are listed
   * compact profile -> each oversized or updated profile is REWRITTEN to a
     bounded size; the Language section is copied back verbatim, because it
     belongs to the user's explicit choice, not to a summariser
@@ -51,7 +56,7 @@ Look for the assistant's OWN failures, each with evidence in the transcript:
 Return strictly JSON:
 {
   "summary": "2-3 sentences on how the day went for the people it served",
-  "issues": [{"kind": "wrong_answer|forgot_context|asked_instead_of_doing|ignored_preference|gave_up|false_claim|slow|tool_failure|other", "what": "one sentence", "evidence": "timestamp + a short quote"}],
+  "issues": [{"kind": "wrong_answer|forgot_context|asked_instead_of_doing|ignored_preference|gave_up|false_claim|slow|tool_failure|other", "what": "one sentence", "evidence": "timestamp + a short quote", "breaks_rule": null}],
   "lessons": ["one imperative rule in English, at most 180 characters"],
   "report": "a short message to the owner, in REPORT_LANGUAGE: what went wrong, what you will do differently; 3-6 lines, no greetings"
 }
@@ -60,14 +65,15 @@ Rules:
 - At most 6 issues and 3 lessons, most important first. Every lesson must prevent an issue you listed; no issue, no lesson.
 - Safety and trust come first: a lesson about credentials, privacy or a false claim outranks one about speed.
 - A lesson is a PROCESS rule that generalises ("When the user sends photos and asks for a design, generate images with generate_image instead of describing them"). Never a fact about one request (a car model, a case number, a person).
-- Do not repeat anything already in CURRENT RULES.
+- CURRENT RULES are numbered. When an issue is something a current rule already forbids, set "breaks_rule" to that rule's number and write no new lesson for it: the rule exists and was not followed, and that is what must be counted. Otherwise "breaks_rule" is null.
 - Empty lists when the day went fine — say so in the summary and report."""
 
 MERGE_SYSTEM = """You maintain the short list of rules an AI assistant wrote for itself after reviewing its mistakes. Rewrite CURRENT plus NEW into at most MAX rules.
 
-Return strictly JSON: {"rules": ["...", "..."]}
+Return strictly JSON: {"rules": [{"text": "...", "from": ["C1", "N2"]}]}
 
 - Each rule: one imperative sentence in English, at most 180 characters.
+- "from" lists the id of every CURRENT and NEW rule the rewritten rule covers. A rule's history (when it was written, how often it was broken) follows these ids, so name every source.
 - Merge rules that say the same thing; keep the most general wording.
 - Keep every NEW rule unless an existing one already covers it.
 - Drop the least useful rules if you must, never the NEW ones first."""
@@ -157,23 +163,51 @@ def day_transcript(since: str, until: str = "9999", *, store=None) -> tuple[str,
 
 # ── lessons ─────────────────────────────────────────────────────────
 
-def _merge_rules(current: list[str], new: list[str], max_rules: int) -> list[str]:
+def _merge_rules(current: list[str], new: list[str], max_rules: int) -> list:
+    """The merged set as {text, from} items (plain strings when the model
+    drops the ids; learned_rules matches those by wording)."""
     resp = _call_json(
         MERGE_SYSTEM.replace("MAX", str(max_rules)),
-        json.dumps({"CURRENT": current, "NEW": new}, ensure_ascii=False),
-        max_tokens=1200)
-    return [str(r) for r in (resp.get("rules") or []) if str(r).strip()]
+        json.dumps({"CURRENT": [{"id": f"C{i}", "text": t} for i, t in enumerate(current, 1)],
+                    "NEW": [{"id": f"N{i}", "text": t} for i, t in enumerate(new, 1)]},
+                   ensure_ascii=False),
+        max_tokens=1500)
+    out: list = []
+    for r in resp.get("rules") or []:
+        if isinstance(r, dict) and str(r.get("text") or "").strip():
+            out.append({"text": str(r["text"]), "from": [str(x) for x in r.get("from") or []]})
+        elif isinstance(r, str) and r.strip():
+            out.append(r)
+    return out
 
 
-def review(transcript: str) -> dict:
-    """One LLM pass over the day. Returns the parsed JSON (may be {})."""
-    from .. import learned_rules
-    current = [r["text"] for r in learned_rules.rules()]
+def review(transcript: str, current: Optional[list[str]] = None) -> dict:
+    """One LLM pass over the day. Returns the parsed JSON (may be {}).
+
+    `current` is the rule texts in the order the prompt numbers them, so
+    an issue's `breaks_rule` can be mapped back (`_broken_rules`)."""
+    if current is None:
+        from .. import learned_rules
+        current = [r["text"] for r in learned_rules.rules()]
     user = (f"REPORT_LANGUAGE: {_report_language()}\n\n"
-            f"CURRENT RULES:\n" + ("\n".join(f"- {c}" for c in current) or "(none)")
+            f"CURRENT RULES:\n" + ("\n".join(f"{i}. {c}" for i, c in enumerate(current, 1))
+                                   or "(none)")
             + f"\n\nYESTERDAY'S CONVERSATIONS:\n{transcript}")
     resp = _call_json(REVIEW_SYSTEM, user, max_tokens=2500)
     return resp if isinstance(resp, dict) else {}
+
+
+def _broken_rules(issues: list[dict], current: list[str]) -> list[tuple[str, str]]:
+    """(rule text, what happened) for each issue the review tied to a rule."""
+    out: list[tuple[str, str]] = []
+    for issue in issues or []:
+        m = re.search(r"\d+", str(issue.get("breaks_rule") or ""))
+        if not m:
+            continue
+        i = int(m.group()) - 1
+        if 0 <= i < len(current):
+            out.append((current[i], str(issue.get("what") or "")))
+    return out
 
 
 # ── profiles ────────────────────────────────────────────────────────
@@ -250,7 +284,9 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
                notify: bool = True) -> dict:
     """The nightly step. Never raises; returns what it did."""
     out: dict = {"status": "ok", "lessons_added": [], "issues": [],
-                 "profiles": [], "summary": "", "report": ""}
+                 "profiles": [], "summary": "", "report": "",
+                 "rules_broken": [], "escalated": [],
+                 "skills_disabled": [], "skills_changed": []}
     now = now or time.time()
     since = datetime.fromtimestamp(now - 26 * 3600).strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -261,16 +297,24 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
 
     if transcript.strip():
         try:
-            res = review(transcript)
+            from .. import learned_rules
+            current = [r["text"] for r in learned_rules.rules()]
+            res = review(transcript, current)
             out["summary"] = str(res.get("summary") or "")
             out["issues"] = [i for i in (res.get("issues") or []) if isinstance(i, dict)][:6]
             out["report"] = str(res.get("report") or "").strip()
+            # Before the lessons: a merge below can reword the very rules
+            # these issues point at.
+            broken = _broken_rules(out["issues"], current)
+            out["rules_broken"] = [text for text, _ in broken]
+            if broken and not dry_run:
+                out["escalated"] = learned_rules.record_violations(broken)
             lessons = [str(l) for l in (res.get("lessons") or []) if str(l).strip()][:3]
             out["lessons_proposed"] = lessons
             if lessons and not dry_run:
-                from .. import learned_rules
+                fresh_issues = [i for i in out["issues"] if not i.get("breaks_rule")]
                 evidence = "; ".join(str(i.get("evidence") or "")[:80]
-                                     for i in out["issues"][:3])
+                                     for i in fresh_issues[:3])
                 added = learned_rules.add(lessons, evidence=evidence, merge=_merge_rules)
                 out["lessons_added"] = added.get("added") or []
         except Exception as e:
@@ -306,7 +350,18 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
     except Exception as e:
         log.warning("profile step failed: %s", e)
 
-    if notify and not dry_run and (out["report"] or out["lessons_added"] or out["profiles"]):
+    # Skills the agent wrote: switch off the ones nothing has loaded for
+    # months, and list the ones rewritten while switched on.
+    try:
+        from .. import skill_upkeep
+        out["skills_disabled"] = skill_upkeep.disable_stale(dry_run=dry_run)
+        out["skills_changed"] = skill_upkeep.take_changes(consume=not dry_run)
+    except Exception as e:
+        log.warning("skill upkeep failed: %s", e)
+
+    if notify and not dry_run and (out["report"] or out["lessons_added"] or out["profiles"]
+                                   or out["escalated"] or out["skills_disabled"]
+                                   or out["skills_changed"]):
         _notify_owner(out)
     return out
 
@@ -318,8 +373,20 @@ def _notify_owner(out: dict) -> None:
     if out.get("lessons_added"):
         lines.append("")
         lines.extend(f"+ {l}" for l in out["lessons_added"])
+    for r in out.get("escalated") or []:
+        nights = ", ".join(v["night"] for v in r.get("violations") or [])
+        lines.append(f"⚠ broken again on {nights} although it is a rule; a prompt "
+                     f"line is not holding it, it needs a check in code: {r['text']}")
     for p in out.get("profiles") or []:
         lines.append(f"profile {Path(p['path']).name}: {p['before']} → {p['after']}")
+    if out.get("skills_disabled"):
+        from ..skill_upkeep import STALE_DAYS
+        lines.append(f"skills switched off, not loaded for {STALE_DAYS} days: "
+                     + ", ".join(out["skills_disabled"]) + " (switch back on under Skills)")
+    for c in out.get("skills_changed") or []:
+        lines.append(f"skill {c['name']} rewritten while on: +{c['added']} −{c['removed']} "
+                     f"lines, previous version kept as {c['backup']}")
+        lines.extend(f"  + {s}" for s in (c.get("sample") or [])[:2])
     # Delivered in the morning, not when the review runs. It runs at 03:00,
     # and on 2026-10-24/25 the report reached the owner's phone at 03:01.
     # Nothing in it is urgent; it is a "say" message queued for the end of

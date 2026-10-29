@@ -173,6 +173,7 @@ def test_a_quiet_day_changes_nothing(tmp_path, monkeypatch):
     from backend import threads
     from backend.threads import ThreadStore
     from backend.consolidation import review
+    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(threads, "THREADS", ThreadStore(root=tmp_path / "t"))
     monkeypatch.setattr(lr, "_path", lambda: tmp_path / "rules.json")
     monkeypatch.setattr(review, "_call_json",

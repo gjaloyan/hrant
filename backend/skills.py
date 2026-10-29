@@ -857,6 +857,9 @@ class SkillsManager:
         else:
             disabled.add(name)
         _save_disabled(disabled)
+        if enabled:
+            from . import skill_upkeep
+            skill_upkeep.record_enabled(name)
         self.reload()
         return self.get(name)
 
@@ -973,7 +976,11 @@ def propose(
        reset it). Do NOT fire `_fire_skill_proposed` — no second
        DM, no "you already approved this, but here's another
        button" prompt the user has been complaining about
-       (2026-05-21).
+       (2026-05-21). When the skill is switched on, the previous
+       version is kept and the change is listed in the next morning
+       report (`skill_upkeep.note_silent_rewrite`): the rewrite is
+       live at once, and until 2026-10-29 nothing recorded what it
+       said.
 
     Returns the freshly-loaded Skill, or None on persistence failure.
     """
@@ -999,6 +1006,12 @@ def propose(
     _existing_source = getattr(existing, "source", "") if existing else ""
     is_update = existing is not None and _existing_source == "user"
     was_enabled = bool(existing.enabled) if is_update else False
+    previous = None
+    if is_update and was_enabled:
+        try:
+            previous = (SKILLS.user_dir / clean_name / "SKILL.md").read_text(encoding="utf-8")
+        except OSError:
+            previous = None
 
     content = _render_skill_md(
         name=clean_name,
@@ -1019,6 +1032,10 @@ def propose(
         # (don't reset to disabled), don't fire the proposed-DM.
         # The owner's earlier decision about this name stands.
         SKILLS.set_enabled(clean_name, was_enabled)
+        if previous is not None:
+            from . import skill_upkeep
+            skill_upkeep.note_silent_rewrite(SKILLS.user_dir / clean_name, clean_name,
+                                             previous, content, requester=requester)
         sk = SKILLS.get(clean_name)
         return sk
 
