@@ -1278,6 +1278,9 @@ _TOOL_LLM_RESULT_CAPS: dict[str, int] = {
     "glob": 4000,
     "grep": 4000,
     "search": 4000,
+    "load_skill": 16000,
+    "delegate": 8000,
+    "read_thread": 8000,
 }
 _TOOL_LLM_DEFAULT_CAP = 6000
 _TOOL_LLM_ERROR_CAP = 2000

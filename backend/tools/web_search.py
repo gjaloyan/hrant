@@ -115,10 +115,25 @@ def _searxng(query: str, max_results: int,
             rec["reason"] = f"http {r.status_code}"
             return []
         data = r.json()
+        query_has_cjk = bool(re.search(r"[\u4e00-\u9fff]", query or ""))
+        query_wants_wiki = "wikipedia" in (query or "").lower()
         hits: list[WebResult] = []
         for item in data.get("results", []):
             url_value = item.get("url") or ""
             if not url_value:
+                continue
+            title_value = item.get("title", "") or ""
+            url_low = url_value.rstrip("/").lower()
+            if not query_has_cjk:
+                if any(d in url_low for d in ("zhihu.com", "baidu.com")):
+                    continue
+                if len(re.findall(r"[\u4e00-\u9fff]", title_value)) >= 3:
+                    continue
+            if not query_wants_wiki and url_low in (
+                "https://www.wikipedia.org",
+                "https://en.wikipedia.org/wiki/main_page",
+                "https://en.wikipedia.org/wiki/wikipedia",
+            ):
                 continue
             raw_snippet = item.get("snippet") or item.get("content") or ""
             pub = str(item.get("publishedDate") or item.get("pubdate") or "").strip()
@@ -128,7 +143,7 @@ def _searxng(query: str, max_results: int,
             else:
                 snippet = raw_snippet
             hits.append(WebResult(
-                title=item.get("title", ""),
+                title=title_value,
                 url=url_value,
                 snippet=snippet,
             ))
@@ -149,6 +164,37 @@ def _searxng(query: str, max_results: int,
 _GNEWS_WINDOWS = {"day": ("1d", 36.0), "week": ("7d", 192.0),
                   "month": ("30d", 768.0), "year": ("1y", 8900.0)}
 
+_NEWS_NOISE_WORDS = frozenset({
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
+    "oct", "nov", "dec", "today", "latest", "current", "news",
+    "update", "updates", "сегодня", "новости", "свежие", "последние",
+})
+
+
+def _compact_news_query(query: str, max_words: int = 5) -> str:
+    """Compact an over-stuffed multi-topic/date query into <= `max_words`
+    core keywords so Google News RSS does not return 0 items on strict AND
+    matching."""
+    tokens = re.findall(r"[A-Za-zА-Яа-яЁё0-9$%.-]+", query or "")
+    kept: list[str] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        clean = tok.strip(".,;:!?")
+        low = clean.lower()
+        if not low or low in _NEWS_NOISE_WORDS:
+            continue
+        if re.fullmatch(r"202\d", low) or re.fullmatch(r"\d{1,2}", low):
+            continue
+        if low in seen:
+            continue
+        seen.add(low)
+        kept.append(clean)
+        if len(kept) >= max_words:
+            break
+    return " ".join(kept)
+
 
 def _google_news_rss(query: str, max_results: int,
                      recency: str | None = None,
@@ -166,18 +212,19 @@ def _google_news_rss(query: str, max_results: int,
     import xml.etree.ElementTree as ET
 
     win, max_hours = _GNEWS_WINDOWS.get(recency or "", ("7d", 192.0))
-    q = f"{query} when:{win}" if "when:" not in query else query
     cyrillic = bool(re.search(r"[\u0400-\u04ff]", query))
-    params = {
-        "q": q,
-        "hl": "ru" if cyrillic else "en-US",
-        "gl": "RU" if cyrillic else "US",
-        "ceid": "RU:ru" if cyrillic else "US:en",
-    }
     url = "https://news.google.com/rss/search"
     rec = {"provider": "google_news_rss", "status": None, "bytes": 0,
            "parsed": 0, "url": url, "reason": ""}
-    try:
+
+    def _fetch_items(q_str: str) -> list[tuple[float, WebResult]]:
+        q_full = f"{q_str} when:{win}" if "when:" not in q_str else q_str
+        params = {
+            "q": q_full,
+            "hl": "ru" if cyrillic else "en-US",
+            "gl": "RU" if cyrillic else "US",
+            "ceid": "RU:ru" if cyrillic else "US:en",
+        }
         r = httpx.get(
             url, params=params, headers=_BROWSER_HEADERS,
             timeout=httpx.Timeout(8.0, connect=2.0), follow_redirects=True,
@@ -189,7 +236,7 @@ def _google_news_rss(query: str, max_results: int,
             return []
         root = ET.fromstring(r.text or "")
         now = datetime.now(timezone.utc)
-        dated_items: list[tuple[float, WebResult]] = []
+        items: list[tuple[float, WebResult]] = []
         for item in root.iter("item"):
             title = _clean(item.findtext("title") or "")
             link = (item.findtext("link") or "").strip()
@@ -220,11 +267,19 @@ def _google_news_rss(query: str, max_results: int,
             meta_prefix = " · ".join(p for p in (stamp, source) if p)
             snippet = (f"[{meta_prefix}] {desc}".strip()
                        if meta_prefix else desc)
-            dated_items.append((ts, WebResult(title=title, url=link, snippet=snippet)))
+            items.append((ts, WebResult(title=title, url=link, snippet=snippet)))
+        return items
+
+    try:
+        dated_items = _fetch_items(query)
+        if not dated_items and rec["status"] == 200:
+            compact = _compact_news_query(query)
+            if compact and compact.lower() != (query or "").strip().lower():
+                dated_items = _fetch_items(compact)
         dated_items.sort(key=lambda pair: pair[0], reverse=True)
-        hits = [ pair[1] for pair in dated_items[:max_results] ]
+        hits = [pair[1] for pair in dated_items[:max_results]]
         rec["parsed"] = len(hits)
-        if not hits:
+        if not hits and not rec["reason"]:
             rec["reason"] = "empty results"
         return hits
     except Exception as e:
@@ -491,7 +546,7 @@ def web_search_detailed(query: str, max_results: int = 5,
             if rss_hits:
                 seen_urls: set[str] = set()
                 merged: list[WebResult] = []
-                for h in rss_hits + dated + [x for x in hits if x not in dated]:
+                for h in dated + rss_hits + [x for x in hits if x not in dated]:
                     if h.url not in seen_urls:
                         seen_urls.add(h.url)
                         merged.append(h)

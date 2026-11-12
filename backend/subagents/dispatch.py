@@ -266,11 +266,46 @@ def run_subagent(
     except AttributeError:
         task_type = TaskType.COMPLEX_SOLVING
 
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+    from ..settings import user_timezone
+
+    now_utc = datetime.now(timezone.utc)
+    try:
+        tz = ZoneInfo(user_timezone())
+        now_local = now_utc.astimezone(tz)
+        clock_line = (
+            f"Current date and time: {now_utc.strftime('%Y-%m-%d %H:%M UTC')} "
+            f"({now_local.strftime('%Y-%m-%d %H:%M %Z')}). "
+            f"Sources dated on or before {now_utc.strftime('%Y-%m-%d')} are current/historical, NOT future-dated."
+        )
+    except Exception:
+        clock_line = (
+            f"Current date and time: {now_utc.strftime('%Y-%m-%d %H:%M UTC')}. "
+            f"Sources dated on or before {now_utc.strftime('%Y-%m-%d')} are current/historical, NOT future-dated."
+        )
+    effective_system_prompt = f"{role.system_prompt}\n\n{clock_line}"
+
+    policy_tok = None
+    if role.name != "builder":
+        try:
+            from ..turn_policy import TurnPolicy, _current_policy, current_policy
+            cur_pol = current_policy()
+            if cur_pol.enforce_action_progress:
+                policy_tok = _current_policy.set(TurnPolicy(
+                    mode=cur_pol.mode,
+                    read_only=cur_pol.read_only,
+                    persist_cognitive_state=cur_pol.persist_cognitive_state,
+                    enforce_action_progress=False,
+                ))
+        except Exception:
+            policy_tok = None
+
     try:
         rt = router()
         answer = rt.call_with_tools(
             task_type,
-            role.system_prompt,
+            effective_system_prompt,
             task,
             tools=tool_schemas,
             execute_tool=execute_tool,
@@ -313,6 +348,13 @@ def run_subagent(
             elapsed_ms=elapsed,
             error=f"unexpected error: {type(e).__name__}: {e}",
         )
+    finally:
+        if policy_tok is not None:
+            try:
+                from ..turn_policy import reset_turn
+                reset_turn(policy_tok)
+            except Exception:
+                pass
 
     answer_text = (answer or "").strip()
     if on_progress is not None:

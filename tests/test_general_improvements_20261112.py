@@ -399,3 +399,101 @@ def test_openai_compatible_call_with_tools_bumps_max_tokens_on_reasoning_truncat
     assert out == "Final answer after token bump."
     assert seen_max_tokens == [2000, 6000]
 
+
+def test_subagent_receives_current_date_and_disables_action_progress_nudge_for_researcher(monkeypatch):
+    from backend import turn_policy as tp
+    from backend.subagents import dispatch
+
+    seen: dict = {}
+
+    class _FakeRouter:
+        def call_with_tools(self, task_type, system, user, **kw):
+            seen["system"] = system
+            seen["enforce_action_progress"] = tp.current_policy().enforce_action_progress
+            return "Verified report."
+
+    monkeypatch.setattr(dispatch, "router", lambda: _FakeRouter())
+
+    parent_tok = tp.begin_turn()
+    try:
+        res = dispatch.run_subagent("researcher", "Verify recent news.", require_owner=False)
+        assert res.ok is True
+        assert "Current date and time:" in seen["system"]
+        assert "NOT future-dated" in seen["system"]
+        assert seen["enforce_action_progress"] is False
+        # Parent policy restored afterwards
+        assert tp.current_policy().enforce_action_progress is True
+    finally:
+        tp.reset_turn(parent_tok)
+
+
+def test_searxng_filters_cjk_spam_and_wikipedia_homepage_on_non_cjk_queries(monkeypatch):
+    from backend.tools import web_search as ws
+
+    class _Resp:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "url": "https://www.zhihu.com/question/556839389",
+                        "title": "SpaceX 为什么不上市？ - 知乎",
+                        "content": "spam",
+                    },
+                    {
+                        "url": "https://www.wikipedia.org/",
+                        "title": "Wikipedia",
+                        "content": "Wikipedia is a free online encyclopedia.",
+                    },
+                    {
+                        "url": "https://www.cnbc.com/2026/06/12/spacex-ipo.html",
+                        "title": "SpaceX debuts on Nasdaq",
+                        "content": "SpaceX shares opened on Friday.",
+                    },
+                ]
+            }
+
+    monkeypatch.setattr(ws.httpx, "get", lambda *a, **k: _Resp())
+    hits = ws._searxng("SpaceX IPO Nasdaq", 5)
+    assert [h.url for h in hits] == ["https://www.cnbc.com/2026/06/12/spacex-ipo.html"]
+
+
+def test_google_news_rss_retries_with_compacted_query_when_stuffed_query_returns_empty(monkeypatch):
+    from backend.tools import web_search as ws
+
+    now_rfc = format_datetime(datetime.now(timezone.utc))
+    rss_empty = """<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel></channel></rss>"""
+    rss_hit = f"""<?xml version="1.0" encoding="UTF-8"?>
+    <rss version="2.0"><channel>
+      <item>
+        <title>Anthropic files S-1 for IPO - Reuters</title>
+        <link>https://reuters.example/anthropic-ipo</link>
+        <pubDate>{now_rfc}</pubDate>
+        <source>Reuters</source>
+        <description>Anthropic filed for an initial public offering.</description>
+      </item>
+    </channel></rss>"""
+
+    queries_seen: list[str] = []
+
+    def _fake_get(url, params=None, **kw):
+        q = (params or {}).get("q", "")
+        queries_seen.append(q)
+        if len(queries_seen) == 1:
+            return NS(status_code=200, text=rss_empty)
+        return NS(status_code=200, text=rss_hit)
+
+    monkeypatch.setattr(ws.httpx, "get", _fake_get)
+    hits = ws._google_news_rss(
+        "Anthropic IPO filing November 12 2026 Reuters news latest today",
+        max_results=5,
+        recency="month",
+    )
+    assert len(queries_seen) == 2
+    assert queries_seen[1] == "Anthropic IPO filing Reuters when:30d"
+    assert len(hits) == 1
+    assert hits[0].title == "Anthropic files S-1 for IPO"
+
+

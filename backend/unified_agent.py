@@ -4058,6 +4058,13 @@ def run_unified(
         "grep": 4000,
         "search": 4000,
         "search_knowledge": 4000,
+        "load_skill": 16000,
+        "delegate": 8000,
+        "fetch_url": 8000,
+        "web_search": 4000,
+        "search_threads": 4000,
+        "read_thread": 8000,
+        "terminal_exec": 4000,
     }
     # T3 (no-progress detector): tracks the last `_NOPROGRESS_WINDOW`
     # tool-result hashes. If the LAST `_NOPROGRESS_WINDOW` tool calls
