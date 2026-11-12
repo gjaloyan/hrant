@@ -275,3 +275,127 @@ def test_unresolved_failures_prompt_instructs_self_repair():
 
     src = inspect.getsource(unified_agent.run_unified)
     assert "Self-repair first (when talking to the owner):" in src
+
+
+def test_search_threads_matches_cross_language_and_inflected_queries(tmp_path):
+    from backend import threads
+
+    store = threads.ThreadStore(root=tmp_path / "threads")
+    store.append(
+        "webui:hrant:webui:default:1",
+        user="Вчера настроил локальный PostgreSQL на порту 5433, пароль от тестовой базы: PgPass_KhorVirap_42.",
+        answer="Принял.",
+        speaker_id="webui:default",
+        ts="2026-11-12 10:00:00",
+    )
+
+    # English query with 4 tokens where only the technical identifier matches Russian thread
+    hits_en = threads.search_threads(
+        "PostgreSQL test database password", store=store,
+    )
+    assert len(hits_en) == 1
+    assert "PgPass_KhorVirap_42" in hits_en[0]["user"]
+
+    # Inflected Russian query ("пароля тестовой")
+    hits_ru = threads.search_threads("пароля тестовой базы", store=store)
+    assert len(hits_ru) == 1
+    assert "PgPass_KhorVirap_42" in hits_ru[0]["user"]
+
+
+def test_rearmed_scheduled_task_exposes_series_and_cancels_by_series_id(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from backend import builtin_tools as bt
+    from backend import roles
+    from backend import scheduled_messages as sm
+    from backend.config import CONFIG
+    import backend.agent as agent_mod
+
+    monkeypatch.setitem(
+        CONFIG._data, "knowledge",
+        {**CONFIG._data["knowledge"], "base_dir": str(tmp_path)},
+    )
+    monkeypatch.setattr(
+        agent_mod.Agent, "run",
+        lambda self, task, **kw: NS(answer="[SILENT]"),
+    )
+    monkeypatch.setattr(sm, "send_to_speaker", lambda *a, **k: (True, ""))
+    monkeypatch.setattr(roles, "is_owner", lambda sid=None: True)
+
+    due = (datetime.now(timezone.utc) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    initial = sm.schedule(
+        target_speaker="webui:default",
+        text="Monitor BTC.",
+        due_at=due,
+        requested_by="webui:default",
+        kind="agent_task",
+        repeat="30m",
+        meta={"name": "BTC watch"},
+    )
+    orig_id = initial["id"]
+    sm.deliver_due()
+
+    tok = roles.set_current_speaker("webui:default")
+    try:
+        listed = json.loads(bt._list_scheduled_handler())
+        item = listed["reminders"][0]
+        assert item["id"] != orig_id
+        assert item["series"] == orig_id
+
+        # Calling get_background_job with the scheduled task id returns a helpful hint
+        bg_err = json.loads(bt._get_background_job_handler(orig_id))
+        assert bg_err["ok"] is False
+        assert "list_scheduled" in bg_err.get("hint", "")
+
+        # Cancelling by the original series id cancels the re-armed pending row
+        cancelled = json.loads(bt._cancel_scheduled_handler(orig_id))
+        assert cancelled["ok"] is True
+        after = json.loads(bt._list_scheduled_handler())
+        assert after["count"] == 0
+    finally:
+        roles.reset_current_speaker(tok)
+
+
+def test_openai_compatible_call_with_tools_bumps_max_tokens_on_reasoning_truncation(monkeypatch):
+    from backend.llm import OpenAICompatibleLLM
+
+    llm = OpenAICompatibleLLM({
+        "base_url": "https://api.example.com/v1",
+        "api_key": "test-key",
+        "model": "reasoning-model",
+    })
+    seen_max_tokens: list[int] = []
+
+    def _fake_post(payload, **kw):
+        seen_max_tokens.append(payload.get("max_tokens"))
+        if len(seen_max_tokens) == 1:
+            return {
+                "choices": [{
+                    "finish_reason": "length",
+                    "message": {
+                        "role": "assistant",
+                        "content": "",
+                        "reasoning": "long chain of thought...",
+                    },
+                }],
+            }
+        return {
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": "Final answer after token bump.",
+                },
+            }],
+        }
+
+    monkeypatch.setattr(llm, "_post", _fake_post)
+    out = llm.complete_with_tools(
+        system="sys",
+        user="hi",
+        tools=[{"name": "noop", "description": "noop", "input_schema": {"type": "object", "properties": {}}}],
+        execute_tool=lambda name, args: "{}",
+        max_tokens=2000,
+    )
+    assert out == "Final answer after token bump."
+    assert seen_max_tokens == [2000, 6000]
+

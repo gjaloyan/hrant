@@ -359,17 +359,29 @@ def cancel(message_id: str, *, by_speaker: Optional[str] = None) -> bool:
     """
     with _LEDGER_LOCK:
         rows = _read_all()
+        target_row = None
         for r in rows:
             if r.get("id") == message_id and r.get("status") == "pending":
-                if by_speaker is not None and not may_manage(r, by_speaker):
-                    log.info(
-                        "cancel refused: %s may not manage row %s",
-                        by_speaker, message_id,
-                    )
-                    return False
-                r["status"] = "cancelled"
-                _write_all(rows)
-                return True
+                target_row = r
+                break
+        if target_row is None and message_id:
+            for r in rows:
+                if (
+                    r.get("status") == "pending"
+                    and (r.get("meta") or {}).get("series") == message_id
+                ):
+                    target_row = r
+                    break
+        if target_row is not None:
+            if by_speaker is not None and not may_manage(target_row, by_speaker):
+                log.info(
+                    "cancel refused: %s may not manage row %s",
+                    by_speaker, message_id,
+                )
+                return False
+            target_row["status"] = "cancelled"
+            _write_all(rows)
+            return True
     return False
 
 

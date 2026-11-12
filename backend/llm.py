@@ -2482,6 +2482,8 @@ class OpenAICompatibleLLM(BaseLLM):
             {"role": "user", "content": first_user},
         ]
         final_text = ""
+        _bumped_for_reasoning = False
+        _tools_executed = 0
         for _iter in range(max_iterations):
             if _iter > 0 and _tool_loop_input_budget_exceeded():
                 break
@@ -2540,6 +2542,21 @@ class OpenAICompatibleLLM(BaseLLM):
             if finish_reason != "tool_calls" and not tool_calls:
                 if final_text:
                     return final_text
+                # Reasoning models (e.g. glm-5.3, qwen3, deepseek-r1) can
+                # exhaust a 2000-token budget inside `reasoning` before
+                # emitting tool_calls or content (`finish_reason == "length"`).
+                # Bump max_tokens once and re-run the iteration so the model
+                # can finish thinking and emit its tool call or answer.
+                if (finish_reason == "length"
+                        and not _bumped_for_reasoning
+                        and (msg.get("reasoning") or msg.get("reasoning_content"))):
+                    _bumped_for_reasoning = True
+                    max_tokens = max((max_tokens or self.default_max) * 3, 6000)
+                    log.info(
+                        "reasoning truncated at length on %s — bumping max_tokens to %d",
+                        self.model, max_tokens,
+                    )
+                    continue
                 # Empty. The turn's work is still intact in `messages`; falling
                 # through to the forced synthesis below is the only way it
                 # reaches the user. Measured 2026-08-19: the model was cut off
@@ -2552,6 +2569,7 @@ class OpenAICompatibleLLM(BaseLLM):
 
             messages.append(msg)
             for tc in tool_calls:
+                _tools_executed += 1
                 func = tc["function"]
                 name = func["name"]
                 try:
@@ -2609,8 +2627,15 @@ class OpenAICompatibleLLM(BaseLLM):
             synth_text = (data["choices"][0]["message"].get("content") or "").strip()
             if synth_text:
                 return synth_text
-        except Exception:
-            pass
+        except Exception as synth_err:
+            if not final_text and _tools_executed == 0:
+                raise LLMError(
+                    f"{self.provider_name} ({self.model}) produced no text or tool calls: {synth_err}"
+                ) from synth_err
+        if not final_text and _tools_executed == 0:
+            raise LLMError(
+                f"{self.provider_name} ({self.model}) returned an empty response in tool loop"
+            )
         return final_text or "[max tool-use iterations reached]"
 
 

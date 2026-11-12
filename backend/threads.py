@@ -391,11 +391,20 @@ def search_threads(
                 continue
             hay = f"{u}\n{a}".lower()
             exact = 1.0 if len(q) >= 3 and q in hay else 0.0
-            hits = sum(1 for t in tokens if t in hay) if tokens else 0
+            hits = 0.0
+            strong_hit = False
+            for t in tokens:
+                if t in hay:
+                    hits += 1.5 if len(t) >= 5 else 1.0
+                    if len(t) >= 4:
+                        strong_hit = True
+                elif len(t) >= 5 and t[:max(4, len(t) - 2)] in hay:
+                    hits += 0.75
+                    strong_hit = True
             if not exact and hits == 0:
                 continue
             ratio = (hits / len(tokens)) if tokens else 0.0
-            if not exact and len(tokens) >= 3 and ratio < 0.5:
+            if not exact and not strong_hit and len(tokens) >= 3 and ratio < 0.5:
                 continue
             score = exact + ratio + (0.05 * hits)
             ts = str(row.get("ts") or "")[:19]

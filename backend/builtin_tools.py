@@ -691,6 +691,8 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
                      "check_in": "todo reminder"}.get(r.get("kind") or "message", "say"),
             "name": meta.get("name") or "",
         }
+        if meta.get("series"):
+            entry["series"] = meta.get("series")
         # How the series has actually been going. Asked "are you
         # monitoring?", the agent could only read back the timetable.
         if meta.get("last_run_at"):
@@ -1673,10 +1675,27 @@ def _get_background_job_handler(job_id: str) -> str:
             "error": f"get_background_job error: {type(e).__name__}: {e}",
         }, ensure_ascii=False)
     if j is None:
-        return json.dumps({
+        hint = ""
+        try:
+            from .scheduled_messages import list_pending as _list_sched
+            jid = (job_id or "").strip()
+            for r in _list_sched():
+                if r.get("id") == jid or (r.get("meta") or {}).get("series") == jid:
+                    hint = (
+                        f"{jid!r} is a scheduled task/reminder (from schedule_task / "
+                        "schedule_message), not a background shell job. Call "
+                        "`list_scheduled()` to inspect its status and run history."
+                    )
+                    break
+        except Exception:
+            pass
+        resp = {
             "ok": False,
             "error": f"no job with id {job_id!r}",
-        }, ensure_ascii=False)
+        }
+        if hint:
+            resp["hint"] = hint
+        return json.dumps(resp, ensure_ascii=False)
     return json.dumps({"ok": True, "job": j}, ensure_ascii=False)
 
 
@@ -4471,7 +4490,9 @@ def register_builtin_tools() -> None:
                 "query": {
                     "type": "string",
                     "description": (
-                        "What to look for, in words. Leave empty to get "
+                        "What to look for, in words. Include keywords in the "
+                        "user's conversation language as well as technical terms "
+                        "so verbatim thread search matches. Leave empty to get "
                         "only the total."
                     ),
                 },
