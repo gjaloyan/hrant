@@ -648,4 +648,72 @@ def test_nightly_review_sees_system_errors_and_runs_autonomous_repairs(tmp_path,
     assert "🔧 Обновлён скилл crypto-asset-analysis" in scheduled_texts[0]
 
 
+def test_propose_with_diff_excerpts_middle_of_large_file_and_multi_module(tmp_path, monkeypatch):
+    from backend import self_modifier as sm
+
+    backend_dir = tmp_path / "backend"
+    backend_dir.mkdir(parents=True)
+    # Create a 90,000-char file where target function is at char ~45,000 (middle of file)
+    padding_top = "# top padding line\n" * 2400
+    target_fn = (
+        "def _recall_facts_handler(query: str = '', n: int = 8) -> str:\n"
+        "    matches = ['old_behavior']\n"
+        "    return str(matches)\n"
+    )
+    padding_bottom = "# bottom padding line\n" * 2400
+    large_code = padding_top + target_fn + padding_bottom
+    assert len(large_code) > 80000
+    (backend_dir / "big_mod.py").write_text(large_code, encoding="utf-8")
+    (backend_dir / "helper_mod.py").write_text(
+        "def search_user_stated_facts(query: str):\n    return []\n",
+        encoding="utf-8",
+    )
+
+    mod_instance = sm.SelfModifier(path=tmp_path / "proposals.json")
+    mod_instance._backend_dir = backend_dir
+    monkeypatch.setattr(sm, "SELF_MODIFIER", mod_instance)
+    monkeypatch.setattr(sm, "_fire_proposal_created", lambda p: None)
+
+    captured_prompt: dict = {}
+
+    class _FakeRouter:
+        def call_json(self, task_type, system_prompt, user_prompt, **kw):
+            captured_prompt["user"] = user_prompt
+            return {
+                "title": "Fix recall_facts and helper",
+                "description": "Include confirmed facts",
+                "changes": [
+                    {
+                        "module": "backend/big_mod.py",
+                        "old_code": "    matches = ['old_behavior']",
+                        "new_code": "    matches = ['new_behavior']",
+                    },
+                    {
+                        "module": "backend/helper_mod.py",
+                        "old_code": "    return []",
+                        "new_code": "    return ['confirmed']",
+                    },
+                ],
+                "impact": "Recalls confirmed facts reliably",
+                "risk": "low",
+            }
+
+    monkeypatch.setattr(sm, "router", lambda: _FakeRouter())
+
+    prop = sm.propose_with_diff(
+        description="Fix _recall_facts_handler and search_user_stated_facts",
+        module="backend/big_mod.py,backend/helper_mod.py",
+        rationale="Both _recall_facts_handler and search_user_stated_facts need updating",
+        requester="telegram:1",
+    )
+    assert prop is not None
+    assert prop.has_diff() is True
+    assert "def _recall_facts_handler" in captured_prompt["user"]
+    assert "def search_user_stated_facts" in captured_prompt["user"]
+    diff_html = sm._render_diff_for_telegram(prop)
+    assert "new_behavior" in diff_html
+    assert "confirmed" in diff_html
+
+
+
 

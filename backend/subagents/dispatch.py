@@ -259,6 +259,17 @@ def run_subagent(
             "result_preview": preview,
             "is_error": bool(is_error),
         })
+        if is_error:
+            try:
+                from ..meta_learner import META_LEARNER
+                META_LEARNER.log_tool_error(
+                    tool=name,
+                    message=(result or "")[:600],
+                    args=args or {},
+                    turn_id=session.id,
+                )
+            except Exception:
+                pass
 
     task_type_name = (role.task_type or "complex_solving").lower()
     try:

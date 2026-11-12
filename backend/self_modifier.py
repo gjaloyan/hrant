@@ -1111,10 +1111,96 @@ DO NOT propose changes unrelated to the owner's request. Stay scoped.
 """
 
 
+def _excerpt_for_diff(code: str, query_text: str, max_total: int = 32000) -> str:
+    """Extract the most relevant slices of a large module for diff generation.
+
+    Previously, files over 30k chars (like `builtin_tools.py` at 215k chars)
+    were blindly truncated to `code[:22000]` + `code[-8000:]`, omitting 185k
+    chars from the middle. Any function in the middle of the file was invisible
+    to the diff LLM, causing `propose_with_diff` to return an empty diff.
+    """
+    if len(code) <= max_total:
+        return code
+
+    import re as _re
+    raw_tokens = _re.findall(r"\b[A-Za-z_][A-Za-z0-9_]{3,}\b", query_text or "")
+    stop = {
+        "from", "import", "return", "true", "false", "none", "self", "dict",
+        "list", "str", "int", "float", "bool", "with", "when", "that", "this",
+        "have", "should", "must", "only", "before", "after", "into", "test",
+        "tests", "code", "file", "files", "module", "backend", "function",
+    }
+    seen_toks: list[str] = []
+    for t in raw_tokens:
+        if t.lower() not in stop and t not in seen_toks:
+            seen_toks.append(t)
+
+    # Prefer `def <tok>` / `class <tok>` matches first, then snake_case hits.
+    hit_positions: list[int] = []
+    for tok in seen_toks:
+        for pat in (f"def {tok}", f"class {tok}", f"def _{tok}"):
+            idx = code.find(pat)
+            if idx >= 0:
+                hit_positions.append(idx)
+    if not hit_positions:
+        for tok in seen_toks:
+            if "_" in tok or len(tok) >= 6:
+                idx = code.find(tok)
+                if idx >= 0:
+                    hit_positions.append(idx)
+
+    head_chars = 8000
+    tail_chars = 5000
+    mid_hits = sorted({p for p in hit_positions if head_chars <= p <= len(code) - tail_chars})
+    if not mid_hits:
+        head_only = 22000
+        tail_only = max_total - head_only - 80
+        omitted = len(code) - head_only - tail_only
+        return (
+            f"{code[:head_only]}\n"
+            f"# ... [{omitted} chars omitted from middle of file] ...\n"
+            f"{code[-tail_only:]}"
+        )
+
+    # Merge overlapping windows around matched positions in the middle of the file.
+    mid_budget = max_total - head_chars - tail_chars - 300
+    half_win = max(2500, min(6000, mid_budget // max(1, len(mid_hits) * 2)))
+    windows: list[tuple[int, int]] = []
+    for pos in mid_hits[:4]:
+        s = max(head_chars, pos - 1200)
+        e = min(len(code) - tail_chars, pos + half_win * 2)
+        if windows and s <= windows[-1][1] + 400:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], e))
+        else:
+            windows.append((s, e))
+
+    chunks = [code[:head_chars]]
+    prev_end = head_chars
+    for s, e in windows:
+        if s > prev_end:
+            chunks.append(f"\n# ... [{s - prev_end} chars omitted] ...\n")
+        chunks.append(code[s:e])
+        prev_end = e
+    if len(code) - tail_chars > prev_end:
+        chunks.append(f"\n# ... [{len(code) - tail_chars - prev_end} chars omitted] ...\n")
+    chunks.append(code[-tail_chars:])
+    return "".join(chunks)
+
+
+def _resolve_module_name(raw: str) -> str:
+    name = (raw or "").strip()
+    if name.startswith("backend/"):
+        name = name[len("backend/"):]
+    if not name.endswith(".py"):
+        name += ".py"
+    return name
+
+
 def propose_with_diff(
     *,
     description: str,
     module: str,
+    modules: Optional[list[str]] = None,
     rationale: str = "",
     requester: str = "webui:default",
 ) -> Optional[Proposal]:
@@ -1131,51 +1217,54 @@ def propose_with_diff(
     behaviour (so the user still sees their request in the queue)
     but stamps `review_note` with the failure cause.
     """
-    if not module:
+    if not module and not modules:
         return propose(
             description=description, rationale=rationale,
             requester=requester,
         )
 
-    # Resolve module file (accepts "backend/x.py", "x.py", "x")
-    module_name = module
-    if module_name.startswith("backend/"):
-        module_name = module_name[len("backend/"):]
-    if not module_name.endswith(".py"):
-        module_name += ".py"
-    module_path = SELF_MODIFIER._backend_dir / module_name
-    if not module_path.exists():
-        # Finding #6: no stub registration. A diff can't be generated for a
-        # missing file; fail honestly (multi-file creation goes through the
-        # `changes` shape against an EXISTING anchor module).
+    raw_list: list[str] = []
+    for item in (modules or []):
+        for part in str(item).split(","):
+            if part.strip() and part.strip() not in raw_list:
+                raw_list.append(part.strip())
+    for part in (module or "").split(","):
+        if part.strip() and part.strip() not in raw_list:
+            raw_list.append(part.strip())
+
+    resolved_modules: list[tuple[str, str]] = []
+    for m in raw_list:
+        m_name = _resolve_module_name(m)
+        m_path = SELF_MODIFIER._backend_dir / m_name
+        if not m_path.exists():
+            continue
+        try:
+            m_code = m_path.read_text(encoding="utf-8")
+            resolved_modules.append((m_name, m_code))
+        except OSError as e:
+            log.warning("propose_with_diff: read failed for %s: %s", m_name, e)
+
+    if not resolved_modules:
         log.warning("propose_with_diff: module %s not found; no proposal "
-                    "created", module_name)
-        return None
-    try:
-        code = module_path.read_text(encoding="utf-8")
-    except OSError as e:
-        log.warning("propose_with_diff: read failed, no proposal created: %s", e)
+                    "created", _resolve_module_name(raw_list[0]))
         return None
 
-    # Truncate following the same head+tail strategy as
-    # analyze_module so we don't drop module-bottom definitions.
-    max_total = 30000
-    if len(code) > max_total:
-        head_chars = 22000
-        tail_chars = max_total - head_chars - 80
-        omitted = len(code) - head_chars - tail_chars
-        code = (
-            f"{code[:head_chars]}\n"
-            f"# ... [{omitted} chars omitted from middle of file] ...\n"
-            f"{code[-tail_chars:]}"
+    module_name = resolved_modules[0][0]
+    query_hint = f"{description}\n{rationale}"
+    per_mod_budget = max(16000, 36000 // len(resolved_modules))
+    source_sections: list[str] = []
+    for m_name, m_code in resolved_modules:
+        excerpt = _excerpt_for_diff(m_code, query_hint, max_total=per_mod_budget)
+        source_sections.append(
+            f"TARGET MODULE: backend/{m_name}\n\n"
+            f"SOURCE CODE:\n```python\n{excerpt}\n```"
         )
 
     user_prompt = (
         f"OWNER REQUEST:\n{description}\n\n"
         + (f"RATIONALE:\n{rationale}\n\n" if rationale else "")
-        + f"TARGET MODULE: backend/{module_name}\n\n"
-        + f"SOURCE CODE:\n```python\n{code}\n```\n\n"
-        + "Produce ONE targeted diff implementing the owner's request."
+        + "\n\n".join(source_sections)
+        + "\n\nProduce ONE targeted diff implementing the owner's request."
     )
 
     try:
@@ -1183,7 +1272,7 @@ def propose_with_diff(
             TaskType.TASK_ANALYSIS,
             _TARGETED_DIFF_SYSTEM,
             user_prompt,
-            max_tokens=2000,
+            max_tokens=4096,
             temperature=0.2,
         )
     except LLMError as e:
@@ -1441,6 +1530,16 @@ def _render_diff_for_telegram(p: Proposal) -> str:
         tofile=f"b/{p.module}" if p.module else "after",
         lineterm="",
     ))
+    if not diff_lines and p.changes:
+        for ch in p.changes:
+            c_mod = ch.get("module") or p.module or "module"
+            diff_lines.extend(difflib.unified_diff(
+                (ch.get("old_code") or "").splitlines(),
+                (ch.get("new_code") or "").splitlines(),
+                fromfile=f"a/{c_mod}",
+                tofile=f"b/{c_mod}",
+                lineterm="",
+            ))
     if not diff_lines:
         body = (
             f"[no diff yet — proposal is in 'pending' status with description only]\n"

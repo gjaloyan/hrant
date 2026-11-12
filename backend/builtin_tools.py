@@ -1903,7 +1903,7 @@ def _propose_self_modification_handler(
                 combined_rationale += f"{sep}TECHNICAL SPEC:\n{prompt}"
             proposal = self_modifier.propose_with_diff(
                 description=description or "",
-                module=file_list[0],
+                module=file_list[0] if len(file_list) == 1 else ",".join(file_list),
                 rationale=combined_rationale,
                 requester=speaker_id or "webui:default",
             )
