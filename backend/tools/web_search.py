@@ -120,13 +120,109 @@ def _searxng(query: str, max_results: int,
             url_value = item.get("url") or ""
             if not url_value:
                 continue
+            raw_snippet = item.get("snippet") or item.get("content") or ""
+            pub = str(item.get("publishedDate") or item.get("pubdate") or "").strip()
+            if pub:
+                stamp = pub[:16].replace("T", " ")
+                snippet = f"[{stamp}] {raw_snippet}".strip() if raw_snippet else f"[{stamp}]"
+            else:
+                snippet = raw_snippet
             hits.append(WebResult(
                 title=item.get("title", ""),
                 url=url_value,
-                snippet=item.get("snippet") or item.get("content") or "",
+                snippet=snippet,
             ))
             if len(hits) >= max_results:
                 break
+        rec["parsed"] = len(hits)
+        if not hits:
+            rec["reason"] = "empty results"
+        return hits
+    except Exception as e:
+        rec["reason"] = f"{type(e).__name__}: {e}"[:160]
+        return []
+    finally:
+        if attempts is not None:
+            attempts.append(rec)
+
+
+_GNEWS_WINDOWS = {"day": ("1d", 36.0), "week": ("7d", 192.0),
+                  "month": ("30d", 768.0), "year": ("1y", 8900.0)}
+
+
+def _google_news_rss(query: str, max_results: int,
+                     recency: str | None = None,
+                     attempts: list | None = None) -> list[WebResult]:
+    """Supplement time-windowed web_search queries via Google News RSS.
+
+    SearXNG's general engines frequently return undated pages or fail under
+    upstream rate limits when `recency` (`day`/`week`/`month`/`year`) is
+    requested. Google News RSS (`news.google.com/rss/search`) accepts any
+    query in any language, honours `when:1d/7d/30d/1y`, and carries exact
+    publication timestamps and publisher names.
+    """
+    from datetime import datetime, timezone
+    from email.utils import parsedate_to_datetime
+    import xml.etree.ElementTree as ET
+
+    win, max_hours = _GNEWS_WINDOWS.get(recency or "", ("7d", 192.0))
+    q = f"{query} when:{win}" if "when:" not in query else query
+    cyrillic = bool(re.search(r"[\u0400-\u04ff]", query))
+    params = {
+        "q": q,
+        "hl": "ru" if cyrillic else "en-US",
+        "gl": "RU" if cyrillic else "US",
+        "ceid": "RU:ru" if cyrillic else "US:en",
+    }
+    url = "https://news.google.com/rss/search"
+    rec = {"provider": "google_news_rss", "status": None, "bytes": 0,
+           "parsed": 0, "url": url, "reason": ""}
+    try:
+        r = httpx.get(
+            url, params=params, headers=_BROWSER_HEADERS,
+            timeout=httpx.Timeout(8.0, connect=2.0), follow_redirects=True,
+        )
+        rec["status"] = r.status_code
+        rec["bytes"] = len(r.text or "")
+        if r.status_code >= 400:
+            rec["reason"] = f"http {r.status_code}"
+            return []
+        root = ET.fromstring(r.text or "")
+        now = datetime.now(timezone.utc)
+        dated_items: list[tuple[float, WebResult]] = []
+        for item in root.iter("item"):
+            title = _clean(item.findtext("title") or "")
+            link = (item.findtext("link") or "").strip()
+            if not title or not link:
+                continue
+            source = _clean(item.findtext("source") or "")
+            if source and title.endswith(f" - {source}"):
+                title = title[: -len(f" - {source}")].strip()
+            desc = _clean(item.findtext("description") or "")
+            if desc == title or desc.startswith(title):
+                desc = desc[len(title):].lstrip(" -–—·:")
+            pub_raw = (item.findtext("pubDate") or "").strip()
+            ts = 0.0
+            stamp = ""
+            if pub_raw:
+                try:
+                    dt = parsedate_to_datetime(pub_raw)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.astimezone(timezone.utc)
+                    age_h = (now - dt).total_seconds() / 3600.0
+                    if age_h > max_hours:
+                        continue
+                    ts = dt.timestamp()
+                    stamp = dt.strftime("%Y-%m-%d %H:%M UTC")
+                except Exception:
+                    pass
+            meta_prefix = " · ".join(p for p in (stamp, source) if p)
+            snippet = (f"[{meta_prefix}] {desc}".strip()
+                       if meta_prefix else desc)
+            dated_items.append((ts, WebResult(title=title, url=link, snippet=snippet)))
+        dated_items.sort(key=lambda pair: pair[0], reverse=True)
+        hits = [ pair[1] for pair in dated_items[:max_results] ]
         rec["parsed"] = len(hits)
         if not hits:
             rec["reason"] = "empty results"
@@ -385,9 +481,23 @@ def web_search_detailed(query: str, max_results: int = 5,
     model when `results` is empty so "the tool is blocked" is never again
     reported as "the web has nothing"."""
     attempts: list[dict] = []
-    # Only SearXNG takes the window today; the fallbacks search all time,
-    # which is better than not searching.
     hits = _searxng(query, max_results, attempts=attempts, recency=recency)
+    if recency in _TIME_RANGES:
+        dated = [h for h in hits if h.snippet.startswith("[20")]
+        if len(dated) < max_results:
+            rss_hits = _google_news_rss(
+                query, max_results, recency=recency, attempts=attempts,
+            )
+            if rss_hits:
+                seen_urls: set[str] = set()
+                merged: list[WebResult] = []
+                for h in rss_hits + dated + [x for x in hits if x not in dated]:
+                    if h.url not in seen_urls:
+                        seen_urls.add(h.url)
+                        merged.append(h)
+                    if len(merged) >= max_results:
+                        break
+                hits = merged
     if hits:
         return {"results": hits, "attempts": attempts, "note": "searxng"}
     if os.getenv("TAVILY_API_KEY"):
@@ -604,12 +714,30 @@ def _render_with_browser(url: str, timeout_s: int = 45) -> "str | None":
     return dom or None
 
 
+def _is_json_payload(body: str, content_type: str = "") -> bool:
+    """True when response body is JSON (either by Content-Type or valid JSON
+    object/array), so HTML extraction and JS-shell heuristics must not run."""
+    ct = (content_type or "").lower()
+    if "json" in ct:
+        return True
+    s = (body or "").strip()
+    if len(s) >= 2 and ((s[0] == "{" and s[-1] == "}") or (s[0] == "[" and s[-1] == "]")):
+        import json
+        try:
+            json.loads(s)
+            return True
+        except Exception:
+            return False
+    return False
+
+
 def fetch_url(url: str, max_chars: int = 8000) -> str:
     blocked = _ssrf_check(url)
     if blocked:
         return f"[fetch refused: {blocked}]"
     status = 0
     body = ""
+    content_type = ""
     # Hop by hop, because every hop is a URL this process was told to
     # fetch by someone else. `follow_redirects=True` checked the first
     # one and obeyed the rest.
@@ -619,10 +747,12 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
             r = httpx.get(current, timeout=30.0, follow_redirects=False,
                           headers=_BROWSER_HEADERS)
             status, body = r.status_code, r.text
+            hdrs = getattr(r, "headers", None) or {}
+            content_type = str(hdrs.get("Content-Type") or hdrs.get("content-type") or "")
             location = ""
             if 300 <= status < 400:
-                location = (r.headers.get("Location")
-                            or r.headers.get("location") or "").strip()
+                location = (hdrs.get("Location")
+                            or hdrs.get("location") or "").strip()
             if not location:
                 break
             nxt = _urljoin(current, location)
@@ -637,6 +767,13 @@ def fetch_url(url: str, max_chars: int = 8000) -> str:
                     f" starting at {url}]")
     except Exception as e:
         return f"[fetch error: {e}]"
+
+    # Structured JSON API responses (e.g. REST tickers, status endpoints)
+    # are not HTML pages: running trafilatura on them logs "empty HTML tree"
+    # and short JSON payloads (<600 chars) falsely trigger `looks_unreadable`
+    # and a 45s headless Chromium render.
+    if status < 400 and _is_json_payload(body, content_type):
+        return (body or "").strip()[:max_chars]
 
     # Prefer clean main-content extraction; fall back to the regex strip when
     # trafilatura is absent or the page has no article body (search-result

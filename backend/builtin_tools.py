@@ -344,6 +344,11 @@ def _save_user_fact_handler(category: str, fact: str) -> str:
             "ok": False,
             "error": f"{type(e).__name__}: {e}",
         }, ensure_ascii=False)
+    try:
+        from . import fact_search
+        fact_search.record_user_fact(fact_clean, category=cat, speaker_id=sid)
+    except Exception:
+        pass
     return json.dumps({
         "ok": True,
         "category": cat,
@@ -671,7 +676,8 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
         if due > cutoff:
             continue
         local = due.astimezone(tz)
-        out.append({
+        meta = r.get("meta") or {}
+        entry = {
             "id": r.get("id"),
             "when": local.strftime("%A %Y-%m-%d %H:%M"),
             "in_hours": round((due - now).total_seconds() / 3600, 1),
@@ -683,8 +689,28 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
             # to-do.
             "type": {"agent_task": "do", "message": "say",
                      "check_in": "todo reminder"}.get(r.get("kind") or "message", "say"),
-            "name": (r.get("meta") or {}).get("name") or "",
-        })
+            "name": meta.get("name") or "",
+        }
+        # How the series has actually been going. Asked "are you
+        # monitoring?", the agent could only read back the timetable.
+        if meta.get("last_run_at"):
+            def _local_stamp(iso: str) -> str:
+                try:
+                    return (datetime.strptime(iso, "%Y-%m-%dT%H:%M:%SZ")
+                            .replace(tzinfo=timezone.utc).astimezone(tz)
+                            .strftime("%Y-%m-%d %H:%M"))
+                except (TypeError, ValueError):
+                    return ""
+            entry["runs_so_far"] = int(meta.get("runs") or 0)
+            entry["last_run"] = _local_stamp(meta["last_run_at"])
+            entry["last_run_result"] = {
+                "sent": "sent a report", "silent": "nothing to report",
+            }.get(meta.get("last_outcome") or "", meta.get("last_outcome") or "")
+            if meta.get("last_sent_at"):
+                entry["last_report_sent"] = _local_stamp(meta["last_sent_at"])
+        if meta.get("last_report"):
+            entry["last_report_head"] = str(meta["last_report"])[:240]
+        out.append(entry)
     out.sort(key=lambda x: x["in_hours"])
     return json.dumps({
         "ok": True,
@@ -3269,6 +3295,7 @@ def _recall_facts_handler(query: str = "", limit: int = 8) -> str:
     total = fact_search.count_facts()
     q = (query or "").strip()
     matches = []
+    conv_matches = []
     if q:
         try:
             for hit in fact_search.search_facts(q, limit=n, speaker_id=scope):
@@ -3279,15 +3306,39 @@ def _recall_facts_handler(query: str = "", limit: int = 8) -> str:
                     "learned": str(hit.get("ts") or "")[:19],
                     "grounding": hit.get("grounding") or "unknown",
                 })
+            if len(matches) < n:
+                seen_facts = {m["fact"].lower() for m in matches}
+                for hit in fact_search.search_user_stated_facts(
+                    q, limit=n - len(matches), speaker_id=scope,
+                ):
+                    summary = (hit.get("summary") or "").strip()
+                    if summary and summary.lower() not in seen_facts:
+                        seen_facts.add(summary.lower())
+                        matches.append({
+                            "fact": summary,
+                            "score": round(float(hit.get("score") or 0.0), 3),
+                            "category": hit.get("category") or "",
+                            "learned": str(hit.get("ts") or "")[:19],
+                            "grounding": hit.get("grounding") or "user_stated",
+                        })
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)},
                               ensure_ascii=False)
+        try:
+            from . import threads
+            conv_matches = threads.search_threads(
+                q, speaker_id=scope, limit=min(n, 5),
+            )
+        except Exception:
+            conv_matches = []
 
     out = {"ok": True, "total": total, "matches": matches}
+    if conv_matches:
+        out["conversation_matches"] = conv_matches
     if not q:
         out["note"] = ("Total only. Pass `query` to see the facts that bear "
                        "on something.")
-    elif not matches:
+    elif not matches and not conv_matches:
         out["note"] = ("Nothing stored bears on that. Say so rather than "
                        "inferring an answer.")
     return json.dumps(out, ensure_ascii=False)
@@ -3927,6 +3978,10 @@ def register_builtin_tools() -> None:
             "are results' includes the first results. Do not put scheduling "
             "words in the instruction ('then schedule the next check'): "
             "`every` repeats it.\n\n"
+            "The instruction is a snapshot of the facts it rests on. When "
+            "the user later tells you one of them changed — they bought, "
+            "sold, a date moved — replace the task in that same turn "
+            "(`cancel_scheduled`, then this tool) and say so.\n\n"
             "Not this tool for fixed words at a time (`schedule_message`) "
             "or for tracking a to-do (`add_todo`). Owner/trusted only; the "
             "result goes to the person who asked."
@@ -4404,7 +4459,9 @@ def register_builtin_tools() -> None:
             "how the agent came to answer with its own name when asked for "
             "its owner's. Check them before leaning on them."
             + chr(10) + chr(10) +
-            "This reads the profile store that `save_user_fact` writes. "
+            "This reads the profile store that `save_user_fact` writes and "
+            "also searches past conversation threads (`conversation_matches`) "
+            "for verbatim details mentioned in earlier chats. "
             "For notes and documents use `search_knowledge` instead. To "
             "take a stored fact back, use `forget_fact`."
         ),

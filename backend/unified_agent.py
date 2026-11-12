@@ -3836,16 +3836,23 @@ def run_unified(
             issue_lines = [
                 "# UNRESOLVED AGENT-SIDE FAILURES",
                 "",
-                "The following provider failures happened on recent turns "
-                "and have NOT been explained to the user. If the user's "
-                "current message looks related (e.g. asking why something "
-                "didn't work, or checking on a background job that should "
-                "have completed), include the diagnosis at the top of your "
-                "answer + suggest a concrete fix (top up credits / switch "
-                "model / add fallback provider / propose a code change via "
-                "`propose_self_modification`). After explaining, call "
-                "`acknowledge_provider_issue(error_id, resolution)` so the "
-                "same issue is not re-surfaced next turn.",
+                "The following provider or subsystem failures happened on "
+                "recent turns and are still unresolved:",
+                "- **Self-repair first (when talking to the owner):** if a "
+                "failure is fixable on this machine (e.g. an outdated package "
+                "in your venv like `edge-tts` returning HTTP 403, a stopped "
+                "local service/container, a bad setting, or a code bug in a "
+                "handler), diagnose and fix it directly (`terminal_exec` to "
+                "upgrade the package or restart the service, `set_setting`, "
+                "or `propose_self_modification`), verify that it works again, "
+                "call `acknowledge_provider_issue(error_id, resolution)`, and "
+                "briefly tell the owner what broke and how you fixed it.",
+                "- **External blockers (billing / credentials):** if the "
+                "failure needs the user's action (e.g. topping up credits or "
+                "updating an API key) or the user's current message relates "
+                "to it, explain the diagnosis clearly, state the concrete "
+                "fix, and call `acknowledge_provider_issue(error_id, "
+                "resolution)` so it is not re-surfaced next turn.",
                 "",
             ]
             for r in unresolved[-5:]:
@@ -3854,7 +3861,7 @@ def run_unified(
                     f"- id={r.get('id')!r} | provider={r.get('provider')} "
                     f"model={r.get('model')} | HTTP {r.get('status_code')} "
                     f"({(ctx.get('category') or 'unknown')}): "
-                    f"{(r.get('message') or '')[:120]}"
+                    f"{(r.get('message') or '')[:220]}"
                 )
             _dyn.append("---\n\n" + "\n".join(issue_lines))
     # Supervisor-mode preamble. The user-visible chat rules above

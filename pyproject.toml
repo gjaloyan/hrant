@@ -41,7 +41,7 @@ dependencies = [
     # Edge TTS — free, online Microsoft TTS used as the default voice
     # backend. ~400 multilingual neural voices, no API key, no local
     # model files. Falls through to Piper / OpenAI when unreachable.
-    "edge-tts>=6.1.0",
+    "edge-tts>=7.3.1",
     # Main-content extraction for fetch_url — strips nav/ads/boilerplate
     # so the LLM sees the readable article body, not the whole page.
     # Local (URL never leaves the box); fetch_url degrades to a regex

@@ -330,6 +330,17 @@ class Transcriber:
         except Exception as e:
             self._last_error = f"transcribe via {self._backend} failed: {e}"
             log.warning("transcribe failed: %s", e)
+            try:
+                from .provider_error_log import log_provider_error
+                log_provider_error(
+                    provider=f"stt:{self._backend or 'none'}",
+                    model=str(self._model or ""),
+                    status_code=500,
+                    message=self._last_error,
+                    context={"category": "stt_failed"},
+                )
+            except Exception:
+                pass
             return None
         return None
 

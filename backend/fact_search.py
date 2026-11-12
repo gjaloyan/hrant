@@ -379,3 +379,109 @@ def search_facts(query: str, limit: int = 5,
             if len(out) >= limit_n:
                 return out
     return out
+
+
+def record_user_fact(
+    summary: str,
+    *,
+    category: str = "about_user",
+    speaker_id: str = "",
+) -> None:
+    """Persist a `save_user_fact` entry into `memory_facts.jsonl` (and
+    embed it when the embedder is online) so `recall_facts` can read back
+    what `save_user_fact` wrote in the same turn."""
+    from datetime import datetime
+
+    text = (summary or "").strip()
+    if not text:
+        return
+    sid = (speaker_id or "").strip()
+    fid = fact_id(text)
+    try:
+        for existing_summary, row in _iter_facts():
+            if (fact_id(existing_summary) == fid
+                    and str(row.get("speaker_id") or "").strip() == sid):
+                break
+        else:
+            p = _facts_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            row = {
+                "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "category": (category or "about_user").strip(),
+                "summary": text,
+                "speaker_id": sid,
+                "grounding": "user_stated",
+                "source_turn": "save_user_fact",
+            }
+            with p.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception as exc:
+        log.debug("record_user_fact write failed: %s", exc)
+        return
+
+    try:
+        status = EMBEDDER.status()
+        backend = status.get("backend")
+        dim = status.get("dim") or 0
+        model = status.get("model") or ""
+        if backend in (None, "disabled") or not dim:
+            return
+        store = get_store()
+        if store._dim is None:  # type: ignore[attr-defined]
+            store.stamp(dim, backend, model)
+        if not store.is_compatible(dim, backend, model):
+            return
+        if not store.has(fid):
+            vec = EMBEDDER.embed(text)
+            if vec:
+                store.add(fid, vec, save=True)
+    except Exception as exc:
+        log.debug("record_user_fact embed failed: %s", exc)
+
+
+def search_user_stated_facts(
+    query: str,
+    limit: int = 5,
+    *,
+    speaker_id: str | None = None,
+) -> list[dict]:
+    """Lexical fallback over explicit `save_user_fact` rows so a fact saved
+    in the current turn is always immediately readable by `recall_facts`,
+    even when the embedder is offline or not yet backfilled."""
+    import re
+
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    tokens = [t for t in re.findall(r"[\w\-]{2,}", q) if len(t) >= 2]
+    if not tokens and len(q) < 2:
+        return []
+    requested_speaker = speaker_id.strip() if speaker_id is not None else None
+    scored: list[tuple[float, dict]] = []
+    for summary, row in _iter_facts():
+        if row.get("source_turn") != "save_user_fact":
+            continue
+        row_speaker = str(row.get("speaker_id") or "").strip()
+        if requested_speaker is not None and row_speaker != requested_speaker:
+            continue
+        if _is_synthetic_speaker(row_speaker):
+            continue
+        low = summary.lower()
+        exact = 1.0 if q in low else 0.0
+        hits = sum(1 for t in tokens if t in low) if tokens else 0
+        if not exact and hits == 0:
+            continue
+        score = min(0.99, 0.75 + 0.1 * exact + 0.05 * hits)
+        scored.append((
+            score,
+            {
+                "summary": summary,
+                "category": row.get("category", "about_user"),
+                "score": round(score, 3),
+                "ts": row.get("ts") or "",
+                "speaker_id": row_speaker,
+                "grounding": row.get("grounding") or "user_stated",
+            },
+        ))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [pair[1] for pair in scored[: max(1, int(limit or 5))]]

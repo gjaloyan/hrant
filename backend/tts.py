@@ -113,6 +113,34 @@ def _language_not_covered(text: str, voice: Optional[str]) -> Optional[str]:
     return None
 
 
+def _report_failure(backend: str, error: Exception) -> None:
+    """Put a synthesis failure where the agent reads it on its next turn.
+
+    2026-10-29 .. 11-12: every voice reply failed with a 403 from Edge's
+    speech service — the installed edge-tts was one release behind a change
+    on Microsoft's side. Each time the owner got the raw exception in the
+    chat, and the agent, which can diagnose and fix exactly this, never
+    learned that anything was wrong. Never raises.
+    """
+    try:
+        from .provider_error_log import log_provider_error
+        text = str(error)
+        refused = "403" in text
+        hint = ("; an outdated edge-tts package has caused this before — "
+                "upgrade it and restart" if backend == "edge_tts" and refused
+                else "")
+        log_provider_error(
+            provider=f"tts:{backend}", model="",
+            status_code=403 if refused else 500,
+            message=("voice replies are failing ("
+                     + ("403 from the speech service" if refused else text[:80])
+                     + ")" + hint),
+            context={"category": "tts"},
+        )
+    except Exception as e:
+        log.debug("tts failure not recorded: %s", e)
+
+
 def _pick_voice(text: str, *, default: str, ru: Optional[str] = None) -> str:
     """Choose Piper voice name based on the text's script.
     Currently only Russian needs explicit handling — the agent's
@@ -389,6 +417,8 @@ class Synthesizer:
                 unspeakable
                 or f"synthesize via {self._backend} failed: {e}")
             log.warning("tts synthesize failed: %s", e)
+            if not unspeakable:
+                _report_failure(self._backend or "", e)
             return None
         return None
 

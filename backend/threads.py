@@ -328,4 +328,89 @@ def trace_digest(tool_names: list[str], media_paths: list[str]) -> str:
     return out
 
 
+_THREAD_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "from", "that", "this", "what", "when",
+    "where", "which", "who", "how", "our", "your", "find", "memory",
+    "мой", "моя", "моё", "мои", " наш", "наших", "твоей", "памяти",
+    "бесед", "найди", "где", "как", "что", "или", "для", "про",
+})
+
+
+def search_threads(
+    query: str,
+    *,
+    speaker_id: Optional[str] = None,
+    limit: int = 5,
+    store: "ThreadStore | None" = None,
+) -> list[dict]:
+    """Search past conversation exchanges in `threads/*.jsonl`.
+
+    Complements `fact_search`: facts store distilled summaries, while
+    `threads` holds the verbatim exchanges (commands, passwords, URLs,
+    exact numbers) including turns that have scrolled out of the active
+    context window or happened in another session.
+    """
+    import re
+
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    tokens = [
+        t for t in re.findall(r"[\w\-]{2,}", q)
+        if t not in _THREAD_STOPWORDS and len(t) >= 2
+    ]
+    if not tokens and len(q) < 2:
+        return []
+    store = store or THREADS
+    try:
+        if not store.root.exists():
+            return []
+        files = sorted(store.root.glob("*.jsonl"))
+    except Exception:
+        return []
+
+    scored: list[tuple[float, str, dict]] = []
+    for log_path in files:
+        try:
+            state = store._read_state(log_path.with_suffix(".state.json"))
+            skey = str(state.get("session_key") or "")
+            sid = str(state.get("speaker_id") or "")
+            if skey.startswith("task:"):
+                continue
+            if any(sid.lower().startswith(p) for p in ("audit:", "bench", "webui:bench", "test:")):
+                continue
+            if speaker_id is not None and sid != speaker_id:
+                continue
+            entries = store._entries(log_path)
+        except Exception:
+            continue
+        for row in entries:
+            u = str(row.get("user") or "").strip()
+            a = str(row.get("answer") or "").strip()
+            if not u and not a:
+                continue
+            hay = f"{u}\n{a}".lower()
+            exact = 1.0 if len(q) >= 3 and q in hay else 0.0
+            hits = sum(1 for t in tokens if t in hay) if tokens else 0
+            if not exact and hits == 0:
+                continue
+            ratio = (hits / len(tokens)) if tokens else 0.0
+            if not exact and len(tokens) >= 3 and ratio < 0.5:
+                continue
+            score = exact + ratio + (0.05 * hits)
+            ts = str(row.get("ts") or "")[:19]
+            scored.append((
+                score,
+                ts,
+                {
+                    "ts": ts,
+                    "user": _clip(u, 240),
+                    "answer": _clip(a, 360),
+                },
+            ))
+    scored.sort(key=lambda item: (round(item[0], 3), item[1]), reverse=True)
+    n = max(1, min(int(limit or 5), 15))
+    return [item[2] for item in scored[:n]]
+
+
 THREADS = ThreadStore()

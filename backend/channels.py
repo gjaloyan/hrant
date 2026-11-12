@@ -738,6 +738,8 @@ class TelegramBot:
         self.allowed_users = allowed_users or []
         self._thread: threading.Thread | None = None
         self._running = False
+        # A failed voice reply is announced once, not after every message.
+        self._voice_failure_told = False
         self._app = None
         self._loop: asyncio.AbstractEventLoop | None = None
         # Per-bot semaphore. Created lazily because asyncio.Semaphore
@@ -2441,6 +2443,7 @@ class TelegramBot:
                                 lambda: _TTS.synthesize(spoken),
                             )
                             if audio_wav:
+                                self._voice_failure_told = False
                                 # Telegram's native voice bubble needs OGG
                                 # container + Opus codec, 48 kHz mono.
                                 # WAV plays as a distorted bubble or a
@@ -2485,10 +2488,20 @@ class TelegramBot:
                                 # the bot stayed silent on voice
                                 # rather than puzzling over a missing
                                 # bubble.
-                                err = _TTS.status().get("last_error") or "(no detail)"
-                                await update.message.reply_text(
-                                    f"⚠️ TTS produced no audio: {err}"
-                                )
+                                # Once per failure streak, in words a
+                                # person can read. The raw exception,
+                                # websocket URL included, used to follow
+                                # every voice message for two weeks; the
+                                # reason is in the log and in front of
+                                # the agent (tts._report_failure).
+                                log.warning("voice reply not sent: %s",
+                                            _TTS.status().get("last_error"))
+                                if not self._voice_failure_told:
+                                    self._voice_failure_told = True
+                                    await update.message.reply_text(
+                                        "⚠️ Voice reply is unavailable right "
+                                        "now — answered in text."
+                                    )
                     except Exception as _tts_err:
                         # Surface the error visibly — debugging silent
                         # TTS failures was painful. Cap the trace so

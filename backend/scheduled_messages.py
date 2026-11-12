@@ -591,7 +591,7 @@ def deliver_due() -> dict:
                 summary["sent"].append(row["id"])
                 summary.setdefault("outcomes", {})[row["id"]] = outcome
                 if outcome != "done":
-                    _rearm(row, summary,
+                    _rearm(row, summary, outcome=outcome,
                            last_report=report if outcome == "sent" else None)
             except Exception as e:
                 mark_failed(row["id"], str(e)[:200])
@@ -742,7 +742,8 @@ def run_agent_task(row: dict) -> tuple[str, str]:
     return ("silent", "") if silent else ("sent", body)
 
 
-def _rearm(row: dict, summary: dict, *, last_report: Optional[str] = None) -> None:
+def _rearm(row: dict, summary: dict, *, last_report: Optional[str] = None,
+           outcome: str = "") -> None:
     """Queue the next occurrence of a repeating row, AFTER it delivered.
 
     After, not before, and only on success: a row that re-arms itself up
@@ -772,6 +773,16 @@ def _rearm(row: dict, summary: dict, *, last_report: Optional[str] = None) -> No
         # passes the previous report on unchanged.
         if last_report:
             meta["last_report"] = last_report[:3000]
+        # What the last run did, for "is it running?" — a schedule alone
+        # says when the next one is due, not that the last one worked
+        # (2026-11-05: "I cannot confirm how the last check went").
+        if outcome:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            meta["runs"] = int(meta.get("runs") or 0) + 1
+            meta["last_run_at"] = stamp
+            meta["last_outcome"] = outcome
+            if outcome == "sent":
+                meta["last_sent_at"] = stamp
         nxt = schedule(
             target_speaker=row.get("target_speaker") or "",
             text=row.get("text") or "",
