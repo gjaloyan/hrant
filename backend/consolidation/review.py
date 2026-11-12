@@ -40,7 +40,7 @@ log = logging.getLogger(__name__)
 PROFILE_TARGET_CHARS = 3000
 PROFILE_REWRITE_ABOVE = 4000
 MAX_PROFILE_REWRITES = 4
-_USER_CAP, _AGENT_CAP, _TOTAL_CAP = 700, 900, 40_000
+_USER_CAP, _AGENT_CAP, _TOTAL_CAP = 1000, 2500, 48_000
 
 REVIEW_SYSTEM = """You are the nightly self-review of Hrant, a personal AI assistant that serves one family over Telegram and a web UI. You read yesterday's REAL conversations — the user's messages, the assistant's answers, and a short note of what it did — and decide what the assistant must do differently tomorrow.
 
@@ -278,6 +278,172 @@ def _profile_path(speaker_id: str) -> Path:
     return config.user_md_path()
 
 
+# ── system & tool errors + autonomous nightly repair ────────────────
+
+def _collect_system_failures(since: str) -> tuple[str, list[dict], list[dict]]:
+    """Gather unresolved provider/subsystem errors and recurring tool errors since `since`."""
+    provider_errors: list[dict] = []
+    tool_errors: list[dict] = []
+    try:
+        from .. import provider_error_log
+        provider_errors = list(provider_error_log.recent_unresolved(within_hours=36) or [])
+    except Exception as e:
+        log.debug("nightly review: provider_error_log read failed: %s", e)
+
+    try:
+        from .. import paths
+        err_path = paths.knowledge_dir() / "error_log.jsonl"
+        if err_path.exists():
+            lines = err_path.read_text(encoding="utf-8", errors="replace").splitlines()[-250:]
+            grouped: dict[tuple[str, str], dict] = {}
+            for ln in lines:
+                if not ln.strip():
+                    continue
+                try:
+                    row = json.loads(ln)
+                except ValueError:
+                    continue
+                if row.get("source") != "tool" or str(row.get("ts") or "") < since:
+                    continue
+                svc = str(row.get("service") or "unknown")
+                msg = " ".join(str(row.get("message") or "").split())[:140]
+                args = row.get("tool_args") or {}
+                arg_hint = str(args.get("url") or args.get("query") or args.get("command") or "")[:120]
+                key = (svc, f"{msg} [{arg_hint}]" if arg_hint else msg)
+                rec = grouped.setdefault(key, {
+                    "service": svc,
+                    "message": msg,
+                    "arg_hint": arg_hint,
+                    "count": 0,
+                    "last_ts": str(row.get("ts") or ""),
+                })
+                rec["count"] += 1
+                rec["last_ts"] = str(row.get("ts") or "")
+            tool_errors = sorted(grouped.values(), key=lambda x: (-x["count"], x["last_ts"]))[:10]
+    except Exception as e:
+        log.debug("nightly review: error_log read failed: %s", e)
+
+    parts: list[str] = []
+    if provider_errors:
+        parts.append("UNRESOLVED SUBSYSTEM / PROVIDER ERRORS:")
+        for pe in provider_errors[-6:]:
+            parts.append(
+                f"- id={pe.get('id')} provider={pe.get('provider')} "
+                f"status={pe.get('status_code')}: {pe.get('message')}"
+            )
+    if tool_errors:
+        parts.append("RECURRING / RECENT TOOL ERRORS (last 26h):")
+        for te in tool_errors:
+            hint = f" (target: {te['arg_hint']})" if te.get("arg_hint") else ""
+            parts.append(f"- tool={te['service']} ({te['count']}x){hint}: {te['message']}")
+    block = "\n".join(parts)
+    return block, provider_errors, tool_errors
+
+
+def _run_repair_agent(prompt: str, owner: str) -> str:
+    """Execute one bounded autonomous self-repair turn as the primary owner.
+
+    Skipped automatically inside pytest unit tests unless a test explicitly
+    monkeypatches `_run_repair_agent`.
+    """
+    import os
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return ""
+    from ..agent import Agent
+    stamp = datetime.now().strftime("%Y-%m-%d")
+    ans = Agent().run(
+        prompt,
+        channel="webui",
+        speaker_id=owner or "webui:default",
+        session_key=f"system:nightly-repair:{stamp}",
+    )
+    return str(getattr(ans, "answer", "") or "").strip()
+
+
+def _run_nightly_repairs(
+    out: dict,
+    repair_rules: list[dict],
+    provider_errors: list[dict],
+    tool_errors: list[dict],
+) -> list[str]:
+    """Run an autonomous self-repair turn when rules are broken repeatedly,
+    workflows/tools fail repeatedly, or subsystem errors remain unresolved."""
+    recurring_tools = [t for t in (tool_errors or []) if int(t.get("count") or 0) >= 2]
+    actionable_issues = [
+        i for i in (out.get("issues") or [])
+        if i.get("kind") in ("tool_failure", "wrong_answer", "ignored_preference", "gave_up")
+        and (i.get("breaks_rule") or i.get("kind") == "tool_failure")
+    ]
+    if not (repair_rules or provider_errors or recurring_tools or actionable_issues):
+        return []
+
+    findings: list[str] = []
+    if repair_rules:
+        findings.append("## Escalated / Repeatedly Broken Rules (prompt rule alone is not holding)")
+        for r in repair_rules:
+            vs = "; ".join(f"{v.get('night')}: {v.get('what', '')}" for v in (r.get("violations") or [])[-3:])
+            findings.append(f"- Rule: {r.get('text')}\n  Recent violations: {vs}")
+    if out.get("issues"):
+        findings.append("## Issues Found in Yesterday's Conversations")
+        for i in out["issues"]:
+            findings.append(
+                f"- [{i.get('kind')}] {i.get('what')} (evidence: {i.get('evidence')})"
+            )
+    if provider_errors:
+        findings.append("## Unresolved Subsystem / Provider Errors")
+        for pe in provider_errors[-6:]:
+            findings.append(
+                f"- id={pe.get('id')} provider={pe.get('provider')} "
+                f"status={pe.get('status_code')}: {pe.get('message')}"
+            )
+    if recurring_tools:
+        findings.append("## Recurring Tool Failures (last 26h)")
+        for te in recurring_tools[:8]:
+            hint = f" (target: {te['arg_hint']})" if te.get("arg_hint") else ""
+            findings.append(f"- tool={te['service']} ({te['count']}x){hint}: {te['message']}")
+
+    prompt = (
+        "[NIGHTLY SELF-REPAIR — autonomous maintenance turn during nightly consolidation.\n"
+        f"REPORT_LANGUAGE: {_report_language()}\n"
+        "You are inspecting your own recurring failures from the last 24 hours to fix the root "
+        "causes in your skills, scheduled tasks, environment/packages, or code so they do not "
+        "repeat tomorrow. Nobody is waiting in chat; do NOT ask questions. Use your tools:\n"
+        "1. **Skills & Scheduled Workflows:** If a broken rule, omitted report section, or "
+        "recurring tool failure involves an active skill or scheduled task, call `list_skills` / "
+        "`load_skill` and `list_scheduled(scope='all')` to inspect them. If a skill's `SKILL.md` "
+        "or a scheduled task uses broken URLs/endpoints (e.g. HTTP 400/403/404) or lacks "
+        "enforcement for required sections (e.g. macro, news, geopolitical context, conclusions), "
+        "test working replacements with `fetch_url` / `web_search` / `run_python` and update the "
+        "skill (`propose_skill` or `write_file` on its `SKILL.md`) and/or update the scheduled "
+        "task (`cancel_scheduled` + `schedule_message`).\n"
+        "2. **Unresolved Subsystem / Provider Errors (e.g. TTS / STT):** Check package versions "
+        "or service health with `run_command` / `run_python` (use `sys.executable` for pip), "
+        "apply the fix, verify it works (e.g. for TTS, run `from backend.tts import SYNTHESIZER; "
+        "SYNTHESIZER.reset(); SYNTHESIZER.synthesize('Проверка')` and confirm non-empty bytes), "
+        "and call `acknowledge_provider_issue(error_id, resolution)`.\n"
+        "3. **Engine Code Bugs:** If a defect lives in `backend/*.py`, read the file with "
+        "`read_file` and submit a minimal diff with `propose_self_modification`.\n"
+        "Finish with 1-3 short bullet points in REPORT_LANGUAGE stating the exact fixes you "
+        "applied and verified.]\n\n"
+        + "\n".join(findings)
+    )
+    try:
+        from .. import roles
+        owner = roles.primary_owner() or "webui:default"
+        raw = _run_repair_agent(prompt, owner)
+        if not raw or raw.upper().startswith("[SILENT]"):
+            return []
+        lines = [
+            ln.strip().lstrip("-•* ").strip()
+            for ln in raw.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")
+        ]
+        return [ln[:260] for ln in lines if ln][:4]
+    except Exception as e:
+        log.warning("nightly self-repair failed: %s", e)
+        return []
+
+
 # ── the step ────────────────────────────────────────────────────────
 
 def run_review(*, now: Optional[float] = None, dry_run: bool = False,
@@ -285,7 +451,7 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
     """The nightly step. Never raises; returns what it did."""
     out: dict = {"status": "ok", "lessons_added": [], "issues": [],
                  "profiles": [], "summary": "", "report": "",
-                 "rules_broken": [], "escalated": [],
+                 "rules_broken": [], "escalated": [], "repairs": [],
                  "skills_disabled": [], "skills_changed": []}
     now = now or time.time()
     since = datetime.fromtimestamp(now - 26 * 3600).strftime("%Y-%m-%d %H:%M:%S")
@@ -295,11 +461,18 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
     except Exception as e:
         return {**out, "status": "failed", "error": f"transcript: {e}"}
 
+    sys_block, provider_errors, tool_errors = _collect_system_failures(since)
+    repair_rules: list[dict] = []
+
     if transcript.strip():
         try:
             from .. import learned_rules
             current = [r["text"] for r in learned_rules.rules()]
-            res = review(transcript, current)
+            review_input = (
+                f"{transcript}\n\n=== SYSTEM & TOOL ERRORS (last 26h) ===\n{sys_block}"
+                if sys_block else transcript
+            )
+            res = review(review_input, current)
             out["summary"] = str(res.get("summary") or "")
             out["issues"] = [i for i in (res.get("issues") or []) if isinstance(i, dict)][:6]
             out["report"] = str(res.get("report") or "").strip()
@@ -309,6 +482,11 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
             out["rules_broken"] = [text for text, _ in broken]
             if broken and not dry_run:
                 out["escalated"] = learned_rules.record_violations(broken)
+                broken_set = set(out["rules_broken"])
+                repair_rules = [
+                    r for r in learned_rules.rules()
+                    if r.get("text") in broken_set and r.get("escalated")
+                ]
             lessons = [str(l) for l in (res.get("lessons") or []) if str(l).strip()][:3]
             out["lessons_proposed"] = lessons
             if lessons and not dry_run:
@@ -321,6 +499,11 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
             log.warning("nightly review failed: %s", e)
             out["status"] = "partial"
             out["error"] = f"review: {e}"
+
+    if not dry_run:
+        out["repairs"] = _run_nightly_repairs(
+            out, repair_rules or out["escalated"], provider_errors, tool_errors,
+        )
 
     # Profiles: everyone who spoke, plus any profile that has grown too big.
     try:
@@ -360,8 +543,8 @@ def run_review(*, now: Optional[float] = None, dry_run: bool = False,
         log.warning("skill upkeep failed: %s", e)
 
     if notify and not dry_run and (out["report"] or out["lessons_added"] or out["profiles"]
-                                   or out["escalated"] or out["skills_disabled"]
-                                   or out["skills_changed"]):
+                                   or out["escalated"] or out["repairs"]
+                                   or out["skills_disabled"] or out["skills_changed"]):
         _notify_owner(out)
     return out
 
@@ -377,6 +560,8 @@ def _notify_owner(out: dict) -> None:
         nights = ", ".join(v["night"] for v in r.get("violations") or [])
         lines.append(f"⚠ broken again on {nights} although it is a rule; a prompt "
                      f"line is not holding it, it needs a check in code: {r['text']}")
+    for rep in out.get("repairs") or []:
+        lines.append(f"🔧 {rep}")
     for p in out.get("profiles") or []:
         lines.append(f"profile {Path(p['path']).name}: {p['before']} → {p['after']}")
     if out.get("skills_disabled"):

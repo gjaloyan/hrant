@@ -152,6 +152,17 @@ def acknowledge(error_id: str, *, resolution: str) -> bool:
                 found = True
                 break
         if not found:
+            for row in rows:
+                if row.get("resolved"):
+                    continue
+                prov = str(row.get("provider") or "")
+                cat = str((row.get("context") or {}).get("category") or "")
+                if prov == error_id or prov.startswith(f"{error_id}:") or cat == error_id:
+                    row["resolved"] = True
+                    row["resolution"] = (resolution or "")[:500]
+                    row["resolved_at"] = _now()
+                    found = True
+        if not found:
             return False
         # Rewrite the whole file (small — typically <100 rows).
         p = _log_path()

@@ -123,17 +123,26 @@ def _report_failure(backend: str, error: Exception) -> None:
     learned that anything was wrong. Never raises.
     """
     try:
+        import sys
         from .provider_error_log import log_provider_error
         text = str(error)
         refused = "403" in text
-        hint = ("; an outdated edge-tts package has caused this before — "
-                "upgrade it and restart" if backend == "edge_tts" and refused
-                else "")
+        timed_out = "timed out" in text.lower()
+        py = sys.executable or "python"
+        if backend == "edge_tts" and refused:
+            hint = (f"; an outdated edge-tts package has caused this before — "
+                    f"upgrade it with `{py} -m pip install -U edge-tts` and "
+                    f"verify synthesis")
+        elif backend == "edge_tts" and timed_out:
+            hint = (f"; edge-tts timed out — inspect network/package state with "
+                    f"`{py}` or check tts_config.json")
+        else:
+            hint = ""
         log_provider_error(
             provider=f"tts:{backend}", model="",
-            status_code=403 if refused else 500,
+            status_code=403 if refused else (504 if timed_out else 500),
             message=("voice replies are failing ("
-                     + ("403 from the speech service" if refused else text[:80])
+                     + ("403 from the speech service" if refused else text[:100])
                      + ")" + hint),
             context={"category": "tts"},
         )
@@ -412,7 +421,12 @@ class Synthesizer:
             # Name the real reason when there is one. The provider's own
             # wording ("verify that your parameters are correct") sends
             # the owner to check settings that are already right.
-            unspeakable = _language_not_covered(text, voice or self._voice)
+            chosen_voice = voice or _pick_voice(
+                text,
+                default=self._voice or "",
+                ru=self._voice_ru,
+            )
+            unspeakable = _language_not_covered(text, chosen_voice)
             self._last_error = (
                 unspeakable
                 or f"synthesize via {self._backend} failed: {e}")
@@ -560,12 +574,23 @@ class Synthesizer:
         rate = cfg_e.get("rate") or "+0%"
 
         async def _synth() -> bytes:
-            buf = bytearray()
-            communicate = edge_tts.Communicate(text, chosen, rate=rate)
-            async for chunk in communicate.stream():
-                if chunk.get("type") == "audio":
-                    buf.extend(chunk.get("data") or b"")
-            return bytes(buf)
+            last_err: Optional[Exception] = None
+            for attempt in range(2):
+                try:
+                    buf = bytearray()
+                    communicate = edge_tts.Communicate(text, chosen, rate=rate)
+                    async for chunk in communicate.stream():
+                        if chunk.get("type") == "audio":
+                            buf.extend(chunk.get("data") or b"")
+                    if buf:
+                        return bytes(buf)
+                except Exception as exc:
+                    last_err = exc
+                    if attempt == 0:
+                        await asyncio.sleep(0.5)
+            if last_err is not None:
+                raise last_err
+            return b""
 
         # Always run in a fresh event loop on this thread. Avoids
         # "asyncio.run() cannot be called from a running event loop"
@@ -585,8 +610,7 @@ class Synthesizer:
         # but allow for slow networks.
         t.join(timeout=30)
         if t.is_alive():
-            self._last_error = "edge_tts timed out after 30s"
-            return None
+            raise TimeoutError("edge_tts timed out after 30s")
         if "error" in result:
             raise result["error"]
         return result.get("audio") or None

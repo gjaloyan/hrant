@@ -497,3 +497,155 @@ def test_google_news_rss_retries_with_compacted_query_when_stuffed_query_returns
     assert hits[0].title == "Anthropic files S-1 for IPO"
 
 
+def test_tts_russian_failure_and_timeout_record_and_queue_self_repair(tmp_path, monkeypatch):
+    from backend import channels, provider_error_log as pel, roles, scheduled_messages, tts
+
+    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(pel, "_log_path", lambda: tmp_path / "provider_errors.jsonl")
+    monkeypatch.setattr(roles, "primary_owner", lambda: "telegram:1")
+
+    s = tts.Synthesizer()
+    s._backend = "edge_tts"
+    s._voice = "en-US-AriaNeural"
+    s._voice_ru = "ru-RU-SvetlanaNeural"
+
+    def _boom_403(*a, **k):
+        raise RuntimeError("403, message='Invalid response status'")
+
+    monkeypatch.setattr(s, "_tx_edge_tts", _boom_403)
+    # Russian text on edge_tts uses ru-RU-SvetlanaNeural, so a 403 must NOT
+    # be misclassified as "no installed voice can speak Cyrillic".
+    assert s.synthesize("Привет, проверка голосовой связи") is None
+    assert "no installed voice" not in (s._last_error or "")
+    unresolved = pel.recent_unresolved(within_hours=24)
+    assert len(unresolved) == 1
+    assert unresolved[0]["provider"] == "tts:edge_tts"
+    assert unresolved[0]["status_code"] == 403
+
+    # Post-turn failure queues a single one-shot TTS self-repair agent_task.
+    channels._queue_tts_self_repair("telegram:1", s._last_error or "")
+    channels._queue_tts_self_repair("telegram:1", s._last_error or "")
+    pending = [
+        r for r in scheduled_messages.list_pending()
+        if (r.get("meta") or {}).get("tag") == "auto-repair:tts"
+    ]
+    assert len(pending) == 1
+    assert pending[0]["kind"] == "agent_task"
+
+    # Acknowledging by category/prefix ("tts") resolves the provider error.
+    assert pel.acknowledge("tts", resolution="upgraded edge-tts and verified synth") is True
+    assert pel.recent_unresolved(within_hours=24) == []
+
+
+def test_nightly_review_sees_system_errors_and_runs_autonomous_repairs(tmp_path, monkeypatch):
+    from backend import learned_rules as lr, provider_error_log as pel, roles, scheduled_messages, threads
+    from backend.consolidation import config as ccfg, review
+    from backend.threads import ThreadStore
+
+    data_dir = tmp_path / "data"
+    (data_dir / "knowledge").mkdir(parents=True)
+    monkeypatch.setenv("HRANT_DATA_DIR", str(data_dir))
+    store = ThreadStore(root=tmp_path / "threads")
+    monkeypatch.setattr(threads, "THREADS", store)
+    monkeypatch.setattr(lr, "_path", lambda: tmp_path / "rules.json")
+    monkeypatch.setattr(ccfg, "user_md_path", lambda: tmp_path / "missing.md")
+    monkeypatch.setattr(ccfg, "profile_path_for_speaker", lambda s: tmp_path / "missing2.md")
+    monkeypatch.setattr(roles, "primary_owner", lambda: "telegram:1")
+    monkeypatch.setattr(pel, "_log_path", lambda: tmp_path / "provider_errors.jsonl")
+
+    # Seed an already-escalated rule that is broken again tonight.
+    rule_text = "In diagnoses and crypto reviews, cover agreed risks and news."
+    (tmp_path / "rules.json").write_text(json.dumps({
+        "rules": [{
+            "text": rule_text,
+            "added": "2026-10-30",
+            "escalated": "2026-11-01",
+            "violations": [
+                {"night": "2026-10-31", "what": "omitted news"},
+                {"night": "2026-11-01", "what": "omitted macro and news"},
+            ],
+        }],
+        "history": [],
+    }), encoding="utf-8")
+
+    # Seed a 2,200-char crypto report whose tail (news/conclusions) lies past 900 chars.
+    long_report = ("📊 PEPE/USDT\n" + ("Технический блок. " * 60)
+                   + "\n📰 Новости и макро: не проверялись в этом запуске.")
+    assert len(long_report) > 1100
+    store.append("tg:1", speaker_id="telegram:1", user="проверь PEPE", answer=long_report)
+
+    # Seed an unresolved TTS provider error and recurring tool errors in error_log.jsonl.
+    pel.log_provider_error(
+        provider="tts:edge_tts", model="", status_code=403,
+        message="voice replies are failing (403 from the speech service)",
+        context={"category": "tts"},
+    )
+    err_log = data_dir / "knowledge" / "error_log.jsonl"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    err_log.write_text(
+        "\n".join([
+            json.dumps({
+                "ts": now_str,
+                "source": "tool",
+                "service": "fetch_url",
+                "message": "HTTP 400 Bad Request",
+                "tool_args": {"url": "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=PEPEUSDT"},
+            }),
+            json.dumps({
+                "ts": now_str,
+                "source": "tool",
+                "service": "fetch_url",
+                "message": "HTTP 400 Bad Request",
+                "tool_args": {"url": "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=PEPEUSDT"},
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    seen_review_user: dict = {}
+    seen_repair_prompt: dict = {}
+
+    def _fake_call_json(system, user, *, max_tokens):
+        seen_review_user["user"] = user
+        return {
+            "summary": "PEPE report skipped news again and TTS failed.",
+            "issues": [{
+                "kind": "ignored_preference",
+                "what": "Skipped news and macro check in PEPE review.",
+                "evidence": "Новости и макро: не проверялись",
+                "breaks_rule": 1,
+            }],
+            "lessons": [],
+            "report": "В обзоре PEPE снова были пропущены новости, а также падал TTS.",
+        }
+
+    def _fake_repair_agent(prompt: str, owner: str) -> str:
+        seen_repair_prompt["prompt"] = prompt
+        seen_repair_prompt["owner"] = owner
+        return (
+            "- Обновлён скилл crypto-asset-analysis: 1000PEPEUSDT вместо PEPEUSDT и обязательный поиск новостей.\n"
+            "- Проверен и восстановлен TTS (edge-tts)."
+        )
+
+    monkeypatch.setattr(review, "_call_json", _fake_call_json)
+    monkeypatch.setattr(review, "_run_repair_agent", _fake_repair_agent)
+    scheduled_texts: list[str] = []
+    monkeypatch.setattr(scheduled_messages, "list_pending", lambda: [])
+    monkeypatch.setattr(scheduled_messages, "schedule", lambda **kw: scheduled_texts.append(kw["text"]))
+
+    out = review.run_review()
+    # 1. Full report (>900 chars) and system/tool errors reached the reviewer.
+    assert "Новости и макро: не проверялись" in seen_review_user["user"]
+    assert "tts:edge_tts" in seen_review_user["user"]
+    assert "fapi.binance.com" in seen_review_user["user"]
+    # 2. Repair agent ran with broken rule, provider errors, and recurring tool errors.
+    assert seen_repair_prompt["owner"] == "telegram:1"
+    assert rule_text in seen_repair_prompt["prompt"]
+    assert "fapi.binance.com" in seen_repair_prompt["prompt"]
+    assert len(out["repairs"]) == 2
+    # 3. Morning report includes 🔧 repair lines.
+    assert scheduled_texts
+    assert "🔧 Обновлён скилл crypto-asset-analysis" in scheduled_texts[0]
+
+
+

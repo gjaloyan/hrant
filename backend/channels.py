@@ -51,6 +51,43 @@ def _resolve_channels_path() -> Path:
     return paths.knowledge_dir() / "channels.json"
 
 
+def _queue_tts_self_repair(speaker_id: str, last_error: str) -> None:
+    """Queue a one-shot background self-repair task when TTS fails after a turn."""
+    if not last_error or last_error.startswith("no installed voice can speak"):
+        return
+    try:
+        from datetime import timedelta, timezone
+        from . import roles, scheduled_messages
+        owner = roles.primary_owner() or (speaker_id if roles.is_owner(speaker_id) else "")
+        if not owner:
+            return
+        tag = "auto-repair:tts"
+        if any((r.get("meta") or {}).get("tag") == tag for r in scheduled_messages.list_pending()):
+            return
+        due = (datetime.now(timezone.utc) + timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        scheduled_messages.schedule(
+            target_speaker=owner,
+            requested_by="system:auto-repair",
+            due_at=due,
+            kind="agent_task",
+            meta={"tag": tag, "name": "TTS self-repair"},
+            text=(
+                f"Voice synthesis (TTS) just failed after a reply ({last_error}). "
+                "Diagnose and fix TTS now using your tools (`run_command`, `read_file`, "
+                "`write_file`, `run_python`, `propose_code_change`). Check the active "
+                "Python environment (`sys.executable`), `edge-tts` version/status, "
+                "`tts_config.json`, or `backend/tts.py`, verify that "
+                "`from backend.tts import SYNTHESIZER; SYNTHESIZER.reset(); "
+                "SYNTHESIZER.synthesize('Проверка связи')` returns non-empty audio bytes, "
+                "call `acknowledge_provider_issue('tts', resolution)` once fixed, and send a brief note "
+                "telling the user what caused the voice failure and how you fixed it "
+                "(or answer [SILENT] if it was a one-off transient blip that already works)."
+            ),
+        )
+    except Exception as e:
+        log.debug("tts self-repair not queued: %s", e)
+
+
 class _ConflictNoiseFilter(logging.Filter):
     """Collapse python-telegram-bot's `Conflict: terminated by other
     getUpdates request` storms into a single warning line.
@@ -2494,8 +2531,9 @@ class TelegramBot:
                                 # every voice message for two weeks; the
                                 # reason is in the log and in front of
                                 # the agent (tts._report_failure).
-                                log.warning("voice reply not sent: %s",
-                                            _TTS.status().get("last_error"))
+                                _tts_err_msg = str(_TTS.status().get("last_error") or "")
+                                log.warning("voice reply not sent: %s", _tts_err_msg)
+                                _queue_tts_self_repair(speaker_id, _tts_err_msg)
                                 if not self._voice_failure_told:
                                     self._voice_failure_told = True
                                     await update.message.reply_text(

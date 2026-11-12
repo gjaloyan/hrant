@@ -3174,7 +3174,7 @@ def run_unified(
     # history, no quick lane, not written into the chat as a turn, none of
     # the gates that judge a chat answer, nothing learned from it.
     from .scheduled_runs import is_background as _is_bg
-    _bg = _is_bg()
+    _bg = _is_bg() or str(session_key or "").startswith("system:")
     _policy_begin(audit_mode=audit_mode, background=_bg)
     # Phase 2 (2026-05-23): reset the per-turn tool-bundle state at
     # the very start of every turn. The ContextVar's default is an
