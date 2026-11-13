@@ -417,6 +417,12 @@ class MemoryExtractor:
                 f.write(json.dumps(fact.to_dict(), ensure_ascii=False) + "\n")
             self._fact_count += 1
         except Exception:
+            return
+        try:
+            from .fact_search import _facts_path, embed_fact
+            if self.log_path.resolve() == _facts_path().resolve():
+                embed_fact(fact.summary)
+        except Exception:
             pass
 
     def recall(self, query: str, limit: int = 10, *,

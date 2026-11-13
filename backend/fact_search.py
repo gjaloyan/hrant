@@ -419,24 +419,66 @@ def record_user_fact(
         log.debug("record_user_fact write failed: %s", exc)
         return
 
+    embed_fact(text)
+
+
+def embed_fact(summary: str) -> bool:
+    """Best-effort immediate embedding of a single fact into the vector
+    store so newly extracted or saved facts are searchable right away
+    without waiting for the periodic backfill lever."""
+    text = (summary or "").strip()
+    if not text:
+        return False
+    fid = fact_id(text)
     try:
         status = EMBEDDER.status()
         backend = status.get("backend")
         dim = status.get("dim") or 0
         model = status.get("model") or ""
         if backend in (None, "disabled") or not dim:
-            return
+            return False
         store = get_store()
         if store._dim is None:  # type: ignore[attr-defined]
             store.stamp(dim, backend, model)
         if not store.is_compatible(dim, backend, model):
-            return
+            return False
         if not store.has(fid):
             vec = EMBEDDER.embed(text)
             if vec:
                 store.add(fid, vec, save=True)
+                return True
+        return False
     except Exception as exc:
-        log.debug("record_user_fact embed failed: %s", exc)
+        log.debug("embed_fact failed: %s", exc)
+        return False
+
+
+def _norm_lexical(text: str) -> str:
+    import re
+    return re.sub(r"(?<=\d),(?=\d)", ".", (text or "").strip().lower())
+
+
+def _lexical_token_matches(
+    token: str, low_norm: str, low_words: list[str], *, fuzzy: bool
+) -> bool:
+    import re
+
+    if token in low_norm:
+        return True
+    if re.fullmatch(r"\d+\.\d+", token):
+        trimmed = token.rstrip("0").rstrip(".")
+        if len(trimmed) >= 2 and trimmed in low_norm:
+            return True
+        return False
+    if not fuzzy or len(token) < 4 or any(ch.isdigit() for ch in token):
+        return False
+    for w in low_words:
+        if any(ch.isdigit() for ch in w) or abs(len(w) - len(token)) > 3:
+            continue
+        min_pref = 3 if len(token) == 4 else max(4, min(len(token), len(w)) - 2)
+        if len(w) >= min_pref and token[:min_pref] == w[:min_pref]:
+            return True
+    return False
 
 
 def search_user_stated_facts(
@@ -445,42 +487,68 @@ def search_user_stated_facts(
     *,
     speaker_id: str | None = None,
 ) -> list[dict]:
-    """Lexical fallback over explicit `save_user_fact` rows so a fact saved
-    in the current turn is always immediately readable by `recall_facts`,
-    even when the embedder is offline or not yet backfilled."""
+    """Lexical fallback over explicit `save_user_fact` / `user_stated` rows
+    AND unembedded facts in `memory_facts.jsonl` so newly stated or
+    just-consolidated facts are immediately readable by `recall_facts`,
+    even before semantic backfill runs or when the embedder is offline."""
     import re
 
-    q = (query or "").strip().lower()
-    if not q:
+    q_norm = _norm_lexical(query)
+    if not q_norm:
         return []
-    tokens = [t for t in re.findall(r"[\w\-]{2,}", q) if len(t) >= 2]
-    if not tokens and len(q) < 2:
+    tokens = list(dict.fromkeys(
+        t for t in (m.strip(".-_") for m in re.findall(r"[\w.\-]{2,}", q_norm))
+        if len(t) >= 2
+    ))
+    if not tokens and len(q_norm) < 2:
         return []
     requested_speaker = speaker_id.strip() if speaker_id is not None else None
-    scored: list[tuple[float, dict]] = []
+    try:
+        store = get_store()
+    except Exception:
+        store = None
+    scored: list[tuple[tuple[float, str], dict]] = []
     for summary, row in _iter_facts():
-        if row.get("source_turn") != "save_user_fact":
+        is_explicit = (
+            row.get("source_turn") == "save_user_fact"
+            or row.get("grounding") == "user_stated"
+            or bool(row.get("confirmed"))
+        )
+        is_unembedded = store is not None and not store.has(fact_id(summary))
+        if not is_explicit and not is_unembedded:
             continue
         row_speaker = str(row.get("speaker_id") or "").strip()
         if requested_speaker is not None and row_speaker != requested_speaker:
             continue
         if _is_synthetic_speaker(row_speaker):
             continue
-        low = summary.lower()
-        exact = 1.0 if q in low else 0.0
-        hits = sum(1 for t in tokens if t in low) if tokens else 0
+        low_norm = _norm_lexical(summary)
+        low_words = [
+            w.strip(".-_") for w in re.findall(r"[\w.\-]{2,}", low_norm) if len(w) >= 2
+        ]
+        exact = 1.0 if q_norm in low_norm else 0.0
+        exact_hits = 0
+        stem_hits = 0
+        for t in tokens:
+            if _lexical_token_matches(t, low_norm, low_words, fuzzy=False):
+                exact_hits += 1
+            elif _lexical_token_matches(t, low_norm, low_words, fuzzy=True):
+                stem_hits += 1
+        hits = exact_hits + 0.7 * stem_hits
         if not exact and hits == 0:
             continue
         score = min(0.99, 0.75 + 0.1 * exact + 0.05 * hits)
         scored.append((
-            score,
+            (score, row.get("ts") or ""),
             {
                 "summary": summary,
                 "category": row.get("category", "about_user"),
                 "score": round(score, 3),
                 "ts": row.get("ts") or "",
                 "speaker_id": row_speaker,
-                "grounding": row.get("grounding") or "user_stated",
+                "grounding": row.get("grounding") or (
+                    "user_stated" if row.get("source_turn") == "save_user_fact" else ""
+                ),
             },
         ))
     scored.sort(key=lambda pair: pair[0], reverse=True)

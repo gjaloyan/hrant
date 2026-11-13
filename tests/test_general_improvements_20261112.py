@@ -717,3 +717,260 @@ def test_propose_with_diff_excerpts_middle_of_large_file_and_multi_module(tmp_pa
 
 
 
+
+
+def test_cancel_during_agent_task_prevents_mark_sent_and_rearm(tmp_path, monkeypatch):
+    """If a repeating agent_task is cancelled while run_agent_task is still in
+    flight, deliver_due must not overwrite status='cancelled' back to 'sent'
+    and _rearm must not spawn a duplicate occurrence in that series."""
+    from backend import scheduled_messages as sm
+
+    ledger = tmp_path / "scheduled_messages.jsonl"
+    monkeypatch.setattr(sm, "_path", lambda: ledger)
+
+    row = sm.schedule(
+        target_speaker="telegram:848732236",
+        text="check market",
+        due_at="2020-01-01T00:00:00Z",
+        requested_by="telegram:848732236",
+        kind="agent_task",
+        repeat="30m",
+    )
+
+    observed = {}
+
+    def _fake_run(r):
+        # Task must already be marked delivering while in flight, and cancelling
+        # by id or series must succeed cleanly mid-run.
+        in_flight = [x for x in sm._read_all() if x["id"] == r["id"]]
+        observed["status_in_flight"] = in_flight[0]["status"]
+        observed["cancel_ok"] = sm.cancel(r["id"], by_speaker="telegram:848732236")
+        return ("sent", "some report")
+
+    monkeypatch.setattr(sm, "run_agent_task", _fake_run)
+
+    summary = sm.deliver_due()
+    assert observed["status_in_flight"] == "delivering"
+    assert observed["cancel_ok"] is True
+    assert row["id"] not in summary["sent"]
+    assert not summary.get("rearmed")
+
+    rows = sm._read_all()
+    assert len(rows) == 1
+    assert rows[0]["id"] == row["id"]
+    assert rows[0]["status"] == "cancelled"
+
+    # Explicit late status mutations and direct _rearm must stay no-ops.
+    sm.mark_sent(row["id"])
+    sm.mark_failed(row["id"], "late error")
+    sm._rearm(row, {}, outcome="sent", last_report="late")
+    rows_after = sm._read_all()
+    assert len(rows_after) == 1
+    assert rows_after[0]["status"] == "cancelled"
+
+
+def test_list_scheduled_preserves_long_instructions(tmp_path, monkeypatch):
+    """list_scheduled must expose full task instructions up to 2000 chars so
+    follow-up edits/audits see all constraints instead of a 160-char prefix."""
+    import json
+    from backend import builtin_tools as bt
+    from backend import scheduled_messages as sm
+    from backend import roles, settings
+
+    ledger = tmp_path / "scheduled_messages.jsonl"
+    monkeypatch.setattr(sm, "_path", lambda: ledger)
+    monkeypatch.setattr(roles, "current_speaker", lambda: "webui:default")
+    monkeypatch.setattr(roles, "is_owner", lambda sid: True)
+    monkeypatch.setattr(settings, "user_timezone", lambda: "UTC")
+
+    long_650 = ("Macro liquidity ETF flows geopolitics SEC EDGAR. " * 15)[:650]
+    long_2500 = "X" * 2500
+
+    r1 = sm.schedule(
+        target_speaker="telegram:848732236",
+        text=long_650,
+        due_at="2099-01-01T00:00:00Z",
+        requested_by="webui:default",
+        kind="agent_task",
+        repeat="daily",
+    )
+    r2 = sm.schedule(
+        target_speaker="telegram:848732236",
+        text=long_2500,
+        due_at="2099-01-02T00:00:00Z",
+        requested_by="webui:default",
+        kind="agent_task",
+    )
+
+    out = json.loads(bt._list_scheduled_handler(horizon_days=100000, scope="all"))
+    by_id = {r["id"]: r for r in out["reminders"]}
+    assert by_id[r1["id"]]["text"] == long_650
+    assert by_id[r1["id"]]["text_truncated"] is False
+    assert len(by_id[r2["id"]]["text"]) == 2000
+    assert by_id[r2["id"]]["text_truncated"] is True
+
+
+def test_load_skill_refreshes_after_state_change_and_disk_edit(tmp_path, monkeypatch):
+    """State-changing tools (e.g. run_python updating SKILL.md) must invalidate the
+    per-turn dedup cache, and load_skill must re-read SKILL.md from disk."""
+    from backend import builtin_tools as bt
+    from backend import skills as skills_mod
+    from backend import tool_registry as tr
+
+    sk_dir = tmp_path / "demo-skill"
+    sk_dir.mkdir(parents=True)
+    sk_md = sk_dir / "SKILL.md"
+    sk_md.write_text(
+        "---\nname: demo-skill\ndescription: Demo skill\n---\nVERSION_ONE_BODY\n",
+        encoding="utf-8",
+    )
+    sk = skills_mod._parse_skill_md(sk_md)
+    assert sk is not None
+
+    monkeypatch.setattr(skills_mod.SKILLS, "skills", [sk])
+
+    reg = tr.ToolRegistry()
+    reg.register_func(
+        name="load_skill",
+        description="load skill",
+        input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+        handler=bt._load_skill_handler,
+    )
+
+    def _fake_run_python(code: str = "") -> str:
+        sk_md.write_text(
+            "---\nname: demo-skill\ndescription: Demo skill\n---\nVERSION_TWO_BODY\n",
+            encoding="utf-8",
+        )
+        return '{"ok": true}'
+
+    reg.register_func(
+        name="run_python",
+        description="run python",
+        input_schema={"type": "object", "properties": {"code": {"type": "string"}}},
+        handler=_fake_run_python,
+    )
+
+    tr.reset_per_turn_call_cache()
+    out1, err1 = reg.execute("load_skill", {"name": "demo-skill"})
+    assert err1 is False
+    assert "VERSION_ONE_BODY" in out1
+
+    _, err_py = reg.execute("run_python", {"code": "update skill"})
+    assert err_py is False
+
+    out2, err2 = reg.execute("load_skill", {"name": "demo-skill"})
+    assert err2 is False
+    assert "DUPLICATE CALL" not in out2
+    assert "VERSION_TWO_BODY" in out2
+
+
+def test_recall_finds_unembedded_extracted_and_cyrillic_decimal_facts(tmp_path, monkeypatch):
+    """search_user_stated_facts and _recall_facts_handler must find unembedded
+    MemoryExtractor facts (with Cyrillic inflection & comma-decimal numbers)
+    even when semantic search_facts already saturates limit, and _append_log
+    must embed immediately when an embedder is active."""
+    import json
+    from backend import builtin_tools as bt
+    from backend import fact_search as fs
+    from backend import memory_extractor as me
+    from backend import roles
+
+    facts_file = tmp_path / "memory_facts.jsonl"
+    store_file = tmp_path / "fact_embeddings.json"
+    monkeypatch.setattr(fs, "_facts_path", lambda: facts_file)
+    monkeypatch.setattr(fs, "_fact_store_path", lambda: store_file)
+    fs._new_store_for_test()
+
+    # 1. With embedder disabled, _append_log still writes the fact unembedded
+    monkeypatch.setattr(
+        fs.EMBEDDER, "status",
+        lambda: {"backend": "disabled", "dim": 0, "model": ""},
+    )
+    extractor = me.MemoryExtractor(log_path=facts_file)
+    extractor._append_log(me.MemoryFact(
+        summary="Пользователь полностью вышел из позиции PEPE по цене $0.0000050.",
+        triples=[],
+        tags=["pepe"],
+        category="event",
+        source_turn="yes",
+        speaker_id="telegram:848732236",
+    ))
+
+    # Query uses inflected Cyrillic ("позиция" vs "позиции") and comma decimal ("0,0000050")
+    lex_hits = fs.search_user_stated_facts("PEPE позиция $0,0000050", limit=5)
+    assert any("0.0000050" in h["summary"] for h in lex_hits)
+
+    # Even if semantic search_facts returns 8 older facts (filling n=8),
+    # _recall_facts_handler must still invoke lexical fallback and return the new fact.
+    older_semantic = [
+        {
+            "summary": f"Older PEPE fact #{i}",
+            "category": "event",
+            "score": 0.72 - 0.01 * i,
+            "ts": "2026-11-01 00:00:00",
+            "speaker_id": "telegram:848732236",
+            "grounding": "inferred",
+        }
+        for i in range(8)
+    ]
+    monkeypatch.setattr(fs, "search_facts", lambda *a, **k: older_semantic)
+    monkeypatch.setattr(roles, "current_speaker", lambda: "webui:default")
+    monkeypatch.setattr(roles, "is_owner", lambda sid: True)
+
+    recalled = json.loads(bt._recall_facts_handler(query="PEPE позиция $0,0000050"))
+    recalled_texts = [m["fact"] for m in recalled["matches"]]
+    assert any("0.0000050" in txt for txt in recalled_texts)
+
+    # 2. When embedder is enabled, _append_log embeds immediately into fact_embeddings.json
+    sub_facts = tmp_path / "sub_facts.jsonl"
+    sub_store = tmp_path / "sub_store.json"
+    monkeypatch.setattr(fs, "_facts_path", lambda: sub_facts)
+    monkeypatch.setattr(fs, "_fact_store_path", lambda: sub_store)
+    fs._new_store_for_test()
+    monkeypatch.setattr(
+        fs.EMBEDDER, "status",
+        lambda: {"backend": "test", "dim": 4, "model": "test-embed"},
+    )
+    monkeypatch.setattr(fs.EMBEDDER, "embed", lambda text: [0.5, 0.5, 0.5, 0.5])
+
+    extractor2 = me.MemoryExtractor(log_path=sub_facts)
+    summary = "Entered ETH swing position at 3100."
+    extractor2._append_log(me.MemoryFact(
+        summary=summary, triples=[], tags=["eth"], category="event", source_turn="t1",
+    ))
+    assert fs.get_store().has(fs.fact_id(summary)) is True
+
+
+def test_terminal_exec_accepts_cwd(tmp_path, monkeypatch):
+    """terminal_exec must accept an optional cwd argument in schema and forward
+    it to run_terminal without unexpected keyword TypeError."""
+    import json
+    from backend import builtin_tools as bt
+    from backend import roles
+    from backend.tool_registry import get_registry
+    from backend.tools import terminal_exec as tex
+
+    bt.register_builtin_tools()
+    tool = get_registry().tools.get("terminal_exec")
+    assert tool is not None
+    assert "cwd" in tool.input_schema["properties"]
+
+    monkeypatch.setattr(roles, "current_speaker", lambda: "webui:default")
+    monkeypatch.setattr(roles, "is_owner", lambda sid: True)
+
+    seen = {}
+
+    def _fake_run(command, *, cwd=None, timeout_seconds=60):
+        seen["command"] = command
+        seen["cwd"] = cwd
+        seen["timeout"] = timeout_seconds
+        return tex.TerminalResult(
+            ok=True, command=command, exit_code=0, stdout=str(cwd),
+            stderr="", truncated=False, elapsed_ms=5, error="",
+        )
+
+    monkeypatch.setattr(bt, "run_terminal", _fake_run)
+    out = json.loads(bt._terminal_exec_handler(command="pwd", cwd=str(tmp_path)))
+    assert out["ok"] is True
+    assert seen["cwd"] == str(tmp_path)

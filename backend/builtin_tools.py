@@ -677,11 +677,13 @@ def _list_scheduled_handler(scope: str = "mine", horizon_days: int = 7) -> str:
             continue
         local = due.astimezone(tz)
         meta = r.get("meta") or {}
+        full_label = _reminder_label(r)
         entry = {
             "id": r.get("id"),
             "when": local.strftime("%A %Y-%m-%d %H:%M"),
             "in_hours": round((due - now).total_seconds() / 3600, 1),
-            "text": _reminder_label(r)[:160],
+            "text": full_label[:2000],
+            "text_truncated": len(full_label) > 2000,
             "repeat": r.get("repeat") or "",
             "target": r.get("target_speaker"),
             # What a read-back has to be able to see: whether the entry
@@ -809,6 +811,20 @@ def _load_skill_handler(name: str) -> str:
             "ok": False,
             "error": f"skill {name!r} is disabled — owner toggles in the Skills panel",
         }, ensure_ascii=False)
+    try:
+        from .skills import _parse_skill_md
+        md_file = sk.path / "SKILL.md" if getattr(sk, "path", None) else None
+        if md_file is not None and md_file.exists():
+            fresh = _parse_skill_md(md_file)
+            if fresh is not None:
+                sk.description = fresh.description
+                sk.when_to_use = fresh.when_to_use
+                sk.triggers = fresh.triggers
+                sk.body = fresh.body
+                sk.required_tools = fresh.required_tools
+                sk.tags = fresh.tags
+    except Exception:
+        pass
     from . import skill_upkeep
     skill_upkeep.record_use(sk.name)
     return json.dumps({
@@ -2156,7 +2172,7 @@ def _check_subagents_handler(session_id: str = "") -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
-def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
+def _terminal_exec_handler(command: str, timeout: int = 0, cwd: str = "") -> str:
     """Run an arbitrary shell command on behalf of the OWNER.
 
     2026-05-21: full-shell mode. The allowlist + subcommand gates +
@@ -2179,7 +2195,7 @@ def _terminal_exec_handler(command: str, timeout: int = 0) -> str:
             "error": "permission denied — terminal_exec is owner-only",
         }, ensure_ascii=False)
     t = int(timeout) if timeout else _TERMINAL_DEFAULT_TIMEOUT
-    res = run_terminal(command, timeout_seconds=t)
+    res = run_terminal(command, cwd=(cwd or "").strip() or None, timeout_seconds=t)
     return json.dumps({
         "ok": res.ok,
         "command": res.command,
@@ -3325,21 +3341,25 @@ def _recall_facts_handler(query: str = "", limit: int = 8) -> str:
                     "learned": str(hit.get("ts") or "")[:19],
                     "grounding": hit.get("grounding") or "unknown",
                 })
-            if len(matches) < n:
-                seen_facts = {m["fact"].lower() for m in matches}
-                for hit in fact_search.search_user_stated_facts(
-                    q, limit=n - len(matches), speaker_id=scope,
-                ):
-                    summary = (hit.get("summary") or "").strip()
-                    if summary and summary.lower() not in seen_facts:
-                        seen_facts.add(summary.lower())
-                        matches.append({
-                            "fact": summary,
-                            "score": round(float(hit.get("score") or 0.0), 3),
-                            "category": hit.get("category") or "",
-                            "learned": str(hit.get("ts") or "")[:19],
-                            "grounding": hit.get("grounding") or "user_stated",
-                        })
+            seen_facts = {m["fact"].lower() for m in matches}
+            for hit in fact_search.search_user_stated_facts(
+                q, limit=n, speaker_id=scope,
+            ):
+                summary = (hit.get("summary") or "").strip()
+                if summary and summary.lower() not in seen_facts:
+                    seen_facts.add(summary.lower())
+                    matches.append({
+                        "fact": summary,
+                        "score": round(float(hit.get("score") or 0.0), 3),
+                        "category": hit.get("category") or "",
+                        "learned": str(hit.get("ts") or "")[:19],
+                        "grounding": hit.get("grounding") or "user_stated",
+                    })
+            matches.sort(
+                key=lambda m: (float(m.get("score") or 0.0), str(m.get("learned") or "")),
+                reverse=True,
+            )
+            matches = matches[:n]
         except Exception as exc:
             return json.dumps({"ok": False, "error": str(exc)},
                               ensure_ascii=False)
@@ -5074,6 +5094,13 @@ def register_builtin_tools() -> None:
                         f"{_TERMINAL_DEFAULT_TIMEOUT}, cap {_TERMINAL_MAX_TIMEOUT})."
                     ),
                     "default": _TERMINAL_DEFAULT_TIMEOUT,
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": (
+                        "Optional working directory for the command "
+                        "(defaults to the workspace/service working directory)."
+                    ),
                 },
             },
             "required": ["command"],

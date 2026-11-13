@@ -349,25 +349,51 @@ def may_manage(row: dict, speaker_id: str) -> bool:
     }
 
 
+def _series_id(row: dict) -> str:
+    return str((row.get("meta") or {}).get("series") or row.get("id") or "").strip()
+
+
+def _is_cancelled_unlocked(rows: list[dict], row: dict) -> bool:
+    row_id = str(row.get("id") or "").strip()
+    series = _series_id(row)
+    for r in rows:
+        if r.get("status") != "cancelled":
+            continue
+        rid = str(r.get("id") or "").strip()
+        r_series = str((r.get("meta") or {}).get("series") or "").strip()
+        if row_id and rid == row_id:
+            return True
+        if series and (rid == series or r_series == series):
+            return True
+    return False
+
+
+def _is_cancelled(row: dict) -> bool:
+    with _LEDGER_LOCK:
+        return _is_cancelled_unlocked(_read_all(), row)
+
+
 def cancel(message_id: str, *, by_speaker: Optional[str] = None) -> bool:
-    """Mark a pending message as cancelled. Returns True if found,
-    pending, and `by_speaker` is allowed to manage it.
+    """Mark a pending or in-flight message (and its active series rows) as
+    cancelled. Returns True if found, active, and `by_speaker` is allowed
+    to manage it.
 
     `by_speaker=None` means an internal caller with no user behind it
     (the re-arm path, tests, migrations) and skips the check; a request
     that came from a person must always pass one.
     """
+    active_statuses = ("pending", "delivering")
     with _LEDGER_LOCK:
         rows = _read_all()
         target_row = None
         for r in rows:
-            if r.get("id") == message_id and r.get("status") == "pending":
+            if r.get("id") == message_id and r.get("status") in active_statuses:
                 target_row = r
                 break
         if target_row is None and message_id:
             for r in rows:
                 if (
-                    r.get("status") == "pending"
+                    r.get("status") in active_statuses
                     and (r.get("meta") or {}).get("series") == message_id
                 ):
                     target_row = r
@@ -379,7 +405,15 @@ def cancel(message_id: str, *, by_speaker: Optional[str] = None) -> bool:
                     by_speaker, message_id,
                 )
                 return False
+            series = _series_id(target_row)
             target_row["status"] = "cancelled"
+            if series:
+                for r in rows:
+                    if r.get("status") in active_statuses and (
+                        r.get("id") == series
+                        or (r.get("meta") or {}).get("series") == series
+                    ):
+                        r["status"] = "cancelled"
             _write_all(rows)
             return True
     return False
@@ -413,6 +447,8 @@ def mark_sent(message_id: str) -> None:
         rows = _read_all()
         for r in rows:
             if r.get("id") == message_id:
+                if r.get("status") == "cancelled":
+                    return
                 r["status"] = "sent"
                 r["delivered_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
                 r["last_error"] = ""
@@ -425,6 +461,8 @@ def mark_failed(message_id: str, error: str) -> None:
         rows = _read_all()
         for r in rows:
             if r.get("id") == message_id:
+                if r.get("status") == "cancelled":
+                    return
                 r["status"] = "failed"
                 r["last_error"] = error[:500]
                 break
@@ -597,8 +635,15 @@ def deliver_due() -> dict:
             # step — a daily digest scheduled as a check_in would have been
             # marked delivered and re-armed while doing nothing at all,
             # every day, in silence.
+            mark_delivering(row["id"])
             try:
                 outcome, report = run_agent_task(row)
+                if _is_cancelled(row):
+                    log.info(
+                        "skipping post-run settlement for cancelled agent_task %s",
+                        row.get("id"),
+                    )
+                    continue
                 mark_sent(row["id"])
                 summary["sent"].append(row["id"])
                 summary.setdefault("outcomes", {})[row["id"]] = outcome
@@ -795,16 +840,23 @@ def _rearm(row: dict, summary: dict, *, last_report: Optional[str] = None,
             meta["last_outcome"] = outcome
             if outcome == "sent":
                 meta["last_sent_at"] = stamp
-        nxt = schedule(
-            target_speaker=row.get("target_speaker") or "",
-            text=row.get("text") or "",
-            due_at=upcoming,
-            requested_by=row.get("requested_by") or "",
-            kind=row.get("kind") or "message",
-            meta=meta,
-            repeat=repeat,
-        )
-        summary.setdefault("rearmed", []).append(nxt["id"])
+        with _LEDGER_LOCK:
+            if _is_cancelled_unlocked(_read_all(), row):
+                log.info(
+                    "skipping re-arm for cancelled schedule %s (series=%s)",
+                    row.get("id"), _series_id(row),
+                )
+                return
+            nxt = schedule(
+                target_speaker=row.get("target_speaker") or "",
+                text=row.get("text") or "",
+                due_at=upcoming,
+                requested_by=row.get("requested_by") or "",
+                kind=row.get("kind") or "message",
+                meta=meta,
+                repeat=repeat,
+            )
+            summary.setdefault("rearmed", []).append(nxt["id"])
     except Exception as e:      # never let re-arming break the sweep
         log.warning("could not re-arm repeating message %s: %s",
                     row.get("id"), e)

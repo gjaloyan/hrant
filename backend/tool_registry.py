@@ -580,7 +580,21 @@ class ToolRegistry:
         # Store in cache for the rest of this turn. Mutate-then-set
         # so we don't lose interleaved writes from other tools that
         # share the ContextVar in this same turn.
-        if cache_key is not None:
+        # When a state-changing tool succeeds, invalidate prior cached
+        # inspections so follow-up verification calls (e.g. list_scheduled
+        # after cancel_scheduled, recall_facts after save_user_fact, or
+        # load_skill after editing SKILL.md) read the updated state.
+        if not is_error and (
+            semantics.advances
+            or name in {
+                "run_python", "save_user_fact", "forget_user_fact",
+                "schedule_message", "schedule_task", "cancel_scheduled",
+                "propose_skill", "set_setting", "acknowledge_provider_issue",
+            }
+        ):
+            cache.clear()
+            _per_turn_call_cache.set(cache)
+        elif cache_key is not None:
             cache[cache_key] = (text, is_error)
             _per_turn_call_cache.set(cache)
         # No-progress nudge: prepend a banner if we've crossed the
