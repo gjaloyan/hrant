@@ -113,21 +113,23 @@ def _language_not_covered(text: str, voice: Optional[str]) -> Optional[str]:
     return None
 
 
-# edge-tts reliability knobs. Segments keep each websocket session short so
-# one stall costs one segment retry, not the whole reply.
-_EDGE_SEGMENT_CHARS = 450
+# edge-tts reliability knobs. Short segments plus bounded concurrency halve
+# worst-case multi-segment latency while per-chunk inactivity watches fail
+# genuine dead sockets quickly without aborting slow active streams.
+_EDGE_SEGMENT_CHARS = 320
+_EDGE_CONCURRENCY = 2
 _EDGE_ATTEMPTS = 3
 _EDGE_CONNECT_TIMEOUT = 6
 _EDGE_RECEIVE_TIMEOUT = 10
-_EDGE_ATTEMPT_BASE_S = 8.0
-_EDGE_CHARS_PER_S = 60.0
+_EDGE_CHUNK_TIMEOUT_S = 14.0
+_EDGE_ATTEMPT_CAP_BASE_S = 35.0
+_EDGE_CHARS_PER_S = 20.0
 
 
 def _edge_total_budget(text: str) -> float:
-    """Wall-clock budget for a whole reply: room for one stalled attempt
-    plus normal synthesis, scaled by length and capped so a voice bubble
-    never holds the chat for minutes."""
-    return min(120.0, 35.0 + len(text or "") / 20.0)
+    """Wall-clock budget for a whole reply: room for a stalled attempt retry
+    plus slow active synthesis, scaled by length and capped for chat."""
+    return min(150.0, 45.0 + len(text or "") / 15.0)
 
 
 def _split_for_speech(text: str, max_chars: int) -> list[str]:
@@ -645,44 +647,66 @@ class Synthesizer:
             except TypeError:  # older edge-tts without timeout kwargs
                 return edge_tts.Communicate(seg, chosen, rate=rate)
 
-        async def _one_attempt(seg: str) -> bytes:
+        async def _one_attempt(seg: str, attempt_cap: float) -> bytes:
             buf = bytearray()
-            async for chunk in _communicate(seg).stream():
-                if chunk.get("type") == "audio":
-                    buf.extend(chunk.get("data") or b"")
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + attempt_cap
+            it = _communicate(seg).stream().__aiter__()
+            try:
+                while True:
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    step = min(_EDGE_CHUNK_TIMEOUT_S, remaining)
+                    try:
+                        chunk = await asyncio.wait_for(it.__anext__(), step)
+                    except StopAsyncIteration:
+                        break
+                    if chunk.get("type") == "audio":
+                        buf.extend(chunk.get("data") or b"")
+            finally:
+                aclose = getattr(it, "aclose", None)
+                if callable(aclose):
+                    try:
+                        await aclose()
+                    except Exception:
+                        pass
             return bytes(buf)
 
         async def _segment(seg: str) -> bytes:
-            # Microsoft's endpoint intermittently stalls a stream for 20s+
-            # (measured on prod 2026-11-13: the same text took 1.2s, then
-            # 19.8s, then 2.3s). Without a per-attempt deadline a stalled
-            # first attempt consumed the whole budget and the retry never
-            # ran. Each attempt now gets its own deadline, then a fresh
-            # connection.
+            # Measured on prod (2026-11-13): Microsoft's endpoint can stream
+            # actively for 20-30s on a 300-char Russian segment before finishing
+            # cleanly, OR stall with 0 chunks. Abort only on per-chunk
+            # inactivity (_EDGE_CHUNK_TIMEOUT_S) or the overall attempt cap,
+            # never on a tight wall-clock timer while audio is arriving.
             last_err: Optional[Exception] = None
-            per_attempt = _EDGE_ATTEMPT_BASE_S + len(seg) / _EDGE_CHARS_PER_S
+            attempt_cap = _EDGE_ATTEMPT_CAP_BASE_S + len(seg) / _EDGE_CHARS_PER_S
             for attempt in range(_EDGE_ATTEMPTS):
                 try:
-                    audio = await asyncio.wait_for(_one_attempt(seg), per_attempt)
+                    audio = await _one_attempt(seg, attempt_cap)
                     if audio:
                         return audio
                     last_err = RuntimeError("edge_tts returned no audio")
                 except asyncio.TimeoutError:
                     last_err = TimeoutError(
-                        f"edge_tts attempt stalled for {per_attempt:.0f}s")
+                        f"edge_tts stalled (>{_EDGE_CHUNK_TIMEOUT_S:.0f}s idle or >{attempt_cap:.0f}s cap)")
                 except Exception as exc:
                     last_err = exc
                 if attempt + 1 < _EDGE_ATTEMPTS:
                     await asyncio.sleep(0.5 * (attempt + 1))
             raise last_err or RuntimeError("edge_tts returned no audio")
 
+        sem = asyncio.Semaphore(_EDGE_CONCURRENCY)
+
+        async def _bounded_segment(seg: str) -> bytes:
+            async with sem:
+                return await _segment(seg)
+
         async def _synth() -> bytes:
             # MP3 frames concatenate cleanly; ffmpeg reads the joined
             # stream as one file when converting to OGG/Opus.
-            out = bytearray()
-            for seg in segments:
-                out.extend(await _segment(seg))
-            return bytes(out)
+            parts = await asyncio.gather(*(_bounded_segment(s) for s in segments))
+            return b"".join(parts)
 
         # Always run in a fresh event loop on this thread. Avoids
         # "asyncio.run() cannot be called from a running event loop"

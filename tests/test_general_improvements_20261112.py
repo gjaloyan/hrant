@@ -1026,20 +1026,27 @@ def test_edge_tts_retries_a_stalled_attempt_and_segments_long_text(monkeypatch):
     from backend import tts
 
     calls = []
+    closed = []
 
     class _FakeCommunicate:
         def __init__(self, text, voice, rate="+0%", **kw):
             self.text = text
             calls.append((text, kw))
+            self.call_num = len(calls)
 
         async def stream(self):
-            # first attempt of the first segment stalls "forever"
-            if len(calls) == 1:
-                await asyncio.sleep(3600)
-            yield {"type": "audio", "data": b"A" * len(self.text)}
+            # Capture call_num in __init__ so concurrency doesn't skip the stall.
+            try:
+                if self.call_num == 1:
+                    await asyncio.sleep(3600)
+                yield {"type": "audio", "data": self.text.encode("utf-8")}
+            finally:
+                if self.call_num == 1:
+                    closed.append(True)
 
     monkeypatch.setitem(sys.modules, "edge_tts", types.SimpleNamespace(Communicate=_FakeCommunicate))
-    monkeypatch.setattr(tts, "_EDGE_ATTEMPT_BASE_S", 0.2)
+    monkeypatch.setattr(tts, "_EDGE_CHUNK_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(tts, "_EDGE_ATTEMPT_CAP_BASE_S", 2.0)
     monkeypatch.setattr(tts, "_EDGE_CHARS_PER_S", 1e9)
     monkeypatch.setattr(tts, "load_config", lambda: {})
 
@@ -1052,12 +1059,53 @@ def test_edge_tts_retries_a_stalled_attempt_and_segments_long_text(monkeypatch):
     audio = s.synthesize(text)
     assert audio, s._last_error
     assert s._last_error is None
+    assert closed == [True]
     segs = tts._split_for_speech(text, tts._EDGE_SEGMENT_CHARS)
     assert len(segs) >= 3 and all(len(x) <= tts._EDGE_SEGMENT_CHARS for x in segs)
-    # one stalled attempt + one call per segment
+    # Concurrent gather must reassemble segments in exact text order.
+    assert audio == b"".join(x.encode("utf-8") for x in segs)
+    # One stalled attempt + one successful call per segment.
     assert len(calls) == len(segs) + 1
     assert calls[0][1].get("receive_timeout") == tts._EDGE_RECEIVE_TIMEOUT
     assert tts._edge_total_budget(text) > 30
+
+
+def test_edge_tts_allows_slow_active_stream_past_chunk_timeout(monkeypatch):
+    """Actively arriving chunks spaced below _EDGE_CHUNK_TIMEOUT_S must
+    succeed even when total synthesis duration exceeds _EDGE_CHUNK_TIMEOUT_S."""
+    import asyncio
+    import sys
+    import types
+    from backend import tts
+
+    calls = []
+
+    class _SlowCommunicate:
+        def __init__(self, text, voice, rate="+0%", **kw):
+            self.text = text
+            calls.append(text)
+
+        async def stream(self):
+            # Total 0.30s > _EDGE_CHUNK_TIMEOUT_S (0.15s), but each gap 0.06s < 0.15s.
+            for _ in range(5):
+                await asyncio.sleep(0.06)
+                yield {"type": "audio", "data": b"X"}
+
+    monkeypatch.setitem(sys.modules, "edge_tts", types.SimpleNamespace(Communicate=_SlowCommunicate))
+    monkeypatch.setattr(tts, "_EDGE_CHUNK_TIMEOUT_S", 0.15)
+    monkeypatch.setattr(tts, "_EDGE_ATTEMPT_CAP_BASE_S", 2.0)
+    monkeypatch.setattr(tts, "_EDGE_CHARS_PER_S", 1e9)
+    monkeypatch.setattr(tts, "load_config", lambda: {})
+
+    s = tts.Synthesizer()
+    s._backend = "edge_tts"
+    s._voice = "en-US-AriaNeural"
+    s._voice_ru = "ru-RU-SvetlanaNeural"
+
+    audio = s.synthesize("Тест медленного активного потока синтеза речи.")
+    assert audio == b"X" * 5
+    assert s._last_error is None
+    assert len(calls) == 1
 
 
 def test_tts_self_repair_prompt_flags_recurring_failures(tmp_path, monkeypatch):
