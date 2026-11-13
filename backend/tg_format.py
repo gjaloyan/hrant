@@ -161,6 +161,102 @@ def escape_html(text: str) -> str:
     return _html.escape(text or "", quote=False)
 
 
+# ─── Splitting long Telegram HTML safely ──────────────────────────
+
+
+_TAG_TOKEN_RE = _re.compile(r"<(/?)([a-zA-Z][a-zA-Z0-9-]*)([^>]*)>")
+_HTML_ATOM_RE = _re.compile(r"<[^>]*>|&[#a-zA-Z0-9]+;|\s+|[^<&\s]+|[<&]")
+
+
+def _apply_tags(stack: list[tuple[str, str]], text: str) -> None:
+    """Update the open-tag stack with every tag that appears in `text`."""
+    for m in _TAG_TOKEN_RE.finditer(text):
+        closing, name = m.group(1), m.group(2).lower()
+        if closing:
+            for idx in range(len(stack) - 1, -1, -1):
+                if stack[idx][0] == name:
+                    del stack[idx]
+                    break
+        else:
+            stack.append((name, m.group(0)))
+
+
+def _html_pieces(html: str, max_piece: int) -> list[str]:
+    """Break HTML into pieces that never cut through a tag or an entity.
+
+    Whole lines are preferred; a line too long to fit is broken into
+    words, and a single giant word into plain character slices (a word
+    atom contains no `<` or `&`, so slicing it is safe)."""
+    pieces: list[str] = []
+    for line in html.splitlines(keepends=True):
+        if len(line) <= max_piece:
+            pieces.append(line)
+            continue
+        for atom in _HTML_ATOM_RE.findall(line):
+            if len(atom) <= max_piece or atom.startswith("<") or atom.startswith("&"):
+                pieces.append(atom)
+            else:
+                pieces.extend(atom[i:i + max_piece] for i in range(0, len(atom), max_piece))
+    return pieces
+
+
+def split_telegram_html(html: str, limit: int = 4000) -> list[str]:
+    """Split Telegram HTML into chunks of at most `limit` chars, each of
+    which is valid HTML on its own.
+
+    Slicing the rendered HTML at fixed offsets (the old behaviour) cut
+    through `<i>…</i>` / `<a href=…>` pairs; Telegram then rejected the
+    chunk ("can't find end tag") and the fallback sent raw tags to the
+    user. Here chunks break at line boundaries where possible; tags still
+    open at a break are closed at the end of the chunk and re-opened at
+    the start of the next one.
+    """
+    if not html:
+        return []
+    if len(html) <= limit:
+        return [html]
+
+    def _closers(st: list[tuple[str, str]]) -> str:
+        return "".join(f"</{name}>" for name, _ in reversed(st))
+
+    def _openers(st: list[tuple[str, str]]) -> str:
+        return "".join(tag for _, tag in st)
+
+    chunks: list[str] = []
+    running: list[tuple[str, str]] = []
+    cur = ""
+    has_content = False
+    for piece in _html_pieces(html, max(200, limit // 2)):
+        trial = list(running)
+        _apply_tags(trial, piece)
+        if has_content and len(cur) + len(piece) + len(_closers(trial)) > limit:
+            chunks.append((cur + _closers(running)).strip("\n"))
+            cur = _openers(running)
+            has_content = False
+        cur += piece
+        if piece.strip():
+            has_content = True
+        running = trial
+    if has_content:
+        chunks.append((cur + _closers(running)).strip("\n"))
+    return [c for c in chunks if c.strip()]
+
+
+def telegram_html_to_plain(html: str) -> str:
+    """Readable plain-text form of Telegram HTML for the no-markup fallback:
+    links keep their URL, every other tag is dropped, entities decoded."""
+    if not html:
+        return ""
+    text = _re.sub(
+        r'<a\s+href="([^"]*)"[^>]*>(.*?)</a>',
+        lambda m: m.group(2) if m.group(2) == m.group(1) else f"{m.group(2)} ({m.group(1)})",
+        html,
+        flags=_re.DOTALL,
+    )
+    text = _re.sub(r"<[^>]+>", "", text)
+    return _html.unescape(text)
+
+
 # ─── Tool-call icons + arg-preview (Hermes-style live trace) ──────
 
 

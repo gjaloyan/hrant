@@ -113,6 +113,60 @@ def _language_not_covered(text: str, voice: Optional[str]) -> Optional[str]:
     return None
 
 
+# edge-tts reliability knobs. Segments keep each websocket session short so
+# one stall costs one segment retry, not the whole reply.
+_EDGE_SEGMENT_CHARS = 450
+_EDGE_ATTEMPTS = 3
+_EDGE_CONNECT_TIMEOUT = 6
+_EDGE_RECEIVE_TIMEOUT = 10
+_EDGE_ATTEMPT_BASE_S = 8.0
+_EDGE_CHARS_PER_S = 60.0
+
+
+def _edge_total_budget(text: str) -> float:
+    """Wall-clock budget for a whole reply: room for one stalled attempt
+    plus normal synthesis, scaled by length and capped so a voice bubble
+    never holds the chat for minutes."""
+    return min(120.0, 35.0 + len(text or "") / 20.0)
+
+
+def _split_for_speech(text: str, max_chars: int) -> list[str]:
+    """Split text into segments of at most `max_chars`, at sentence
+    boundaries where possible, then at word boundaries."""
+    text = (text or "").strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+    sentences = re.split(r"(?<=[.!?…;:])\s+|\n+", text)
+    segments: list[str] = []
+    cur = ""
+    for sent in sentences:
+        sent = sent.strip()
+        if not sent:
+            continue
+        while len(sent) > max_chars:
+            cut = sent.rfind(" ", 0, max_chars)
+            if cut <= 0:
+                cut = max_chars
+            head, sent = sent[:cut].strip(), sent[cut:].strip()
+            if cur:
+                segments.append(cur)
+                cur = ""
+            if head:
+                segments.append(head)
+        if not sent:
+            continue
+        if cur and len(cur) + 1 + len(sent) > max_chars:
+            segments.append(cur)
+            cur = sent
+        else:
+            cur = f"{cur} {sent}" if cur else sent
+    if cur:
+        segments.append(cur)
+    return segments
+
+
 def _report_failure(backend: str, error: Exception) -> None:
     """Put a synthesis failure where the agent reads it on its next turn.
 
@@ -411,12 +465,16 @@ class Synthesizer:
         if self._backend in (None, "disabled"):
             return None
         try:
+            audio: Optional[bytes] = None
             if self._backend == "edge_tts":
-                return self._tx_edge_tts(text, voice=voice)
-            if self._backend == "local_piper":
-                return self._tx_local_piper(text, voice=voice)
-            if self._backend == "openai_tts":
-                return self._tx_openai_tts(text, voice=voice)
+                audio = self._tx_edge_tts(text, voice=voice)
+            elif self._backend == "local_piper":
+                audio = self._tx_local_piper(text, voice=voice)
+            elif self._backend == "openai_tts":
+                audio = self._tx_openai_tts(text, voice=voice)
+            if audio:
+                self._last_error = None
+            return audio
         except Exception as e:
             # Name the real reason when there is one. The provider's own
             # wording ("verify that your parameters are correct") sends
@@ -573,24 +631,58 @@ class Synthesizer:
         cfg_e = (load_config().get("edge_tts") or {})
         rate = cfg_e.get("rate") or "+0%"
 
-        async def _synth() -> bytes:
+        segments = _split_for_speech(text, _EDGE_SEGMENT_CHARS)
+        if not segments:
+            return None
+
+        def _communicate(seg: str):
+            try:
+                return edge_tts.Communicate(
+                    seg, chosen, rate=rate,
+                    connect_timeout=_EDGE_CONNECT_TIMEOUT,
+                    receive_timeout=_EDGE_RECEIVE_TIMEOUT,
+                )
+            except TypeError:  # older edge-tts without timeout kwargs
+                return edge_tts.Communicate(seg, chosen, rate=rate)
+
+        async def _one_attempt(seg: str) -> bytes:
+            buf = bytearray()
+            async for chunk in _communicate(seg).stream():
+                if chunk.get("type") == "audio":
+                    buf.extend(chunk.get("data") or b"")
+            return bytes(buf)
+
+        async def _segment(seg: str) -> bytes:
+            # Microsoft's endpoint intermittently stalls a stream for 20s+
+            # (measured on prod 2026-11-13: the same text took 1.2s, then
+            # 19.8s, then 2.3s). Without a per-attempt deadline a stalled
+            # first attempt consumed the whole budget and the retry never
+            # ran. Each attempt now gets its own deadline, then a fresh
+            # connection.
             last_err: Optional[Exception] = None
-            for attempt in range(2):
+            per_attempt = _EDGE_ATTEMPT_BASE_S + len(seg) / _EDGE_CHARS_PER_S
+            for attempt in range(_EDGE_ATTEMPTS):
                 try:
-                    buf = bytearray()
-                    communicate = edge_tts.Communicate(text, chosen, rate=rate)
-                    async for chunk in communicate.stream():
-                        if chunk.get("type") == "audio":
-                            buf.extend(chunk.get("data") or b"")
-                    if buf:
-                        return bytes(buf)
+                    audio = await asyncio.wait_for(_one_attempt(seg), per_attempt)
+                    if audio:
+                        return audio
+                    last_err = RuntimeError("edge_tts returned no audio")
+                except asyncio.TimeoutError:
+                    last_err = TimeoutError(
+                        f"edge_tts attempt stalled for {per_attempt:.0f}s")
                 except Exception as exc:
                     last_err = exc
-                    if attempt == 0:
-                        await asyncio.sleep(0.5)
-            if last_err is not None:
-                raise last_err
-            return b""
+                if attempt + 1 < _EDGE_ATTEMPTS:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+            raise last_err or RuntimeError("edge_tts returned no audio")
+
+        async def _synth() -> bytes:
+            # MP3 frames concatenate cleanly; ffmpeg reads the joined
+            # stream as one file when converting to OGG/Opus.
+            out = bytearray()
+            for seg in segments:
+                out.extend(await _segment(seg))
+            return bytes(out)
 
         # Always run in a fresh event loop on this thread. Avoids
         # "asyncio.run() cannot be called from a running event loop"
@@ -606,11 +698,10 @@ class Synthesizer:
 
         t = threading.Thread(target=_runner, daemon=True)
         t.start()
-        # 30s budget — edge-tts is usually <2s for a short sentence,
-        # but allow for slow networks.
-        t.join(timeout=30)
+        budget = _edge_total_budget(text)
+        t.join(timeout=budget)
         if t.is_alive():
-            raise TimeoutError("edge_tts timed out after 30s")
+            raise TimeoutError(f"edge_tts timed out after {budget:.0f}s")
         if "error" in result:
             raise result["error"]
         return result.get("audio") or None

@@ -51,11 +51,27 @@ def _resolve_channels_path() -> Path:
     return paths.knowledge_dir() / "channels.json"
 
 
-def _queue_tts_self_repair(speaker_id: str, last_error: str) -> None:
+def _recent_tts_failures(days: int = 7) -> int:
+    """How many TTS failures were recorded in the last `days` days."""
+    try:
+        import time as _time
+        from .provider_error_log import read_all
+        cutoff = _time.time() - days * 86400
+        return sum(
+            1 for r in read_all()
+            if str(r.get("provider") or "").startswith("tts:")
+            and float(r.get("ts") or 0) >= cutoff
+        )
+    except Exception:
+        return 0
+
+
+def _queue_tts_self_repair(speaker_id: str, last_error: str, spoken_chars: int = 0) -> None:
     """Queue a one-shot background self-repair task when TTS fails after a turn."""
     if not last_error or last_error.startswith("no installed voice can speak"):
         return
     try:
+        import sys as _sys
         from datetime import timedelta, timezone
         from . import roles, scheduled_messages
         owner = roles.primary_owner() or (speaker_id if roles.is_owner(speaker_id) else "")
@@ -64,24 +80,45 @@ def _queue_tts_self_repair(speaker_id: str, last_error: str) -> None:
         tag = "auto-repair:tts"
         if any((r.get("meta") or {}).get("tag") == tag for r in scheduled_messages.list_pending()):
             return
+        py = _sys.executable or "python3"
+        failures = _recent_tts_failures()
+        recurring = failures >= 2
+        length_note = (
+            f" The failed reply was {spoken_chars} characters long — reproduce "
+            f"with text of that length, not a two-word phrase that passes anyway."
+            if spoken_chars else ""
+        )
+        if recurring:
+            verdict = (
+                f"This is NOT a one-off: {failures} TTS failures were recorded in the "
+                "last 7 days, so a passing short probe proves nothing. Find the root "
+                "cause in the code path (`backend/tts.py`, `backend/channels.py`) and "
+                "fix it with `propose_self_modification`; then report to the user what "
+                "the cause was and what you changed. Do not answer [SILENT]."
+            )
+        else:
+            verdict = (
+                "If it was a first, transient blip and a probe of realistic length "
+                "succeeds, answer [SILENT]."
+            )
         due = (datetime.now(timezone.utc) + timedelta(seconds=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
         scheduled_messages.schedule(
             target_speaker=owner,
             requested_by="system:auto-repair",
             due_at=due,
             kind="agent_task",
-            meta={"tag": tag, "name": "TTS self-repair"},
+            meta={"tag": tag, "name": "TTS self-repair", "recent_failures": failures},
             text=(
-                f"Voice synthesis (TTS) just failed after a reply ({last_error}). "
-                "Diagnose and fix TTS now using your tools (`run_command`, `read_file`, "
-                "`write_file`, `run_python`, `propose_code_change`). Check the active "
-                "Python environment (`sys.executable`), `edge-tts` version/status, "
-                "`tts_config.json`, or `backend/tts.py`, verify that "
+                f"Voice synthesis (TTS) just failed after a reply ({last_error}).{length_note} "
+                "Diagnose and fix TTS now using your tools (`terminal_exec`, `run_python`, "
+                "`read_file`, `propose_self_modification`, `acknowledge_provider_issue`). "
+                f"The service's interpreter is `{py}` (plain `python` is not on PATH). "
+                "Check the journal (`journalctl --user -u hrant`), the `edge-tts` version, "
+                "`tts_config.json`, and `backend/tts.py`; time "
                 "`from backend.tts import SYNTHESIZER; SYNTHESIZER.reset(); "
-                "SYNTHESIZER.synthesize('Проверка связи')` returns non-empty audio bytes, "
-                "call `acknowledge_provider_issue('tts', resolution)` once fixed, and send a brief note "
-                "telling the user what caused the voice failure and how you fixed it "
-                "(or answer [SILENT] if it was a one-off transient blip that already works)."
+                "SYNTHESIZER.synthesize(text)` several times with realistic text. "
+                f"{verdict} Call `acknowledge_provider_issue('tts', resolution)` only "
+                "after the fix is verified."
             ),
         )
     except Exception as e:
@@ -884,18 +921,21 @@ class TelegramBot:
                     log.warning("TG send_text media failed: %s", e)
                 if not plain.strip():
                     return
-                from .tg_format import markdown_to_telegram_html
-                for i, chunk in enumerate(_chunks(markdown_to_telegram_html(plain))):
+                from .tg_format import (
+                    markdown_to_telegram_html,
+                    split_telegram_html,
+                    telegram_html_to_plain,
+                )
+                for chunk in split_telegram_html(markdown_to_telegram_html(plain), LIMIT):
                     try:
                         await bot.send_message(
                             chat_id=target, text=chunk, parse_mode="HTML",
                             disable_web_page_preview=True, **quiet)
                     except Exception as e:
                         log.warning("TG send_text HTML failed (%s); plain text", e)
-                        rest = (_chunks(plain) if i == 0 else
-                                [_html.unescape(_re_media.sub(r"<[^>]+>", "", chunk))])
-                        for c in rest:
-                            await bot.send_message(chat_id=target, text=c, **quiet)
+                        await bot.send_message(
+                            chat_id=target, text=telegram_html_to_plain(chunk),
+                            disable_web_page_preview=True, **quiet)
                 return
             for chunk in chunks:
                 try:
@@ -1654,10 +1694,8 @@ class TelegramBot:
                         # 400 us out.
                         text = result.followup_text
                         LIMIT = 3900
-                        chunks = (
-                            [text] if len(text) <= LIMIT
-                            else [text[i:i + LIMIT] for i in range(0, len(text), LIMIT)]
-                        )
+                        from .tg_format import split_telegram_html
+                        chunks = split_telegram_html(text, LIMIT)
                         for chunk in chunks:
                             try:
                                 await self._app.bot.send_message(
@@ -2376,6 +2414,8 @@ class TelegramBot:
                     from .tg_format import (
                         markdown_to_telegram_html as _md_to_html,
                         render_answer_with_footer as _render_msg,
+                        split_telegram_html as _split_tg_html,
+                        telegram_html_to_plain as _tg_html_to_plain,
                     )
                     answer_html = _md_to_html(answer or "")
                     full_message = _render_msg(
@@ -2403,11 +2443,7 @@ class TelegramBot:
                             f"<i>{_DIV}</i>\n\n" + "\n\n".join(tail_parts)
                             if tail_parts else ""
                         )
-                        body_chunks: list[str] = []
-                        i = 0
-                        while i < len(answer_html):
-                            body_chunks.append(answer_html[i:i + LIMIT])
-                            i += LIMIT
+                        body_chunks: list[str] = _split_tg_html(answer_html, LIMIT)
                         if tail and body_chunks and (
                             len(body_chunks[-1]) + len(tail) + 2 <= LIMIT
                         ):
@@ -2442,7 +2478,10 @@ class TelegramBot:
                                 "TG reply HTML failed (%s); "
                                 "retrying as plain text", e_send,
                             )
-                            await update.message.reply_text(c)
+                            await update.message.reply_text(
+                                _tg_html_to_plain(c),
+                                disable_web_page_preview=True,
+                            )
 
                     # Round D + voice-fix: voice reply. When the user
                     # sent a voice message AND TTS is configured +
@@ -2533,7 +2572,7 @@ class TelegramBot:
                                 # the agent (tts._report_failure).
                                 _tts_err_msg = str(_TTS.status().get("last_error") or "")
                                 log.warning("voice reply not sent: %s", _tts_err_msg)
-                                _queue_tts_self_repair(speaker_id, _tts_err_msg)
+                                _queue_tts_self_repair(speaker_id, _tts_err_msg, len(spoken))
                                 if not self._voice_failure_told:
                                     self._voice_failure_told = True
                                     await update.message.reply_text(

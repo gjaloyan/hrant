@@ -974,3 +974,113 @@ def test_terminal_exec_accepts_cwd(tmp_path, monkeypatch):
     out = json.loads(bt._terminal_exec_handler(command="pwd", cwd=str(tmp_path)))
     assert out["ok"] is True
     assert seen["cwd"] == str(tmp_path)
+
+
+def test_split_telegram_html_never_cuts_through_tags():
+    """Long answers were sliced at fixed offsets, cutting <i>…</i> pairs;
+    Telegram rejected the chunk and the fallback showed raw tags."""
+    import re
+    from backend.tg_format import (
+        markdown_to_telegram_html, split_telegram_html, telegram_html_to_plain,
+    )
+
+    para = (
+        "🏦 *Макро и ликвидность.* По данным [CNBC](https://www.cnbc.com/x), "
+        "инфляция выросла на **0,4%** & ожидания <ФРС> сдвинулись. "
+    )
+    md = "\n\n".join(para * 3 for _ in range(12)) + "\n\n" + ("*" + "слово " * 900 + "*")
+    html = markdown_to_telegram_html(md)
+    assert len(html) > 8000
+
+    chunks = split_telegram_html(html, 4000)
+    assert len(chunks) >= 3
+    tag_re = re.compile(r"<(/?)([a-zA-Z]+)[^>]*>")
+    for c in chunks:
+        assert len(c) <= 4000
+        # every chunk is balanced on its own
+        stack = []
+        for m in tag_re.finditer(c):
+            if m.group(1):
+                assert stack and stack[-1] == m.group(2), c[:200]
+                stack.pop()
+            else:
+                stack.append(m.group(2))
+        assert stack == []
+        # no tag or entity cut in half at chunk edges
+        assert not re.search(r"<[^>]*$", c)
+        assert not re.search(r"&[#a-zA-Z0-9]*$", c)
+    # nothing lost apart from re-opened/closed tags
+    plain_all = "".join(telegram_html_to_plain(c) for c in chunks)
+    assert plain_all.count("Макро и ликвидность") == 36
+
+    plain = telegram_html_to_plain('<b>x</b> <a href="https://a.b/c">CNBC</a> &amp; &lt;y&gt;')
+    assert plain == "x CNBC (https://a.b/c) & <y>"
+
+
+def test_edge_tts_retries_a_stalled_attempt_and_segments_long_text(monkeypatch):
+    """A stalled edge-tts stream used to eat the whole 30s budget, so the
+    retry never ran and long replies always lost their voice bubble."""
+    import asyncio
+    import sys
+    import types
+    from backend import tts
+
+    calls = []
+
+    class _FakeCommunicate:
+        def __init__(self, text, voice, rate="+0%", **kw):
+            self.text = text
+            calls.append((text, kw))
+
+        async def stream(self):
+            # first attempt of the first segment stalls "forever"
+            if len(calls) == 1:
+                await asyncio.sleep(3600)
+            yield {"type": "audio", "data": b"A" * len(self.text)}
+
+    monkeypatch.setitem(sys.modules, "edge_tts", types.SimpleNamespace(Communicate=_FakeCommunicate))
+    monkeypatch.setattr(tts, "_EDGE_ATTEMPT_BASE_S", 0.2)
+    monkeypatch.setattr(tts, "_EDGE_CHARS_PER_S", 1e9)
+    monkeypatch.setattr(tts, "load_config", lambda: {})
+
+    s = tts.Synthesizer()
+    s._backend = "edge_tts"
+    s._voice = "en-US-AriaNeural"
+    s._voice_ru = "ru-RU-SvetlanaNeural"
+
+    text = ("Это предложение про рынок и ликвидность. " * 40).strip()
+    audio = s.synthesize(text)
+    assert audio, s._last_error
+    assert s._last_error is None
+    segs = tts._split_for_speech(text, tts._EDGE_SEGMENT_CHARS)
+    assert len(segs) >= 3 and all(len(x) <= tts._EDGE_SEGMENT_CHARS for x in segs)
+    # one stalled attempt + one call per segment
+    assert len(calls) == len(segs) + 1
+    assert calls[0][1].get("receive_timeout") == tts._EDGE_RECEIVE_TIMEOUT
+    assert tts._edge_total_budget(text) > 30
+
+
+def test_tts_self_repair_prompt_flags_recurring_failures(tmp_path, monkeypatch):
+    from backend import channels, provider_error_log as pel, roles, scheduled_messages
+
+    monkeypatch.setenv("HRANT_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(pel, "_log_path", lambda: tmp_path / "provider_errors.jsonl")
+    monkeypatch.setattr(roles, "primary_owner", lambda: "telegram:1")
+    monkeypatch.setattr(scheduled_messages, "_path", lambda: tmp_path / "scheduled_messages.jsonl")
+    import time as _time
+    now = _time.time()
+    for offset in (3 * 3600, 60):  # two separate incidents (dedup window is 5 min)
+        monkeypatch.setattr(pel, "_now", lambda o=offset: now - o)
+        pel.log_provider_error(provider="tts:edge_tts", model="", status_code=504,
+                               message="edge_tts timed out", context={"category": "tts"})
+    monkeypatch.setattr(pel, "_now", lambda: now)
+
+    channels._queue_tts_self_repair("telegram:1", "edge_tts timed out after 30s", 1000)
+    rows = [r for r in scheduled_messages.list_pending()
+            if (r.get("meta") or {}).get("tag") == "auto-repair:tts"]
+    assert len(rows) == 1
+    text = rows[0]["text"]
+    assert "NOT a one-off" in text
+    assert "1000 characters" in text
+    assert "propose_self_modification" in text and "terminal_exec" in text
+    assert "run_command" not in text and "propose_code_change" not in text
